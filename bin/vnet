@@ -1,0 +1,10 @@
+netstat -n|grep ":80 "
+iptables -L
+echo "iptables -I INPUT -s 221.182.46.22 -j DROP"
+echo "iptables -I INPUT -s 221.182.46.19 -j DROP"
+echo "iptables -I INPUT -s 119.119.67.207 -j DROP"
+
+
+echo "sysctl -w net.ipv4.tcp_keepalive_time=300"
+echo "sysctl -w net.ipv4.tcp_keepalive_probes=2"
+echo "sysctl -w net.ipv4.tcp_keepalive_intvl=2"

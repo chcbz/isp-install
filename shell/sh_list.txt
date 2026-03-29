@@ -1,0 +1,17 @@
+openssl
+nginx
+mysql
+rabbitmq
+jdk
+maven
+redis
+git
+jenkins
+pureftpd
+gitblit
+php
+openldap
+node
+python
+nexus
+vpn

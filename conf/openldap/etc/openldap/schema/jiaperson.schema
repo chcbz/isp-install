@@ -1,0 +1,90 @@
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.1
+	NAME 'openid'
+	DESC 'openid'
+	EQUALITY caseExactMatch
+	SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+	SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.2
+        NAME 'weiboid'
+        DESC 'weiboid'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.3
+        NAME 'weixinid'
+        DESC 'weixinid'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.4
+        NAME 'country'
+        DESC 'country'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.5
+        NAME 'province'
+        DESC 'province'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.6
+        NAME 'city'
+        DESC 'city'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.7
+        NAME 'sex'
+        DESC 'sex'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.8
+        NAME 'nickname'
+        DESC 'nickname'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.9
+        NAME 'headimg'
+        DESC 'headimg'
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.28 )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.10
+        NAME 'location'
+        DESC 'location'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.11
+        NAME 'remark'
+        DESC 'remark'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.42.2.2727.4.1.12
+        NAME 'githubid'
+        DESC 'githubid'
+        EQUALITY caseExactMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+ 
+objectclass ( 1.3.6.1.4.1.42.2.2727.4.2.1
+	NAME 'jiaPerson'
+	DESC 'Jia Person'
+	SUP person
+	STRUCTURAL
+	MAY ( openid $ email $ country $ province $ city $ 
+              sex $ nickname $ uid $ headimg $ weiboid $
+              weixinid $ githubid $ location $ remark ) )

@@ -1,0 +1,44 @@
+<Server port="20003" shutdown="SHUTDOWN">
+  <Service name="isp">
+    <!--
+    <Connector port="8080" protocol="HTTP/1.1"
+               connectionTimeout="20000"
+               redirectPort="8443" />
+    -->
+    <Connector port="10003" address="127.0.0.1" maxHttpHeaderSize="8192"
+               maxThreads="20" minSpareThreads="5"
+               enableLookups="false" acceptCount="100"
+               connectionTimeout="20000" disableUploadTimeout="true" URIEncoding="UTF-8" />
+    <Engine name="isp.localhost">
+<!--
+      <Host name="zakkabc.com" appBase="/home/isp/webapps/emptyroot" autoDeploy="true">
+        <Context path="/" docBase="/home/isp/webapps/hostroot/zakkabc.com"/>
+      </Host>
+-->
+      <Host name="www.oa.0769sw.org" debug="0" appBase="/home/isp/webapps/emptyroot" unpackWARs="true" autoDeploy="true">
+        <Alias>oa.0769sw.org</Alias>
+        <Context path="" docBase="/home/isp/webapps/hostroot/oa.0769sw.org"/>
+      </Host>
+      <Host name="www.lf.e2tt.com" debug="0" appBase="/home/isp/webapps/emptyroot" unpackWARs="true" autoDeploy="true">
+        <Alias>lf.e2tt.com</Alias>
+        <Context path="" docBase="/home/isp/webapps/hostroot/lf.e2tt.com"/>
+      </Host>
+      <Host name="wydiy.com" debug="0" appBase="/home/isp/webapps/emptyroot" unpackWARs="true" autoDeploy="true">
+        <Alias>www.wydiy.com</Alias>
+        <Context path="" docBase="/home/isp/webapps/hostroot/wydiy.com"/>
+      </Host>
+      <Host name="gdym580.e2tt.com" debug="0" appBase="/home/isp/webapps/emptyroot" unpackWARs="true" autoDeploy="true">
+        <Alias>gdym580.e2tt.com</Alias>
+        <Context path="" docBase="/home/isp/webapps/hostroot/gdym580.org"/>
+      </Host>
+      <Host name="www.gdym580.org" debug="0" appBase="/home/isp/webapps/emptyroot" unpackWARs="true" autoDeploy="true">
+        <Alias>gdym580.org</Alias>
+        <Context path="" docBase="/home/isp/webapps/hostroot/gdym580.org"/>
+      </Host>
+      <Host name="www.vm.e2tt.com" debug="0" appBase="/home/isp/webapps/emptyroot" unpackWARs="true" autoDeploy="true">
+        <Alias>vm.e2tt.com</Alias>
+        <Context path="" docBase="/home/isp/webapps/hostroot/vm.e2tt.com"/>
+      </Host>
+    </Engine>
+  </Service>
+</Server>
