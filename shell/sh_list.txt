@@ -16,9 +16,10 @@ init.sh        ✅  服务器初始化
 # 开发环境
 #===============================================================
 jdk_install.sh      ✅  JDK 8 (Adoptium Temurin)
-maven_install.sh    ✅  Maven 3.9.6
-node_install.sh     ✅  Node.js LTS
+maven_install.sh    ✅  Maven 3.9.6 (阿里云镜像)
+node_install.sh     ✅  Node.js LTS (可选淘宝镜像)
 python_install.sh   ✅  Python 3.12
+git_install.sh      ✅  Git 2.44
 
 #===============================================================
 # 数据库
@@ -35,12 +36,11 @@ httpd_install.sh    🔧  Apache httpd (仅 RHEL)
 #===============================================================
 # 消息队列
 #===============================================================
-rabbitmq_install.sh 🔧  RabbitMQ (仅 RHEL)
+rabbitmq_install.sh ✅  RabbitMQ 3.12 + Erlang 26
 
 #===============================================================
 # 版本控制
 #===============================================================
-git_install.sh      🔧  Git (仅 RHEL)
 gitblit_install.sh  🔧  Gitblit (仅 RHEL)
 jenkins_install.sh  🔧  Jenkins (仅 RHEL)
 nexus_install.sh    🔧  Nexus (仅 RHEL)
@@ -48,7 +48,7 @@ nexus_install.sh    🔧  Nexus (仅 RHEL)
 #===============================================================
 # 目录服务
 #===============================================================
-openldap_install.sh 🔧  OpenLDAP (仅 RHEL)
+openldap_install.sh ✅  OpenLDAP 2.6 (MDB 后端)
 
 #===============================================================
 # VPN
@@ -64,7 +64,7 @@ pureftpd_install.sh 🔧  Pure-FTPd (仅 RHEL)
 #===============================================================
 # PHP
 #===============================================================
-php_install.sh      🔧  PHP 7.1 (仅 RHEL)
+php_install.sh      ✅  PHP 8.2 (OPcache + FPM)
 
 #===============================================================
 # 搜索引擎
@@ -76,3 +76,5 @@ elasticsearch_install.sh 🔧  Elasticsearch (仅 RHEL)
 #===============================================================
 openssl_install.sh  🔧  OpenSSL (仅 RHEL)
 fonts_install.sh    🔧  字体安装 (仅 RHEL)
+console_install.sh  🔧  控制台工具 (仅 RHEL)
+https_install.sh    🔧  HTTPS 证书 (仅 RHEL)
