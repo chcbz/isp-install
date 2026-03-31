@@ -1,142 +1,250 @@
 #!/bin/bash
-
-# Pure-FTPd 安装脚本
-# 密码从配置文件读取或交互式输入
+#===============================================================
+# Pure-FTPd 安装脚本 - 支持 CentOS/Rocky/Ubuntu/Debian
+#===============================================================
 
 set -e
 
-MYSQL_PASS_FILE="/home/isp/.config/mysql.pass"
-ISP_PASS_FILE="/home/isp/.config/isp_db.pass"
+# 获取脚本目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
 
-# 检查并安装 MySQL
-if [ ! -d "/home/isp/apps/mysql/" ]; then
-    echo "MySQL 未安装，请先运行 mysql_install.sh"
-    exit 1
+check_root
+detect_os
+
+echo "=========================================="
+echo "Pure-FTPd 安装脚本"
+echo "=========================================="
+show_os_info
+
+#===============================================================
+# 配置变量
+#===============================================================
+PUREFTPD_VERSION="1.0.51"
+PUREFTPD_URL="https://download.pureftpd.org/pub/pure-ftpd/releases/pure-ftpd-${PUREFTPD_VERSION}.tar.gz"
+INSTALL_PREFIX="$ISP_APPS/pureftpd"
+
+#===============================================================
+# 安装编译依赖
+#===============================================================
+echo ""
+echo "[1/4] 安装编译依赖..."
+
+case $OS_FAMILY in
+    rhel)
+        pkg_install gcc gcc-c++ make \
+            openssl-devel mysql-devel postgresql-devel
+        ;;
+    debian)
+        pkg_install gcc g++ make \
+            libssl-dev libmysqlclient-dev libpq-dev
+        ;;
+esac
+
+#===============================================================
+# 下载源码
+#===============================================================
+echo ""
+echo "[2/4] 下载 Pure-FTPd ${PUREFTPD_VERSION}..."
+
+cd $ISP_PKGS
+
+if [ ! -f "pure-ftpd-${PUREFTPD_VERSION}.tar.gz" ]; then
+    download_file "$PUREFTPD_URL"
 fi
 
-# 加载 MySQL root 密码
-if [ -f "$MYSQL_PASS_FILE" ]; then
-    source "$MYSQL_PASS_FILE"
-fi
+#===============================================================
+# 编译安装
+#===============================================================
+echo ""
+echo "[3/4] 编译安装 Pure-FTPd..."
 
-# 如果还是没有 MySQL 密码，提示用户输入
-if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
-    echo "=========================================="
-    echo "请输入 MySQL root 密码"
-    echo "=========================================="
-    read -s -p "MySQL root 密码: " MYSQL_ROOT_PASSWORD
-    echo
-fi
+tar -xzf pure-ftpd-${PUREFTPD_VERSION}.tar.gz
+cd pure-ftpd-${PUREFTPD_VERSION}
 
-# 获取 ISP 数据库密码
-if [ -z "$ISP_DB_PASSWORD" ]; then
-    echo "=========================================="
-    echo "请设置 ISP 数据库用户密码"
-    echo "=========================================="
-    while true; do
-        read -s -p "请输入 ISP 数据库密码: " ISP_DB_PASSWORD
-        echo
-        read -s -p "请再次确认密码: " ISP_DB_PASSWORD_CONFIRM
-        echo
-        if [ "$ISP_DB_PASSWORD" = "$ISP_DB_PASSWORD_CONFIRM" ] && [ -n "$ISP_DB_PASSWORD" ]; then
-            break
-        else
-            echo "错误: 两次密码不一致或密码为空，请重新输入"
-        fi
-    done
-    
-    # 保存 ISP 数据库密码
-    mkdir -p "$(dirname "$ISP_PASS_FILE")"
-    cat > "$ISP_PASS_FILE" << EOF
-ISP_DB_PASSWORD=$ISP_DB_PASSWORD
-EOF
-    chmod 600 "$ISP_PASS_FILE"
-    echo "ISP 数据库密码已保存到 $ISP_PASS_FILE"
-fi
+./configure \
+    --prefix=$INSTALL_PREFIX \
+    --with-ftpwho \
+    --with-altlog \
+    --with-puredb \
+    --with-throttling \
+    --with-ratios \
+    --with-quotas \
+    --with-uploadscript \
+    --with-virtualchroot \
+    --with-tls \
+    --with-largefile \
+    --with-peruserlimits
 
-# 启动 MySQL（如果未运行）
-/home/isp/bin/mysql.sh status
-if [ $? = "0" ] ;then
-    /home/isp/bin/mysql.sh start
-    sleep 3s
-fi
-
-# 创建数据库和用户
-cd /home/isp/apps/mysql
-bin/mysql -uroot -p"$MYSQL_ROOT_PASSWORD" << EOF
-CREATE DATABASE IF NOT EXISTS isp DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;
-use isp;
-
-CREATE TABLE IF NOT EXISTS isp_domain (
-  no int(11) NOT NULL AUTO_INCREMENT,
-  domain_name varchar(250) NOT NULL DEFAULT '',
-  admin_passwd varchar(250) NOT NULL DEFAULT '',
-  admin_flag int(11) NOT NULL DEFAULT '0',
-  mailbox_service tinyint(1) NOT NULL DEFAULT '0',
-  mailbox_count int(11) NOT NULL DEFAULT '0',
-  mailbox_quota int(11) NOT NULL DEFAULT '0',
-  host_service tinyint(1) NOT NULL DEFAULT '0',
-  host_type varchar(20) NOT NULL DEFAULT '',
-  host_passwd varchar(250) NOT NULL DEFAULT '',
-  host_quota int(11) NOT NULL DEFAULT '0',
-  sql_service tinyint(1) NOT NULL DEFAULT '0',
-  sql_passwd varchar(250) NOT NULL DEFAULT '0',
-  sql_quota int(11) NOT NULL DEFAULT '0',
-  ftp_dir varchar(250) DEFAULT NULL,
-  PRIMARY KEY (no),
-  UNIQUE KEY uni_domain_name (domain_name)
-) ENGINE=MyISAM DEFAULT CHARSET=utf8;
-
-CREATE TABLE IF NOT EXISTS isp_ftp_user (
-  no int(11) NOT NULL AUTO_INCREMENT,
-  ftp_user_domain_no int(11) NOT NULL DEFAULT '0',
-  ftp_user_name varchar(50) NOT NULL DEFAULT '',
-  ftp_user_password varchar(50) NOT NULL DEFAULT '',
-  ftp_user_path varchar(255) NOT NULL DEFAULT '',
-  PRIMARY KEY (no)
-) ENGINE=MyISAM DEFAULT CHARSET=utf8;
-
-GRANT ALL PRIVILEGES ON isp.* TO 'isp'@'%' IDENTIFIED BY '$ISP_DB_PASSWORD' WITH GRANT OPTION;
-FLUSH PRIVILEGES;
-
-EOF
-
-# 安装 Pure-FTPd
-cd /home/isp/pkgs
-wget https://install.chcbz.net/pkgs/pure-ftpd-1.0.36.tar.gz
-tar -zxvf pure-ftpd-1.0.36.tar.gz
-yum install -y gcc gcc-c++ make pam-devel openldap-devel mysql-devel
-cd pure-ftpd-1.0.36
-./configure --prefix=/home/isp/apps/pureftpd/ --with-mysql=/home/isp/apps/mysql --with-language=simplified-chinese --with-everything
-make
+make -j$(nproc)
 make install
 
-# 创建配置目录
-cd /home/isp/apps/pureftpd
-mkdir -p etc
+echo -e "${GREEN}Pure-FTPd 编译安装完成${NC}"
 
-# 生成 MySQL 配置文件（使用用户输入的密码）
-cat > etc/pureftpd-mysql.conf << EOF
-#MYSQLServer     localhost
-#MYSQLPort       3306
-MYSQLSocket     /home/isp/apps/mysql/mysql.sock
-MYSQLUser       root
-MYSQLPassword   $MYSQL_ROOT_PASSWORD
-MYSQLDatabase   isp
-MYSQLCrypt      cleartext
-MYSQLGetPW	SELECT u.ftp_user_password as passwd FROM isp_domain d join isp_ftp_user u on d.no=u.ftp_user_domain_no WHERE u.ftp_user_name="\L" and d.host_service=1
-MYSQLGetUID     SELECT 1000
-MYSQLGetGID     SELECT 1000
-MYSQLGetDir	SELECT concat('/home/isp/hosts/',d.ftp_dir,'/',u.ftp_user_path) from isp_domain d join isp_ftp_user u on d.no=u.ftp_user_domain_no WHERE u.ftp_user_name="\L"
+#===============================================================
+# 配置
+#===============================================================
+echo ""
+echo "[4/4] 配置 Pure-FTPd..."
+
+# 创建目录
+mkdir -p $INSTALL_PREFIX/etc
+mkdir -p $INSTALL_PREFIX/var/run
+mkdir -p $INSTALL_PREFIX/var/log
+mkdir -p $INSTALL_PREFIX/etc/ssl
+
+# 创建配置文件
+cat > $INSTALL_PREFIX/etc/pure-ftpd.conf << 'EOF'
+# 基本配置
+ChrootEveryone              yes
+BrokenClientsCompatibility  yes
+MaxClientsNumber            50
+Daemonize                   yes
+MaxClientsPerIP             10
+VerboseLog                  yes
+DisplayDotFiles             yes
+AnonymousOnly               no
+NoAnonymous                 yes
+SyslogFacility              ftp
+DontResolve                 yes
+MaxIdleTime                 15
+
+# 认证配置
+PureDB                      /home/isp/apps/pureftpd/etc/pureftpd.pdb
+ExtAuth                     /home/isp/apps/pureftpd/sbin/pure-authd -s /var/run/pure-authd.sock -r /home/isp/apps/pureftpd/bin/auth.sh &
+
+# 性能配置
+LimitRecursion              10000 8
+AnonymousCanCreateDirs      no
+MaxLoad                     4
+
+# 被动模式端口范围
+PassivePortRange            30000 50000
+
+# 强制 TLS (可选)
+# TLS                        2
+
+# TLS 证书
+TLSCipherSuite              HIGH:MEDIUM:+TLSv1:!SSLv2:!SSLv3
+CertFile                    /home/isp/apps/pureftpd/etc/ssl/pure-ftpd.pem
+
+# 日志
+AltLog                      clf:/home/isp/apps/pureftpd/var/log/pure-ftpd.log
+
+# 文件权限
+Umask                       133:022
+MinUID                      100
+
+# 禁止 .forward 等文件
+ProhibitDotFilesRead        no
+ProhibitDotFilesWrite       yes
 EOF
-chmod 600 etc/pureftpd-mysql.conf
 
-cd /home/isp/bin
-wget -N https://install.chcbz.net/bin/pureftpd.sh
-chmod 777 pureftpd.sh
+# 创建 FTP 用户目录
+mkdir -p $ISP_HOME/ftp
+chown -R isp:isp $ISP_HOME/ftp
 
-echo "=========================================="
-echo "Pure-FTPd 安装完成!"
-echo "MySQL root 密码配置: $MYSQL_PASS_FILE"
-echo "ISP 数据库密码配置: $ISP_PASS_FILE"
-echo "=========================================="
+# 创建管理脚本
+cat > $ISP_BIN/pureftpd.sh << 'SCRIPT'
+#!/bin/bash
+
+PUREFTPD_HOME=/home/isp/apps/pureftpd
+PUREFTPD_CONF=$PUREFTPD_HOME/etc/pure-ftpd.conf
+
+case "$1" in
+    start)
+        $PUREFTPD_HOME/sbin/pure-ftpd $PUREFTPD_CONF
+        echo "Pure-FTPd started"
+        ;;
+    stop)
+        killall pure-ftpd 2>/dev/null || true
+        echo "Pure-FTPd stopped"
+        ;;
+    restart)
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+    status)
+        if pgrep -x pure-ftpd > /dev/null; then
+            echo "Pure-FTPd is running"
+            $PUREFTPD_HOME/sbin/pure-ftpwho
+        else
+            echo "Pure-FTPd is not running"
+        fi
+        ;;
+    user-add)
+        if [ -z "$2" ]; then
+            echo "用法: $0 user-add <用户名>"
+            exit 1
+        fi
+        $PUREFTPD_HOME/bin/pure-pw useradd $2 -u isp -d /home/isp/ftp/$2
+        $PUREFTPD_HOME/bin/pure-pw mkdb
+        echo "用户 $2 创建成功"
+        ;;
+    user-del)
+        if [ -z "$2" ]; then
+            echo "用法: $0 user-del <用户名>"
+            exit 1
+        fi
+        $PUREFTPD_HOME/bin/pure-pw userdel $2
+        $PUREFTPD_HOME/bin/pure-pw mkdb
+        echo "用户 $2 删除成功"
+        ;;
+    user-list)
+        $PUREFTPD_HOME/bin/pure-pw list
+        ;;
+    mkdb)
+        $PUREFTPD_HOME/bin/pure-pw mkdb
+        echo "数据库已更新"
+        ;;
+    *)
+        echo "Pure-FTPd 管理脚本"
+        echo ""
+        echo "使用方法:"
+        echo "  $0 start           启动"
+        echo "  $0 stop            停止"
+        echo "  $0 restart         重启"
+        echo "  $0 status          状态"
+        echo "  $0 user-add <用户> 添加用户"
+        echo "  $0 user-del <用户> 删除用户"
+        echo "  $0 user-list       用户列表"
+        echo "  $0 mkdb            更新用户数据库"
+        ;;
+esac
+SCRIPT
+
+chmod +x $ISP_BIN/pureftpd.sh
+
+# 生成自签名 TLS 证书
+if [ ! -f "$INSTALL_PREFIX/etc/ssl/pure-ftpd.pem" ]; then
+    openssl req -x509 -nodes -days 3650 \
+        -newkey rsa:2048 \
+        -keyout $INSTALL_PREFIX/etc/ssl/pure-ftpd.pem \
+        -out $INSTALL_PREFIX/etc/ssl/pure-ftpd.pem \
+        -subj "/C=CN/ST=Shanghai/L=Shanghai/O=ISP/CN=localhost" 2>/dev/null
+    chmod 600 $INSTALL_PREFIX/etc/ssl/pure-ftpd.pem
+fi
+
+#===============================================================
+# 完成
+#===============================================================
+echo ""
+echo -e "${GREEN}=========================================="
+echo "Pure-FTPd 安装完成！"
+echo "==========================================${NC}"
+echo ""
+echo "安装位置: $INSTALL_PREFIX"
+echo "版本: $PUREFTPD_VERSION"
+echo "配置文件: $INSTALL_PREFIX/etc/pure-ftpd.conf"
+echo "管理脚本: $ISP_BIN/pureftpd.sh"
+echo ""
+echo "FTP 目录: $ISP_HOME/ftp"
+echo ""
+echo "使用方法:"
+echo "  $ISP_BIN/pureftpd.sh start           # 启动"
+echo "  $ISP_BIN/pureftpd.sh stop            # 停止"
+echo "  $ISP_BIN/pureftpd.sh user-add <用户> # 添加用户"
+echo "  $ISP_BIN/pureftpd.sh user-list       # 用户列表"
+echo ""
+echo "被动模式端口: 30000-50000 (请在防火墙开放)"
