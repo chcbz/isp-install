@@ -18,7 +18,16 @@ mv rabbitmq_server-3.6.11 rabbitmq
 cd rabbitmq
 sbin/rabbitmq-server -detached
 sbin/rabbitmq-plugins enable rabbitmq_management
-sbin/rabbitmqctl add_user admin password
+# 设置 RabbitMQ 管理员密码
+if [ -z "$RABBITMQ_ADMIN_PASSWORD" ]; then
+    echo "=========================================="
+    echo "请设置 RabbitMQ 管理员密码"
+    echo "=========================================="
+    read -s -p "请输入 admin 用户密码: " RABBITMQ_ADMIN_PASSWORD
+    echo
+fi
+
+sbin/rabbitmqctl add_user admin "$RABBITMQ_ADMIN_PASSWORD"
 sbin/rabbitmqctl set_user_tags admin administrator
 cd /home/isp/bin
 wget -N https://install.chcbz.net/bin/rabbitmq.sh

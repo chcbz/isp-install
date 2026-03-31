@@ -10,17 +10,17 @@
 		<server>
 			<id>nexus-releases</id>
 			<username>admin</username>
-			<password>admin123</password>
+			<password>${env.NEXUS_PASSWORD}</password>
 		</server>
 		<server>
 			<id>nexus-snapshots</id>
 			<username>admin</username>
-			<password>admin123</password>
+			<password>${env.NEXUS_PASSWORD}</password>
 		</server>
 		<server>
 			<id>ftp-repository</id>
-			<username>jia.wydiy.com</username>
-			<password>jiadiy0806</password>
+			<username>${env.FTP_USERNAME}</username>
+			<password>${env.FTP_PASSWORD}</password>
 		</server>
 	</servers>
 

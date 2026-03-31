@@ -443,11 +443,28 @@ EOF
 
 # configure the ipsec.secrets
 function configure_secrets(){
+    # 使用环境变量或交互式输入
+    if [ -z "$VPN_PSK" ]; then
+        read -s -p "请输入 VPN PSK 密钥: " VPN_PSK
+        echo
+    fi
+    if [ -z "$VPN_XAUTH_PASS" ]; then
+        read -s -p "请输入 XAUTH 密码: " VPN_XAUTH_PASS
+        echo
+    fi
+    if [ -z "$VPN_EAP_USER" ]; then
+        read -p "请输入 EAP 用户名: " VPN_EAP_USER
+    fi
+    if [ -z "$VPN_EAP_PASS" ]; then
+        read -s -p "请输入 EAP 密码: " VPN_EAP_PASS
+        echo
+    fi
+
     cat > /usr/local/etc/ipsec.secrets<<-EOF
 : RSA server.pem
-: PSK "myPSKkey"
-: XAUTH "myXAUTHPass"
-myUserName %any : EAP "myUserPass"
+: PSK "$VPN_PSK"
+: XAUTH "$VPN_XAUTH_PASS"
+$VPN_EAP_USER %any : EAP "$VPN_EAP_PASS"
 EOF
 }
 
