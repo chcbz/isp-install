@@ -1,6 +1,19 @@
 # ISP Install - 服务器自动化部署工具集
 
-一套用于 CentOS/RHEL 系统的服务器环境快速部署脚本集合，支持从源码编译安装各类常用服务软件。
+一套用于 Linux 系统的服务器环境快速部署脚本集合，支持从源码编译安装各类常用服务软件。
+
+## 支持的操作系统
+
+| 系统 | 版本 | 状态 |
+|------|------|------|
+| CentOS | 7, 8 | ✅ 完全支持 |
+| Rocky Linux | 8, 9 | ✅ 完全支持 |
+| AlmaLinux | 8, 9 | ✅ 完全支持 |
+| RHEL | 7, 8, 9 | ✅ 完全支持 |
+| Ubuntu | 18.04, 20.04, 22.04, 24.04 | ✅ 完全支持 |
+| Debian | 10, 11, 12 | ✅ 完全支持 |
+
+脚本会自动检测操作系统类型，并使用对应的包管理器（yum/dnf 或 apt）。
 
 ## 目录结构
 
@@ -137,10 +150,44 @@ conf/
 
 ## 系统要求
 
-- **操作系统**: CentOS 7/8, RHEL 7/8, Rocky Linux 8/9
-- **架构**: x86_64
+- **操作系统**: CentOS 7/8, Rocky Linux 8/9, Ubuntu 18.04+, Debian 10+
+- **架构**: x86_64 (AMD64)
 - **权限**: 需要 root 权限执行安装脚本
-- **网络**: 需要访问 `install.chcbz.net` 下载配置文件（可选）
+- **网络**: 需要访问外网下载源码包和配置文件
+
+## 核心组件
+
+### shell/common.sh - 通用工具库
+
+提供跨系统兼容的核心功能：
+
+```bash
+# 加载工具库
+source ./shell/common.sh
+
+# 检测系统
+detect_os
+show_os_info
+
+# 智能安装（自动处理包名差异）
+pkg_install_smart gcc-c++ openssl-devel
+
+# 通用函数
+check_root          # 检查 root 权限
+download_file URL   # 下载文件
+compile_install ... # 编译安装
+```
+
+### 包名映射
+
+不同系统的包名差异会自动处理：
+
+| RHEL/CentOS | Ubuntu/Debian |
+|-------------|---------------|
+| openssl-devel | libssl-dev |
+| gcc-c++ | g++ |
+| ncurses-devel | libncurses-dev |
+| zlib-devel | zlib1g-dev |
 
 ## 注意事项
 
