@@ -16,7 +16,7 @@ install.sh     ✅  一键部署脚本 (预设配置/交互选择)
 #===============================================================
 # 开发环境 (全部支持多系统)
 #===============================================================
-jdk_install.sh      ✅  JDK 8 (Adoptium Temurin 8u482)
+jdk_install.sh      ✅  JDK 21.0.10 LTS (Adoptium Temurin)
 maven_install.sh    ✅  Maven 3.9.6 (官方镜像)
 node_install.sh     ✅  Node.js LTS (可选淘宝镜像)
 python_install.sh   ✅  Python 3.12.13
