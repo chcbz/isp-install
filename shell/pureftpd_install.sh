@@ -20,7 +20,7 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-PUREFTPD_VERSION="1.0.51"
+PUREFTPD_VERSION="1.0.53"
 PUREFTPD_URL="https://download.pureftpd.org/pub/pure-ftpd/releases/pure-ftpd-${PUREFTPD_VERSION}.tar.gz"
 INSTALL_PREFIX="$ISP_APPS/pureftpd"
 

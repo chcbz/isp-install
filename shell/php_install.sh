@@ -20,7 +20,7 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-PHP_VERSION="8.2.16"
+PHP_VERSION="8.2.26"
 PHP_URL="https://www.php.net/distributions/php-${PHP_VERSION}.tar.gz"
 INSTALL_PREFIX="$ISP_APPS/php"
 

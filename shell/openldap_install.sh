@@ -20,7 +20,7 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-OPENLDAP_VERSION="2.6.9"
+OPENLDAP_VERSION="2.6.13"
 OPENLDAP_URL="https://www.openldap.org/software/download/OpenLDAP/openldap-release/openldap-${OPENLDAP_VERSION}.tgz"
 INSTALL_PREFIX="$ISP_APPS/openldap"
 
