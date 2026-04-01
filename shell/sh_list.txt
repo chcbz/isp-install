@@ -1,5 +1,5 @@
 # ISP Install - 支持的安装脚本
-# 最后更新: 2026-03-31
+# 最后更新: 2026-04-01
 
 #===============================================================
 # 核心组件 (全部支持多系统)
@@ -16,54 +16,54 @@ install.sh     ✅  一键部署脚本 (预设配置/交互选择)
 #===============================================================
 # 开发环境 (全部支持多系统)
 #===============================================================
-jdk_install.sh      ✅  JDK 8 (Adoptium Temurin)
-maven_install.sh    ✅  Maven 3.9.6 (阿里云镜像)
+jdk_install.sh      ✅  JDK 8 (Adoptium Temurin 8u482)
+maven_install.sh    ✅  Maven 3.9.6 (官方镜像)
 node_install.sh     ✅  Node.js LTS (可选淘宝镜像)
-python_install.sh   ✅  Python 3.12 (virtualenv)
-git_install.sh      ✅  Git 2.44
+python_install.sh   ✅  Python 3.12.13
+git_install.sh      ✅  Git 2.53.0
 
 #===============================================================
 # 数据库 (全部支持多系统)
 #===============================================================
-mysql_install.sh    ✅  MySQL 8.0
-redis_install.sh    ✅  Redis 7.2
+mysql_install.sh    ✅  MySQL 8.0.45
+redis_install.sh    ✅  Redis 7.4.8 (7.2.x 已 EOL)
 
 #===============================================================
 # Web 服务器 (全部支持多系统)
 #===============================================================
-nginx_install.sh    ✅  Nginx 1.24 (HTTP/2)
+nginx_install.sh    ✅  Nginx 1.28.2 (含安全修复)
 httpd_install.sh    🔧  Apache httpd (待优化)
 
 #===============================================================
 # 消息队列 (全部支持多系统)
 #===============================================================
-rabbitmq_install.sh ✅  RabbitMQ 3.12 + Erlang 26
+rabbitmq_install.sh ✅  RabbitMQ 3.12.13 + Erlang 26.2.1
 
 #===============================================================
 # CI/CD (全部支持多系统)
 #===============================================================
 jenkins_install.sh  ✅  Jenkins 2.440 (LTS)
-nexus_install.sh    ✅  Nexus 3.66
+nexus_install.sh    ✅  Nexus 3.66.0-02
 
 #===============================================================
 # 目录服务 (全部支持多系统)
 #===============================================================
-openldap_install.sh ✅  OpenLDAP 2.6 (MDB 后端)
+openldap_install.sh ✅  OpenLDAP 2.6.13 (MDB 后端)
 
 #===============================================================
 # 文件服务 (全部支持多系统)
 #===============================================================
-pureftpd_install.sh ✅  Pure-FTPd 1.0.51
+pureftpd_install.sh ✅  Pure-FTPd 1.0.53
 
 #===============================================================
 # PHP (全部支持多系统)
 #===============================================================
-php_install.sh      ✅  PHP 8.2 (OPcache + FPM)
+php_install.sh      ✅  PHP 8.2.26 (安全修复版本)
 
 #===============================================================
 # 搜索引擎 (全部支持多系统)
 #===============================================================
-elasticsearch_install.sh ✅  Elasticsearch 8.12 + IK分词
+elasticsearch_install.sh ✅  Elasticsearch 8.12.2 + IK分词
 
 #===============================================================
 # VPN (仅 RHEL)
@@ -77,9 +77,10 @@ strongswan_install.sh   🔧  StrongSwan VPN
 gitblit_install.sh  🔧  Gitblit (Git 仓库管理)
 
 #===============================================================
-# 其他 (待优化)
+# 其他 (已废弃)
 #===============================================================
-openssl_install.sh  🔧  OpenSSL (系统自带，通常不需要)
-fonts_install.sh    🔧  中文字体安装
-console_install.sh  🔧  控制台工具
-https_install.sh    🔧  HTTPS 证书
+# 以下脚本已废弃，不推荐使用
+openssl_install.sh  ❌  已废弃 (系统自带 OpenSSL 即可)
+fonts_install.sh    ❌  已废弃 (硬编码域名，不安全)
+https_install.sh    ❌  已废弃 (硬编码域名，不安全)
+console_install.sh  ❌  已废弃 (外部下载源，不可靠)
