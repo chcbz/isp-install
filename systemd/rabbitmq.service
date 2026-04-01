@@ -1,0 +1,25 @@
+[Unit]
+Description=RabbitMQ Message Broker
+Documentation=https://www.rabbitmq.com/documentation.html
+After=network.target
+
+[Service]
+Type=simple
+User=isp
+Group=isp
+WorkingDirectory=/home/isp/apps/rabbitmq
+ExecStart=/home/isp/apps/rabbitmq/sbin/rabbitmq-server
+ExecStop=/home/isp/bin/rabbitmq.sh stop
+Restart=on-failure
+RestartSec=10s
+
+# 环境变量
+Environment="HOME=/home/isp"
+Environment="RABBITMQ_LOG=/home/isp/apps/rabbitmq/var/log/rabbitmq"
+
+# 资源限制
+LimitNOFILE=65535
+LimitNPROC=65535
+
+[Install]
+WantedBy=multi-user.target

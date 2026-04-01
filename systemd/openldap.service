@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenLDAP Server
+Documentation=https://www.openldap.org/doc/
+After=network.target
+
+[Service]
+Type=simple
+User=isp
+Group=isp
+ExecStart=/home/isp/apps/openldap/libexec/slapd -f /home/isp/apps/openldap/etc/openldap/slapd.conf -h "ldap:// ldapi://"
+ExecStop=/bin/kill -INT $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# 资源限制
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

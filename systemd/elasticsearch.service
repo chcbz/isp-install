@@ -1,0 +1,23 @@
+[Unit]
+Description=Elasticsearch Search Engine
+Documentation=https://www.elastic.co/guide/en/elasticsearch/reference/current/index.html
+After=network.target
+
+[Service]
+Type=simple
+User=elasticsearch
+Group=isp
+WorkingDirectory=/home/isp/apps/elasticsearch
+Environment="ES_HOME=/home/isp/apps/elasticsearch"
+Environment="JAVA_HOME=/home/isp/apps/java"
+ExecStart=/home/isp/apps/elasticsearch/bin/elasticsearch -p /home/isp/apps/elasticsearch/es.pid -d
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=10s
+
+# 资源限制
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

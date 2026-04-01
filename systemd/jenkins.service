@@ -1,0 +1,23 @@
+[Unit]
+Description=Jenkins CI Server
+Documentation=https://www.jenkins.io/doc/
+After=network.target
+
+[Service]
+Type=simple
+User=isp
+Group=isp
+WorkingDirectory=/home/isp/apps/jenkins
+Environment="JENKINS_HOME=/home/isp/apps/jenkins"
+Environment="JAVA_HOME=/home/isp/apps/java"
+ExecStart=/home/isp/apps/java/bin/java -Xms512m -Xmx1024m -jar /home/isp/apps/jenkins/jenkins.war --httpPort=8080
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=10s
+
+# 资源限制
+LimitNOFILE=65535
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

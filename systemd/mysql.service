@@ -1,0 +1,34 @@
+# Systemd 服务单元文件
+# 使用方法: 
+#   cp systemd/<service>.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable <service>
+#   systemctl start <service>
+
+[Unit]
+Description=MySQL Server
+Documentation=https://dev.mysql.com/doc/
+After=network.target
+
+[Service]
+Type=forking
+User=isp
+Group=isp
+PIDFile=/home/isp/apps/mysql/mysql.pid
+ExecStart=/home/isp/bin/mysql.sh start
+ExecStop=/home/isp/bin/mysql.sh stop
+ExecReload=/home/isp/bin/mysql.sh restart
+Restart=on-failure
+RestartSec=5s
+
+# 资源限制
+LimitNOFILE=65535
+LimitNPROC=65535
+
+# 安全设置
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

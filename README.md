@@ -27,52 +27,67 @@
 
 ## 快速开始
 
-### 1. 初始化服务器
+### 方式一：一键部署（推荐）
 
 ```bash
-# 以 root 用户执行
-./shell/init.sh
+# 初始化服务器
+sudo ./shell/init.sh
+
+# 使用预设配置安装
+sudo ./install.sh --profile web-server    # Web 服务器
+sudo ./install.sh --profile dev-env       # 开发环境
+sudo ./install.sh --profile db-server     # 数据库服务器
+sudo ./install.sh --profile ci-cd         # CI/CD 服务器
+
+# 交互式选择安装
+sudo ./install.sh --select
+
+# 指定组件安装
+sudo ./install.sh nginx mysql redis
 ```
 
-这将创建：
-- 用户和用户组：`isp`
-- 目录结构：`/home/isp/{apps,hosts,pkgs,bin,logs}`
-- 中文语言环境
-- 时区设置：`Asia/Shanghai`
-
-### 2. 安装软件
+### 方式二：单独安装
 
 ```bash
-# 安装 MySQL (交互式输入密码)
-./shell/mysql_install.sh
+# 1. 初始化服务器
+sudo ./shell/init.sh
 
-# 安装 Nginx
-./shell/nginx_install.sh
+# 2. 安装软件（按需选择）
+sudo ./shell/jdk_install.sh
+sudo ./shell/mysql_install.sh
+sudo ./shell/nginx_install.sh
+sudo ./shell/redis_install.sh
 
-# 安装 Redis
-./shell/redis_install.sh
-
-# 安装 OpenLDAP
-./shell/openldap_install.sh
-
-# 安装 VPN (IPsec/L2TP)
-./shell/vpn_install.sh
+# 3. 使环境变量生效
+source /etc/profile
 ```
 
-### 3. 管理服务
+### 防火墙配置
 
 ```bash
-# 启动服务
-/home/isp/bin/mysql.sh start
+# 开放服务端口
+sudo ./shell/firewall.sh open nginx
+sudo ./shell/firewall.sh open mysql
+sudo ./shell/firewall.sh open redis
 
-# 停止服务
-/home/isp/bin/mysql.sh stop
+# 查看已开放端口
+sudo ./shell/firewall.sh list
 
-# 重启服务
-/home/isp/bin/mysql.sh restart
+# 查看可用服务
+sudo ./shell/firewall.sh services
+```
 
-# 查看状态
-/home/isp/bin/mysql.sh status
+### Systemd 服务
+
+```bash
+# 复制服务文件
+sudo cp systemd/mysql.service /etc/systemd/system/
+sudo cp systemd/nginx.service /etc/systemd/system/
+
+# 启用并启动服务
+sudo systemctl daemon-reload
+sudo systemctl enable mysql nginx
+sudo systemctl start mysql nginx
 ```
 
 ## 支持的软件

@@ -1,0 +1,21 @@
+[Unit]
+Description=PHP FastCGI Process Manager
+Documentation=https://php.net/manual/en/install.fpm.php
+After=network.target
+
+[Service]
+Type=forking
+User=isp
+Group=isp
+PIDFile=/home/isp/apps/php/var/run/php-fpm.pid
+ExecStart=/home/isp/bin/php.sh start
+ExecStop=/home/isp/bin/php.sh stop
+ExecReload=/bin/kill -s USR2 $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# 资源限制
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

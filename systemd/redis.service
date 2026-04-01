@@ -1,0 +1,21 @@
+[Unit]
+Description=Redis In-Memory Data Store
+Documentation=https://redis.io/documentation
+After=network.target
+
+[Service]
+Type=forking
+User=isp
+Group=isp
+PIDFile=/home/isp/apps/redis/redis.pid
+ExecStart=/home/isp/bin/redis.sh start
+ExecStop=/home/isp/bin/redis.sh stop
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# 资源限制
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=Nginx HTTP Server
+Documentation=https://nginx.org/en/docs/
+After=network.target
+
+[Service]
+Type=forking
+User=isp
+Group=isp
+PIDFile=/home/isp/apps/nginx/logs/nginx.pid
+ExecStart=/home/isp/bin/nginx.sh start
+ExecStop=/home/isp/bin/nginx.sh stop
+ExecReload=/home/isp/bin/nginx.sh reload
+Restart=on-failure
+RestartSec=5s
+
+# 资源限制
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
