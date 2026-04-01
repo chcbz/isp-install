@@ -20,11 +20,11 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-NGINX_VERSION="1.24.0"
+NGINX_VERSION="1.28.2"
 NGINX_URL="https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 INSTALL_PREFIX="$ISP_APPS/nginx"
 PCRE_VERSION="8.45"
-ZLIB_VERSION="1.3.1"
+ZLIB_VERSION="1.3.2"
 OPENSSL_VERSION="1.1.1w"
 
 #===============================================================

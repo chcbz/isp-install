@@ -20,7 +20,7 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-GIT_VERSION="2.44.0"
+GIT_VERSION="2.53.0"
 GIT_URL="https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.gz"
 INSTALL_PREFIX="$ISP_APPS/git"
 

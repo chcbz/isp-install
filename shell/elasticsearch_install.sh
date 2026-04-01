@@ -22,8 +22,9 @@ show_os_info
 #===============================================================
 ES_VERSION="8.12.2"
 ES_URL="https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-${ES_VERSION}-linux-x86_64.tar.gz"
+# IK 分词插件已迁移到新地址
 IK_VERSION=$ES_VERSION
-IK_URL="https://github.com/medcl/elasticsearch-analysis-ik/releases/download/v${IK_VERSION}/elasticsearch-analysis-ik-${IK_VERSION}.zip"
+IK_URL="https://get.infini.cloud/elasticsearch/analysis-ik/${ES_VERSION}"
 INSTALL_PREFIX="$ISP_APPS/elasticsearch"
 
 #===============================================================
@@ -86,8 +87,13 @@ if [ ! -f "elasticsearch-analysis-ik-${IK_VERSION}.zip" ]; then
 fi
 
 # 安装 IK 插件
-mkdir -p $INSTALL_PREFIX/plugins/analysis-ik
-unzip -o elasticsearch-analysis-ik-${IK_VERSION}.zip -d $INSTALL_PREFIX/plugins/analysis-ik
+echo "安装 IK 分词插件..."
+# 使用 ES 插件管理器安装 IK
+cd $INSTALL_PREFIX
+bin/elasticsearch-plugin install "$IK_URL" --batch || {
+    echo -e "${YELLOW}IK 插件安装失败，可稍后手动安装:${NC}"
+    echo "  bin/elasticsearch-plugin install $IK_URL"
+}
 
 #===============================================================
 # 配置

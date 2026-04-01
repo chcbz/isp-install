@@ -93,7 +93,7 @@ mkdir -p $INSTALL_PREFIX/plugins
 
 # 下载 plugin-installation-manager
 if [ ! -f "$INSTALL_PREFIX/jenkins-plugin-manager.jar" ]; then
-    download_file "https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.12.0/jenkins-plugin-manager-2.12.0.jar" \
+    download_file "https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.14.0/jenkins-plugin-manager-2.14.0.jar" \
         "$INSTALL_PREFIX/jenkins-plugin-manager.jar"
 fi
 

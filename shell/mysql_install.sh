@@ -20,7 +20,7 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-MYSQL_VERSION="8.0.36"
+MYSQL_VERSION="8.0.45"
 MYSQL_URL="https://dev.mysql.com/get/Downloads/MySQL-8.0/mysql-${MYSQL_VERSION}-linux-glibc2.28-x86_64.tar.xz"
 INSTALL_PREFIX="$ISP_APPS/mysql"
 MYSQL_USER="mysql"

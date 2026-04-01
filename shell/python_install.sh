@@ -20,7 +20,7 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-PYTHON_VERSION="3.12.2"
+PYTHON_VERSION="3.12.13"
 PYTHON_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz"
 INSTALL_PREFIX="$ISP_APPS/python3"
 

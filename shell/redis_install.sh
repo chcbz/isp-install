@@ -20,7 +20,7 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-REDIS_VERSION="7.2.4"
+REDIS_VERSION="7.4.8"
 REDIS_URL="https://download.redis.io/releases/redis-${REDIS_VERSION}.tar.gz"
 INSTALL_PREFIX="$ISP_APPS/redis"
 

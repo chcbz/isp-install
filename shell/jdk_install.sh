@@ -20,10 +20,10 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-JDK_VERSION="8u411"
-JDK_BUILD="09"
-JDK_URL="https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u411-b09/OpenJDK8U-jdk_x64_linux_hotspot_8u411b09.tar.gz"
-JDK_ARCHIVE="OpenJDK8U-jdk_x64_linux_hotspot_8u411b09.tar.gz"
+JDK_VERSION="8u482"
+JDK_BUILD="b08"
+JDK_URL="https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u482-b08/OpenJDK8U-jdk_x64_linux_hotspot_8u482b08.tar.gz"
+JDK_ARCHIVE="OpenJDK8U-jdk_x64_linux_hotspot_8u482b08.tar.gz"
 INSTALL_PREFIX="$ISP_APPS/java"
 
 #===============================================================
