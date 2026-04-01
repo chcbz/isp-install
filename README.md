@@ -94,19 +94,19 @@ sudo systemctl start mysql nginx
 
 | 类别 | 软件 | 说明 |
 |------|------|------|
-| **Web 服务器** | Nginx, Apache httpd | 反向代理、Web 服务 |
-| **数据库** | MySQL 5.6 | 关系型数据库 |
-| **缓存/消息** | Redis, RabbitMQ | 缓存、消息队列 |
-| **开发环境** | JDK 8, Maven, Node.js, Python 3.7, PHP 7.1 | 编程语言和构建工具 |
-| **版本控制** | Git, Gitblit, SVN | 代码仓库管理 |
-| **CI/CD** | Jenkins, Nexus | 持续集成、制品库 |
-| **文件服务** | Pure-FTPd | FTP 服务器 |
-| **目录服务** | OpenLDAP | LDAP 目录服务 |
+| **Web 服务器** | Nginx 1.28.2, Apache httpd | 反向代理、Web 服务 |
+| **数据库** | MySQL 8.0.45 | 关系型数据库 |
+| **缓存/消息** | Redis 7.4.8, RabbitMQ 3.12.13 | 缓存、消息队列 |
+| **开发环境** | JDK 8u482, Maven 3.9.6, Node.js LTS, Python 3.12.13, PHP 8.2.26 | 编程语言和构建工具 |
+| **版本控制** | Git 2.53.0, Gitblit, SVN | 代码仓库管理 |
+| **CI/CD** | Jenkins 2.440.1, Nexus 3.66.0-02 | 持续集成、制品库 |
+| **文件服务** | Pure-FTPd 1.0.53 | FTP 服务器 |
+| **目录服务** | OpenLDAP 2.6.13 | LDAP 目录服务 |
 | **VPN** | Libreswan, StrongSwan, PPTP | IPsec/L2TP VPN |
 | **邮件服务** | Postfix, Dovecot | 邮件服务器 |
 | **DNS** | BIND | DNS 服务器 |
-| **搜索引擎** | Elasticsearch, Logstash, Kibana | ELK 日志分析栈 |
-| **其他** | OpenSSL, Tomcat | SSL 库、应用服务器 |
+| **搜索引擎** | Elasticsearch 8.12.2 + IK分词, Logstash, Kibana | ELK 日志分析栈 |
+| **其他** | OpenSSL (系统自带), Tomcat | SSL 库、应用服务器 |
 
 ## 环境变量
 
@@ -206,10 +206,15 @@ compile_install ... # 编译安装
 
 ## 注意事项
 
-1. **生产环境**: 部分脚本版本较旧，建议根据实际需求更新软件版本
+1. **安全更新**: 所有组件已更新到最新稳定版本（截至2026年4月1日），包含重要的安全修复
 2. **安全性**: 所有密码均需通过环境变量或交互式输入，不再硬编码
 3. **防火墙**: 安装后需根据服务开放相应端口
 4. **备份**: 建议在安装前备份重要数据
+5. **已废弃脚本**: 以下脚本已标记为废弃，不推荐使用：
+   - `openssl_install.sh` (系统自带 OpenSSL 即可)
+   - `fonts_install.sh` (硬编码域名，不安全)
+   - `https_install.sh` (硬编码域名，不安全)
+   - `console_install.sh` (外部下载源，不可靠)
 
 ## 可用的安装脚本
 
