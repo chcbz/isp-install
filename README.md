@@ -97,7 +97,7 @@ sudo systemctl start mysql nginx
 | **Web 服务器** | Nginx 1.28.2, Apache httpd | 反向代理、Web 服务 |
 | **数据库** | MySQL 8.0.45 | 关系型数据库 |
 | **缓存/消息** | Redis 7.4.8, RabbitMQ 3.12.13 | 缓存、消息队列 |
-| **开发环境** | JDK 8u482, Maven 3.9.6, Node.js LTS, Python 3.12.13, PHP 8.2.26 | 编程语言和构建工具 |
+| **开发环境** | JDK 21.0.10, Maven 3.9.6, Node.js LTS, Python 3.12.13, PHP 8.2.26 | 编程语言和构建工具 |
 | **版本控制** | Git 2.53.0, Gitblit, SVN | 代码仓库管理 |
 | **CI/CD** | Jenkins 2.440.1, Nexus 3.66.0-02 | 持续集成、制品库 |
 | **文件服务** | Pure-FTPd 1.0.53 | FTP 服务器 |

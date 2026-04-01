@@ -1,6 +1,7 @@
 #!/bin/bash
 #===============================================================
 # JDK 安装脚本 - 支持 CentOS/Rocky/Ubuntu/Debian
+# 当前版本: JDK 21.0.10 (LTS)
 #===============================================================
 
 set -e
@@ -20,10 +21,10 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-JDK_VERSION="8u482"
-JDK_BUILD="b08"
-JDK_URL="https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u482-b08/OpenJDK8U-jdk_x64_linux_hotspot_8u482b08.tar.gz"
-JDK_ARCHIVE="OpenJDK8U-jdk_x64_linux_hotspot_8u482b08.tar.gz"
+JDK_VERSION="21.0.10"
+JDK_BUILD="7"
+JDK_URL="https://github.com/adoptium/temurin21-binaries/releases/download/jdk21.0.10+7/OpenJDK21U-jdk_x64_linux_hotspot_21.0.10_7.tar.gz"
+JDK_ARCHIVE="OpenJDK21U-jdk_x64_linux_hotspot_21.0.10_7.tar.gz"
 INSTALL_PREFIX="$ISP_APPS/java"
 
 #===============================================================
@@ -35,7 +36,7 @@ echo "[1/3] 下载 JDK..."
 cd $ISP_PKGS
 
 if [ ! -f "$JDK_ARCHIVE" ]; then
-    echo "下载 OpenJDK 8 (Temurin)..."
+    echo "下载 OpenJDK $JDK_VERSION (Temurin)..."
     download_file "$JDK_URL" "$JDK_ARCHIVE"
 fi
 
@@ -49,8 +50,10 @@ mkdir -p $ISP_APPS
 tar -xzf $JDK_ARCHIVE -C $ISP_APPS
 
 # 重命名为 java
-if [ -d "$ISP_APPS/jdk8u411-b09" ]; then
-    mv $ISP_APPS/jdk8u411-b09 $INSTALL_PREFIX
+JDK_EXTRACTED_DIR=$(tar -tzf $JDK_ARCHIVE | head -1 | cut -f1 -d"/")
+if [ -n "$JDK_EXTRACTED_DIR" ] && [ -d "$ISP_APPS/$JDK_EXTRACTED_DIR" ]; then
+    mv $ISP_APPS/$JDK_EXTRACTED_DIR $INSTALL_PREFIX
+    echo "已将 $JDK_EXTRACTED_DIR 重命名为 $INSTALL_PREFIX"
 fi
 
 #===============================================================
