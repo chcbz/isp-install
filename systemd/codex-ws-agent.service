@@ -1,0 +1,21 @@
+[Unit]
+Description=Codex WebSocket Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/isp/apps/codex-ws-agent
+Environment=PATH=/home/isp/apps/nodejs/bin:/home/isp/apps/node/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/env node /home/isp/apps/codex-ws-agent/agent-client.mjs --validate
+ExecStart=/usr/bin/env node /home/isp/apps/codex-ws-agent/agent-client.mjs
+Restart=always
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=20s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

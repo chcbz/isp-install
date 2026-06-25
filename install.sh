@@ -114,6 +114,8 @@ declare -A COMPONENT_SCRIPTS=(
     ["nexus"]="nexus_install.sh"
     ["pureftpd"]="pureftpd_install.sh"
     ["ftp"]="pureftpd_install.sh"
+    ["codex-ws-agent"]="codex_ws_agent_install.sh"
+    ["codex"]="codex_ws_agent_install.sh"
 )
 
 #===============================================================
@@ -124,7 +126,8 @@ declare -A PROFILES=(
     ["dev-env"]="jdk maven git node python"
     ["db-server"]="mysql redis rabbitmq"
     ["ci-cd"]="jdk maven git jenkins nexus"
-    ["full"]="jdk maven node python git mysql redis nginx php rabbitmq openldap elasticsearch jenkins nexus pureftpd"
+    ["agent"]="node codex-ws-agent"
+    ["full"]="jdk maven node python git mysql redis nginx php rabbitmq openldap elasticsearch jenkins nexus pureftpd codex-ws-agent"
 )
 
 #===============================================================
@@ -170,7 +173,7 @@ interactive_select() {
     local i=1
     
     for comp in "${!COMPONENT_SCRIPTS[@]}"; do
-        if [[ ! "$comp" =~ ^(java|mvn|py|es|ldap|ftp)$ ]]; then  # 跳过别名
+        if [[ ! "$comp" =~ ^(java|mvn|py|es|ldap|ftp|codex)$ ]]; then  # 跳过别名
             echo "  $i) $comp"
             components+=("$comp")
             ((i++))

@@ -38,12 +38,14 @@ sudo ./install.sh --profile web-server    # Web 服务器
 sudo ./install.sh --profile dev-env       # 开发环境
 sudo ./install.sh --profile db-server     # 数据库服务器
 sudo ./install.sh --profile ci-cd         # CI/CD 服务器
+sudo ./install.sh --profile agent         # Codex WebSocket Agent
 
 # 交互式选择安装
 sudo ./install.sh --select
 
 # 指定组件安装
 sudo ./install.sh nginx mysql redis
+sudo ./install.sh codex-ws-agent
 ```
 
 ### 方式二：单独安装
@@ -57,6 +59,7 @@ sudo ./shell/jdk_install.sh
 sudo ./shell/mysql_install.sh
 sudo ./shell/nginx_install.sh
 sudo ./shell/redis_install.sh
+sudo ./shell/codex_ws_agent_install.sh
 
 # 3. 使环境变量生效
 source /etc/profile
@@ -98,6 +101,7 @@ sudo systemctl start mysql nginx
 | **数据库** | MySQL 8.0.45 | 关系型数据库 |
 | **缓存/消息** | Redis 7.4.8, RabbitMQ 3.12.13 | 缓存、消息队列 |
 | **开发环境** | JDK 21.0.10, Maven 3.9.6, Node.js LTS, Python 3.12.13, PHP 8.2.26 | 编程语言和构建工具 |
+| **Agent** | Codex WebSocket Agent | Codex CLI WebSocket 执行代理 |
 | **版本控制** | Git 2.53.0, Gitblit, SVN | 代码仓库管理 |
 | **CI/CD** | Jenkins 2.440.1, Nexus 3.66.0-02 | 持续集成、制品库 |
 | **文件服务** | Pure-FTPd 1.0.53 | FTP 服务器 |
@@ -129,6 +133,9 @@ export VPN_EAP_PASS="your_eap_password"
 export NEXUS_PASSWORD="your_nexus_password"
 export FTP_USERNAME="ftp_username"
 export FTP_PASSWORD="ftp_password"
+
+# Codex WebSocket Agent
+export START_CODEX_WS_AGENT="y"  # 可选，安装后立即启动
 ```
 
 ## 安装位置
@@ -143,6 +150,7 @@ export FTP_PASSWORD="ftp_password"
 ├── openldap/
 ├── java/
 ├── maven/
+├── codex-ws-agent/
 └── ...
 ```
 
@@ -160,6 +168,9 @@ conf/
 │   └── etc/openldap/slapd.conf
 ├── maven/
 │   └── settings.xml
+├── codex-ws-agent/
+│   ├── env.example
+│   └── codex-profiles.conf
 └── ...
 ```
 
@@ -236,6 +247,7 @@ php
 openldap
 node
 python
+codex-ws-agent
 nexus
 vpn
 ```
