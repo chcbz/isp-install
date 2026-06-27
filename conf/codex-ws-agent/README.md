@@ -6,9 +6,9 @@ Connects a local Codex runner to the OpenClaw agent WebSocket channel.
 
 ```bash
 cd /home/isp/apps/codex-ws-agent
-cp .env.example .env
+cp -n .env.example .env
 vi .env
-/home/isp/bin/codex_ws_agent_start.sh start
+/home/isp/bin/codex_ws_agent.sh start
 ```
 
 Recommended production mode is `systemd`:
@@ -19,7 +19,7 @@ systemctl restart codex-ws-agent
 journalctl -u codex-ws-agent -f
 ```
 
-The helper script `/home/isp/bin/codex_ws_agent_start.sh` now delegates to `systemd` automatically when the service is installed, and falls back to the legacy direct-start mode otherwise.
+The helper script `/home/isp/bin/codex_ws_agent.sh` now delegates to `systemd` automatically when the service is installed, and falls back to the legacy direct-start mode otherwise.
 
 Required:
 
@@ -54,7 +54,7 @@ Each profile can define:
 Recommended `.env`:
 
 ```bash
-DEFAULT_CODEX_PROFILE=songjiang
+DEFAULT_CODEX_PROFILE=codex-default
 CODEX_PROFILES_FILE=/home/isp/apps/codex-ws-agent/codex-profiles.conf
 ```
 
@@ -63,24 +63,26 @@ Example `codex-profiles.conf`:
 ```ini
 [default]
 codexBin=/usr/local/bin/codex
-codexWorkdir=/home/isp/wsps/cyf
-codexSandbox=workspace-write
+codexWorkdir=/home/isp
+codexSandbox=danger-full-access
 codexApproval=never
 codexSessionMode=resume
 codexTimeoutMs=900000
 
-[agent.songjiang]
-agentId=songjiang
-agentName=宋江
-personaName=及时雨
-codexHome=/home/isp/apps/codex-ws-agent/.codex-songjiang
+[agent.default]
+profileId=codex-default
+agentId=codex-default
+agentName=Codex
+personaName=Default
+codexHome=/home/isp/apps/codex-ws-agent/.codex-default
 isDefault=true
 
 [agent.wuyong]
-agentId=wuyong
+agentId=jyt-client-wuyong
 agentName=吴用
 personaName=智多星
 codexHome=/home/isp/apps/codex-ws-agent/.codex-wuyong
+codexWorkdir=/home/isp/wsps/cyf
 enabled=true
 apiKey=cdx_optional_profile_specific_key
 ```
@@ -102,7 +104,7 @@ You can run the validation manually:
 
 ```bash
 cd /home/isp/apps/codex-ws-agent
-/home/isp/apps/node/bin/node agent-client.mjs --validate
+node agent-client.mjs --validate
 ```
 
 JSON is still supported:
