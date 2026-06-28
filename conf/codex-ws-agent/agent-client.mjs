@@ -216,7 +216,7 @@ const loadRuntimeConfig = (options = {}) => {
 const runtimeConfig = loadRuntimeConfig()
 
 const config = {
-  wsUrl: process.env.WS_URL || 'ws://127.0.0.1:10018/ws/agent/channel',
+  wsUrl: process.env.WS_URL || 'wss://api.chaoyoufan.cn/ws/agent/channel',
   apiKey: process.env.OPENCLAW_API_KEY || '',
   profiles: runtimeConfig.profiles,
   defaultProfileId: runtimeConfig.defaultProfileId,

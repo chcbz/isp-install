@@ -24,7 +24,7 @@ The helper script `/home/isp/bin/codex_ws_agent.sh` now delegates to `systemd` a
 Required:
 
 - `OPENCLAW_API_KEY`: API key accepted by `/ws/agent/channel`.
-- `WS_URL`: WebSocket endpoint, default local API port is `ws://127.0.0.1:10018/ws/agent/channel`.
+- `WS_URL`: WebSocket endpoint. Default public endpoint is `wss://api.chaoyoufan.cn/ws/agent/channel`.
 
 ## Multiple Codex CLI Profiles
 
