@@ -1,6 +1,24 @@
 import { spawn } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync, accessSync, constants as fsConstants, readdirSync, statSync, watchFile, unwatchFile } from 'node:fs'
-import { resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import {
+  accessSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  unwatchFile,
+  watchFile,
+  writeFileSync
+} from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -15,16 +33,320 @@ if (existsSync(envPath)) {
   }
 }
 
+export const PROCESS_RUNTIME_INSTANCE_ID = randomUUID()
+export const PROTOCOL_VERSION = 1
+export const MESSAGE_TYPES = Object.freeze({
+  PROTOCOL_HELLO: 'protocol.hello',
+  PROTOCOL_ERROR: 'protocol.error',
+  AGENT_REGISTER: 'agent.register',
+  AGENT_PRESENCE: 'agent.presence',
+  CHAT_MESSAGE: 'chat.message',
+  CHAT_MESSAGE_DELTA: 'chat.message.delta',
+  COMMAND_DISPATCH: 'command.dispatch',
+  COMMAND_ACK: 'command.ack',
+  WORK_PROGRESS: 'work.progress',
+  WORK_HEARTBEAT: 'work.heartbeat',
+  WORK_RESULT: 'work.result',
+  HELP_REQUEST: 'help.request',
+  ARTIFACT_PUBLISH: 'artifact.publish',
+  TASK_EVENT: 'task.event'
+})
+
+const CANONICAL_MESSAGE_TYPES = new Set(Object.values(MESSAGE_TYPES))
+const MESSAGE_ID_REQUIRED_TYPES = new Set([
+  MESSAGE_TYPES.CHAT_MESSAGE,
+  MESSAGE_TYPES.CHAT_MESSAGE_DELTA,
+  MESSAGE_TYPES.COMMAND_DISPATCH,
+  MESSAGE_TYPES.COMMAND_ACK,
+  MESSAGE_TYPES.WORK_PROGRESS,
+  MESSAGE_TYPES.WORK_HEARTBEAT,
+  MESSAGE_TYPES.WORK_RESULT,
+  MESSAGE_TYPES.HELP_REQUEST,
+  MESSAGE_TYPES.ARTIFACT_PUBLISH,
+  MESSAGE_TYPES.TASK_EVENT
+])
+const RESERVED_FIELDS = [
+  'schemaVersion', 'tenantId', 'clientId', 'agentId', 'sourceAgentId', 'targetAgentId',
+  'receiverAgentId', 'runtimeInstanceId', 'messageId', 'requestId', 'commandId', 'commandType',
+  'correlationId', 'causationId', 'conversationId', 'taskId', 'workItemId',
+  'issuedAt', 'sentAt', 'timestamp', 'expiresAt', 'attempt'
+]
+const INBOUND_CONTROL_TYPES = new Set([
+  'connected', 'ping', 'pong', 'agent_registered', 'agent_status_updated',
+  'agent_capability_index', 'protocol_error', 'error', 'task_reported'
+])
+const DISABLED_PROFILE_STATUSES = new Set(['disabled', 'inactive', 'unavailable'])
+
+export class AgentProtocolError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'AgentProtocolError'
+    this.code = code
+  }
+}
+
+const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
+
+const sameEnvelopeValue = (left, right) => {
+  if (typeof left === 'number' && typeof right === 'number') {
+    return Number.isFinite(left) && Number.isFinite(right) && Object.is(left, right)
+  }
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+const envelopeConflict = field => new AgentProtocolError(
+  'ENVELOPE_FIELD_CONFLICT',
+  `Conflicting values for reserved Envelope field or alias: ${field}`
+)
+
+const firstPresent = (layer, aliases) => {
+  for (const alias of aliases) {
+    if (hasOwn(layer, alias)) return { alias, value: layer[alias] }
+  }
+  return null
+}
+
+const validateAliasGroupWithinLayer = (layer, logicalField, aliases) => {
+  const first = firstPresent(layer, aliases)
+  if (!first) return
+  for (const alias of aliases) {
+    if (hasOwn(layer, alias) && !sameEnvelopeValue(first.value, layer[alias])) {
+      throw envelopeConflict(logicalField)
+    }
+  }
+}
+
+const validateAliasGroupAcrossLayers = (outer, nested, logicalField, aliases) => {
+  const left = firstPresent(outer, aliases)
+  const right = firstPresent(nested, aliases)
+  if (left && right && !sameEnvelopeValue(left.value, right.value)) {
+    throw envelopeConflict(logicalField)
+  }
+}
+
+const validateSchemaVersion = layer => {
+  if (!hasOwn(layer, 'schemaVersion')) return
+  const version = layer.schemaVersion
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version !== PROTOCOL_VERSION) {
+    throw new AgentProtocolError('INVALID_SCHEMA_VERSION', 'schemaVersion must be the JSON integer 1')
+  }
+}
+
+const validateRawSchemaVersionTokens = text => {
+  let index = 0
+  const skipWhitespace = () => {
+    while (index < text.length && /\s/.test(text[index])) index += 1
+  }
+  const readStringToken = () => {
+    const start = index
+    index += 1
+    let escaped = false
+    while (index < text.length) {
+      const character = text[index]
+      index += 1
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (character === '\\') {
+        escaped = true
+        continue
+      }
+      if (character === '"') return text.slice(start, index)
+    }
+    return null
+  }
+  while (index < text.length) {
+    if (text[index] !== '"') {
+      index += 1
+      continue
+    }
+    const token = readStringToken()
+    if (!token) return
+    let key
+    try { key = JSON.parse(token) } catch { continue }
+    const afterKey = index
+    skipWhitespace()
+    if (text[index] !== ':') {
+      index = afterKey
+      continue
+    }
+    index += 1
+    skipWhitespace()
+    if (key !== 'schemaVersion') continue
+    if (text[index] !== '1') {
+      throw new AgentProtocolError('INVALID_SCHEMA_VERSION', 'schemaVersion must be the JSON integer 1')
+    }
+    const following = text[index + 1]
+    if (following && !/[\s,}]/.test(following)) {
+      throw new AgentProtocolError('INVALID_SCHEMA_VERSION', 'schemaVersion must be the JSON integer 1')
+    }
+    index += 1
+  }
+}
+
+const canonicalTypeAlias = type => {
+  if (CANONICAL_MESSAGE_TYPES.has(type)) return type
+  switch (type) {
+    case 'agent.action': return MESSAGE_TYPES.COMMAND_DISPATCH
+    case 'task_event':
+    case 'task_assigned': return MESSAGE_TYPES.TASK_EVENT
+    case 'agent.message':
+    case 'agent.reply':
+    case 'agent_message': return MESSAGE_TYPES.CHAT_MESSAGE
+    case 'agent.message.delta':
+    case 'agent_message_delta': return MESSAGE_TYPES.CHAT_MESSAGE_DELTA
+    case 'protocol_error': return MESSAGE_TYPES.PROTOCOL_ERROR
+    default: return null
+  }
+}
+
+const typeDeclarations = (layer, layerName) => {
+  const declarations = []
+  for (const field of ['type', 'messageType']) {
+    if (!hasOwn(layer, field)) continue
+    const value = layer[field]
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new AgentProtocolError('INVALID_MESSAGE_TYPE', `${layerName}.${field} must be a non-blank string`)
+    }
+    declarations.push({ field, value: value.trim(), layerName })
+  }
+  return declarations
+}
+
+const getEnvelopeValue = (outer, nested, aliases) => {
+  const outerValue = firstPresent(outer, aliases)
+  if (outerValue) return outerValue.value
+  return firstPresent(nested, aliases)?.value
+}
+
+export const normalizeInboundMessage = raw => {
+  let outer = raw
+  if (typeof raw === 'string' || Buffer.isBuffer(raw)) {
+    const rawText = raw.toString()
+    validateRawSchemaVersionTokens(rawText)
+    try {
+      outer = JSON.parse(rawText)
+    } catch (error) {
+      throw new AgentProtocolError('INVALID_JSON', `Invalid JSON message: ${error.message}`)
+    }
+  }
+  if (!isObject(outer)) {
+    throw new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object')
+  }
+  if (hasOwn(outer, 'payload') && !isObject(outer.payload)) {
+    throw new AgentProtocolError('INVALID_PAYLOAD', 'payload must be a JSON object when present')
+  }
+  const nested = isObject(outer.payload) ? outer.payload : {}
+
+  validateSchemaVersion(outer)
+  validateSchemaVersion(nested)
+  for (const field of RESERVED_FIELDS) {
+    if (hasOwn(outer, field) && hasOwn(nested, field) && !sameEnvelopeValue(outer[field], nested[field])) {
+      throw envelopeConflict(field)
+    }
+  }
+  validateAliasGroupWithinLayer(outer, 'messageId', ['messageId', 'requestId'])
+  validateAliasGroupWithinLayer(nested, 'messageId', ['messageId', 'requestId'])
+  validateAliasGroupWithinLayer(outer, 'sourceAgentId', ['agentId', 'sourceAgentId'])
+  validateAliasGroupWithinLayer(nested, 'sourceAgentId', ['agentId', 'sourceAgentId'])
+  validateAliasGroupWithinLayer(outer, 'targetAgentId', ['targetAgentId', 'receiverAgentId'])
+  validateAliasGroupWithinLayer(nested, 'targetAgentId', ['targetAgentId', 'receiverAgentId'])
+  validateAliasGroupWithinLayer(outer, 'sentAt', ['sentAt', 'timestamp'])
+  validateAliasGroupWithinLayer(nested, 'sentAt', ['sentAt', 'timestamp'])
+  validateAliasGroupAcrossLayers(outer, nested, 'messageId', ['messageId', 'requestId'])
+  validateAliasGroupAcrossLayers(outer, nested, 'sourceAgentId', ['agentId', 'sourceAgentId'])
+  validateAliasGroupAcrossLayers(outer, nested, 'targetAgentId', ['targetAgentId', 'receiverAgentId'])
+  validateAliasGroupAcrossLayers(outer, nested, 'sentAt', ['sentAt', 'timestamp'])
+
+  const declarations = [...typeDeclarations(outer, 'outer'), ...typeDeclarations(nested, 'payload')]
+  const messageTypeDeclarations = declarations.filter(({ field }) => field === 'messageType')
+  if (!messageTypeDeclarations.length) {
+    throw new AgentProtocolError('MESSAGE_TYPE_REQUIRED', 'An explicit messageType is required')
+  }
+  for (const declaration of messageTypeDeclarations) {
+    if (!CANONICAL_MESSAGE_TYPES.has(declaration.value)) {
+      throw new AgentProtocolError(
+        'INVALID_MESSAGE_TYPE',
+        `${declaration.layerName}.messageType must use a canonical Protocol v1 value`
+      )
+    }
+  }
+
+  let canonicalType = null
+  let directWrapper = false
+  for (const declaration of declarations) {
+    if (declaration.field === 'type' && declaration.value === 'agent_direct_message') {
+      directWrapper = true
+      continue
+    }
+    const resolved = canonicalTypeAlias(declaration.value)
+    if (!resolved) {
+      throw new AgentProtocolError('UNSUPPORTED_MESSAGE_TYPE', `Unsupported Agent Protocol message type: ${declaration.value}`)
+    }
+    if (canonicalType && canonicalType !== resolved) {
+      throw new AgentProtocolError('MESSAGE_TYPE_CONFLICT', 'type and messageType resolve to different Agent Protocol semantics')
+    }
+    canonicalType = resolved
+  }
+  if (!canonicalType || !CANONICAL_MESSAGE_TYPES.has(canonicalType)) {
+    throw new AgentProtocolError('UNSUPPORTED_MESSAGE_TYPE', 'No supported canonical messageType was declared')
+  }
+  if (directWrapper && canonicalType !== MESSAGE_TYPES.CHAT_MESSAGE && canonicalType !== MESSAGE_TYPES.COMMAND_DISPATCH) {
+    throw new AgentProtocolError(
+      'MESSAGE_TYPE_CONFLICT',
+      'agent_direct_message compatibility wrapper is limited to chat.message or command.dispatch'
+    )
+  }
+  if (!hasOwn(outer, 'schemaVersion') && !hasOwn(nested, 'schemaVersion')) {
+    throw new AgentProtocolError('SCHEMA_VERSION_REQUIRED', 'schemaVersion=1 is required for Protocol v1 messages')
+  }
+
+  const messageId = getEnvelopeValue(outer, nested, ['messageId', 'requestId'])
+  if (MESSAGE_ID_REQUIRED_TYPES.has(canonicalType) && (typeof messageId !== 'string' || !messageId.trim())) {
+    throw new AgentProtocolError('MESSAGE_ID_REQUIRED', `messageId is required for ${canonicalType}`)
+  }
+
+  const normalized = { ...nested, ...outer, payload: nested, schemaVersion: PROTOCOL_VERSION, messageType: canonicalType }
+  normalized.messageId = messageId
+  normalized.commandId = getEnvelopeValue(outer, nested, ['commandId'])
+  normalized.commandType = getEnvelopeValue(outer, nested, ['commandType'])
+  normalized.targetAgentId = getEnvelopeValue(outer, nested, ['targetAgentId', 'receiverAgentId'])
+  normalized.sourceAgentId = getEnvelopeValue(outer, nested, ['sourceAgentId', 'agentId'])
+  normalized.runtimeInstanceId = getEnvelopeValue(outer, nested, ['runtimeInstanceId'])
+  normalized.taskId = getEnvelopeValue(outer, nested, ['taskId'])
+  normalized.workItemId = getEnvelopeValue(outer, nested, ['workItemId'])
+  normalized.attempt = getEnvelopeValue(outer, nested, ['attempt'])
+  normalized.issuedAt = getEnvelopeValue(outer, nested, ['issuedAt'])
+  normalized.expiresAt = getEnvelopeValue(outer, nested, ['expiresAt'])
+  normalized.correlationId = getEnvelopeValue(outer, nested, ['correlationId'])
+  normalized.causationId = getEnvelopeValue(outer, nested, ['causationId'])
+  normalized.rawPayload = outer
+
+  if (canonicalType === MESSAGE_TYPES.COMMAND_DISPATCH) {
+    for (const [field, value] of [
+      ['commandId', normalized.commandId],
+      ['commandType', normalized.commandType],
+      ['targetAgentId', normalized.targetAgentId]
+    ]) {
+      if (typeof value !== 'string' || !value.trim()) {
+        throw new AgentProtocolError(`${field.replace(/[A-Z]/g, letter => `_${letter}`).toUpperCase()}_REQUIRED`, `${field} is required for command.dispatch`)
+      }
+    }
+  }
+
+  return normalized
+}
+
 const parseNonNegativeMs = (value, fallback) => {
   const parsed = Number(value ?? fallback)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-const DISABLED_PROFILE_STATUSES = new Set(['disabled', 'inactive', 'unavailable'])
+const hasFlag = flag => process.argv.slice(2).includes(flag)
 
-const hasFlag = (flag) => process.argv.slice(2).includes(flag)
-
-const canExecute = (targetPath) => {
+const canExecute = targetPath => {
   try {
     accessSync(targetPath, fsConstants.X_OK)
     return true
@@ -33,22 +355,18 @@ const canExecute = (targetPath) => {
   }
 }
 
-const resolveExecutable = (command) => {
+const resolveExecutable = command => {
   const value = String(command || '').trim()
   if (!value) return ''
-  if (value.includes('/')) {
-    return canExecute(value) ? value : ''
-  }
-
-  const searchPaths = String(process.env.PATH || '').split(':').filter(Boolean)
-  for (const dir of searchPaths) {
+  if (value.includes('/')) return canExecute(value) ? value : ''
+  for (const dir of String(process.env.PATH || '').split(':').filter(Boolean)) {
     const candidate = resolve(dir, value)
     if (canExecute(candidate)) return candidate
   }
   return ''
 }
 
-const parseScalarValue = (rawValue) => {
+const parseScalarValue = rawValue => {
   const value = String(rawValue || '').trim()
   if (!value) return ''
   if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
@@ -73,58 +391,39 @@ const parseSectionProfiles = (raw, fallbackProfile, options = {}) => {
   const profiles = []
   let current = null
   let defaults = {}
-
   for (const originalLine of String(raw).split(/\r?\n/)) {
     const line = originalLine.trim()
     if (!line || line.startsWith('#')) continue
-
     if (/^\[(default|profile\.default|agent\.default)\]$/.test(line)) {
       if (current) profiles.push(current)
       current = { __section: 'default' }
       continue
     }
-
     const sectionMatch = line.match(/^\[(agent|profile)\.([^\]]+)\]$/)
     if (sectionMatch) {
       if (current) profiles.push(current)
-      current = {
-        profileId: sectionMatch[2]
-      }
+      current = { profileId: sectionMatch[2] }
       continue
     }
-
     if (!current) continue
-
     const index = line.indexOf('=')
     if (index < 0) continue
-
-    const key = line.slice(0, index).trim()
-    const value = line.slice(index + 1).trim()
-    current[key] = parseScalarValue(value)
+    current[line.slice(0, index).trim()] = parseScalarValue(line.slice(index + 1).trim())
   }
-
   if (current) profiles.push(current)
-
   const defaultIndex = profiles.findIndex(profile => profile.__section === 'default')
   if (defaultIndex >= 0) {
     defaults = { ...profiles[defaultIndex] }
     delete defaults.__section
     profiles.splice(defaultIndex, 1)
   }
-
-  if (!profiles.length) {
-    configError('CODEX_PROFILES_FILE section format is empty or invalid', exitOnError)
-  }
-
+  if (!profiles.length) configError('CODEX_PROFILES_FILE section format is empty or invalid', exitOnError)
   return profiles.map((profile, index) => normalizeProfile({ ...defaults, ...profile }, fallbackProfile, index))
 }
 
 const normalizeProfile = (profile, fallback = {}, index = 0) => {
   const agentId = profile.agentId || fallback.agentId || `local-codex-${index + 1}`
   const status = String(profile.status || fallback.status || '').trim().toLowerCase()
-  const enabled = profile.enabled !== false
-    && profile.active !== false
-    && !DISABLED_PROFILE_STATUSES.has(status)
   return {
     profileId: profile.profileId || agentId,
     agentId,
@@ -138,50 +437,13 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     codexApproval: profile.codexApproval || fallback.codexApproval || 'never',
     codexSessionMode: profile.codexSessionMode || fallback.codexSessionMode || 'new',
     codexTimeoutMs: parseNonNegativeMs(profile.codexTimeoutMs, fallback.codexTimeoutMs || 900000),
-    enabled,
+    enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
   }
 }
 
-const loadProfilesRaw = (options = {}) => {
-  const exitOnError = options.exitOnError !== false
-  const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-  if (profilesFile) {
-    try {
-      return readFileSync(resolve(profilesFile), 'utf8')
-    } catch (error) {
-      configError(`failed to read CODEX_PROFILES_FILE ${profilesFile}: ${error.message}`, exitOnError)
-    }
-  }
-
-  return process.env.CODEX_PROFILES || ''
-}
-
-const parseProfiles = (raw, fallbackProfile, options = {}) => {
-  const exitOnError = options.exitOnError !== false
-  if (!raw || !String(raw).trim()) return [fallbackProfile]
-
-  const text = String(raw).trim()
-  if (/^\[(agent|profile)\./m.test(text)) {
-    return parseSectionProfiles(text, fallbackProfile, { exitOnError })
-  }
-
-  let parsed
-  try {
-    parsed = JSON.parse(text)
-  } catch (error) {
-    configError(`CODEX_PROFILES must be valid JSON: ${error.message}`, exitOnError)
-  }
-
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    configError('CODEX_PROFILES must be a non-empty JSON array', exitOnError)
-  }
-
-  return parsed.map((profile, index) => normalizeProfile(profile || {}, fallbackProfile, index))
-}
-
-const legacyProfile = normalizeProfile({
+const legacyProfile = () => normalizeProfile({
   profileId: process.env.CODEX_PROFILE_ID || process.env.AGENT_ID || 'default',
   agentId: process.env.AGENT_ID || 'local-codex',
   agentName: process.env.AGENT_NAME || '本地 Codex',
@@ -196,172 +458,855 @@ const legacyProfile = normalizeProfile({
   isDefault: true
 })
 
-const loadRuntimeConfig = (options = {}) => {
-  const loadedProfiles = parseProfiles(loadProfilesRaw(options), legacyProfile, options)
-    .filter(profile => profile.enabled !== false)
-  if (!loadedProfiles.length) {
-    configError('CODEX_PROFILES has no enabled profiles', options.exitOnError !== false)
+const loadProfilesRaw = (options = {}) => {
+  const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
+  if (profilesFile) {
+    try {
+      return readFileSync(resolve(profilesFile), 'utf8')
+    } catch (error) {
+      configError(`failed to read CODEX_PROFILES_FILE ${profilesFile}: ${error.message}`, options.exitOnError !== false)
+    }
   }
+  return process.env.CODEX_PROFILES || ''
+}
+
+const parseProfiles = (raw, fallbackProfile, options = {}) => {
+  const exitOnError = options.exitOnError !== false
+  if (!raw || !String(raw).trim()) return [fallbackProfile]
+  const text = String(raw).trim()
+  if (/^\[(agent|profile)\./m.test(text)) return parseSectionProfiles(text, fallbackProfile, { exitOnError })
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    configError(`CODEX_PROFILES must be valid JSON: ${error.message}`, exitOnError)
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) configError('CODEX_PROFILES must be a non-empty JSON array', exitOnError)
+  return parsed.map((profile, index) => normalizeProfile(profile || {}, fallbackProfile, index))
+}
+
+const loadRuntimeConfig = (options = {}) => {
+  const loadedProfiles = parseProfiles(loadProfilesRaw(options), legacyProfile(), options).filter(profile => profile.enabled)
+  if (!loadedProfiles.length) configError('CODEX_PROFILES has no enabled profiles', options.exitOnError !== false)
   const configuredDefaultProfile = process.env.DEFAULT_CODEX_PROFILE
-  const defaultProfile = configuredDefaultProfile
-    && loadedProfiles.find(profile => profile.profileId === configuredDefaultProfile || profile.agentId === configuredDefaultProfile)
+  const selected = configuredDefaultProfile && loadedProfiles.find(
+    profile => profile.profileId === configuredDefaultProfile || profile.agentId === configuredDefaultProfile
+  )
   return {
     profiles: loadedProfiles,
-    defaultProfileId: defaultProfile?.profileId
-      || loadedProfiles.find(profile => profile.isDefault)?.profileId
-      || loadedProfiles[0].profileId
+    defaultProfileId: selected?.profileId || loadedProfiles.find(profile => profile.isDefault)?.profileId || loadedProfiles[0].profileId
   }
 }
 
-const runtimeConfig = loadRuntimeConfig()
-
-const config = {
-  wsUrl: process.env.WS_URL || 'wss://api.chaoyoufan.cn/ws/agent/channel',
-  apiKey: process.env.OPENCLAW_API_KEY || '',
-  profiles: runtimeConfig.profiles,
-  defaultProfileId: runtimeConfig.defaultProfileId,
-  heartbeatMs: Number(process.env.HEARTBEAT_MS || 30000),
-  reconnectMaxMs: parseNonNegativeMs(process.env.RECONNECT_MAX_MS, 30 * 60 * 1000),
-  profileReloadMs: parseNonNegativeMs(process.env.CODEX_PROFILE_RELOAD_MS, 5000)
-}
-
-if (!config.apiKey && !config.profiles.every(profile => profile.apiKey)) {
-  console.error('OPENCLAW_API_KEY is required unless every profile defines apiKey')
-  process.exit(1)
-}
-
-const currentRuns = new Map()
+let config = null
+let defaultProfile = null
 let shuttingDown = false
-const codexSessionMapPath = resolve(process.env.CODEX_SESSION_MAP_FILE || resolve(process.cwd(), 'codex-session-map.json'))
+let shutdownStarted = false
+let profileReloadTimer = null
+let profileReloadInFlight = false
+let lastProfileSignature = ''
+let codexSessionMapPath = ''
+let codexSessionMap = {}
+const currentRuns = new Map()
+const profileStates = new Map()
+
+const atomicWriteText = (targetPath, text) => {
+  mkdirSync(dirname(targetPath), { recursive: true })
+  const temporaryPath = `${targetPath}.tmp-${process.pid}-${randomUUID()}`
+  let descriptor
+  try {
+    descriptor = openSync(temporaryPath, 'wx', 0o600)
+    writeFileSync(descriptor, text, 'utf8')
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+    descriptor = undefined
+    renameSync(temporaryPath, targetPath)
+    try {
+      const directoryDescriptor = openSync(dirname(targetPath), 'r')
+      fsyncSync(directoryDescriptor)
+      closeSync(directoryDescriptor)
+    } catch {}
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor) } catch {}
+    }
+    try { unlinkSync(temporaryPath) } catch {}
+    throw error
+  }
+}
+
+const atomicWriteJson = (targetPath, value) => atomicWriteText(targetPath, `${JSON.stringify(value, null, 2)}\n`)
+const fsyncDirectory = directory => {
+  try {
+    const descriptor = openSync(directory, 'r')
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+  } catch {}
+}
+const safeProfileDirectory = profile => Buffer.from(String(profile.agentId), 'utf8').toString('hex')
+
+export class PersistentCommandInbox {
+  constructor({
+    rootDir,
+    profile,
+    successPolicy = 'archive',
+    now = () => Date.now(),
+    createId = () => randomUUID()
+  }) {
+    if (!profile?.agentId || !profile?.profileId) throw new Error('profileId and agentId are required for the command inbox')
+    if (!['archive', 'delete'].includes(successPolicy)) throw new Error('successPolicy must be archive or delete')
+    this.rootDir = resolve(rootDir)
+    this.profile = profile
+    this.successPolicy = successPolicy
+    this.now = now
+    this.createId = createId
+    this.sequence = 0
+    this.profileDir = resolve(this.rootDir, safeProfileDirectory(profile))
+    this.pendingDir = resolve(this.profileDir, 'pending')
+    this.processingDir = resolve(this.profileDir, 'processing')
+    this.archiveDir = resolve(this.profileDir, 'archive')
+    this.quarantineDir = resolve(this.profileDir, 'quarantine')
+  }
+
+  initialize() {
+    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.quarantineDir]) {
+      mkdirSync(directory, { recursive: true })
+    }
+    return this.recover()
+  }
+
+  enqueue(message) {
+    const now = this.now()
+    const queueId = this.createId()
+    const queueSequence = ++this.sequence
+    const record = {
+      formatVersion: 1,
+      queueId,
+      queueSequence,
+      profileId: this.profile.profileId,
+      agentId: this.profile.agentId,
+      state: 'pending',
+      receivedAt: now,
+      enqueuedAt: now,
+      messageId: message.messageId || '',
+      commandId: message.commandId || '',
+      commandType: message.commandType || '',
+      taskId: message.taskId || '',
+      workItemId: message.workItemId || '',
+      attempt: Number.isSafeInteger(message.attempt) ? message.attempt : 0,
+      issuedAt: Number.isSafeInteger(message.issuedAt) ? message.issuedAt : null,
+      expiresAt: Number.isSafeInteger(message.expiresAt) ? message.expiresAt : null,
+      correlationId: message.correlationId || '',
+      causationId: message.causationId || '',
+      rawPayload: message.rawPayload || message
+    }
+    const fileName = `${String(now).padStart(13, '0')}-${String(queueSequence).padStart(8, '0')}-${queueId}.json`
+    const targetPath = resolve(this.pendingDir, fileName)
+    atomicWriteJson(targetPath, record)
+    return { record, fileName, path: targetPath }
+  }
+
+  recover() {
+    const result = { recovered: 0, completed: 0, quarantined: 0 }
+    for (const directory of [this.pendingDir, this.processingDir]) {
+      for (const fileName of this.listJsonFiles(directory)) {
+        const sourcePath = resolve(directory, fileName)
+        let record
+        try {
+          record = this.readAndValidate(sourcePath)
+        } catch (error) {
+          this.quarantine(sourcePath, error)
+          result.quarantined += 1
+          continue
+        }
+        if (directory === this.processingDir) {
+          if (record.state === 'completed' && record.outcome) {
+            this.settleCompletedFile(sourcePath, fileName, record)
+            result.completed += 1
+          } else {
+            const pendingPath = this.uniquePath(this.pendingDir, fileName)
+            renameSync(sourcePath, pendingPath)
+            fsyncDirectory(this.processingDir)
+            fsyncDirectory(this.pendingDir)
+            atomicWriteJson(pendingPath, {
+              ...record,
+              state: 'pending',
+              recoveredAt: this.now(),
+              recoveryCount: Number(record.recoveryCount || 0) + 1
+            })
+            result.recovered += 1
+          }
+        }
+      }
+    }
+    return result
+  }
+
+  claimNext() {
+    const candidates = []
+    for (const fileName of this.listJsonFiles(this.pendingDir)) {
+      const filePath = resolve(this.pendingDir, fileName)
+      try {
+        candidates.push({ fileName, filePath, record: this.readAndValidate(filePath) })
+      } catch (error) {
+        this.quarantine(filePath, error)
+      }
+    }
+    candidates.sort((left, right) => (
+      Number(left.record.enqueuedAt) - Number(right.record.enqueuedAt)
+      || Number(left.record.queueSequence) - Number(right.record.queueSequence)
+      || left.fileName.localeCompare(right.fileName)
+    ))
+    const next = candidates[0]
+    if (!next) return null
+    const processingPath = resolve(this.processingDir, next.fileName)
+    renameSync(next.filePath, processingPath)
+    fsyncDirectory(this.pendingDir)
+    fsyncDirectory(this.processingDir)
+    const record = {
+      ...next.record,
+      profileId: this.profile.profileId,
+      state: 'processing',
+      startedAt: this.now()
+    }
+    atomicWriteJson(processingPath, record)
+    return { record, fileName: next.fileName, path: processingPath }
+  }
+
+  complete(item, outcome) {
+    const completed = {
+      ...item.record,
+      state: 'completed',
+      completedAt: this.now(),
+      outcome: {
+        status: outcome?.status || 'completed',
+        exitCode: outcome?.exitCode ?? null,
+        errorMessage: outcome?.errorMessage || ''
+      }
+    }
+    atomicWriteJson(item.path, completed)
+    this.settleCompletedFile(item.path, item.fileName, completed)
+    return completed
+  }
+
+  restoreProcessing(item, reason = 'interrupted') {
+    if (!item?.path || !existsSync(item.path)) return null
+    const pendingPath = this.uniquePath(this.pendingDir, item.fileName)
+    renameSync(item.path, pendingPath)
+    const restored = {
+      ...item.record,
+      state: 'pending',
+      recoveredAt: this.now(),
+      recoveryReason: reason,
+      recoveryCount: Number(item.record.recoveryCount || 0) + 1
+    }
+    atomicWriteJson(pendingPath, restored)
+    return { record: restored, fileName: pendingPath.split('/').pop(), path: pendingPath }
+  }
+
+  count(state = 'pending') {
+    const directory = state === 'processing' ? this.processingDir : state === 'archive' ? this.archiveDir : this.pendingDir
+    return this.listJsonFiles(directory).length
+  }
+
+  list(state = 'pending') {
+    const directory = state === 'processing' ? this.processingDir : state === 'archive' ? this.archiveDir : this.pendingDir
+    return this.listJsonFiles(directory).map(fileName => this.readAndValidate(resolve(directory, fileName)))
+  }
+
+  listJsonFiles(directory) {
+    try {
+      return readdirSync(directory).filter(name => name.endsWith('.json')).sort()
+    } catch {
+      return []
+    }
+  }
+
+  readAndValidate(filePath) {
+    let record
+    try {
+      record = JSON.parse(readFileSync(filePath, 'utf8'))
+    } catch (error) {
+      throw new Error(`invalid inbox JSON: ${error.message}`)
+    }
+    if (!isObject(record) || record.formatVersion !== 1 || typeof record.queueId !== 'string' || !isObject(record.rawPayload)) {
+      throw new Error('invalid inbox record shape')
+    }
+    if (record.agentId !== this.profile.agentId) {
+      throw new Error('inbox record canonical agent identity mismatch')
+    }
+    return record
+  }
+
+  quarantine(sourcePath, error) {
+    if (!existsSync(sourcePath)) return
+    const baseName = sourcePath.split('/').pop()
+    const targetPath = this.uniquePath(this.quarantineDir, baseName)
+    renameSync(sourcePath, targetPath)
+    atomicWriteText(`${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
+  }
+
+  settleCompletedFile(sourcePath, fileName, record) {
+    if (record.outcome?.status === 'completed' && this.successPolicy === 'delete') {
+      unlinkSync(sourcePath)
+      return
+    }
+    renameSync(sourcePath, this.uniquePath(this.archiveDir, fileName))
+  }
+
+  uniquePath(directory, fileName) {
+    let candidate = resolve(directory, fileName)
+    if (!existsSync(candidate)) return candidate
+    const suffix = fileName.endsWith('.json') ? '.json' : ''
+    const stem = suffix ? fileName.slice(0, -suffix.length) : fileName
+    candidate = resolve(directory, `${stem}-${this.createId()}${suffix}`)
+    return candidate
+  }
+}
+
+export class AgentMessageProcessor {
+  constructor({ profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onReject = () => {}, sendChatBusy = () => {} }) {
+    this.profile = profile
+    this.inbox = inbox
+    this.runCommand = runCommand
+    this.runChat = runChat
+    this.onTaskEvent = onTaskEvent
+    this.onReject = onReject
+    this.sendChatBusy = sendChatBusy
+    this.drainPromise = null
+    this.chatActive = false
+    this.commandActive = false
+    this.paused = false
+    this.stopped = false
+  }
+
+  start({ drain = true } = {}) {
+    const recovery = this.inbox.initialize()
+    this.paused = !drain
+    if (drain) void this.drain()
+    return recovery
+  }
+
+  pause() {
+    this.paused = true
+  }
+
+  resume() {
+    if (this.stopped) return
+    this.paused = false
+    void this.drain()
+  }
+
+  stop() {
+    this.stopped = true
+    this.paused = true
+  }
+
+  isBusy() {
+    return this.chatActive || this.commandActive
+  }
+
+  async handle(raw) {
+    let message
+    try {
+      message = normalizeInboundMessage(raw)
+    } catch (error) {
+      const protocolError = error instanceof AgentProtocolError
+        ? error
+        : new AgentProtocolError('INVALID_MESSAGE', error.message)
+      this.onReject(protocolError, raw)
+      return { kind: 'rejected', error: protocolError }
+    }
+
+    if (message.targetAgentId && message.targetAgentId !== this.profile.agentId) {
+      const error = new AgentProtocolError('TARGET_AGENT_ID_MISMATCH', 'targetAgentId does not match this Agent profile')
+      this.onReject(error, raw)
+      return { kind: 'rejected', error }
+    }
+
+    switch (message.messageType) {
+      case MESSAGE_TYPES.COMMAND_DISPATCH: {
+        const item = this.inbox.enqueue(message)
+        void this.drain()
+        return { kind: 'command', item }
+      }
+      case MESSAGE_TYPES.CHAT_MESSAGE:
+        if (this.isBusy()) {
+          await this.sendChatBusy(message)
+          return { kind: 'chat-busy' }
+        }
+        this.chatActive = true
+        try {
+          await this.runChat(message)
+        } finally {
+          this.chatActive = false
+          void this.drain()
+        }
+        return { kind: 'chat' }
+      case MESSAGE_TYPES.TASK_EVENT:
+        await this.onTaskEvent(message)
+        return { kind: 'task-event' }
+      default:
+        return { kind: 'ignored', messageType: message.messageType }
+    }
+  }
+
+  drain() {
+    if (this.paused || this.stopped || this.chatActive) return this.drainPromise || Promise.resolve()
+    if (this.drainPromise) return this.drainPromise
+    this.drainPromise = Promise.resolve()
+      .then(() => this.runDrain())
+      .finally(() => {
+        this.drainPromise = null
+        if (!this.paused && !this.stopped && !this.chatActive && this.inbox.count('pending')) {
+          queueMicrotask(() => { void this.drain() })
+        }
+      })
+    return this.drainPromise
+  }
+
+  async runDrain() {
+    while (!this.paused && !this.stopped && !this.chatActive) {
+      const item = this.inbox.claimNext()
+      if (!item) return
+      this.commandActive = true
+      let outcome
+      try {
+        outcome = await this.runCommand(item.record.rawPayload, item.record)
+      } catch (error) {
+        outcome = { status: 'failed', errorMessage: error.message }
+      }
+      try {
+        this.inbox.complete(item, {
+          status: outcome?.status === 'failed' ? 'failed' : 'completed',
+          exitCode: outcome?.exitCode,
+          errorMessage: outcome?.errorMessage
+        })
+      } catch (error) {
+        this.paused = true
+        this.onReject(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to settle command inbox record: ${error.message}`), item.record.rawPayload)
+      } finally {
+        this.commandActive = false
+      }
+    }
+  }
+
+  async waitForIdle(timeoutMs = 5000) {
+    const startedAt = Date.now()
+    while (this.isBusy() || this.drainPromise || this.inbox.count('pending') || this.inbox.count('processing')) {
+      if (Date.now() - startedAt > timeoutMs) throw new Error('Timed out waiting for AgentMessageProcessor to become idle')
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
+    }
+  }
+}
 
 const loadCodexSessionMap = () => {
   try {
-    if (!existsSync(codexSessionMapPath)) return {}
+    if (!codexSessionMapPath || !existsSync(codexSessionMapPath)) return {}
     const parsed = JSON.parse(readFileSync(codexSessionMapPath, 'utf8'))
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    return isObject(parsed) ? parsed : {}
   } catch (error) {
     console.warn(`failed to load codex session map | path=${codexSessionMapPath} | ${error.message}`)
     return {}
   }
 }
 
-const codexSessionMap = loadCodexSessionMap()
-
 const saveCodexSessionMap = () => {
   try {
-    writeFileSync(codexSessionMapPath, `${JSON.stringify(codexSessionMap, null, 2)}\n`)
+    atomicWriteJson(codexSessionMapPath, codexSessionMap)
   } catch (error) {
     console.warn(`failed to save codex session map | path=${codexSessionMapPath} | ${error.message}`)
   }
 }
 
-const withApiKey = (url, profile = defaultProfile) => {
+export const buildWebSocketUrl = (url, apiKey, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
   const parsed = new URL(url)
-  parsed.searchParams.set('api_key', profile?.apiKey || config.apiKey)
+  parsed.searchParams.set('api_key', profile?.apiKey || apiKey)
   if (profile?.agentId) {
     parsed.searchParams.set('agent_id', profile.agentId)
     parsed.searchParams.set('agentId', profile.agentId)
   }
+  parsed.searchParams.set('runtime_instance_id', runtimeInstanceId)
+  parsed.searchParams.set('runtimeInstanceId', runtimeInstanceId)
   return parsed.toString()
 }
 
-const getProfileById = (profileId) => config.profiles.find(profile => profile.profileId === profileId || profile.agentId === profileId)
-
-let defaultProfile = getProfileById(config.defaultProfileId) || config.profiles[0]
-
-const ensureProfiles = (profilesToValidate = config.profiles, defaultProfileIdToValidate = config.defaultProfileId, exitOnError = true) => {
-  const seenProfileIds = new Set()
-  const seenAgentIds = new Set()
-  for (const profile of profilesToValidate) {
-    if (seenProfileIds.has(profile.profileId)) {
-      configError(`duplicate CODEX_PROFILES profileId: ${profile.profileId}`, exitOnError)
-    }
-    if (seenAgentIds.has(profile.agentId)) {
-      configError(`duplicate CODEX_PROFILES agentId: ${profile.agentId}`, exitOnError)
-    }
-    seenProfileIds.add(profile.profileId)
-    seenAgentIds.add(profile.agentId)
-
-    const resolvedCodexBin = resolveExecutable(profile.codexBin)
-    if (!resolvedCodexBin) {
-      configError(`codex binary not found or not executable for profile ${profile.profileId}: ${profile.codexBin}`, exitOnError)
-    }
-    profile.codexBin = resolvedCodexBin
-
-    if (!existsSync(profile.codexWorkdir)) {
-      configError(`codex workdir not found for profile ${profile.profileId}: ${profile.codexWorkdir}`, exitOnError)
-    }
-  }
-  if (!profilesToValidate.find(profile => profile.profileId === defaultProfileIdToValidate || profile.agentId === defaultProfileIdToValidate)) {
-    configError(`DEFAULT_CODEX_PROFILE not found: ${defaultProfileIdToValidate}`, exitOnError)
-  }
-}
-
-ensureProfiles()
-
-if (hasFlag('--validate')) {
-  console.log(`configuration valid | profiles=${config.profiles.length} | defaultProfile=${defaultProfile.profileId}`)
-  for (const profile of config.profiles) {
-    console.log(`profile ok | profile=${profile.profileId} | agentId=${profile.agentId} | codexBin=${profile.codexBin} | workdir=${profile.codexWorkdir}`)
-  }
-  process.exit(0)
-}
-
-const createProfileState = (profile) => ({
-  profile,
-  ws: null,
-  heartbeatTimer: null,
-  reconnectTimer: null,
-  reconnectAttempt: 0,
-  reconnectStartedAt: 0,
-  reconnectScheduled: false
+export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => ({
+  ...payload,
+  type: messageType,
+  schemaVersion: PROTOCOL_VERSION,
+  messageType,
+  messageId: randomUUID(),
+  agentId: profile.agentId,
+  sourceAgentId: profile.agentId,
+  runtimeInstanceId,
+  senderType: 'agent',
+  senderName: profile.agentName,
+  sentAt: Date.now()
 })
 
-const profileStates = new Map(config.profiles.map(profile => [profile.agentId, createProfileState(profile)]))
+const getProfileById = profileId => config?.profiles.find(profile => profile.profileId === profileId || profile.agentId === profileId)
+const getProfileState = profile => profileStates.get(profile.agentId)
 
-const getProfileState = (profile) => profileStates.get(profile.agentId)
+const sendRaw = (event, profile = defaultProfile) => {
+  const state = getProfileState(profile)
+  if (!state?.ws || state.ws.readyState !== WebSocket.OPEN) return false
+  state.ws.send(JSON.stringify(event))
+  return true
+}
 
-let shutdownStarted = false
-let profileReloadTimer = null
-let profileReloadInFlight = false
-let lastProfileSignature = ''
+const sendProtocol = (messageType, payload = {}, profile = defaultProfile) => sendRaw(
+  buildProtocolEnvelope(messageType, payload, profile),
+  profile
+)
 
-const clearReconnectState = (state) => {
+const sendLegacy = (type, payload = {}, profile = defaultProfile) => sendRaw({
+  ...payload,
+  type,
+  requestId: `${type}-${Date.now()}-${randomUUID()}`,
+  agentId: profile.agentId,
+  runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+  senderType: 'agent',
+  senderName: profile.agentName
+}, profile)
+
+const sendStatus = (profile, status, extra = {}) => sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, {
+  status,
+  currentTaskId: extra.taskId || '',
+  currentTaskTitle: extra.title || '',
+  errorMessage: extra.errorMessage || ''
+}, profile)
+
+const registerAgent = profile => sendProtocol(MESSAGE_TYPES.AGENT_REGISTER, {
+  name: profile.agentName,
+  personaName: profile.personaName,
+  endpoint: config.wsUrl,
+  abilities: ['codex', 'shell', 'code-edit', 'debug', 'deploy-assist']
+}, profile)
+
+const resolvePrompt = message => {
+  if (message.prompt) return String(message.prompt)
+  if (message.content) return String(message.content)
+  if (message.instruction) return String(message.instruction)
+  if (message.description) return String(message.description)
+  if (message.currentTaskTitle) return String(message.currentTaskTitle)
+  if (message.title) return `处理任务：${message.title}`
+  return ''
+}
+
+const trimReply = (value, limit = 12000) => {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return text.length > limit ? `${text.slice(0, limit)}\n\n[输出已截断]` : text
+}
+const sleep = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms))
+const buildReplyChunks = (content, chunkSize = 72) => {
+  const text = String(content || '')
+  const chunks = []
+  for (let index = 0; index < text.length; index += chunkSize) chunks.push(text.slice(index, index + chunkSize))
+  return chunks
+}
+
+const chatTrace = message => ({
+  correlationId: message.correlationId || message.messageId,
+  causationId: message.messageId,
+  conversationId: message.conversationId,
+  conversationType: message.conversationType || 'juyiting'
+})
+
+const sendChatDelta = (profile, message, content, extra = {}, sendProtocolFn = sendProtocol) => {
+  if (!content) return
+  sendProtocolFn(MESSAGE_TYPES.CHAT_MESSAGE_DELTA, {
+    ...chatTrace(message),
+    content,
+    senderName: profile.personaName || profile.agentName,
+    ...extra
+  }, profile)
+}
+
+const sendChatFinal = (profile, message, content, extra = {}, sendProtocolFn = sendProtocol) => sendProtocolFn(
+  MESSAGE_TYPES.CHAT_MESSAGE,
+  {
+    ...chatTrace(message),
+    content,
+    senderName: profile.personaName || profile.agentName,
+    ...extra
+  },
+  profile
+)
+
+const extractCodexAgentText = event => {
+  if (!isObject(event)) return ''
+  const item = isObject(event.item) ? event.item : null
+  if (item?.type === 'agent_message' && typeof item.text === 'string') return item.text
+  if (event.type === 'agent_message_delta' && typeof event.delta === 'string') return event.delta
+  if (event.type === 'agent_message_delta' && typeof event.text === 'string') return event.text
+  if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') return event.delta
+  return ''
+}
+
+const extractCodexSessionId = event => {
+  if (!isObject(event)) return ''
+  if (typeof event.session_id === 'string') return event.session_id
+  if (typeof event.sessionId === 'string') return event.sessionId
+  if (event.type === 'session_meta' && typeof event.payload?.id === 'string') return event.payload.id
+  if (typeof event.payload?.session_id === 'string') return event.payload.session_id
+  if (typeof event.payload?.sessionId === 'string') return event.payload.sessionId
+  if (typeof event.item?.session_id === 'string') return event.item.session_id
+  return ''
+}
+
+const findCodexSessionFiles = dir => {
+  const files = []
+  let entries
+  try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return files }
+  for (const entry of entries) {
+    const entryPath = resolve(dir, entry.name)
+    if (entry.isDirectory()) files.push(...findCodexSessionFiles(entryPath))
+    else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(entryPath)
+  }
+  return files
+}
+
+const readCodexSessionMeta = filePath => {
+  try {
+    const firstLine = readFileSync(filePath, 'utf8').split(/\r?\n/, 1)[0]
+    if (!firstLine) return null
+    const event = JSON.parse(firstLine)
+    if (event?.type !== 'session_meta' || !event.payload?.id) return null
+    const stats = statSync(filePath)
+    return { id: String(event.payload.id), path: filePath, mtimeMs: stats.mtimeMs }
+  } catch { return null }
+}
+
+const findLatestCodexSession = (profile, sinceMs = 0) => {
+  if (!profile.codexHome) return null
+  return findCodexSessionFiles(resolve(profile.codexHome, 'sessions'))
+    .map(readCodexSessionMeta)
+    .filter(meta => meta && meta.mtimeMs >= sinceMs)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)[0] || null
+}
+
+const hasCodexSession = profile => {
+  if (!profile.codexHome) return false
+  const indexPath = resolve(profile.codexHome, 'session_index.jsonl')
+  try {
+    if (existsSync(indexPath) && readFileSync(indexPath, 'utf8').trim()) return true
+    return Boolean(findLatestCodexSession(profile))
+  } catch { return false }
+}
+
+const codexSessionMapKey = (profile, message) => message?.conversationId ? `${profile.agentId}:${message.conversationId}` : ''
+const getMappedCodexSessionId = (profile, message) => {
+  const value = codexSessionMap[codexSessionMapKey(profile, message)]
+  return typeof value === 'string' ? value.trim() : ''
+}
+const rememberCodexSession = (profile, message, sessionId) => {
+  const key = codexSessionMapKey(profile, message)
+  const value = String(sessionId || '').trim()
+  if (!key || !value || codexSessionMap[key] === value) return
+  codexSessionMap[key] = value
+  saveCodexSessionMap()
+}
+
+const buildCodexArgs = (profile, message, prompt) => {
+  const mappedSessionId = getMappedCodexSessionId(profile, message)
+  if (profile.codexSessionMode === 'resume' && (mappedSessionId || hasCodexSession(profile))) {
+    return [
+      '--ask-for-approval', profile.codexApproval,
+      'exec', 'resume', '--json', '--skip-git-repo-check',
+      ...(mappedSessionId ? [mappedSessionId] : ['--last', '--all']),
+      prompt
+    ]
+  }
+  return [
+    '--ask-for-approval', profile.codexApproval,
+    'exec', '--json', '--cd', profile.codexWorkdir,
+    '--sandbox', profile.codexSandbox, '--skip-git-repo-check', prompt
+  ]
+}
+
+export const runCodex = (profile, message, mode = 'command', overrides = {}) => new Promise(resolveRun => {
+  const spawnFn = overrides.spawnFn || spawn
+  const sendProtocolFn = overrides.sendProtocolFn || sendProtocol
+  const sendLegacyFn = overrides.sendLegacyFn || sendLegacy
+  const sendStatusFn = overrides.sendStatusFn || sendStatus
+  const prompt = resolvePrompt(message)
+  const taskId = message.taskId || message.workItemId || message.commandId || message.messageId || `codex-${Date.now()}`
+  const title = message.title || message.currentTaskTitle || (mode === 'chat' ? 'Agent 聊天' : 'Codex 执行任务')
+
+  if (!prompt) {
+    const errorMessage = 'No prompt/content/instruction/title found in inbound event'
+    if (mode === 'chat') sendChatFinal(profile, message, `无法处理：${errorMessage}`, { status: 'failed' }, sendProtocolFn)
+    else sendLegacyFn('codex.result', { taskId, status: 'failed', errorMessage }, profile)
+    resolveRun({ status: 'failed', errorMessage })
+    return
+  }
+
+  if (mode === 'command') sendStatusFn(profile, 'busy', { taskId, title })
+  if (mode === 'chat') sendChatDelta(profile, message, '收到，正在整理回复。\n\n', { phase: 'intro' }, sendProtocolFn)
+
+  const args = buildCodexArgs(profile, message, prompt)
+  const startedAt = Date.now()
+  let child
+  try {
+    child = spawnFn(profile.codexBin, args, {
+      cwd: profile.codexWorkdir,
+      env: { ...process.env, ...(profile.codexHome ? { CODEX_HOME: profile.codexHome } : {}) },
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+  } catch (error) {
+    if (mode === 'chat') sendChatFinal(profile, message, `执行失败：${error.message}`, { status: 'failed' }, sendProtocolFn)
+    else {
+      const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage: error.message }
+      sendLegacyFn('task.report', payload, profile)
+      sendLegacyFn('codex.result', payload, profile)
+    }
+    if (mode === 'command') sendStatusFn(profile, 'online')
+    resolveRun({ status: 'failed', errorMessage: error.message })
+    return
+  }
+
+  currentRuns.set(profile.agentId, child)
+  let stdout = ''
+  let stderr = ''
+  let agentReplyText = ''
+  let streamedAgentReply = ''
+  let jsonLineBuffer = ''
+  let runSessionId = ''
+  let streamQueue = Promise.resolve()
+  let settled = false
+  const timeout = setTimeout(() => child.kill('SIGTERM'), profile.codexTimeoutMs)
+
+  const streamAgentReplyText = async (content, extra = {}) => {
+    if (mode !== 'chat' || !content) return
+    const chunks = buildReplyChunks(content)
+    for (const [index, chunk] of chunks.entries()) {
+      sendChatDelta(profile, message, chunk, {
+        phase: extra.phase || 'reply',
+        chunkIndex: extra.chunkIndex ?? index,
+        chunkCount: extra.chunkCount ?? chunks.length
+      }, sendProtocolFn)
+      streamedAgentReply += chunk
+      await sleep(index === 0 ? 1 : 2)
+    }
+  }
+  const queueAgentReplyText = (content, extra = {}) => {
+    if (content) streamQueue = streamQueue.then(() => streamAgentReplyText(content, extra))
+    return streamQueue
+  }
+  const handleJsonLine = line => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let event
+    try { event = JSON.parse(trimmed) } catch {
+      agentReplyText += `${trimmed}\n`
+      return
+    }
+    const sessionId = extractCodexSessionId(event)
+    if (sessionId) {
+      runSessionId = sessionId
+      rememberCodexSession(profile, message, sessionId)
+    }
+    const agentText = extractCodexAgentText(event)
+    if (!agentText) return
+    if (event.type === 'item.completed') {
+      agentReplyText = agentText
+      queueAgentReplyText(agentText.startsWith(streamedAgentReply) ? agentText.slice(streamedAgentReply.length) : agentText)
+    } else {
+      agentReplyText += agentText
+      queueAgentReplyText(agentText)
+    }
+  }
+
+  child.stdout.on('data', chunk => {
+    const raw = chunk.toString()
+    stdout = (stdout + raw).slice(-120000)
+    jsonLineBuffer += raw
+    let newline
+    while ((newline = jsonLineBuffer.indexOf('\n')) !== -1) {
+      handleJsonLine(jsonLineBuffer.slice(0, newline))
+      jsonLineBuffer = jsonLineBuffer.slice(newline + 1)
+    }
+  })
+  child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-60000) })
+
+  const finish = async (code, spawnError = null) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timeout)
+    if (jsonLineBuffer.trim()) handleJsonLine(jsonLineBuffer)
+    currentRuns.delete(profile.agentId)
+    if (!runSessionId) {
+      const latestSession = findLatestCodexSession(profile, startedAt - 5000)
+      if (latestSession?.id) rememberCodexSession(profile, message, latestSession.id)
+    }
+    const status = !spawnError && code === 0 ? 'completed' : 'failed'
+    const replyContent = trimReply(agentReplyText) || trimReply(stdout) || trimReply(stderr)
+      || (status === 'completed' ? '已处理，但无可返回内容。' : '执行失败，暂无详细输出。')
+    const errorMessage = spawnError?.message || stderr.trim()
+    const payload = {
+      taskId,
+      workItemId: message.workItemId || '',
+      commandId: message.commandId || '',
+      agentId: profile.agentId,
+      status,
+      currentTaskTitle: title,
+      durationMs: Date.now() - startedAt,
+      output: replyContent,
+      errorMessage
+    }
+    if (mode === 'chat') {
+      if (replyContent && streamedAgentReply !== replyContent) {
+        await queueAgentReplyText(replyContent.startsWith(streamedAgentReply)
+          ? replyContent.slice(streamedAgentReply.length)
+          : replyContent)
+      }
+      await streamQueue
+      sendChatFinal(profile, message, replyContent, { status }, sendProtocolFn)
+    } else {
+      sendLegacyFn('task.report', payload, profile)
+      sendLegacyFn('codex.result', payload, profile)
+    }
+    if (mode === 'command') sendStatusFn(profile, 'online')
+    resolveRun({ ...payload, exitCode: code })
+  }
+
+  child.on('close', code => { void finish(code) })
+  child.on('error', error => { void finish(null, error) })
+})
+
+const ensureProfiles = (profiles, defaultProfileId, exitOnError = true) => {
+  const profileIds = new Set()
+  const agentIds = new Set()
+  for (const profile of profiles) {
+    if (profileIds.has(profile.profileId)) configError(`duplicate CODEX_PROFILES profileId: ${profile.profileId}`, exitOnError)
+    if (agentIds.has(profile.agentId)) configError(`duplicate CODEX_PROFILES agentId: ${profile.agentId}`, exitOnError)
+    profileIds.add(profile.profileId)
+    agentIds.add(profile.agentId)
+    const resolvedCodexBin = resolveExecutable(profile.codexBin)
+    if (!resolvedCodexBin) configError(`codex binary not found or not executable for profile ${profile.profileId}: ${profile.codexBin}`, exitOnError)
+    profile.codexBin = resolvedCodexBin
+    if (!existsSync(profile.codexWorkdir)) configError(`codex workdir not found for profile ${profile.profileId}: ${profile.codexWorkdir}`, exitOnError)
+  }
+  if (!profiles.find(profile => profile.profileId === defaultProfileId || profile.agentId === defaultProfileId)) {
+    configError(`DEFAULT_CODEX_PROFILE not found: ${defaultProfileId}`, exitOnError)
+  }
+}
+
+const profileSignature = (profiles, defaultProfileId) => JSON.stringify({ defaultProfileId, profiles })
+const sameProfileConfig = (left, right) => profileSignature([left], left.profileId) === profileSignature([right], right.profileId)
+
+const clearReconnectState = state => {
   if (!state) return
   clearTimeout(state.reconnectTimer)
   state.reconnectTimer = null
   state.reconnectScheduled = false
 }
 
-const profileSignature = (profiles, defaultProfileId) => JSON.stringify({
-  defaultProfileId,
-  profiles: profiles.map(profile => ({
-    profileId: profile.profileId,
-    agentId: profile.agentId,
-    agentName: profile.agentName,
-    personaName: profile.personaName,
-    apiKey: profile.apiKey,
-    codexBin: profile.codexBin,
-    codexHome: profile.codexHome,
-    codexWorkdir: profile.codexWorkdir,
-    codexSandbox: profile.codexSandbox,
-    codexApproval: profile.codexApproval,
-    codexSessionMode: profile.codexSessionMode,
-    codexTimeoutMs: profile.codexTimeoutMs,
-    enabled: profile.enabled,
-    status: profile.status,
-    isDefault: profile.isDefault
-  }))
-})
-
-const sameProfileConfig = (left, right) => profileSignature([left], left.profileId) === profileSignature([right], right.profileId)
-
 const terminateChild = (profile, child, signal = 'SIGTERM') => {
   if (!child || child.exitCode !== null || child.killed) return
-  try {
-    child.kill(signal)
-    console.warn(`sent ${signal} to codex child | profile=${profile.profileId} | agentId=${profile.agentId}`)
-  } catch (error) {
+  try { child.kill(signal) } catch (error) {
     console.error(`failed to send ${signal} to codex child | profile=${profile.profileId} | ${error.message}`)
   }
 }
@@ -376,475 +1321,89 @@ const terminateAllRuns = () => {
   }
 }
 
-const scheduleRestart = (reason) => {
-  if (shutdownStarted) return
-  console.error(`agent restart required | reason=${reason}`)
-  shutdown(1, reason)
-}
-
-const send = (type, payload = {}, profile = defaultProfile) => {
-  const state = getProfileState(profile)
-  if (!state?.ws || state.ws.readyState !== WebSocket.OPEN) return
-  state.ws.send(JSON.stringify({
-    type,
-    requestId: `${type}-${Date.now()}`,
-    agentId: profile?.agentId || defaultProfile.agentId,
-    senderType: 'agent',
-    senderName: profile?.agentName || defaultProfile.agentName,
-    ...payload
-  }))
-}
-
-const sendStatus = (profile, status, extra = {}) => {
-  send('agent.status', {
-    status,
-    currentTaskId: extra.taskId || '',
-    currentTaskTitle: extra.title || '',
-    errorMessage: extra.errorMessage || ''
-  }, profile)
-}
-
-const registerAgent = (profile) => {
-  send('agent.register', {
-    agentId: profile.agentId,
-    name: profile.agentName,
-    personaName: profile.personaName,
-    endpoint: config.wsUrl,
-    abilities: ['codex', 'shell', 'code-edit', 'debug', 'deploy-assist']
-  }, profile)
-}
-
-const resolvePrompt = (message) => {
-  if (message.prompt) return String(message.prompt)
-  if (message.content) return String(message.content)
-  if (message.description) return String(message.description)
-  if (message.currentTaskTitle) return String(message.currentTaskTitle)
-  if (message.title) return `处理任务：${message.title}`
-  return ''
-}
-
-const trimReply = (value, limit = 12000) => {
-  const text = String(value || '').trim()
-  if (!text) return ''
-  return text.length > limit ? `${text.slice(0, limit)}\n\n[输出已截断]` : text
-}
-
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
-
-const buildReplyChunks = (content, chunkSize = 72) => {
-  const text = String(content || '')
-  if (!text) return []
-  const chunks = []
-  for (let index = 0; index < text.length; index += chunkSize) {
-    chunks.push(text.slice(index, index + chunkSize))
+const createProfileState = profile => {
+  const inbox = new PersistentCommandInbox({
+    rootDir: config.commandInboxDir,
+    profile,
+    successPolicy: config.commandInboxSuccessPolicy
+  })
+  const taskEvents = new Map()
+  const state = {
+    profile,
+    ws: null,
+    heartbeatTimer: null,
+    reconnectTimer: null,
+    reconnectAttempt: 0,
+    reconnectStartedAt: 0,
+    reconnectScheduled: false,
+    taskEvents,
+    inbox,
+    processor: null
   }
-  return chunks
-}
-
-const sendAgentReplyDelta = (profile, message, content, extra = {}) => {
-  if (!content) return
-  send('agent.message.delta', {
-    conversationId: message.conversationId,
-    conversationType: message.conversationType || 'juyiting',
-    content,
-    agentId: profile.agentId,
-    senderName: profile.personaName || profile.agentName,
-    ...extra
-  }, profile)
-}
-
-const extractCodexAgentText = (event) => {
-  if (!event || typeof event !== 'object') return ''
-  const item = event.item && typeof event.item === 'object' ? event.item : null
-  if (item?.type === 'agent_message' && typeof item.text === 'string') return item.text
-  if (event.type === 'agent_message_delta' && typeof event.delta === 'string') return event.delta
-  if (event.type === 'agent_message_delta' && typeof event.text === 'string') return event.text
-  if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') return event.delta
-  return ''
-}
-
-const extractCodexSessionId = (event) => {
-  if (!event || typeof event !== 'object') return ''
-  if (typeof event.session_id === 'string') return event.session_id
-  if (typeof event.sessionId === 'string') return event.sessionId
-  if (event.type === 'session_meta' && typeof event.payload?.id === 'string') return event.payload.id
-  if (typeof event.payload?.session_id === 'string') return event.payload.session_id
-  if (typeof event.payload?.sessionId === 'string') return event.payload.sessionId
-  if (typeof event.item?.session_id === 'string') return event.item.session_id
-  return ''
-}
-
-const resolveProfileFromMessage = (message) => {
-  const candidates = [
-    message.cliProfile,
-    message.codexProfile,
-    message.profileId,
-    message.profile,
-    message.assignedAgentId,
-    message.targetAgentId,
-    message.receiverAgentId,
-    message.agentId
-  ].filter(Boolean)
-
-  for (const candidate of candidates) {
-    const profile = getProfileById(String(candidate))
-    if (profile) return profile
-  }
-
-  return defaultProfile
-}
-
-const shouldRun = (message, profile) => {
-  if (!profile) return false
-  if (currentRuns.has(profile.agentId)) return false
-  if (message.type === 'agent_direct_message') return true
-  if (['codex.exec', 'task.assign', 'task_assigned'].includes(message.type)) return true
-  if (message.type === 'task_event') {
-    const assignedToMe = !message.assignedAgentId || message.assignedAgentId === profile.agentId
-    return assignedToMe && ['running', 'pending', 'assigned'].includes(String(message.status || '').toLowerCase())
-  }
-  return false
-}
-
-const findCodexSessionFiles = (dir) => {
-  const files = []
-  let entries
-  try {
-    entries = readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return files
-  }
-
-  for (const entry of entries) {
-    const entryPath = resolve(dir, entry.name)
-    if (entry.isDirectory()) {
-      files.push(...findCodexSessionFiles(entryPath))
-    } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-      files.push(entryPath)
-    }
-  }
-  return files
-}
-
-const readCodexSessionMeta = (filePath) => {
-  try {
-    const firstLine = readFileSync(filePath, 'utf8').split(/\r?\n/, 1)[0]
-    if (!firstLine) return null
-    const event = JSON.parse(firstLine)
-    if (event?.type !== 'session_meta' || !event.payload?.id) return null
-    const stats = statSync(filePath)
-    return {
-      id: String(event.payload.id),
-      path: filePath,
-      mtimeMs: stats.mtimeMs,
-      timestamp: event.payload.timestamp || event.timestamp || ''
-    }
-  } catch {
-    return null
-  }
-}
-
-const findLatestCodexSession = (profile, sinceMs = 0) => {
-  if (!profile.codexHome) return null
-  const sessionsDir = resolve(profile.codexHome, 'sessions')
-  return findCodexSessionFiles(sessionsDir)
-    .map(readCodexSessionMeta)
-    .filter(meta => meta && meta.mtimeMs >= sinceMs)
-    .sort((left, right) => right.mtimeMs - left.mtimeMs)[0] || null
-}
-
-const hasCodexSession = (profile) => {
-  if (!profile.codexHome) return false
-  const indexPath = resolve(profile.codexHome, 'session_index.jsonl')
-  try {
-    if (existsSync(indexPath) && readFileSync(indexPath, 'utf8').trim().length > 0) return true
-    return Boolean(findLatestCodexSession(profile))
-  } catch {
-    return false
-  }
-}
-
-const codexSessionMapKey = (profile, message) => {
-  const conversationId = message?.conversationId ? String(message.conversationId) : ''
-  if (!conversationId) return ''
-  return `${profile.agentId}:${conversationId}`
-}
-
-const getMappedCodexSessionId = (profile, message) => {
-  const key = codexSessionMapKey(profile, message)
-  const sessionId = key ? codexSessionMap[key] : ''
-  return typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : ''
-}
-
-const rememberCodexSession = (profile, message, sessionId) => {
-  const key = codexSessionMapKey(profile, message)
-  const value = String(sessionId || '').trim()
-  if (!key || !value || codexSessionMap[key] === value) return
-  codexSessionMap[key] = value
-  saveCodexSessionMap()
-  console.log(`remembered codex session | profile=${profile.profileId} | conversationId=${message.conversationId || ''} | sessionId=${value}`)
-}
-
-const buildCodexArgs = (profile, message, prompt) => {
-  const mappedSessionId = getMappedCodexSessionId(profile, message)
-  const resume = profile.codexSessionMode === 'resume' && (mappedSessionId || hasCodexSession(profile))
-  if (resume) {
-    const sessionSelector = mappedSessionId ? [mappedSessionId] : ['--last', '--all']
-    return [
-      '--ask-for-approval', profile.codexApproval,
-      'exec',
-      'resume',
-      '--json',
-      '--skip-git-repo-check',
-      ...sessionSelector,
-      prompt
-    ]
-  }
-
-  return [
-    '--ask-for-approval', profile.codexApproval,
-    'exec',
-    '--json',
-    '--cd', profile.codexWorkdir,
-    '--sandbox', profile.codexSandbox,
-    '--skip-git-repo-check',
-    prompt
-  ]
-}
-
-const runCodex = (profile, message) => {
-  const prompt = resolvePrompt(message)
-  if (!prompt) {
-    send('codex.result', {
-      status: 'failed',
-      message: 'No prompt/content/title found in inbound event'
-    }, profile)
-    return
-  }
-
-  const taskId = message.taskId || message.id || message.requestId || `codex-${Date.now()}`
-  const title = message.title || message.currentTaskTitle || 'Codex 执行任务'
-  sendStatus(profile, 'busy', { taskId, title })
-  if (message.type === 'agent_direct_message') {
-    sendAgentReplyDelta(profile, message, '收到，正在整理回报。\n\n', { phase: 'intro' })
-  }
-
-  const args = buildCodexArgs(profile, message, prompt)
-  const mappedSessionId = getMappedCodexSessionId(profile, message)
-  console.log(`starting codex run | profile=${profile.profileId} | agentId=${profile.agentId} | type=${message.type} | taskId=${taskId} | conversationId=${message.conversationId || ''} | resumeSessionId=${mappedSessionId || ''}`)
-
-  const startedAt = Date.now()
-  const child = spawn(profile.codexBin, args, {
-    cwd: profile.codexWorkdir,
-    env: {
-      ...process.env,
-      ...(profile.codexHome ? { CODEX_HOME: profile.codexHome } : {})
+  state.processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: rawMessage => runCodex(profile, normalizeInboundMessage(rawMessage), 'command'),
+    runChat: message => runCodex(profile, message, 'chat'),
+    onTaskEvent: message => {
+      const key = message.workItemId || message.taskId || message.messageId
+      taskEvents.set(key, { ...message, observedAt: Date.now() })
+      console.log(`task event observed | profile=${profile.profileId} | event=${message.eventType || ''} | taskId=${message.taskId || ''}`)
     },
-    stdio: ['ignore', 'pipe', 'pipe']
-  })
-
-  currentRuns.set(profile.agentId, child)
-  let stdout = ''
-  let agentReplyText = ''
-  let streamedAgentReply = ''
-  let streamQueue = Promise.resolve()
-  let jsonLineBuffer = ''
-  let runSessionId = ''
-  let stderr = ''
-  const timeout = setTimeout(() => {
-    child.kill('SIGTERM')
-  }, profile.codexTimeoutMs)
-
-  const streamAgentReplyText = async (content, extra = {}) => {
-    if (message.type !== 'agent_direct_message' || !content) return
-    const chunks = buildReplyChunks(content)
-    for (const [index, chunk] of chunks.entries()) {
-      sendAgentReplyDelta(profile, message, chunk, {
-        phase: extra.phase || 'reply',
-        chunkIndex: extra.chunkIndex ?? index,
-        chunkCount: extra.chunkCount ?? chunks.length
-      })
-      streamedAgentReply += chunk
-      await sleep(index === 0 ? 20 : 45)
-    }
-  }
-
-  const queueAgentReplyText = (content, extra = {}) => {
-    if (!content) return streamQueue
-    streamQueue = streamQueue.then(() => streamAgentReplyText(content, extra))
-    return streamQueue
-  }
-
-  const handleJsonLine = line => {
-    const trimmed = line.trim()
-    if (!trimmed) return
-    let event
-    try {
-      event = JSON.parse(trimmed)
-    } catch {
-      agentReplyText += trimmed + '\n'
-      return
-    }
-    const sessionId = extractCodexSessionId(event)
-    if (sessionId) {
-      runSessionId = sessionId
-      rememberCodexSession(profile, message, sessionId)
-    }
-    const agentText = extractCodexAgentText(event)
-    if (!agentText) return
-
-    if (event.type === 'item.completed') {
-      agentReplyText = agentText
-      const remaining = agentText.startsWith(streamedAgentReply)
-        ? agentText.slice(streamedAgentReply.length)
-        : agentText
-      queueAgentReplyText(remaining, { phase: 'reply' })
-      return
-    }
-
-    agentReplyText += agentText
-    queueAgentReplyText(agentText, { phase: 'reply' })
-  }
-
-  child.stdout.on('data', chunk => {
-    const raw = chunk.toString()
-    stdout += raw
-    if (stdout.length > 120000) stdout = stdout.slice(-120000)
-    jsonLineBuffer += raw
-    let lineEndIndex
-    while ((lineEndIndex = jsonLineBuffer.indexOf('\n')) !== -1) {
-      const line = jsonLineBuffer.slice(0, lineEndIndex)
-      jsonLineBuffer = jsonLineBuffer.slice(lineEndIndex + 1)
-      handleJsonLine(line)
-    }
-  })
-
-  child.stderr.on('data', chunk => {
-    stderr += chunk.toString()
-    if (stderr.length > 60000) stderr = stderr.slice(-60000)
-  })
-
-  child.on('close', async code => {
-    clearTimeout(timeout)
-    if (jsonLineBuffer.trim()) {
-      handleJsonLine(jsonLineBuffer)
-      jsonLineBuffer = ''
-    }
-    currentRuns.delete(profile.agentId)
-    const status = code === 0 ? 'completed' : 'failed'
-    if (!runSessionId) {
-      const latestSession = findLatestCodexSession(profile, startedAt - 5000)
-      if (latestSession?.id) {
-        runSessionId = latestSession.id
-        rememberCodexSession(profile, message, latestSession.id)
-      }
-    }
-    const replyContent = trimReply(agentReplyText) || trimReply(stdout) || trimReply(stderr) || (code === 0 ? '已处理，但无可返回内容。' : '执行失败，暂无详细输出。')
-    console.log(`codex run finished | profile=${profile.profileId} | status=${status} | code=${code} | conversationId=${message.conversationId || ''} | sessionId=${runSessionId || ''}`)
-    const payload = {
-      taskId,
-      agentId: profile.agentId,
-      status,
-      currentTaskTitle: title,
-      durationMs: Date.now() - startedAt,
-      output: replyContent,
-      errorMessage: stderr.trim()
-    }
-    if (message.type === 'agent_direct_message') {
-      if (replyContent && streamedAgentReply !== replyContent) {
-        const remaining = replyContent.startsWith(streamedAgentReply)
-          ? replyContent.slice(streamedAgentReply.length)
-          : replyContent
-        await queueAgentReplyText(remaining, { phase: 'reply' })
-      }
-      await streamQueue
-      console.log(`sending agent.message | conversationId=${message.conversationId || ''}`)
-      send('agent.message', {
-        conversationId: message.conversationId,
-        conversationType: message.conversationType || 'juyiting',
-        content: replyContent,
-        agentId: profile.agentId,
-        senderName: profile.personaName || profile.agentName
+    onReject: (error, raw) => {
+      console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
+      sendProtocol(MESSAGE_TYPES.PROTOCOL_ERROR, {
+        code: error.code,
+        message: error.message,
+        causationId: isObject(raw) ? raw.messageId || raw.requestId : undefined
       }, profile)
-    }
-    send('task.report', payload, profile)
-    send('codex.result', payload, profile)
-    sendStatus(profile, 'online')
+    },
+    sendChatBusy: message => sendChatFinal(profile, message, '当前正在处理其他请求，请稍后再试。', { status: 'busy' })
   })
-
-  child.on('error', error => {
-    clearTimeout(timeout)
-    currentRuns.delete(profile.agentId)
-    console.error(`codex run error | profile=${profile.profileId} | conversationId=${message.conversationId || ''} | ${error.message}`)
-    const payload = {
-      taskId,
-      agentId: profile.agentId,
-      status: 'failed',
-      currentTaskTitle: title,
-      errorMessage: error.message
-    }
-    if (message.type === 'agent_direct_message') {
-      send('agent.message', {
-        conversationId: message.conversationId,
-        conversationType: message.conversationType || 'juyiting',
-        content: `执行失败：${error.message}`,
-        agentId: profile.agentId,
-        senderName: profile.personaName || profile.agentName
-      }, profile)
-    }
-    send('task.report', payload, profile)
-    send('codex.result', payload, profile)
-    sendStatus(profile, 'online')
-  })
+  const recovery = state.processor.start({ drain: false })
+  if (recovery.recovered || recovery.completed || recovery.quarantined) {
+    console.warn(`command inbox recovered | profile=${profile.profileId} | ${JSON.stringify(recovery)}`)
+  }
+  return state
 }
 
-const handleMessage = (profile, raw) => {
-  let message
-  try {
-    message = JSON.parse(raw.toString())
-  } catch {
-    message = { type: 'codex.exec', content: raw.toString() }
-  }
+const isProfileBusy = profile => getProfileState(profile)?.processor?.isBusy() || currentRuns.has(profile.agentId)
 
-  if (message.type === 'connected') {
-    console.log(`websocket connected | profile=${profile.profileId} | agentId=${profile.agentId}`)
-    registerAgent(profile)
-    sendStatus(profile, currentRuns.has(profile.agentId) ? 'busy' : 'online')
+const handleMessage = async (profile, raw) => {
+  let parsed
+  try { parsed = JSON.parse(raw.toString()) } catch (error) {
+    getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_JSON', `Invalid JSON message: ${error.message}`), raw.toString())
     return
   }
-  if (message.type === 'ping') {
-    send('pong', {}, profile)
+  if (!isObject(parsed)) {
+    getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object'), parsed)
     return
   }
-  if (message.type === 'agent_direct_message') {
-    console.log(`received agent_direct_message | profile=${profile.profileId} | conversationId=${message.conversationId || ''}`)
-  }
-  const targetProfile = resolveProfileFromMessage(message)
-  if (targetProfile.agentId !== profile.agentId) {
+  if (INBOUND_CONTROL_TYPES.has(parsed.type) && !hasOwn(parsed, 'messageType')) {
+    if (parsed.type === 'connected') {
+      registerAgent(profile)
+      sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
+    } else if (parsed.type === 'ping') {
+      sendLegacy('pong', {}, profile)
+    }
     return
   }
-  if (shouldRun(message, targetProfile)) {
-    runCodex(targetProfile, message)
-  }
+  await getProfileState(profile)?.processor?.handle(raw.toString())
 }
 
-const doReconnect = (profile) => {
+const doReconnect = profile => {
   const state = getProfileState(profile)
-  if (!state || shuttingDown) return
-  if (state.reconnectScheduled) return
+  if (!state || shuttingDown || state.reconnectScheduled) return
   const now = Date.now()
   if (!state.reconnectStartedAt) state.reconnectStartedAt = now
   const elapsed = now - state.reconnectStartedAt
   if (elapsed >= config.reconnectMaxMs) {
-    console.error(`reconnect window exceeded ${config.reconnectMaxMs}ms | profile=${profile.profileId}`)
-    scheduleRestart(`reconnect timeout for profile ${profile.profileId}`)
+    shutdown(1, `reconnect timeout for profile ${profile.profileId}`)
     return
   }
-
   const delay = Math.min(30000, 1000 * 2 ** state.reconnectAttempt, config.reconnectMaxMs - elapsed)
   state.reconnectAttempt += 1
   state.reconnectScheduled = true
-  console.warn(`reconnecting in ${delay}ms | profile=${profile.profileId} | attempt ${state.reconnectAttempt} | elapsed ${(elapsed / 1000).toFixed(0)}s`)
   state.reconnectTimer = setTimeout(() => {
     state.reconnectScheduled = false
     state.reconnectTimer = null
@@ -852,53 +1411,37 @@ const doReconnect = (profile) => {
   }, delay)
 }
 
-const connectProfile = (profile) => {
+const connectProfile = profile => {
   const state = getProfileState(profile)
   if (!state) return
-
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
-  state.heartbeatTimer = null
-
   if (state.ws && state.ws.readyState !== WebSocket.CLOSED) {
     try { state.ws.close() } catch {}
   }
-
   let closeFired = false
-
-  state.ws = new WebSocket(withApiKey(config.wsUrl, profile))
-
+  state.ws = new WebSocket(buildWebSocketUrl(config.wsUrl, config.apiKey, profile))
   state.ws.addEventListener('open', () => {
-    closeFired = true
     clearReconnectState(state)
     state.reconnectAttempt = 0
     state.reconnectStartedAt = 0
-    console.log(`websocket open | profile=${profile.profileId} | agentId=${profile.agentId}`)
     registerAgent(profile)
-    sendStatus(profile, currentRuns.has(profile.agentId) ? 'busy' : 'online')
-    state.heartbeatTimer = setInterval(() => {
-      sendStatus(profile, currentRuns.has(profile.agentId) ? 'busy' : 'online')
-    }, config.heartbeatMs)
+    sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
+    state.processor.resume()
+    state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
   })
-
-  state.ws.addEventListener('message', event => handleMessage(profile, event.data))
-
+  state.ws.addEventListener('message', event => { void handleMessage(profile, event.data) })
   state.ws.addEventListener('close', () => {
     closeFired = true
     clearInterval(state.heartbeatTimer)
-    state.heartbeatTimer = null
-    if (shuttingDown) return
-    doReconnect(profile)
+    state.processor.pause()
+    if (!shuttingDown) doReconnect(profile)
   })
-
   state.ws.addEventListener('error', error => {
     console.error(`websocket error | profile=${profile.profileId}:`, error.message || error)
     setTimeout(() => {
       if (!closeFired && !shuttingDown && !state.reconnectScheduled) {
-        console.warn(`websocket error without close, forcing reconnect | profile=${profile.profileId}`)
-        if (state.ws && state.ws.readyState !== WebSocket.CLOSED) {
-          try { state.ws.close() } catch {}
-        }
+        try { state.ws?.close() } catch {}
         doReconnect(profile)
       }
     }, 1000)
@@ -908,19 +1451,17 @@ const connectProfile = (profile) => {
 const disconnectProfile = (profile, reason = 'profile removed') => {
   const state = getProfileState(profile)
   if (!state) return
-  console.warn(`disconnecting profile | profile=${profile.profileId} | agentId=${profile.agentId} | reason=${reason}`)
+  state.processor.pause()
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
-  state.heartbeatTimer = null
   sendStatus(profile, 'offline', { errorMessage: reason })
-  if (state.ws && state.ws.readyState !== WebSocket.CLOSED) {
-    try { state.ws.close() } catch {}
-  }
+  try { state.ws?.close() } catch {}
   const child = currentRuns.get(profile.agentId)
   if (child) {
     terminateChild(profile, child, 'SIGTERM')
     setTimeout(() => terminateChild(profile, child, 'SIGKILL'), 5000)
   }
+  state.processor.stop()
   profileStates.delete(profile.agentId)
 }
 
@@ -928,48 +1469,43 @@ const applyProfileConfig = (nextProfiles, nextDefaultProfileId, reason = 'config
   const previousProfiles = config.profiles
   const previousByAgentId = new Map(previousProfiles.map(profile => [profile.agentId, profile]))
   const nextByAgentId = new Map(nextProfiles.map(profile => [profile.agentId, profile]))
-
   for (const previousProfile of previousProfiles) {
-    const nextProfile = nextByAgentId.get(previousProfile.agentId)
-    if (!nextProfile) {
-      disconnectProfile(previousProfile, reason)
-      continue
-    }
-    if (!sameProfileConfig(previousProfile, nextProfile)) {
-      disconnectProfile(previousProfile, `${reason}: profile changed`)
+    const next = nextByAgentId.get(previousProfile.agentId)
+    const state = profileStates.get(previousProfile.agentId)
+    if ((!next || !sameProfileConfig(previousProfile, next)) && state?.processor?.isBusy()) {
+      shutdown(1, `${reason}: defer active profile replacement to process restart`)
+      return
     }
   }
-
+  for (const previousProfile of previousProfiles) {
+    const next = nextByAgentId.get(previousProfile.agentId)
+    if (!next || !sameProfileConfig(previousProfile, next)) disconnectProfile(previousProfile, reason)
+  }
   config.profiles = nextProfiles
   config.defaultProfileId = nextDefaultProfileId
-  defaultProfile = getProfileById(config.defaultProfileId) || config.profiles[0]
-
+  defaultProfile = getProfileById(nextDefaultProfileId) || nextProfiles[0]
   for (const nextProfile of nextProfiles) {
-    const previousProfile = previousByAgentId.get(nextProfile.agentId)
+    const previous = previousByAgentId.get(nextProfile.agentId)
     const state = profileStates.get(nextProfile.agentId)
-    if (state && previousProfile && sameProfileConfig(previousProfile, nextProfile)) {
+    if (state && previous && sameProfileConfig(previous, nextProfile)) {
       state.profile = nextProfile
       continue
     }
     profileStates.set(nextProfile.agentId, createProfileState(nextProfile))
-    console.log(`connecting profile from config | profile=${nextProfile.profileId} | agentId=${nextProfile.agentId} | reason=${reason}`)
     connectProfile(nextProfile)
   }
-
   lastProfileSignature = profileSignature(config.profiles, config.defaultProfileId)
-  console.log(`profile config active | profiles=${config.profiles.length} | defaultProfile=${defaultProfile.profileId}`)
 }
 
 const reloadProfiles = (reason = 'config reload') => {
   if (shuttingDown || shutdownStarted || profileReloadInFlight) return
   profileReloadInFlight = true
   try {
-    const nextRuntimeConfig = loadRuntimeConfig({ exitOnError: false })
-    ensureProfiles(nextRuntimeConfig.profiles, nextRuntimeConfig.defaultProfileId, false)
-    const nextSignature = profileSignature(nextRuntimeConfig.profiles, nextRuntimeConfig.defaultProfileId)
-    if (nextSignature === lastProfileSignature) return
-    console.log(`profile config changed | reason=${reason}`)
-    applyProfileConfig(nextRuntimeConfig.profiles, nextRuntimeConfig.defaultProfileId, reason)
+    const next = loadRuntimeConfig({ exitOnError: false })
+    ensureProfiles(next.profiles, next.defaultProfileId, false)
+    if (profileSignature(next.profiles, next.defaultProfileId) !== lastProfileSignature) {
+      applyProfileConfig(next.profiles, next.defaultProfileId, reason)
+    }
   } catch (error) {
     console.warn(`profile config reload skipped | reason=${reason} | ${error.message}`)
   } finally {
@@ -984,53 +1520,71 @@ const startProfileWatcher = () => {
   if (profilesFile) {
     const resolvedProfilesFile = resolve(profilesFile)
     watchFile(resolvedProfilesFile, { interval: config.profileReloadMs }, (current, previous) => {
-      if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return
-      reloadProfiles(`file changed: ${resolvedProfilesFile}`)
+      if (current.mtimeMs !== previous.mtimeMs || current.size !== previous.size) reloadProfiles(`file changed: ${resolvedProfilesFile}`)
     })
-    console.log(`watching profile config | file=${resolvedProfilesFile} | intervalMs=${config.profileReloadMs}`)
-    return
+  } else {
+    profileReloadTimer = setInterval(() => reloadProfiles('periodic CODEX_PROFILES check'), config.profileReloadMs)
   }
-
-  profileReloadTimer = setInterval(() => reloadProfiles('periodic CODEX_PROFILES check'), config.profileReloadMs)
-  console.log(`watching inline profile config | intervalMs=${config.profileReloadMs}`)
 }
 
 const shutdown = (exitCode = 0, reason = '') => {
   if (shutdownStarted) return
   shutdownStarted = true
   shuttingDown = true
-  if (reason) {
-    console.warn(`shutting down codex-ws-agent | reason=${reason}`)
-  }
+  if (reason) console.warn(`shutting down codex-ws-agent | reason=${reason}`)
   terminateAllRuns()
-  if (profileReloadTimer) {
-    clearInterval(profileReloadTimer)
-    profileReloadTimer = null
-  }
+  if (profileReloadTimer) clearInterval(profileReloadTimer)
   const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-  if (profilesFile) {
-    unwatchFile(resolve(profilesFile))
-  }
+  if (profilesFile) unwatchFile(resolve(profilesFile))
   for (const profile of config.profiles) {
     const state = getProfileState(profile)
+    state?.processor.pause()
     clearReconnectState(state)
     clearInterval(state?.heartbeatTimer)
     sendStatus(profile, 'offline')
-    state?.ws?.close()
+    try { state?.ws?.close() } catch {}
   }
   setTimeout(() => process.exit(exitCode), 100)
 }
 
-process.on('SIGINT', () => {
-  shutdown(0, 'SIGINT')
-})
+export const main = () => {
+  if (typeof WebSocket !== 'function') {
+    configError('Node.js >= 22 with the built-in WebSocket client is required')
+  }
+  const runtimeConfig = loadRuntimeConfig()
+  config = {
+    wsUrl: process.env.WS_URL || 'wss://api.chaoyoufan.cn/ws/agent/channel',
+    apiKey: process.env.OPENCLAW_API_KEY || '',
+    profiles: runtimeConfig.profiles,
+    defaultProfileId: runtimeConfig.defaultProfileId,
+    heartbeatMs: parseNonNegativeMs(process.env.HEARTBEAT_MS, 30000),
+    reconnectMaxMs: parseNonNegativeMs(process.env.RECONNECT_MAX_MS, 30 * 60 * 1000),
+    profileReloadMs: parseNonNegativeMs(process.env.CODEX_PROFILE_RELOAD_MS, 5000),
+    commandInboxDir: resolve(process.env.COMMAND_INBOX_DIR || '/home/isp/apps/codex-ws-agent/data/inbox'),
+    commandInboxSuccessPolicy: process.env.COMMAND_INBOX_SUCCESS_POLICY || 'archive'
+  }
+  if (!config.apiKey && !config.profiles.every(profile => profile.apiKey)) {
+    configError('OPENCLAW_API_KEY is required unless every profile defines apiKey')
+  }
+  if (!['archive', 'delete'].includes(config.commandInboxSuccessPolicy)) {
+    configError('COMMAND_INBOX_SUCCESS_POLICY must be archive or delete')
+  }
+  ensureProfiles(config.profiles, config.defaultProfileId)
+  defaultProfile = getProfileById(config.defaultProfileId) || config.profiles[0]
+  codexSessionMapPath = resolve(process.env.CODEX_SESSION_MAP_FILE || resolve(process.cwd(), 'codex-session-map.json'))
+  codexSessionMap = loadCodexSessionMap()
 
-process.on('SIGTERM', () => {
-  shutdown(0, 'SIGTERM')
-})
+  if (hasFlag('--validate')) {
+    console.log(`configuration valid | profiles=${config.profiles.length} | defaultProfile=${defaultProfile.profileId} | runtimeInstanceId=${PROCESS_RUNTIME_INSTANCE_ID}`)
+    return
+  }
 
-for (const profile of config.profiles) {
-  connectProfile(profile)
+  for (const profile of config.profiles) profileStates.set(profile.agentId, createProfileState(profile))
+  process.on('SIGINT', () => shutdown(0, 'SIGINT'))
+  process.on('SIGTERM', () => shutdown(0, 'SIGTERM'))
+  for (const profile of config.profiles) connectProfile(profile)
+  startProfileWatcher()
 }
 
-startProfileWatcher()
+const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+if (isMain) main()
