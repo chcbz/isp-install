@@ -70,16 +70,22 @@ if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 20 ]; then
 fi
 
 echo ""
-echo "[1/5] 创建目录..."
+echo "[1/6] 创建目录..."
 create_isp_dirs
-mkdir -p "$APP_HOME/logs"
+install -d -m 0755 "$APP_HOME" "$APP_HOME/logs"
+install -d -m 0700 "$APP_HOME/data" "$APP_HOME/data/inbox"
 
 echo ""
-echo "[2/5] 部署应用文件..."
+echo "[2/6] 部署应用文件..."
 install -m 0644 "$CONF_SRC/agent-client.mjs" "$APP_HOME/agent-client.mjs"
+install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$APP_HOME/workspace-manager.mjs"
 install -m 0644 "$CONF_SRC/package.json" "$APP_HOME/package.json"
 install -m 0644 "$CONF_SRC/README.md" "$APP_HOME/README.md"
 install -m 0644 "$CONF_SRC/env.example" "$APP_HOME/.env.example"
+install -m 0640 "$CONF_SRC/workspace-policies.example.json" "$APP_HOME/workspace-policies.example.json"
+if [ -f "$APP_HOME/workspace-policies.json" ]; then
+    chmod 0600 "$APP_HOME/workspace-policies.json"
+fi
 
 if copy_if_missing "$CONF_SRC/env.example" "$APP_HOME/.env"; then
     __yellow "已生成默认 .env，请编辑 OPENCLAW_API_KEY 和 WS_URL: $APP_HOME/.env"
@@ -94,21 +100,31 @@ else
 fi
 
 echo ""
-echo "[3/5] 安装管理脚本..."
+echo "[3/6] 安装管理脚本..."
 install -m 0755 "$BIN_SRC" "$BIN_DST"
 
 echo ""
-echo "[4/5] 安装 systemd 服务..."
+echo "[4/6] 安装 systemd 服务..."
 install -m 0644 "$SERVICE_SRC" "$SERVICE_DST"
 systemctl daemon-reload
 systemctl enable "$APP_NAME.service"
 
 echo ""
-echo "[5/5] 验证配置..."
+echo "[5/6] 验证配置..."
 if (cd "$APP_HOME" && "$NODE_BIN" agent-client.mjs --validate); then
     __green "配置验证通过"
 else
     __yellow "配置验证未通过。请确认 codex CLI、codexWorkdir、API key/profile 配置后再启动服务。"
+fi
+
+echo ""
+echo "[6/6] 检查 A07 workspace policy..."
+if [ -f "$APP_HOME/workspace-policies.json" ]; then
+    __green "检测到受控 workspace policy: $APP_HOME/workspace-policies.json"
+else
+    __yellow "尚未启用 A07 workspace policy。command.dispatch 将 fail closed，不会回退到共享可写代码目录。"
+    echo "  cp $APP_HOME/workspace-policies.example.json $APP_HOME/workspace-policies.json"
+    echo "  编辑可信 repository/baseRef，并在 .env 设置 CODEX_WORKSPACE_POLICIES_FILE"
 fi
 
 if [ "${START_CODEX_WS_AGENT:-n}" = "y" ]; then
@@ -127,5 +143,6 @@ echo "应用目录: $APP_HOME"
 echo "配置文件: $APP_HOME/.env"
 echo "配置模板: $APP_HOME/.env.example"
 echo "Profile:  $APP_HOME/codex-profiles.conf"
+echo "Workspace policy 示例: $APP_HOME/workspace-policies.example.json"
 echo "管理脚本: $BIN_DST"
 echo "服务单元: $SERVICE_DST"

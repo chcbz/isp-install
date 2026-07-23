@@ -10,6 +10,7 @@ description: Use when installing or configuring codex-ws-agent from this reposit
 - Node.js 20 or newer is installed from this repo or otherwise available as `node`.
 - `codex` CLI exists on the target host.
 - The service account can create, rename, delete, and `fsync` files below `/home/isp/apps/codex-ws-agent/data/inbox`.
+- For A07 coding commands, prepare a trusted Git repository and a `0700` workspace root (default `/home/isp/hosts/cyf/agent-workspaces`). Prefer a dedicated bare repository/mirror rather than a shared main checkout.
 
 ## Command
 
@@ -26,6 +27,18 @@ A06 runtime notes:
 - reconnects must call the built-in ACK replay path; do not clear the outbox on send failure, marker failure, corrupt-record quarantine, or uncertain recovery
 - each ACK has an independent `messageId`; only `correlationId` references the dispatch `messageId`
 
+## A07 workspace policy
+
+1. Copy `/home/isp/apps/codex-ws-agent/workspace-policies.example.json` to `workspace-policies.json` and set mode `0600`.
+2. Set only trusted local values for `root`, `repository`, and `baseRef`; never derive them from a dispatch payload.
+3. Set `CODEX_WORKSPACE_POLICIES_FILE=/home/isp/apps/codex-ws-agent/workspace-policies.json`.
+4. Add `workspacePolicyId=<policy>` and `workspaceRole=coder` to every coding Agent profile.
+5. Keep `workspaceNoTaskPolicy=reject` unless a specific non-coding command type needs compatibility. If needed, use `dedicated-workdir`, list exact command types, and provide a non-Git `workspaceFallbackWorkdir` outside both repository and workspace root.
+
+Each `taskId + canonical agentId` receives one deterministic worktree. Creation is cross-process locked and durable metadata must match the repository, fixed baseline commit, branch, role, and path before reuse. Missing policy/task id, path traversal, symlink escape, branch collision, unknown partial state, or Git failure is fail-closed.
+
+There is no automatic cleanup. Operators may inspect or explicitly archive with `/home/isp/bin/codex_ws_agent.sh workspace ...`; archive requires the Agent service to be stopped and refuses dirty, untracked, unmerged, or unpushed work. Never expose archive arguments to Agent-generated commands.
+
 ## Config files
 
 - App dir: `/home/isp/apps/codex-ws-agent`
@@ -33,6 +46,9 @@ A06 runtime notes:
 - Env template: `/home/isp/apps/codex-ws-agent/.env.example`
 - Profiles: `/home/isp/apps/codex-ws-agent/codex-profiles.conf`
 - Durable inbox: `/home/isp/apps/codex-ws-agent/data/inbox`
+- Workspace manager: `/home/isp/apps/codex-ws-agent/workspace-manager.mjs`
+- Workspace policies: `/home/isp/apps/codex-ws-agent/workspace-policies.json`
+- Default workspace root: `/home/isp/hosts/cyf/agent-workspaces`
 
 ## Required settings
 
@@ -42,6 +58,8 @@ A06 runtime notes:
 - `CODEX_PROFILES_FILE=/home/isp/apps/codex-ws-agent/codex-profiles.conf`
 - `COMMAND_INBOX_DIR=/home/isp/apps/codex-ws-agent/data/inbox`
 - `COMMAND_INBOX_SUCCESS_POLICY=archive`
+- `CODEX_WORKSPACE_POLICIES_FILE=/home/isp/apps/codex-ws-agent/workspace-policies.json`
+- profile: `workspacePolicyId=<trusted-policy>` and `workspaceRole=coder`
 
 Use `archive` for initial rollout. Do not run old and new clients concurrently for the same canonical `agentId`. A rollback must preserve `pending/`, `processing/`, `recovery-required/`, ledger, conflict, blocked/quarantine, and ACK outbox state; the old client cannot consume these records safely.
 
@@ -50,5 +68,6 @@ Use `archive` for initial rollout. Do not run old and new clients concurrently f
 - `cd /home/isp/apps/codex-ws-agent && npm ci --omit=dev`
 - `node -v` (must be Node 20+)
 - `cd /home/isp/apps/codex-ws-agent && node agent-client.mjs --validate`
+- `/home/isp/bin/codex_ws_agent.sh workspace inspect --policy <id> --task <taskId> --agent <agentId> --role coder`
 - `systemctl status codex-ws-agent`
 - `journalctl -u codex-ws-agent -f`

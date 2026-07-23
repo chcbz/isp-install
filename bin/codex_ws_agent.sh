@@ -7,6 +7,7 @@ PID_FILE="$APP_HOME/codex-ws-agent.pid"
 LOG_DIR="$APP_HOME/logs"
 SESSION="codex-ws-agent"
 APP_ENTRY="agent-client.mjs"
+WORKSPACE_ENTRY="workspace-manager.mjs"
 ACTION="${1:-start}"
 VALIDATE_ARGS=(--validate)
 SERVICE_NAME="codex-ws-agent.service"
@@ -175,6 +176,34 @@ stop_agent() {
   echo "codex-ws-agent stopped | PID: $pid"
 }
 
+
+workspace_action() {
+  local subaction="${1:-}"
+  shift || true
+  case "$subaction" in
+    ensure|inspect)
+      ;;
+    archive)
+      if [ -n "$(find_agent_pid || true)" ]; then
+        echo "refusing workspace archive while codex-ws-agent is running; stop the service first" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "Usage: $0 workspace {ensure|inspect|archive} --policy ID --task ID --agent ID [--role ROLE]" >&2
+      return 2
+      ;;
+  esac
+  if [ ! -f "$APP_HOME/$WORKSPACE_ENTRY" ]; then
+    echo "workspace manager not installed: $APP_HOME/$WORKSPACE_ENTRY" >&2
+    return 1
+  fi
+  (
+    cd "$APP_HOME"
+    "$NODE_BIN" "$WORKSPACE_ENTRY" "$subaction" "$@"
+  )
+}
+
 case "$ACTION" in
   start)
     if has_systemd_service; then
@@ -205,8 +234,12 @@ case "$ACTION" in
     fi
     status_agent
     ;;
+  workspace)
+    shift || true
+    workspace_action "$@"
+    ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status}" >&2
+    echo "Usage: $0 {start|stop|restart|status|workspace}" >&2
     exit 2
     ;;
 esac
