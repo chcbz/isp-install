@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   accessSync,
   chmodSync,
@@ -910,8 +910,334 @@ export class PersistentCommandInbox {
   }
 }
 
+// --- A06: Command Deduplication & Acknowledgement ---
+
+export const ACK_STATUS = Object.freeze({
+  RECEIVED: 'RECEIVED',
+  STARTED: 'STARTED',
+  SUCCEEDED: 'SUCCEEDED',
+  FAILED: 'FAILED',
+  REJECTED: 'REJECTED'
+})
+
+const computeSha256 = text => {
+  const hash = createHash('sha256')
+  hash.update(text, 'utf8')
+  return hash.digest('hex')
+}
+
+const canonicalizeFingerprintValue = value => {
+  if (value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map(canonicalizeFingerprintValue)
+  const entries = []
+  for (const key of Object.keys(value).sort()) {
+    if (value[key] === undefined) continue
+    entries.push([key, canonicalizeFingerprintValue(value[key])])
+  }
+  return Object.fromEntries(entries)
+}
+
+const buildFingerprintSource = normalized => {
+  const source = {}
+  for (const [key, value] of Object.entries(normalized || {})) {
+    if (key === 'rawPayload' || key === 'payload' || key === 'type' || key === 'messageType' || key === 'schemaVersion') continue
+    if (value === undefined) continue
+    source[key] = value
+  }
+  return source
+}
+
+export class CommandFingerprint {
+  static compute(normalized) {
+    return computeSha256(JSON.stringify(canonicalizeFingerprintValue(buildFingerprintSource(normalized))))
+  }
+}
+
+export class DurableDedupeLedger {
+  constructor({ rootDir, profile, now = () => Date.now(), fs = DEFAULT_FS_OPERATIONS }) {
+    if (!profile?.agentId) throw new Error('profile.agentId is required for the dedupe ledger')
+    this.rootDir = resolve(rootDir)
+    this.profile = profile
+    this.now = now
+    this.fs = { ...DEFAULT_FS_OPERATIONS, ...fs }
+    this.ledgerDir = resolve(this.rootDir, 'ledger')
+  }
+
+  initialize() {
+    ensureSecureDirectory(this.fs, this.ledgerDir)
+    for (const fileName of this.fs.readdirSync(this.ledgerDir)) {
+      if (!fileName.endsWith('.json')) continue
+      forceSecureFileMode(this.fs, resolve(this.ledgerDir, fileName))
+    }
+  }
+
+  _entryPath(commandId) {
+    const safe = Buffer.from(String(commandId), 'utf8').toString('hex')
+    return resolve(this.ledgerDir, safe + '.json')
+  }
+
+  getEntry(commandId) {
+    const path = this._entryPath(commandId)
+    if (!this.fs.existsSync(path)) return null
+    forceSecureFileMode(this.fs, path)
+    try {
+      const entry = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+      if (!isObject(entry) || entry.formatVersion !== 1 || entry.commandId !== commandId) {
+        throw new Error('invalid dedupe ledger entry')
+      }
+      return entry
+    } catch { return null }
+  }
+
+  _writeEntry(commandId, entry) {
+    atomicWriteJson(this.fs, this._entryPath(commandId), entry)
+  }
+
+  checkOrRecord(commandId, fingerprint, meta) {
+    const existing = this.getEntry(commandId)
+    const now = this.now()
+
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        this._writeEntry(commandId, {
+          ...existing,
+          status: ACK_STATUS.REJECTED,
+          rejectedAt: now,
+          rejectReason: 'FINGERPRINT_CONFLICT: same commandId with different payload'
+        })
+        return { action: 'conflict', entry: this.getEntry(commandId) }
+      }
+      return { action: 'duplicate', entry: existing }
+    }
+
+    if (Number.isSafeInteger(meta.expiresAt) && meta.expiresAt > 0 && now > meta.expiresAt) {
+      const entry = {
+        formatVersion: 1,
+        commandId,
+        fingerprint,
+        status: ACK_STATUS.REJECTED,
+        queueSequence: 0,
+        messageId: meta.messageId || '',
+        commandType: meta.commandType || '',
+        targetAgentId: meta.targetAgentId || '',
+        taskId: meta.taskId || '',
+        workItemId: meta.workItemId || '',
+        receivedAt: now,
+        startedAt: null,
+        completedAt: null,
+        rejectedAt: now,
+        rejectReason: 'EXPIRED: command expired before execution',
+        outcome: null,
+        ackReceivedEmitted: false,
+        ackStartedEmitted: false,
+        ackCompletedEmitted: false,
+        ackRejectedEmitted: false
+      }
+      this._writeEntry(commandId, entry)
+      return { action: 'expired', entry }
+    }
+
+    const entry = {
+      formatVersion: 1,
+      commandId,
+      fingerprint,
+      status: ACK_STATUS.RECEIVED,
+      queueSequence: 0,
+      messageId: meta.messageId || '',
+      commandType: meta.commandType || '',
+      targetAgentId: meta.targetAgentId || '',
+      taskId: meta.taskId || '',
+      workItemId: meta.workItemId || '',
+      receivedAt: now,
+      startedAt: null,
+      completedAt: null,
+      rejectedAt: null,
+      rejectReason: null,
+      outcome: null,
+      ackReceivedEmitted: false,
+      ackStartedEmitted: false,
+      ackCompletedEmitted: false,
+      ackRejectedEmitted: false
+    }
+    this._writeEntry(commandId, entry)
+    return { action: 'accept', entry }
+  }
+
+  recordQueueSequence(commandId, queueSequence) {
+    const existing = this.getEntry(commandId)
+    if (!existing) return
+    this._writeEntry(commandId, { ...existing, queueSequence })
+  }
+
+  markStarted(commandId) {
+    const existing = this.getEntry(commandId)
+    if (!existing) return null
+    const entry = { ...existing, status: ACK_STATUS.STARTED, startedAt: this.now() }
+    this._writeEntry(commandId, entry)
+    return entry
+  }
+
+  markCompleted(commandId, outcome) {
+    const existing = this.getEntry(commandId)
+    if (!existing) return null
+    const status = outcome?.status === 'failed' ? ACK_STATUS.FAILED : ACK_STATUS.SUCCEEDED
+    const entry = {
+      ...existing,
+      status,
+      completedAt: this.now(),
+      outcome: {
+        status: outcome?.status || 'completed',
+        exitCode: outcome?.exitCode ?? null,
+        errorMessage: outcome?.errorMessage || ''
+      }
+    }
+    this._writeEntry(commandId, entry)
+    return entry
+  }
+
+  markRejected(commandId, reason) {
+    const existing = this.getEntry(commandId)
+    if (!existing) return null
+    const entry = {
+      ...existing,
+      status: ACK_STATUS.REJECTED,
+      rejectedAt: this.now(),
+      rejectReason: reason || 'REJECTED'
+    }
+    this._writeEntry(commandId, entry)
+    return entry
+  }
+
+  markAckEmitted(commandId, ackStatus) {
+    const existing = this.getEntry(commandId)
+    if (!existing) return
+    const field = ackStatus === ACK_STATUS.RECEIVED ? 'ackReceivedEmitted'
+      : ackStatus === ACK_STATUS.STARTED ? 'ackStartedEmitted'
+      : ackStatus === ACK_STATUS.SUCCEEDED || ackStatus === ACK_STATUS.FAILED ? 'ackCompletedEmitted'
+      : ackStatus === ACK_STATUS.REJECTED ? 'ackRejectedEmitted'
+      : null
+    if (!field) return
+    this._writeEntry(commandId, { ...existing, [field]: true })
+  }
+
+  reconcileWithInbox(inboxState) {
+    const results = { staleLedgerEntries: 0, orphanAcks: 0 }
+    for (const fileName of this.fs.readdirSync(this.ledgerDir)) {
+      if (!fileName.endsWith('.json')) continue
+      const path = resolve(this.ledgerDir, fileName)
+      forceSecureFileMode(this.fs, path)
+      let entry
+      try { entry = JSON.parse(this.fs.readFileSync(path, 'utf8')) } catch { continue }
+      if (!isObject(entry) || entry.formatVersion !== 1) continue
+
+      if (entry.status === ACK_STATUS.RECEIVED && !inboxState.has(entry.commandId)) {
+        this._writeEntry(entry.commandId, {
+          ...entry,
+          status: ACK_STATUS.REJECTED,
+          rejectedAt: this.now(),
+          rejectReason: 'STALE_RECEIVED: command not found in inbox after restart'
+        })
+        results.staleLedgerEntries += 1
+      }
+    }
+    return results
+  }
+
+  allPendingAckEntries() {
+    const entries = []
+    for (const fileName of this.fs.readdirSync(this.ledgerDir)) {
+      if (!fileName.endsWith('.json')) continue
+      const path = resolve(this.ledgerDir, fileName)
+      forceSecureFileMode(this.fs, path)
+      try {
+        const entry = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+        if (isObject(entry) && entry.formatVersion === 1) entries.push(entry)
+      } catch {}
+    }
+    return entries
+  }
+}
+
+export class AckOutbox {
+  constructor({ rootDir, profile, now = () => Date.now(), createId = () => randomUUID(), fs = DEFAULT_FS_OPERATIONS }) {
+    if (!profile?.agentId) throw new Error('profile.agentId is required for the ACK outbox')
+    this.rootDir = resolve(rootDir)
+    this.profile = profile
+    this.now = now
+    this.createId = createId
+    this.fs = { ...DEFAULT_FS_OPERATIONS, ...fs }
+    this.acksDir = resolve(this.rootDir, 'acks')
+  }
+
+  initialize() {
+    ensureSecureDirectory(this.fs, this.acksDir)
+    for (const fileName of this.fs.readdirSync(this.acksDir)) {
+      if (!fileName.endsWith('.json')) continue
+      forceSecureFileMode(this.fs, resolve(this.acksDir, fileName))
+    }
+  }
+
+  enqueue(ackEnvelope) {
+    const now = this.now()
+    const fileName = String(now).padStart(15, '0') + '-' + this.createId() + '.json'
+    const record = {
+      formatVersion: 1,
+      envelope: ackEnvelope,
+      createdAt: now,
+      attempts: 0
+    }
+    atomicWriteJson(this.fs, resolve(this.acksDir, fileName), record)
+    return { fileName, record }
+  }
+
+  dequeue(fileName) {
+    const path = resolve(this.acksDir, fileName)
+    if (!this.fs.existsSync(path)) return
+    durableUnlink(this.fs, path)
+  }
+
+  pendingEnvelopes() {
+    const envelopes = []
+    for (const fileName of this.fs.readdirSync(this.acksDir).sort()) {
+      if (!fileName.endsWith('.json')) continue
+      const path = resolve(this.acksDir, fileName)
+      forceSecureFileMode(this.fs, path)
+      try {
+        const record = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+        if (isObject(record) && record.formatVersion === 1 && isObject(record.envelope)) {
+          envelopes.push({ fileName, envelope: record.envelope, record })
+        }
+      } catch {}
+    }
+    return envelopes
+  }
+}
+
+export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
+  const envelope = {
+    schemaVersion: PROTOCOL_VERSION,
+    messageType: MESSAGE_TYPES.COMMAND_ACK,
+    messageId: randomUUID(),
+    commandId: meta.commandId || '',
+    sourceAgentId: profile.agentId,
+    agentId: profile.agentId,
+    runtimeInstanceId,
+    ackStatus,
+    ackAt: Date.now()
+  }
+  if (meta.messageId) {
+    envelope.correlationId = meta.messageId
+    envelope.messageId = meta.messageId
+  }
+  if (meta.taskId) envelope.taskId = meta.taskId
+  if (meta.workItemId) envelope.workItemId = meta.workItemId
+  if (meta.rejectReason) envelope.rejectReason = meta.rejectReason
+  return envelope
+}
+
+
 export class AgentMessageProcessor {
-  constructor({ profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onReject = () => {}, sendChatBusy = () => {} }) {
+  constructor({ profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onReject = () => {}, sendChatBusy = () => {}, ledger = null, ackOutbox = null, sendFn = null }) {
     this.profile = profile
     this.inbox = inbox
     this.runCommand = runCommand
@@ -919,6 +1245,9 @@ export class AgentMessageProcessor {
     this.onTaskEvent = onTaskEvent
     this.onReject = onReject
     this.sendChatBusy = sendChatBusy
+    this.ledger = ledger
+    this.ackOutbox = ackOutbox
+    this.sendFn = sendFn
     this.drainPromise = null
     this.chatActive = false
     this.commandActive = false
@@ -972,8 +1301,47 @@ export class AgentMessageProcessor {
 
     switch (message.messageType) {
       case MESSAGE_TYPES.COMMAND_DISPATCH: {
+        if (this.ledger) {
+          const commandId = message.commandId
+          const fingerprint = CommandFingerprint.compute(message)
+          const meta = {
+            messageId: message.messageId || '',
+            commandType: message.commandType || '',
+            targetAgentId: message.targetAgentId || '',
+            taskId: message.taskId || '',
+            workItemId: message.workItemId || '',
+            expiresAt: message.expiresAt
+          }
+          const check = this.ledger.checkOrRecord(commandId, fingerprint, meta)
+
+          if (check.action === 'conflict') {
+            this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId, rejectReason: check.entry.rejectReason })
+            return { kind: 'rejected', error: new AgentProtocolError('COMMAND_FINGERPRINT_CONFLICT', check.entry.rejectReason) }
+          }
+          if (check.action === 'expired') {
+            this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId, rejectReason: check.entry.rejectReason })
+            return { kind: 'rejected', error: new AgentProtocolError('COMMAND_EXPIRED', check.entry.rejectReason) }
+          }
+          if (check.action === 'duplicate') {
+            this._emitAck(ACK_STATUS.RECEIVED, { ...meta, commandId })
+            void this.drain()
+            return { kind: 'command-duplicate', commandId }
+          }
+        }
+
         try {
           const item = this.inbox.enqueue(message)
+          if (this.ledger) {
+            this.ledger.recordQueueSequence(message.commandId, item.record.queueSequence)
+            const meta = {
+              messageId: message.messageId || '',
+              commandType: message.commandType || '',
+              targetAgentId: message.targetAgentId || '',
+              taskId: message.taskId || '',
+              workItemId: message.workItemId || ''
+            }
+            this._emitAck(ACK_STATUS.RECEIVED, { ...meta, commandId: message.commandId })
+          }
           void this.drain()
           return { kind: 'command', item }
         } catch (error) {
@@ -1044,6 +1412,18 @@ export class AgentMessageProcessor {
         this.onReject(new AgentProtocolError('INVALID_PERSISTED_COMMAND', error.message), item.record.rawPayload)
         continue
       }
+
+      if (this.ledger && validated.normalized.commandId) {
+        this.ledger.markStarted(validated.normalized.commandId)
+        this._emitAck(ACK_STATUS.STARTED, {
+          commandId: validated.normalized.commandId,
+          messageId: validated.normalized.messageId || '',
+          commandType: validated.normalized.commandType || '',
+          taskId: validated.normalized.taskId || '',
+          workItemId: validated.normalized.workItemId || ''
+        })
+      }
+
       this.commandActive = true
       let outcome
       try {
@@ -1057,6 +1437,21 @@ export class AgentMessageProcessor {
           exitCode: outcome?.exitCode,
           errorMessage: outcome?.errorMessage
         })
+        if (this.ledger && validated.normalized.commandId) {
+          this.ledger.markCompleted(validated.normalized.commandId, {
+            status: outcome?.status === 'failed' ? 'failed' : 'completed',
+            exitCode: outcome?.exitCode,
+            errorMessage: outcome?.errorMessage || ''
+          })
+          const ackStatus = outcome?.status === 'failed' ? ACK_STATUS.FAILED : ACK_STATUS.SUCCEEDED
+          this._emitAck(ackStatus, {
+            commandId: validated.normalized.commandId,
+            messageId: validated.normalized.messageId || '',
+            commandType: validated.normalized.commandType || '',
+            taskId: validated.normalized.taskId || '',
+            workItemId: validated.normalized.workItemId || ''
+          })
+        }
       } catch (error) {
         this.paused = true
         this.onReject(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to settle command inbox record: ${error.message}`), item.record.rawPayload)
@@ -1064,6 +1459,32 @@ export class AgentMessageProcessor {
         this.commandActive = false
       }
     }
+  }
+
+  _emitAck(ackStatus, meta) {
+    if (!this.ackOutbox || !this.sendFn) return
+    const envelope = buildAckEnvelope(this.profile, ackStatus, meta)
+    const result = this.ackOutbox.enqueue(envelope)
+    if (this.ledger) this.ledger.markAckEmitted(meta.commandId, ackStatus)
+    try {
+      const sent = this.sendFn(envelope)
+      if (sent) this.ackOutbox.dequeue(result.fileName)
+    } catch {}
+  }
+
+  replayAcks() {
+    if (!this.ackOutbox || !this.sendFn) return 0
+    let replayed = 0
+    for (const pending of this.ackOutbox.pendingEnvelopes()) {
+      try {
+        const sent = this.sendFn(pending.envelope)
+        if (sent) {
+          this.ackOutbox.dequeue(pending.fileName)
+          replayed += 1
+        }
+      } catch {}
+    }
+    return replayed
   }
 
   async waitForIdle(timeoutMs = 5000) {
@@ -1502,6 +1923,19 @@ const createProfileState = profile => {
     profile,
     successPolicy: config.commandInboxSuccessPolicy
   })
+  const ledger = new DurableDedupeLedger({
+    rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile)),
+    profile
+  })
+  const ackOutbox = new AckOutbox({
+    rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile)),
+    profile
+  })
+  ledger.initialize()
+  ackOutbox.initialize()
+
+  const sendAckFn = envelope => sendRaw(envelope, profile)
+
   const taskEvents = new Map()
   const state = {
     profile,
@@ -1513,6 +1947,8 @@ const createProfileState = profile => {
     reconnectScheduled: false,
     taskEvents,
     inbox,
+    ledger,
+    ackOutbox,
     processor: null
   }
   state.processor = new AgentMessageProcessor({
@@ -1533,7 +1969,10 @@ const createProfileState = profile => {
         causationId: isObject(raw) ? raw.messageId || raw.requestId : undefined
       }, profile)
     },
-    sendChatBusy: message => sendChatFinal(profile, message, '当前正在处理其他请求，请稍后再试。', { status: 'busy' })
+    sendChatBusy: message => sendChatFinal(profile, message, '当前正在处理其他请求，请稍后再试。', { status: 'busy' }),
+    ledger,
+    ackOutbox,
+    sendFn: sendAckFn
   })
   const recovery = state.processor.start({ drain: false })
   if (recovery.recovered || recovery.completed || recovery.quarantined) {
@@ -1603,6 +2042,8 @@ const connectProfile = profile => {
     registerAgent(profile)
     sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
     state.processor.resume()
+    const replayed = state.processor.replayAcks()
+    if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
     state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
   })
   state.ws.addEventListener('message', event => { void handleMessage(profile, event.data) })

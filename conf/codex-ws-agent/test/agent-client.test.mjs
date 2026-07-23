@@ -8,10 +8,15 @@ import { PassThrough } from 'node:stream'
 import test, { afterEach } from 'node:test'
 
 import {
+  ACK_STATUS,
+  AckOutbox,
   AgentMessageProcessor,
+  CommandFingerprint,
+  DurableDedupeLedger,
   MESSAGE_TYPES,
   PersistentCommandInbox,
   PROCESS_RUNTIME_INSTANCE_ID,
+  buildAckEnvelope,
   buildProtocolEnvelope,
   buildWebSocketUrl,
   normalizeInboundMessage,
@@ -557,6 +562,479 @@ test('public envelope preserves explicit sender identity and validate works with
     await main();
   `
   const output = execFileSync(process.execPath, ['--input-type=module', '--eval', bootstrap], {
+    cwd: resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      OPENCLAW_API_KEY: 'test',
+      CODEX_PROFILES_FILE: '',
+      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
+      DEFAULT_CODEX_PROFILE: 'validate',
+      CODEX_PROFILE_RELOAD_MS: '0'
+    }
+  })
+  assert.match(output, /configuration valid/)
+})
+
+
+// --- A06: Command Deduplication & Acknowledgements ---
+
+test('same commandId triggers dedupe and does not re-enqueue', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ledger.initialize()
+  const ackOutbox = new AckOutbox({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ackOutbox.initialize()
+
+  let runs = 0
+  let receivedAcks = []
+  let startedAcks = []
+  let completedAcks = []
+
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async message => {
+      runs += 1
+      return { status: 'completed' }
+    },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: env => {
+      if (env.ackStatus === ACK_STATUS.RECEIVED) receivedAcks.push(env.commandId)
+      if (env.ackStatus === ACK_STATUS.STARTED) startedAcks.push(env.commandId)
+      if (env.ackStatus === ACK_STATUS.SUCCEEDED) completedAcks.push(env.commandId)
+      return true
+    }
+  })
+  processor.start()
+
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+  const firstRunCount = runs
+
+  // Same commandId second time
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+
+  assert.equal(runs, 1)
+  assert.equal(receivedAcks.length, 2)
+  assert.deepEqual(receivedAcks, ['command-1', 'command-1'])
+  assert.deepEqual(startedAcks, ['command-1'])
+  assert.deepEqual(completedAcks, ['command-1'])
+})
+
+test('same commandId with different payload causes fingerprint conflict and REJECTED', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ledger.initialize()
+  const ackOutbox = new AckOutbox({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ackOutbox.initialize()
+
+  let runs = 0
+  let rejectedAcks = []
+
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: env => {
+      if (env.ackStatus === ACK_STATUS.REJECTED) rejectedAcks.push(env)
+      return true
+    }
+  })
+  processor.start()
+
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+
+  const differentPayloadCmd = {
+    ...command(1),
+    payload: { instruction: 'totally different thing' }
+  }
+  const result = await processor.handle(differentPayloadCmd)
+
+  assert.equal(result.kind, 'rejected')
+  assert.equal(result.error.code, 'COMMAND_FINGERPRINT_CONFLICT')
+  assert.equal(runs, 1)
+  assert.equal(rejectedAcks.length, 1)
+  assert.equal(rejectedAcks[0].ackStatus, ACK_STATUS.REJECTED)
+  assert.equal(rejectedAcks[0].rejectReason, 'FINGERPRINT_CONFLICT: same commandId with different payload')
+})
+
+test('completed commandId re-delivery replays terminal ACK only', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ledger.initialize()
+  const ackOutbox = new AckOutbox({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ackOutbox.initialize()
+
+  let runs = 0
+  const allAcks = []
+
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: env => { allAcks.push(env.ackStatus); return true }
+  })
+  processor.start()
+
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+  assert.equal(runs, 1)
+
+  // Clear acks to observe only replayed ones
+  allAcks.length = 0
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+
+  // Should only emit RECEIVED (duplicate), not re-execute
+  assert.equal(runs, 1)
+  assert.deepEqual(allAcks, ['RECEIVED'])
+})
+
+test('expired command before execution is REJECTED', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ledger.initialize()
+  const ackOutbox = new AckOutbox({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ackOutbox.initialize()
+
+  let runs = 0
+  let rejectedAcks = []
+
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: env => {
+      if (env.ackStatus === ACK_STATUS.REJECTED) rejectedAcks.push(env)
+      return true
+    }
+  })
+  processor.start()
+
+  const expiredCmd = {
+    ...command(50),
+    expiresAt: 1000
+  }
+  const result = await processor.handle(expiredCmd)
+
+  assert.equal(result.kind, 'rejected')
+  assert.equal(result.error.code, 'COMMAND_EXPIRED')
+  assert.equal(runs, 0)
+  assert.equal(rejectedAcks.length, 1)
+  assert.equal(rejectedAcks[0].ackStatus, ACK_STATUS.REJECTED)
+  assert.match(rejectedAcks[0].rejectReason, /EXPIRED/)
+})
+
+test('ack outbox retains pending ACKs when send fails and replays on reconnect', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  const ledgerDir = resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex'))
+
+  const ledger = new DurableDedupeLedger({ rootDir: ledgerDir, profile })
+  ledger.initialize()
+  const ackOutbox = new AckOutbox({ rootDir: ledgerDir, profile })
+  ackOutbox.initialize()
+
+  let sendSucceeds = false
+  let runs = 0
+
+  const processor1 = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: () => sendSucceeds
+  })
+  processor1.start()
+
+  await processor1.handle(command(1))
+  await processor1.waitForIdle()
+  assert.equal(runs, 1)
+
+  // At this point: RECEIVED/STARTED/SUCCEEDED should be in outbox since send failed
+  const pendingPreReplay = ackOutbox.pendingEnvelopes()
+  assert.ok(pendingPreReplay.length >= 1, 'outbox should have pending ACKs after failed sends')
+
+  // Now simulate reconnect: create new processor with same ledger/outbox, send succeeds
+  sendSucceeds = true
+  const processor2 = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: () => true
+  })
+  processor2.start({ drain: false })
+  const replayed = processor2.replayAcks()
+  assert.ok(replayed >= 1, 'should replay at least one pending ACK')
+
+  const pendingPostReplay = ackOutbox.pendingEnvelopes()
+  assert.equal(pendingPostReplay.length, 0, 'outbox should be empty after successful replay')
+})
+
+test('ack envelope has required canonical fields', () => {
+  const meta = {
+    commandId: 'cmd-1',
+    messageId: 'msg-1',
+    commandType: 'TEST',
+    taskId: 'task-1',
+    workItemId: 'work-1'
+  }
+  const envelope = buildAckEnvelope(profile, ACK_STATUS.RECEIVED, meta)
+
+  assert.equal(envelope.schemaVersion, 1)
+  assert.equal(envelope.messageType, MESSAGE_TYPES.COMMAND_ACK)
+  assert.equal(envelope.commandId, 'cmd-1')
+  assert.equal(envelope.correlationId, 'msg-1')
+  assert.equal(envelope.targetAgentId, undefined)
+  assert.equal(envelope.ackStatus, ACK_STATUS.RECEIVED)
+  assert.ok(Number.isSafeInteger(envelope.ackAt))
+  assert.equal(envelope.taskId, 'task-1')
+  assert.equal(envelope.workItemId, 'work-1')
+  assert.equal(envelope.sourceAgentId, profile.agentId)
+  assert.equal(envelope.runtimeInstanceId, PROCESS_RUNTIME_INSTANCE_ID)
+})
+
+test('rejected ack includes rejectReason', () => {
+  const envelope = buildAckEnvelope(profile, ACK_STATUS.REJECTED, {
+    commandId: 'cmd-2',
+    rejectReason: 'EXPIRED: too old'
+  })
+  assert.equal(envelope.ackStatus, ACK_STATUS.REJECTED)
+  assert.equal(envelope.rejectReason, 'EXPIRED: too old')
+})
+
+test('ledger survives cross-restart and correctly identifies duplicates', async () => {
+  const rootDir = temporaryDirectory()
+  const ledgerDir = resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex'))
+
+  // Phase 1: execute a command
+  const inbox1 = createInbox(rootDir)
+  const ledger1 = new DurableDedupeLedger({ rootDir: ledgerDir, profile })
+  ledger1.initialize()
+  const ackOutbox1 = new AckOutbox({ rootDir: ledgerDir, profile })
+  ackOutbox1.initialize()
+
+  let runs = 0
+  const processor1 = new AgentMessageProcessor({
+    profile,
+    inbox: inbox1,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger: ledger1,
+    ackOutbox: ackOutbox1,
+    sendFn: () => true
+  })
+  processor1.start()
+  await processor1.handle(command(1))
+  await processor1.waitForIdle()
+  assert.equal(runs, 1)
+
+  // Phase 2: restart - new ledger reads the same directory
+  const inbox2 = createInbox(rootDir)
+  const ledger2 = new DurableDedupeLedger({ rootDir: ledgerDir, profile })
+  ledger2.initialize()
+  const ackOutbox2 = new AckOutbox({ rootDir: ledgerDir, profile })
+  ackOutbox2.initialize()
+
+  const processor2 = new AgentMessageProcessor({
+    profile,
+    inbox: inbox2,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger: ledger2,
+    ackOutbox: ackOutbox2,
+    sendFn: () => true
+  })
+  processor2.start()
+
+  await processor2.handle(command(1))
+  await processor2.waitForIdle()
+  assert.equal(runs, 1, 'should not re-execute after restart')
+
+  // Check ledger entry
+  const entry = ledger2.getEntry('command-1')
+  assert.ok(entry)
+  assert.equal(entry.status, ACK_STATUS.SUCCEEDED)
+  assert.equal(entry.commandId, 'command-1')
+})
+
+test('fingerprint is stable for semantically identical payloads', () => {
+  const cmd1 = normalizeInboundMessage(command(1))
+  const cmd2 = normalizeInboundMessage(command(1))
+  assert.equal(CommandFingerprint.compute(cmd1), CommandFingerprint.compute(cmd2))
+})
+
+test('fingerprint stays stable when payload field order changes', () => {
+  const cmd1 = normalizeInboundMessage({
+    ...command(1),
+    payload: {
+      instruction: 'run 1',
+      details: { alpha: 1, beta: 2 }
+    }
+  })
+  const cmd2 = normalizeInboundMessage({
+    ...command(1),
+    payload: {
+      details: { beta: 2, alpha: 1 },
+      instruction: 'run 1'
+    }
+  })
+  assert.equal(CommandFingerprint.compute(cmd1), CommandFingerprint.compute(cmd2))
+})
+
+test('fingerprint differs for different payloads', () => {
+  const cmd1 = normalizeInboundMessage(command(1))
+  const cmd2 = normalizeInboundMessage({
+    ...command(1),
+    payload: { instruction: 'different', details: { alpha: 1 } }
+  })
+  assert.notEqual(CommandFingerprint.compute(cmd1), CommandFingerprint.compute(cmd2))
+})
+
+test('completed command across restart replays terminal ACK without re-execution', async () => {
+  const rootDir = temporaryDirectory()
+  const ledgerDir = resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex'))
+
+  // Execute and complete a command
+  const inbox1 = createInbox(rootDir)
+  const ledger1 = new DurableDedupeLedger({ rootDir: ledgerDir, profile })
+  ledger1.initialize()
+  const ackOutbox1 = new AckOutbox({ rootDir: ledgerDir, profile })
+  ackOutbox1.initialize()
+
+  let runs = 0
+  const processor1 = new AgentMessageProcessor({
+    profile,
+    inbox: inbox1,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger: ledger1,
+    ackOutbox: ackOutbox1,
+    sendFn: () => true
+  })
+  processor1.start()
+  await processor1.handle(command(10))
+  await processor1.waitForIdle()
+  assert.equal(runs, 1)
+
+  // Restart: new processor, clear acks list
+  const inbox2 = createInbox(rootDir)
+  const ledger2 = new DurableDedupeLedger({ rootDir: ledgerDir, profile })
+  ledger2.initialize()
+  const ackOutbox2 = new AckOutbox({ rootDir: ledgerDir, profile })
+  ackOutbox2.initialize()
+
+  const replayedAcks = []
+  const processor2 = new AgentMessageProcessor({
+    profile,
+    inbox: inbox2,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger: ledger2,
+    ackOutbox: ackOutbox2,
+    sendFn: env => { replayedAcks.push(env.ackStatus); return true }
+  })
+  processor2.start()
+
+  await processor2.handle(command(10))
+  await processor2.waitForIdle()
+  assert.equal(runs, 1, 'must not re-execute completed command after restart')
+  assert.deepEqual(replayedAcks, ['RECEIVED'], 'completed duplicate replays RECEIVED only')
+})
+
+test('command fails and ACK reflects FAILED status', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ledger.initialize()
+  const ackOutbox = new AckOutbox({
+    rootDir: resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex')),
+    profile
+  })
+  ackOutbox.initialize()
+
+  const allAcks = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { throw new Error('command failure') },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: env => { allAcks.push(env.ackStatus); return true }
+  })
+  processor.start()
+
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+
+  assert.deepEqual(allAcks, ['RECEIVED', 'STARTED', 'FAILED'])
+  const entry = ledger.getEntry('command-1')
+  assert.equal(entry.status, ACK_STATUS.FAILED)
+  assert.ok(entry.outcome)
+  assert.equal(entry.outcome.status, 'failed')
+})
+
+test('all 5 ACK status constants are defined', () => {
+  assert.equal(ACK_STATUS.RECEIVED, 'RECEIVED')
+  assert.equal(ACK_STATUS.STARTED, 'STARTED')
+  assert.equal(ACK_STATUS.SUCCEEDED, 'SUCCEEDED')
+  assert.equal(ACK_STATUS.FAILED, 'FAILED')
+  assert.equal(ACK_STATUS.REJECTED, 'REJECTED')
+})
+
+test('standalone --validate still works with a06 additions', () => {
+  const output = execFileSync(process.execPath, ['agent-client.mjs', '--validate'], {
     cwd: resolve(import.meta.dirname, '..'),
     encoding: 'utf8',
     env: {

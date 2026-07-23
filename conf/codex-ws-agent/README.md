@@ -238,7 +238,12 @@ Queue behavior:
 - Critical file/directory `fsync`, rename, unlink, and cross-directory move failures propagate and pause execution rather than claiming durability.
 - With the default `archive` policy, successful and failed executions move to `archive/`. With `delete`, successful executions are removed and failures remain archived.
 
-A05 deliberately does **not** implement durable ACK or `commandId` idempotency. A crash after the external command side effect but before the local completion marker can execute the command again after restart. A06 must close that window. Completed failures are archived rather than retried in a hot loop.
+A06 closes the A05 crash window with two durable guards:
+
+- `commandId` is deduped in a persistent ledger by a canonical fingerprint of the resolved semantic payload. Reordered fields hash the same; the same `commandId` with a different payload is rejected closed.
+- `RECEIVED`, `STARTED`, `SUCCEEDED`, `FAILED`, and `REJECTED` ACKs are written to a persistent outbox before send; failed sends are replayed on reconnect.
+
+Completed failures are archived rather than retried in a hot loop.
 
 ## Codex Invocation
 

@@ -19,6 +19,11 @@ description: Use when installing or configuring codex-ws-agent from this reposit
 
 After files are installed, run `cd /home/isp/apps/codex-ws-agent && npm ci --omit=dev` so Node 20 can load the declared `ws` dependency. Node runtimes with a built-in WebSocket remain supported.
 
+A06 runtime notes:
+- keep one canonical `agentId` on one client at a time; the durable inbox, dedupe ledger, and ACK outbox are profile-local
+- `commandId` dedupe is fingerprint-based, so same payload re-deliveries replay only terminal ACKs while different payloads with the same `commandId` fail closed
+- reconnects must call the built-in ACK replay path; do not clear the outbox on send failure
+
 ## Config files
 
 - App dir: `/home/isp/apps/codex-ws-agent`
