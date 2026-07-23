@@ -759,7 +759,7 @@ export class PersistentCommandInbox {
       const sourcePath = resolve(this.processingDir, fileName)
       let validated
       try {
-        validated = this.readAndValidate(sourcePath, new Set(['pending', 'processing', 'completed']))
+        validated = this.readAndValidate(sourcePath, new Set(['pending', 'processing', 'completed', 'recovery_required']))
       } catch (error) {
         this.quarantine(sourcePath, error)
         result.quarantined += 1
@@ -771,17 +771,21 @@ export class PersistentCommandInbox {
         result.completed += 1
         continue
       }
+      const record = validated.record.state === 'recovery_required'
+        ? validated.record
+        : {
+            ...validated.record,
+            profileId: this.profile.profileId,
+            state: 'recovery_required',
+            recoveredAt: this.now(),
+            recoveryReason: 'PROCESSING_OUTCOME_UNKNOWN: automatic re-execution is forbidden',
+            recoveryCount: Number(validated.record.recoveryCount || 0) + 1
+          }
+      // Persist the non-executable state before moving directories. A crash after
+      // this write but before rename is recovered as recovery_required, never rerun.
+      if (validated.record.state !== 'recovery_required') atomicWriteJson(this.fs, sourcePath, record)
       const recoveryPath = this.uniquePath(this.recoveryDir, fileName)
       durableRename(this.fs, sourcePath, recoveryPath)
-      const record = {
-        ...validated.record,
-        profileId: this.profile.profileId,
-        state: 'recovery_required',
-        recoveredAt: this.now(),
-        recoveryReason: 'PROCESSING_OUTCOME_UNKNOWN: automatic re-execution is forbidden',
-        recoveryCount: Number(validated.record.recoveryCount || 0) + 1
-      }
-      atomicWriteJson(this.fs, recoveryPath, record)
       result.recoveryRecords.push({ record, normalized: validated.normalized, fileName, path: recoveryPath })
       result.recoveryRequired += 1
     }
@@ -850,6 +854,63 @@ export class PersistentCommandInbox {
     }
     atomicWriteJson(this.fs, pendingPath, restored)
     return { record: restored, fileName: pendingPath.split('/').pop(), path: pendingPath }
+  }
+
+  markRecoveryRequired(item, reason) {
+    if (!item?.path || !this.fs.existsSync(item.path)) throw new Error('claimed command file is missing')
+    const validated = this.readAndValidate(item.path, new Set(['pending', 'processing', 'recovery_required']))
+    const record = validated.record.state === 'recovery_required'
+      ? validated.record
+      : {
+          ...validated.record,
+          profileId: this.profile.profileId,
+          state: 'recovery_required',
+          recoveredAt: this.now(),
+          recoveryReason: reason || 'PROCESSING_OUTCOME_UNKNOWN: automatic re-execution is forbidden',
+          recoveryCount: Number(validated.record.recoveryCount || 0) + 1
+        }
+    if (validated.record.state !== 'recovery_required') atomicWriteJson(this.fs, item.path, record)
+    if (dirname(item.path) === this.recoveryDir) {
+      return { record, normalized: validated.normalized, fileName: item.fileName, path: item.path }
+    }
+    const recoveryPath = this.uniquePath(this.recoveryDir, item.fileName)
+    durableRename(this.fs, item.path, recoveryPath)
+    return {
+      record,
+      normalized: validated.normalized,
+      fileName: recoveryPath.split('/').pop(),
+      path: recoveryPath
+    }
+  }
+
+  commandStateIndex() {
+    const index = new Map()
+    const errors = []
+    const locations = [
+      { directory: this.pendingDir, expectedStates: new Set(['pending']) },
+      { directory: this.processingDir, expectedStates: new Set(['pending', 'processing', 'completed', 'recovery_required']) },
+      { directory: this.archiveDir, expectedStates: new Set(['completed']) },
+      { directory: this.recoveryDir, expectedStates: new Set(['recovery_required']) }
+    ]
+    for (const { directory, expectedStates } of locations) {
+      for (const fileName of this.listJsonFiles(directory)) {
+        const path = resolve(directory, fileName)
+        try {
+          const validated = this.readAndValidate(path, expectedStates)
+          const item = { ...validated, fileName, path }
+          const records = index.get(validated.normalized.commandId) || []
+          records.push(item)
+          index.set(validated.normalized.commandId, records)
+        } catch (error) {
+          try { this.quarantine(path, error) } catch {}
+          errors.push(`${fileName}: ${error.message}`)
+        }
+      }
+    }
+    if (errors.length) {
+      throw new AgentProtocolError('COMMAND_INBOX_CORRUPT', `Inbox records quarantined during reconciliation: ${errors.join('; ')}`)
+    }
+    return index
   }
 
   count(state = 'pending') {
@@ -1208,6 +1269,24 @@ export class DurableDedupeLedger {
       this._quarantineLedgerFile(path, commandId, error)
       throw new AgentProtocolError('DEDUPE_LEDGER_CORRUPT', `Corrupt ledger entry for ${commandId}: ${error.message}`)
     }
+  }
+
+  listEntries() {
+    this._assertHealthy()
+    const entries = []
+    for (const fileName of this.fs.readdirSync(this.ledgerDir).sort()) {
+      if (!fileName.endsWith('.json')) continue
+      const path = resolve(this.ledgerDir, fileName)
+      const commandId = this._decodeCommandId(fileName)
+      forceSecureFileMode(this.fs, path)
+      try {
+        entries.push(this._validateEntry(JSON.parse(this.fs.readFileSync(path, 'utf8')), commandId || undefined))
+      } catch (error) {
+        this._quarantineLedgerFile(path, commandId, error)
+        throw new AgentProtocolError('DEDUPE_LEDGER_CORRUPT', `Corrupt ledger entry ${fileName}: ${error.message}`)
+      }
+    }
+    return entries
   }
 
   _writeEntry(commandId, entry) {
@@ -1581,10 +1660,13 @@ export class AgentMessageProcessor {
   start({ drain = true } = {}) {
     const recovery = this.inbox.initialize()
     try {
-      for (const completed of recovery.completedRecords || []) this._reconcileCompletedRecord(completed)
-      for (const recovered of recovery.recoveryRecords || []) this._recordRecoveryRequired(recovered)
+      if (this.ledger) this._reconcileLedgerWithInbox()
+      else for (const recovered of recovery.recoveryRecords || []) this._recordRecoveryRequired(recovered)
     } catch (error) {
-      this._failClosed(new AgentProtocolError('COMMAND_RECOVERY_ERROR', `Failed to persist recovery state: ${error.message}`), {})
+      const protocolError = error instanceof AgentProtocolError
+        ? error
+        : new AgentProtocolError('COMMAND_RECOVERY_ERROR', `Failed to persist recovery state: ${error.message}`)
+      this._failClosed(protocolError, {})
     }
     if (this.ledger?.hasCorruption()) {
       this._failClosed(new AgentProtocolError(
@@ -1629,6 +1711,132 @@ export class AgentMessageProcessor {
       commandId: message.commandId,
       outcome: entry.outcome
     })
+  }
+
+  _reconcileLedgerWithInbox() {
+    if (!this.ledger) return
+    const inboxIndex = this.inbox.commandStateIndex()
+    const ledgerEntries = this.ledger.listEntries()
+    const ledgerIndex = new Map(ledgerEntries.map(entry => [entry.commandId, entry]))
+    const commandIds = new Set([...inboxIndex.keys(), ...ledgerIndex.keys()])
+
+    for (const commandId of [...commandIds].sort()) {
+      const records = inboxIndex.get(commandId) || []
+      const entry = ledgerIndex.get(commandId) || null
+      if (records.length > 1) {
+        throw new AgentProtocolError(
+          'COMMAND_STATE_CONFLICT',
+          `Multiple durable inbox records exist for commandId ${commandId}; manual reconciliation is required`
+        )
+      }
+
+      if (!entry && records.length) {
+        const item = records[0]
+        if (item.record.state === 'completed') {
+          this._reconcileCompletedRecord(item)
+          continue
+        }
+        if (item.record.state === 'recovery_required') {
+          this._recordRecoveryRequired(item)
+          continue
+        }
+        if (item.record.state === 'pending') {
+          const fingerprint = CommandFingerprint.compute(item.normalized)
+          const check = this.ledger.checkOrRecord(
+            commandId,
+            fingerprint,
+            { ...this._commandMeta(item.normalized), expiresAt: null }
+          )
+          if (check.action !== 'accept') throw new Error(`failed to reconstruct missing RECEIVED ledger for ${commandId}`)
+          this.ledger.recordQueueSequence(commandId, item.record.queueSequence)
+          this._emitAck(ACK_STATUS.RECEIVED, { ...this._commandMeta(item.normalized), commandId })
+          continue
+        }
+        const reason = 'PROCESSING_OUTCOME_UNKNOWN: durable inbox processing state requires reconciliation'
+        const recovered = this.inbox.markRecoveryRequired(item, reason)
+        this._recordRecoveryRequired(recovered)
+        continue
+      }
+
+      if (!entry) continue
+      if (!records.length) {
+        if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(entry.status)) {
+          const reason = `ORPHAN_LEDGER_NO_INBOX: ${entry.status} ledger was persisted but no inbox record exists; execution outcome is unknown; reconcile or dispatch a new commandId`
+          const result = this.ledger.markRecoveryRequired(
+            commandId,
+            entry.fingerprint,
+            entry,
+            reason
+          )
+          if (result.conflict) throw new Error(`orphan ledger fingerprint conflict for ${commandId}`)
+          this._emitAck(ACK_STATUS.REJECTED, {
+            ...this._commandMeta(entry),
+            commandId,
+            rejectReason: reason
+          })
+          this._failClosed(new AgentProtocolError('COMMAND_RECOVERY_REQUIRED', reason), entry)
+        } else if (entry.status === LEDGER_STATUS.RECOVERY_REQUIRED) {
+          const reason = entry.rejectReason || 'RECOVERY_REQUIRED: manual reconciliation is required'
+          this._emitAck(ACK_STATUS.REJECTED, {
+            ...this._commandMeta(entry),
+            commandId,
+            rejectReason: reason
+          })
+          this._failClosed(new AgentProtocolError('COMMAND_RECOVERY_REQUIRED', reason), entry)
+        }
+        continue
+      }
+
+      const item = records[0]
+      const fingerprint = CommandFingerprint.compute(item.normalized)
+      if (entry.fingerprint !== fingerprint) {
+        throw new AgentProtocolError(
+          'COMMAND_STATE_CONFLICT',
+          `Ledger/inbox fingerprint mismatch for commandId ${commandId}; manual reconciliation is required`
+        )
+      }
+
+      if (item.record.state === 'completed') {
+        if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(entry.status)) this._reconcileCompletedRecord(item)
+        else if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry.status)) {
+          throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Completed inbox record conflicts with ledger status ${entry.status} for ${commandId}`)
+        }
+        continue
+      }
+
+      if (item.record.state === 'recovery_required') {
+        if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, LEDGER_STATUS.RECOVERY_REQUIRED].includes(entry.status)) {
+          this._recordRecoveryRequired(item)
+        } else {
+          throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Recovery inbox record conflicts with ledger status ${entry.status} for ${commandId}`)
+        }
+        continue
+      }
+
+      if (item.record.state === 'pending' && entry.status === ACK_STATUS.RECEIVED) continue
+      if (['pending', 'processing'].includes(item.record.state)
+          && [ACK_STATUS.STARTED, LEDGER_STATUS.RECOVERY_REQUIRED].includes(entry.status)) {
+        const reason = entry.rejectReason
+          || 'PROCESSING_OUTCOME_UNKNOWN: STARTED ledger state cannot be automatically re-executed after restart'
+        const recovered = this.inbox.markRecoveryRequired(item, reason)
+        if (entry.status === LEDGER_STATUS.RECOVERY_REQUIRED) {
+          this._emitAck(ACK_STATUS.REJECTED, {
+            ...this._commandMeta(item.normalized),
+            commandId,
+            rejectReason: reason
+          })
+          this._failClosed(new AgentProtocolError('COMMAND_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
+        } else {
+          this._recordRecoveryRequired(recovered)
+        }
+        continue
+      }
+
+      throw new AgentProtocolError(
+        'COMMAND_STATE_CONFLICT',
+        `Inbox state ${item.record.state} conflicts with ledger status ${entry.status} for ${commandId}`
+      )
+    }
   }
 
   _recordRecoveryRequired(recovered) {
@@ -1886,8 +2094,9 @@ export class AgentMessageProcessor {
       }
 
       if (this.ledger && validated.normalized.commandId) {
+        let fingerprint
         try {
-          const fingerprint = CommandFingerprint.compute(validated.normalized)
+          fingerprint = CommandFingerprint.compute(validated.normalized)
           let entry = this.ledger.getEntry(validated.normalized.commandId)
           if (!entry) {
             const check = this.ledger.checkOrRecord(
@@ -1902,13 +2111,20 @@ export class AgentMessageProcessor {
             throw new Error(`queued command ledger mismatch/status ${entry.status}`)
           }
           this.ledger.markStarted(validated.normalized.commandId)
-          this._emitAck(ACK_STATUS.STARTED, {
+          const startedAck = this._emitAck(ACK_STATUS.STARTED, {
             ...this._commandMeta(validated.normalized),
             commandId: validated.normalized.commandId
           })
+          if (!startedAck.persisted || this.failClosedError) {
+            const reason = !startedAck.persisted
+              ? 'STARTED_ACK_NOT_DURABLE: command was not executed because its STARTED ACK could not be persisted'
+              : `PRE_EXECUTION_DURABILITY_FAILURE: command was not executed after STARTED ACK persistence (${this.failClosedError.message})`
+            this._transitionClaimedToRecovery(item, validated.normalized, fingerprint, reason)
+            return
+          }
         } catch (error) {
-          try { this.inbox.restoreProcessing(item, 'pre-execution durable ledger failure') } catch {}
-          this._failClosed(new AgentProtocolError('DEDUPE_LEDGER_ERROR', `Command not executed: ${error.message}`), item.record.rawPayload)
+          const reason = `PRE_EXECUTION_DURABILITY_FAILURE: command was not executed because durable preparation failed (${error.message})`
+          this._transitionClaimedToRecovery(item, validated.normalized, fingerprint, reason)
           return
         }
       }
@@ -1948,42 +2164,89 @@ export class AgentMessageProcessor {
     }
   }
 
+  _transitionClaimedToRecovery(item, message, fingerprint, reason) {
+    let recovered
+    try {
+      recovered = this.inbox.markRecoveryRequired(item, reason)
+    } catch (error) {
+      this._failClosed(new AgentProtocolError(
+        'COMMAND_INBOX_ERROR',
+        `Command was not executed, but recovery-required inbox persistence failed: ${error.message}`
+      ), item.record.rawPayload)
+      return false
+    }
+
+    try {
+      const durableFingerprint = fingerprint || CommandFingerprint.compute(message)
+      const result = this.ledger.markRecoveryRequired(
+        message.commandId,
+        durableFingerprint,
+        this._commandMeta(message),
+        reason
+      )
+      if (result.conflict) throw new Error(`recovery fingerprint conflict for ${message.commandId}`)
+      this._emitAck(ACK_STATUS.REJECTED, {
+        ...this._commandMeta(message),
+        commandId: message.commandId,
+        rejectReason: reason
+      })
+    } catch (error) {
+      this._failClosed(new AgentProtocolError(
+        'DEDUPE_LEDGER_ERROR',
+        `Command was not executed; recovery-required inbox is durable but ledger/ACK persistence failed: ${error.message}`
+      ), recovered.record.rawPayload)
+      return false
+    }
+    this._failClosed(new AgentProtocolError('COMMAND_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
+    return true
+  }
+
   _emitAck(ackStatus, meta, marker = { kind: 'entry' }) {
-    if (!this.ackOutbox) return false
+    const delivery = {
+      persisted: false,
+      sent: false,
+      markerPersisted: false,
+      dequeued: false
+    }
+    if (!this.ackOutbox) return delivery
     const envelope = buildAckEnvelope(this.profile, ackStatus, meta)
     let queued
     try {
       queued = this.ackOutbox.enqueue(envelope, marker)
+      delivery.persisted = true
     } catch (error) {
       this._failClosed(new AgentProtocolError('ACK_OUTBOX_PERSIST_ERROR', `Failed to persist ACK before send: ${error.message}`), meta)
-      return false
+      return delivery
     }
-    if (!this.sendFn) return false
+    if (!this.sendFn) return delivery
     let sent = false
     try {
       sent = this.sendFn(envelope) === true
     } catch {
-      return false
+      return delivery
     }
-    if (!sent) return false
+    if (!sent) return delivery
+    delivery.sent = true
     try {
       if (this.ledger && marker.kind !== 'none') this.ledger.markAckEmitted(meta.commandId, ackStatus, marker)
+      delivery.markerPersisted = true
     } catch (error) {
       this._failClosed(new AgentProtocolError(
         'ACK_MARKER_PERSIST_ERROR',
         `ACK was sent but durable emitted marker failed; replay remains enabled for at-least-once delivery: ${error.message}`
       ), meta)
-      return false
+      return delivery
     }
     try {
       this.ackOutbox.dequeue(queued.fileName)
-      return true
+      delivery.dequeued = true
+      return delivery
     } catch (error) {
       this._failClosed(new AgentProtocolError(
         'ACK_OUTBOX_DEQUEUE_ERROR',
         `ACK was sent but outbox dequeue failed; delivery remains at-least-once: ${error.message}`
       ), meta)
-      return false
+      return delivery
     }
   }
 

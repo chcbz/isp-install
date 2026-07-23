@@ -896,8 +896,10 @@ test('send false or throw keeps ACK markers false and records in the durable out
 
 test('ACK marker persistence failure retains sent ACK for at-least-once replay', () => {
   const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
   const ledger = new DurableDedupeLedger({ rootDir: profileStorageRoot(rootDir), profile })
   const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile })
+  inbox.initialize()
   ledger.initialize()
   ackOutbox.initialize()
   const normalized = normalizeInboundMessage(command(70))
@@ -908,10 +910,12 @@ test('ACK marker persistence failure retains sent ACK for at-least-once replay',
     taskId: normalized.taskId,
     workItemId: normalized.workItemId
   })
+  const queued = inbox.enqueue(normalized)
+  ledger.recordQueueSequence(normalized.commandId, queued.record.queueSequence)
   const errors = []
   const processor = new AgentMessageProcessor({
     profile,
-    inbox: createInbox(rootDir),
+    inbox,
     runCommand: async () => ({ status: 'completed' }),
     runChat: async () => {},
     ledger,
@@ -929,11 +933,142 @@ test('ACK marker persistence failure retains sent ACK for at-least-once replay',
     workItemId: normalized.workItemId
   })
 
-  assert.equal(emitted, false)
+  assert.deepEqual(emitted, {
+    persisted: true,
+    sent: true,
+    markerPersisted: false,
+    dequeued: false
+  })
   assert.deepEqual(errors, ['ACK_MARKER_PERSIST_ERROR'])
   assert.equal(ackOutbox.pendingEnvelopes().length, 1)
   const persisted = JSON.parse(readFileSync(resolve(ledger.ledgerDir, `${Buffer.from(normalized.commandId).toString('hex')}.json`), 'utf8'))
   assert.equal(persisted.ackReceivedEmitted, false)
+})
+
+test('STARTED ACK persistence failure fail-closes before command side effects', async () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  let failNextAckFsync = false
+  const ackOutbox = new AckOutbox({
+    rootDir: storageRoot,
+    profile,
+    fs: {
+      fsyncSync: descriptor => {
+        if (failNextAckFsync) {
+          failNextAckFsync = false
+          throw new Error('injected STARTED ACK fsync failure')
+        }
+        return fsyncSync(descriptor)
+      }
+    }
+  })
+  ledger.initialize()
+  ackOutbox.initialize()
+
+  let runs = 0
+  const acks = []
+  const errors = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => {
+      acks.push(envelope)
+      if (envelope.ackStatus === ACK_STATUS.RECEIVED) {
+        queueMicrotask(() => { failNextAckFsync = true })
+      }
+      return true
+    },
+    onReject: error => errors.push(error.code)
+  })
+  processor.start({ drain: false })
+
+  await processor.handle(command(71))
+  processor.resume()
+  await processor.waitForIdle()
+
+  assert.equal(runs, 0)
+  assert.equal(inbox.count('pending'), 0)
+  assert.equal(inbox.count('processing'), 0)
+  assert.equal(inbox.count('recovery'), 1)
+  const recovery = inbox.list('recovery')[0]
+  assert.equal(recovery.commandId, 'command-71')
+  assert.match(recovery.recoveryReason, /STARTED_ACK_NOT_DURABLE/)
+  const entry = ledger.getEntry('command-71')
+  assert.equal(entry.status, LEDGER_STATUS.RECOVERY_REQUIRED)
+  assert.notEqual(entry.status, ACK_STATUS.SUCCEEDED)
+  assert.match(entry.rejectReason, /STARTED_ACK_NOT_DURABLE/)
+  assert.deepEqual(acks.map(envelope => envelope.ackStatus), [ACK_STATUS.RECEIVED, ACK_STATUS.REJECTED])
+  assert.equal(entry.ackStartedEmitted, false)
+  assert.equal(entry.ackRejectedEmitted, true)
+  assert.equal(ackOutbox.pendingEnvelopes().length, 0)
+  assert.ok(errors.includes('ACK_OUTBOX_PERSIST_ERROR'))
+})
+
+test('orphan RECEIVED ledger is reconciled to recovery-required across restart', async () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const normalized = normalizeInboundMessage(command(72))
+
+  // Simulate a crash after the RECEIVED ledger fsync but before inbox enqueue.
+  const ledgerBeforeCrash = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  ledgerBeforeCrash.initialize()
+  ledgerBeforeCrash.checkOrRecord(normalized.commandId, CommandFingerprint.compute(normalized), {
+    messageId: normalized.messageId,
+    commandType: normalized.commandType,
+    targetAgentId: normalized.targetAgentId,
+    taskId: normalized.taskId,
+    workItemId: normalized.workItemId
+  })
+
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ledger.initialize()
+  ackOutbox.initialize()
+  let sendSucceeds = false
+  let runs = 0
+  const acks = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => {
+      if (sendSucceeds) acks.push(envelope)
+      return sendSucceeds
+    }
+  })
+
+  const startup = processor.start()
+  assert.equal(startup.paused, true)
+  assert.equal(startup.failClosedCode, 'COMMAND_RECOVERY_REQUIRED')
+  assert.equal(runs, 0)
+  const reconciled = ledger.getEntry(normalized.commandId)
+  assert.equal(reconciled.status, LEDGER_STATUS.RECOVERY_REQUIRED)
+  assert.match(reconciled.rejectReason, /ORPHAN_LEDGER_NO_INBOX/)
+  assert.equal(reconciled.ackRejectedEmitted, false)
+  const pending = ackOutbox.pendingEnvelopes()
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].envelope.ackStatus, ACK_STATUS.REJECTED)
+
+  sendSucceeds = true
+  assert.equal(processor.replayAcks(), 1)
+  assert.equal(ackOutbox.pendingEnvelopes().length, 0)
+  assert.equal(ledger.getEntry(normalized.commandId).ackRejectedEmitted, true)
+
+  const redelivery = { ...command(72), messageId: 'message-72-redelivery', requestId: 'message-72-redelivery' }
+  const result = await processor.handle(redelivery)
+  assert.equal(result.kind, 'command-duplicate')
+  assert.equal(runs, 0)
+  assert.deepEqual(acks.map(envelope => envelope.ackStatus), [ACK_STATUS.REJECTED, ACK_STATUS.REJECTED])
+  assert.equal(acks.at(-1).correlationId, 'message-72-redelivery')
 })
 
 test('corrupt ledger is quarantined and the profile rejects and pauses', async () => {
