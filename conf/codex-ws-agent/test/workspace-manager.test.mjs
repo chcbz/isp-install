@@ -19,6 +19,7 @@ import test, { afterEach } from 'node:test'
 import { runCodex } from '../agent-client.mjs'
 import {
   GitWorkspaceManager,
+  parseWorkspacePolicies,
   runGitProcess
 } from '../workspace-manager.mjs'
 
@@ -51,6 +52,8 @@ const createRepository = () => {
   writeFileSync(resolve(repository, 'tracked.txt'), 'baseline\n')
   git(repository, ['add', 'tracked.txt'])
   git(repository, ['commit', '-m', 'baseline'])
+  git(repository, ['remote', 'add', 'origin', 'https://trusted.example/a07.git'])
+  git(repository, ['update-ref', 'refs/remotes/origin/master', 'refs/heads/master'])
   return {
     root,
     repository,
@@ -59,15 +62,25 @@ const createRepository = () => {
       policyId: 'test-repository',
       root: resolve(root, 'agent-workspaces'),
       repository,
-      baseRef: 'refs/heads/master'
+      baseRef: 'refs/heads/master',
+      remote: {
+        name: 'origin',
+        url: 'https://trusted.example/a07.git'
+      }
     }
   }
+}
+
+const noNetworkFetchRunner = input => {
+  if (input.args[0] === 'fetch') return { status: 0, stdout: '', stderr: '' }
+  return runGitProcess(input)
 }
 
 const manager = (fixture, agentId = 'agent-a', options = {}) => new GitWorkspaceManager({
   policy: fixture.policy,
   agentId,
   role: options.role || 'coder',
+  gitRunner: noNetworkFetchRunner,
   ...options
 })
 
@@ -177,6 +190,126 @@ test('archive is explicit and refuses untracked, unmerged, and unpushed work', (
     error => error.code === 'WORKSPACE_UNMERGED'
   )
   assert.equal(Boolean(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8')), true)
+})
+
+test('archive refuses tracked modifications hidden by assume-unchanged or skip-worktree', () => {
+  for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    const fixture = createRepository()
+    const taskId = `task-hidden-${flag.slice(2)}`
+    const active = manager(fixture).ensureWorkspace(taskId)
+    git(active.workspacePath, ['update-index', flag, 'tracked.txt'])
+    writeFileSync(resolve(active.workspacePath, 'tracked.txt'), `${flag} hidden modification\n`)
+    assert.equal(git(active.workspacePath, ['status', '--porcelain=v1', '--untracked-files=all']), '')
+    assert.throws(
+      () => manager(fixture).archiveWorkspace(taskId),
+      error => error.code === 'WORKSPACE_INDEX_HIDDEN'
+    )
+    assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), `${flag} hidden modification\n`)
+  }
+})
+
+test('archive ignores local upstreams and requires freshly fetched trusted remote containment', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-remote-proof')
+  writeFileSync(resolve(active.workspacePath, 'tracked.txt'), 'agent commit\n')
+  git(active.workspacePath, ['add', 'tracked.txt'])
+  git(active.workspacePath, ['commit', '-m', 'agent commit'])
+  git(fixture.repository, ['branch', 'published-local-only', 'HEAD'])
+  git(fixture.repository, ['config', `branch.${active.branch}.remote`, '.'])
+  git(fixture.repository, ['config', `branch.${active.branch}.merge`, 'refs/heads/published-local-only'])
+
+  assert.throws(
+    () => manager(fixture).archiveWorkspace('task-remote-proof'),
+    error => error.code === 'WORKSPACE_UNPUSHED'
+  )
+
+  git(fixture.repository, ['update-ref', 'refs/remotes/origin/master', git(active.workspacePath, ['rev-parse', 'HEAD'])])
+  let fetched = 0
+  const publishedManager = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      if (input.args[0] === 'fetch') {
+        fetched += 1
+        assert.deepEqual(input.args, [
+          'fetch', '--prune', '--no-tags', 'origin',
+          '+refs/heads/*:refs/remotes/origin/*'
+        ])
+        return { status: 0, stdout: '', stderr: '' }
+      }
+      return runGitProcess(input)
+    }
+  })
+  const archived = publishedManager.archiveWorkspace('task-remote-proof')
+  assert.equal(fetched, 1)
+  assert.equal(archived.state, 'archived')
+})
+
+test('archive rejects a local fake remote even when its tracking ref contains HEAD', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-fake-remote')
+  writeFileSync(resolve(active.workspacePath, 'tracked.txt'), 'agent commit\n')
+  git(active.workspacePath, ['add', 'tracked.txt'])
+  git(active.workspacePath, ['commit', '-m', 'agent commit'])
+  git(fixture.repository, ['update-ref', 'refs/remotes/origin/master', git(active.workspacePath, ['rev-parse', 'HEAD'])])
+  git(fixture.repository, ['remote', 'set-url', 'origin', fixture.repository])
+
+  assert.throws(
+    () => manager(fixture).archiveWorkspace('task-fake-remote'),
+    error => error.code === 'WORKSPACE_REMOTE_UNTRUSTED'
+  )
+  assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'agent commit\n')
+})
+
+test('archive fails closed when the trusted remote fetch fails', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-fetch-failure')
+  writeFileSync(resolve(active.workspacePath, 'tracked.txt'), 'agent commit\n')
+  git(active.workspacePath, ['add', 'tracked.txt'])
+  git(active.workspacePath, ['commit', '-m', 'agent commit'])
+  let fetches = 0
+  const failing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      if (input.args[0] === 'fetch') {
+        fetches += 1
+        return { status: 1, stdout: '', stderr: 'injected fetch failure' }
+      }
+      return runGitProcess(input)
+    }
+  })
+  assert.throws(
+    () => failing.archiveWorkspace('task-fetch-failure'),
+    error => error.code === 'WORKSPACE_GIT_ERROR' && /injected fetch failure/.test(error.message)
+  )
+  assert.equal(fetches, 1)
+  assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'agent commit\n')
+})
+
+test('workspace policies reject local remote URLs and canonical resource overlap across policy IDs', () => {
+  const fixture = createRepository()
+  assert.throws(
+    () => new GitWorkspaceManager({
+      policy: { ...fixture.policy, remote: { name: 'origin', url: fixture.repository } },
+      agentId: 'agent-a'
+    }),
+    error => error.code === 'WORKSPACE_POLICY_INVALID'
+  )
+
+  const duplicate = {
+    first: { ...fixture.policy },
+    second: {
+      ...fixture.policy,
+      root: resolve(fixture.workspaces, '..', 'agent-workspaces'),
+      repository: resolve(fixture.repository, '..', 'repository')
+    }
+  }
+  assert.throws(
+    () => parseWorkspacePolicies(JSON.stringify(duplicate)),
+    error => error.code === 'WORKSPACE_POLICY_INVALID' && /duplicate or overlapping canonical/.test(error.message)
+  )
+
+  const first = manager(fixture, 'agent-a')
+  const aliasPolicy = { ...fixture.policy, policyId: 'alias-policy' }
+  const second = new GitWorkspaceManager({ policy: aliasPolicy, agentId: 'agent-a', gitRunner: noNetworkFetchRunner })
+  assert.equal(first.describe('task-lock-identity').lockPath, second.describe('task-lock-identity').lockPath)
 })
 
 test('task traversal and symlink workspace escapes fail closed', () => {
@@ -326,6 +459,29 @@ test('client command execution passes the managed worktree as spawn cwd and --cd
   assert.equal(invocation.options.cwd, expected)
   assert.equal(invocation.args[invocation.args.indexOf('--cd') + 1], expected)
   assert.equal(invocation.args.includes('resume'), false, 'managed command must not resume a session from another worktree')
+})
+
+test('dedicated fallback rejects overlap in both containment directions', () => {
+  const fixture = createRepository()
+  const workspaceManager = manager(fixture)
+  const options = {
+    noTaskPolicy: 'dedicated-workdir',
+    nonCodingCommandTypes: ['STATUS_QUERY']
+  }
+  assert.throws(
+    () => workspaceManager.resolveCommandWorkspace(
+      { taskId: '', commandType: 'STATUS_QUERY' },
+      { ...options, fallbackWorkdir: fixture.workspaces }
+    ),
+    error => error.code === 'WORKSPACE_FALLBACK_INVALID'
+  )
+  assert.throws(
+    () => workspaceManager.resolveCommandWorkspace(
+      { taskId: '', commandType: 'STATUS_QUERY' },
+      { ...options, fallbackWorkdir: fixture.root }
+    ),
+    error => error.code === 'WORKSPACE_FALLBACK_INVALID'
+  )
 })
 
 test('no-task command requires an explicit non-coding dedicated-workdir policy', async () => {

@@ -1094,7 +1094,10 @@ test('duplicate ACK queueSequence is quarantined and replay fails closed before 
   assert.equal(sends, 0)
   assert.equal(processor.failClosedError?.code, 'ACK_OUTBOX_SEQUENCE_CORRUPT')
   assert.equal(ackOutbox.hasCorruption(), true)
-  assert.ok(readdirSync(ackOutbox.quarantineDir).some(name => name.includes('duplicate')))
+  const quarantineReasons = readdirSync(ackOutbox.quarantineDir)
+    .filter(name => name.endsWith('.reason.txt'))
+    .map(name => readFileSync(resolve(ackOutbox.quarantineDir, name), 'utf8'))
+  assert.ok(quarantineReasons.some(reason => /duplicate ACK queueSequence/.test(reason)))
   assert.throws(
     () => alreadyInitializedObserver.pendingEnvelopes(),
     error => error.code === 'ACK_OUTBOX_CORRUPT'

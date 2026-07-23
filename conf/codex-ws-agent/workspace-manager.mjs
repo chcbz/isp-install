@@ -18,7 +18,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { hostname } from 'node:os'
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const FORMAT_VERSION = 1
@@ -29,6 +29,7 @@ const DEFAULT_LOCK_RETRY_MS = 10
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SAFE_POLICY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/@{}^~:+-]{0,254}$/
+const SAFE_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 const blockingSleep = milliseconds => {
   const buffer = new SharedArrayBuffer(4)
@@ -108,6 +109,38 @@ export const safeWorkspaceComponent = (value, label) => {
   return component
 }
 
+const canonicalizeResourcePath = path => {
+  const absolute = resolve(path)
+  assertNoSymlinkComponents(absolute)
+  let existing = absolute
+  const missing = []
+  while (!existsSync(existing)) {
+    const parent = dirname(existing)
+    if (parent === existing) {
+      throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Cannot canonicalize trusted resource path: ${absolute}`)
+    }
+    missing.unshift(basename(existing))
+    existing = parent
+  }
+  assertNoSymlinkComponents(existing, { allowMissing: false })
+  return resolve(realpathSync(existing), ...missing)
+}
+
+const validateTrustedRemoteUrl = (value, policyId) => {
+  const remoteUrl = String(value || '').trim()
+  if (!remoteUrl || /[\u0000-\u0020\u007f]/.test(remoteUrl)) {
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace remote URL is missing or unsafe for policy ${policyId}`)
+  }
+  let parsed
+  try { parsed = new URL(remoteUrl) } catch {
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace remote URL must be an absolute HTTPS or SSH URL for policy ${policyId}`)
+  }
+  if (!['https:', 'ssh:'].includes(parsed.protocol) || !parsed.hostname) {
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace remote URL must use HTTPS or SSH and cannot be a local/file URL for policy ${policyId}`)
+  }
+  return remoteUrl
+}
+
 const validatePolicyShape = policy => {
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
     throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', 'Workspace policy must be an object')
@@ -116,19 +149,50 @@ const validatePolicyShape = policy => {
   if (!SAFE_POLICY_ID.test(policyId)) {
     throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', 'Workspace policyId is missing or unsafe')
   }
-  const root = resolve(String(policy.root || DEFAULT_ROOT))
-  const repository = resolve(String(policy.repository || ''))
-  const baseRef = String(policy.baseRef || '').trim()
-  if (!isAbsolute(String(policy.root || DEFAULT_ROOT))) {
+  const configuredRoot = String(policy.root || DEFAULT_ROOT)
+  const configuredRepository = String(policy.repository || '')
+  if (!isAbsolute(configuredRoot)) {
     throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace root must be absolute for policy ${policyId}`)
   }
-  if (!policy.repository || !isAbsolute(String(policy.repository))) {
+  if (!configuredRepository || !isAbsolute(configuredRepository)) {
     throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace repository must be an absolute trusted path for policy ${policyId}`)
   }
+  const root = canonicalizeResourcePath(configuredRoot)
+  const repository = canonicalizeResourcePath(configuredRepository)
+  if (isInside(repository, root) || isInside(root, repository)) {
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace root and repository overlap for policy ${policyId}`)
+  }
+  const baseRef = String(policy.baseRef || '').trim()
   if (!baseRef || !SAFE_REF.test(baseRef) || baseRef.startsWith('-') || baseRef.includes('..')) {
     throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace baseRef is missing or unsafe for policy ${policyId}`)
   }
-  return { policyId, root, repository, baseRef }
+  const remote = policy.remote
+  if (!remote || typeof remote !== 'object' || Array.isArray(remote)) {
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace trusted remote is required for policy ${policyId}`)
+  }
+  const remoteName = String(remote.name || '').trim()
+  if (!SAFE_REMOTE_NAME.test(remoteName) || remoteName === '.' || remoteName === '..') {
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace remote name is missing or unsafe for policy ${policyId}`)
+  }
+  const remoteUrl = validateTrustedRemoteUrl(remote.url, policyId)
+  return { policyId, root, repository, baseRef, remote: { name: remoteName, url: remoteUrl } }
+}
+
+const assertDistinctPolicyResources = policies => {
+  const resources = []
+  for (const policy of policies.values()) {
+    for (const [kind, path] of [['repository', policy.repository], ['root', policy.root]]) {
+      for (const existing of resources) {
+        if (isInside(existing.path, path) || isInside(path, existing.path)) {
+          throw new WorkspaceManagerError(
+            'WORKSPACE_POLICY_INVALID',
+            `Workspace policies ${existing.policyId} and ${policy.policyId} have duplicate or overlapping canonical ${existing.kind}/${kind} resources`
+          )
+        }
+      }
+      resources.push({ policyId: policy.policyId, kind, path })
+    }
+  }
 }
 
 export const runGitProcess = ({ gitBin = 'git', cwd, args }) => spawnSync(gitBin, args, {
@@ -168,6 +232,7 @@ export const parseWorkspacePolicies = raw => {
     }
     policies.set(policy.policyId, policy)
   }
+  assertDistinctPolicyResources(policies)
   return policies
 }
 
@@ -272,7 +337,7 @@ export class GitWorkspaceManager {
     const metadataDir = resolve(this.metadataRoot, task)
     const metadataPath = resolve(metadataDir, `agent-${agent}.json`)
     const lockKey = createHash('sha256')
-      .update(`${this.policy.policyId}\0${this.repository}\0${task}\0${agent}`)
+      .update(`${this.repository}\0${this.root}\0${task}\0${agent}`)
       .digest('hex')
     return {
       policyId: this.policy.policyId,
@@ -322,7 +387,9 @@ export class GitWorkspaceManager {
     const resolvedFallback = realpathSync(configured)
     if (resolvedFallback !== resolve(configured)
         || isInside(this.repository, resolvedFallback)
-        || isInside(this.root, resolvedFallback)) {
+        || isInside(resolvedFallback, this.repository)
+        || isInside(this.root, resolvedFallback)
+        || isInside(resolvedFallback, this.root)) {
       throw new WorkspaceManagerError('WORKSPACE_FALLBACK_INVALID', 'Non-coding fallback workdir must not be a repository, worktree root, or symlink alias')
     }
     const gitProbe = this._gitResult(['rev-parse', '--is-inside-work-tree'], { cwd: resolvedFallback })
@@ -370,23 +437,23 @@ export class GitWorkspaceManager {
       if (unmerged.trim()) throw new WorkspaceManagerError('WORKSPACE_UNMERGED', 'Workspace has unmerged files; archive refused')
       const dirty = this._git(['status', '--porcelain=v1', '--untracked-files=all'], { cwd: expected.workspacePath })
       if (dirty.trim()) throw new WorkspaceManagerError('WORKSPACE_DIRTY', 'Workspace has modified or untracked files; archive refused')
-      const head = this._git(['rev-parse', 'HEAD'], { cwd: expected.workspacePath }).trim()
-      if (head !== metadata.baseCommit) {
-        const upstreamResult = this._gitResult(
-          ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
-          { cwd: expected.workspacePath }
+      const ignored = this._git(
+        ['ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--'],
+        { cwd: expected.workspacePath }
+      )
+      if (ignored) throw new WorkspaceManagerError('WORKSPACE_DIRTY', 'Workspace has ignored untracked files; archive refused')
+      const indexEntries = this._git(['ls-files', '-v', '-z', '--'], { cwd: expected.workspacePath })
+        .split('\0')
+        .filter(Boolean)
+      const hiddenEntries = indexEntries.filter(entry => !entry.startsWith('H '))
+      if (hiddenEntries.length) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_INDEX_HIDDEN',
+          'Workspace index contains skip-worktree, assume-unchanged, or another non-normal tracked-file flag; archive refused'
         )
-        if (upstreamResult.status !== 0 || !upstreamResult.stdout.trim()) {
-          throw new WorkspaceManagerError('WORKSPACE_UNPUSHED', 'Workspace has commits beyond baseline and no verified upstream; archive refused')
-        }
-        const ahead = Number(this._git(
-          ['rev-list', '--count', `${upstreamResult.stdout.trim()}..HEAD`],
-          { cwd: expected.workspacePath }
-        ).trim())
-        if (!Number.isSafeInteger(ahead) || ahead > 0) {
-          throw new WorkspaceManagerError('WORKSPACE_UNPUSHED', `Workspace has ${ahead || 'unknown'} unpushed commits; archive refused`)
-        }
       }
+      const head = this._git(['rev-parse', 'HEAD'], { cwd: expected.workspacePath }).trim()
+      if (head !== metadata.baseCommit) this._assertHeadPublishedToTrustedRemote(expected, head)
       this._git(['worktree', 'remove', '--', expected.workspacePath], { cwd: this.repository })
       if (existsSync(expected.workspacePath)) {
         throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_FAILED', 'Git reported success but workspace path still exists')
@@ -395,6 +462,41 @@ export class GitWorkspaceManager {
       atomicWriteJson(expected.metadataPath, archived)
       return archived
     })
+  }
+
+  _assertHeadPublishedToTrustedRemote(expected, head) {
+    const { name, url } = this.policy.remote
+    const configuredUrls = this._git(['remote', 'get-url', '--all', name], { cwd: this.repository })
+      .split(/\r?\n/)
+      .map(value => value.trim())
+      .filter(Boolean)
+    if (configuredUrls.length !== 1 || configuredUrls[0] !== url) {
+      throw new WorkspaceManagerError(
+        'WORKSPACE_REMOTE_UNTRUSTED',
+        `Trusted remote ${name} URL does not exactly match workspace policy; archive refused`
+      )
+    }
+    this._git([
+      'fetch', '--prune', '--no-tags', name,
+      `+refs/heads/*:refs/remotes/${name}/*`
+    ], { cwd: this.repository })
+    const prefix = `refs/remotes/${name}/`
+    const remoteRefs = this._git(['for-each-ref', '--format=%(refname)', prefix], { cwd: this.repository })
+      .split(/\r?\n/)
+      .map(value => value.trim())
+      .filter(value => value.startsWith(prefix) && value !== `${prefix}HEAD`)
+    for (const remoteRef of remoteRefs) {
+      const containment = this._gitResult(['merge-base', '--is-ancestor', head, remoteRef], { cwd: expected.workspacePath })
+      if (containment.status === 0 && !containment.error) return
+      if (containment.status > 1 || containment.error) {
+        const detail = containment.stderr.trim() || containment.error?.message || `exit ${containment.status}`
+        throw new WorkspaceManagerError('WORKSPACE_GIT_ERROR', `git merge-base publication check failed: ${detail}`)
+      }
+    }
+    throw new WorkspaceManagerError(
+      'WORKSPACE_UNPUSHED',
+      `Workspace HEAD is not contained by any freshly fetched ${name} remote-tracking branch; archive refused`
+    )
   }
 
   _ensureLocked(expected) {
@@ -435,6 +537,8 @@ export class GitWorkspaceManager {
       root: this.root,
       repository: this.repository,
       baseRef: this.policy.baseRef,
+      remoteName: this.policy.remote.name,
+      remoteUrl: this.policy.remote.url,
       baseCommit,
       taskId: expected.taskId,
       agentId: expected.agentId,
@@ -513,6 +617,8 @@ export class GitWorkspaceManager {
       root: this.root,
       repository: this.repository,
       baseRef: this.policy.baseRef,
+      remoteName: this.policy.remote.name,
+      remoteUrl: this.policy.remote.url,
       taskId: expected.taskId,
       agentId: expected.agentId,
       role: expected.role,
