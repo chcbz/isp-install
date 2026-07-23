@@ -1612,6 +1612,12 @@ export class AckOutbox {
         return
       } catch (error) {
         if (error?.code === 'EEXIST') {
+          if (this._lockOwnedByCurrentRuntime()) {
+            throw new AgentProtocolError(
+              'ACK_OUTBOX_LOCK_REENTRANT',
+              `Durable ACK sequence lock re-entry during ${operation} is forbidden`
+            )
+          }
           if (this.lockClock() - startedAt >= this.lockTimeoutMs) {
             throw new AgentProtocolError(
               'ACK_OUTBOX_LOCK_TIMEOUT',
@@ -1626,6 +1632,16 @@ export class AckOutbox {
         } catch {}
         throw new AgentProtocolError('ACK_OUTBOX_LOCK_ERROR', `Failed to acquire durable ACK sequence lock during ${operation}: ${error.message}`)
       }
+    }
+  }
+
+  _lockOwnedByCurrentRuntime() {
+    if (!this.fs.existsSync(this.lockOwnerPath)) return false
+    try {
+      const owner = JSON.parse(this.fs.readFileSync(this.lockOwnerPath, 'utf8'))
+      return owner?.pid === process.pid && owner?.runtimeInstanceId === PROCESS_RUNTIME_INSTANCE_ID
+    } catch {
+      return false
     }
   }
 
@@ -1870,6 +1886,7 @@ export class AckOutbox {
   enqueue(ackEnvelope, marker = { kind: 'entry' }) {
     this._assertHealthy()
     return this._withSequenceLock('enqueue', () => {
+      this._assertHealthy()
       const records = this._scanPendingRecords({ failOnInvalid: true })
       const state = this._validateSequenceEvidence(this._readSequenceState(), this._readHighWater(), records)
       if (state.lastSequence >= Number.MAX_SAFE_INTEGER) throw new Error('ACK outbox sequence exhausted')
@@ -1898,11 +1915,16 @@ export class AckOutbox {
   }
 
   pendingEnvelopes() {
+    return this.withPendingEnvelopesLocked('replay-scan', pending => pending)
+  }
+
+  withPendingEnvelopesLocked(operation, callback) {
     this._assertHealthy()
-    return this._withSequenceLock('replay-scan', () => {
+    return this._withSequenceLock(operation, () => {
+      this._assertHealthy()
       const records = this._scanPendingRecords({ failOnInvalid: true })
       this._validateSequenceEvidence(this._readSequenceState(), this._readHighWater(), records)
-      return records
+      const pending = records
         .sort((left, right) => left.record.queueSequence - right.record.queueSequence)
         .map(item => ({
           fileName: item.fileName,
@@ -1910,6 +1932,7 @@ export class AckOutbox {
           marker: item.record.marker || { kind: 'entry' },
           record: item.record
         }))
+      return callback(pending)
     })
   }
 }
@@ -2550,46 +2573,45 @@ export class AgentMessageProcessor {
 
   replayAcks() {
     if (!this.ackOutbox || !this.sendFn) return 0
-    let pending
+    let replayed = 0
     try {
-      pending = this.ackOutbox.pendingEnvelopes()
+      this.ackOutbox.withPendingEnvelopesLocked('replay-send', pending => {
+        for (const item of pending) {
+          let sent = false
+          try {
+            sent = this.sendFn(item.envelope) === true
+          } catch {
+            break
+          }
+          if (!sent) break
+          try {
+            if (this.ledger && item.marker.kind !== 'none') {
+              this.ledger.markAckEmitted(item.envelope.commandId, item.envelope.ackStatus, item.marker)
+            }
+          } catch (error) {
+            this._failClosed(new AgentProtocolError(
+              'ACK_MARKER_PERSIST_ERROR',
+              `Replayed ACK was sent but marker persistence failed; outbox retained: ${error.message}`
+            ), item.envelope)
+            break
+          }
+          try {
+            this.ackOutbox.dequeue(item.fileName)
+            replayed += 1
+          } catch (error) {
+            this._failClosed(new AgentProtocolError(
+              'ACK_OUTBOX_DEQUEUE_ERROR',
+              `Replayed ACK was sent but dequeue failed; outbox retained: ${error.message}`
+            ), item.envelope)
+            break
+          }
+        }
+      })
     } catch (error) {
       const protocolError = error instanceof AgentProtocolError
         ? error
         : new AgentProtocolError('ACK_OUTBOX_CORRUPT', error.message)
       this._failClosed(protocolError, {})
-      return 0
-    }
-    let replayed = 0
-    for (const item of pending) {
-      let sent = false
-      try {
-        sent = this.sendFn(item.envelope) === true
-      } catch {
-        break
-      }
-      if (!sent) break
-      try {
-        if (this.ledger && item.marker.kind !== 'none') {
-          this.ledger.markAckEmitted(item.envelope.commandId, item.envelope.ackStatus, item.marker)
-        }
-      } catch (error) {
-        this._failClosed(new AgentProtocolError(
-          'ACK_MARKER_PERSIST_ERROR',
-          `Replayed ACK was sent but marker persistence failed; outbox retained: ${error.message}`
-        ), item.envelope)
-        break
-      }
-      try {
-        this.ackOutbox.dequeue(item.fileName)
-        replayed += 1
-      } catch (error) {
-        this._failClosed(new AgentProtocolError(
-          'ACK_OUTBOX_DEQUEUE_ERROR',
-          `Replayed ACK was sent but dequeue failed; outbox retained: ${error.message}`
-        ), item.envelope)
-        break
-      }
     }
     return replayed
   }

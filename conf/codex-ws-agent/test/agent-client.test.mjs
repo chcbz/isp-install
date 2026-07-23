@@ -1038,6 +1038,102 @@ test('ACK sequence lock contention and lock fsync failure fail closed without al
   assert.equal(readdirSync(ackOutbox.acksDir).filter(name => name.endsWith('.json')).length, 0)
 })
 
+const prepareAckQuarantineLockRace = rootDir => {
+  const storageRoot = profileStorageRoot(rootDir)
+  const waiting = new AckOutbox({ rootDir: storageRoot, profile })
+  const quarantining = new AckOutbox({ rootDir: storageRoot, profile })
+  waiting.initialize()
+  quarantining.initialize()
+  waiting.enqueue(buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: 'quarantine-race' }), { kind: 'none' })
+
+  const originalFile = readdirSync(waiting.acksDir).find(name => name.endsWith('.json'))
+  const duplicate = JSON.parse(readFileSync(resolve(waiting.acksDir, originalFile), 'utf8'))
+  writeFileSync(
+    resolve(waiting.acksDir, `${String(duplicate.queueSequence).padStart(20, '0')}-race-duplicate.json`),
+    `${JSON.stringify(duplicate)}\n`,
+    { mode: 0o600 }
+  )
+
+  waiting.fs.mkdirSync(waiting.lockPath, { mode: 0o700 })
+  writeFileSync(waiting.lockOwnerPath, JSON.stringify({
+    pid: process.pid + 1,
+    runtimeInstanceId: 'other-runtime',
+    operation: 'barrier'
+  }), { mode: 0o600 })
+  let barrierRuns = 0
+  waiting.sleepSync = () => {
+    barrierRuns += 1
+    rmSync(waiting.lockPath, { recursive: true, force: true })
+    assert.throws(
+      () => quarantining.pendingEnvelopes(),
+      error => error.code === 'ACK_OUTBOX_SEQUENCE_CORRUPT'
+    )
+  }
+  return { waiting, barrierRuns: () => barrierRuns }
+}
+
+test('enqueue rechecks durable quarantine after waiting for the sequence lock', () => {
+  const rootDir = temporaryDirectory()
+  const { waiting, barrierRuns } = prepareAckQuarantineLockRace(rootDir)
+  const sequenceBefore = JSON.parse(readFileSync(waiting.sequencePath, 'utf8')).lastSequence
+  const highWaterBefore = readdirSync(waiting.highWaterDir).filter(name => /^\d{20}\.json$/.test(name)).length
+
+  assert.throws(
+    () => waiting.enqueue(buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'quarantine-race' }), { kind: 'none' }),
+    error => error.code === 'ACK_OUTBOX_CORRUPT'
+  )
+
+  assert.equal(barrierRuns(), 1)
+  assert.equal(JSON.parse(readFileSync(waiting.sequencePath, 'utf8')).lastSequence, sequenceBefore)
+  assert.equal(readdirSync(waiting.highWaterDir).filter(name => /^\d{20}\.json$/.test(name)).length, highWaterBefore)
+})
+
+test('replay rechecks durable quarantine after lock wait and sends nothing', () => {
+  const rootDir = temporaryDirectory()
+  const { waiting, barrierRuns } = prepareAckQuarantineLockRace(rootDir)
+  let sends = 0
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: async () => {},
+    ackOutbox: waiting,
+    sendFn: () => { sends += 1; return true }
+  })
+
+  assert.equal(processor.replayAcks(), 0)
+  assert.equal(barrierRuns(), 1)
+  assert.equal(sends, 0)
+  assert.equal(processor.failClosedError?.code, 'ACK_OUTBOX_CORRUPT')
+})
+
+test('replay-held lock makes nested enqueue fail immediately instead of deadlocking', () => {
+  const rootDir = temporaryDirectory()
+  const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile, lockTimeoutMs: 5000 })
+  ackOutbox.initialize()
+  ackOutbox.enqueue(buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: 'nested-enqueue' }), { kind: 'none' })
+  let nestedAttempts = 0
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: async () => {},
+    ackOutbox,
+    sendFn: () => {
+      nestedAttempts += 1
+      assert.throws(
+        () => ackOutbox.enqueue(buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'nested-enqueue' }), { kind: 'none' }),
+        error => error.code === 'ACK_OUTBOX_LOCK_REENTRANT'
+      )
+      return false
+    }
+  })
+
+  assert.equal(processor.replayAcks(), 0)
+  assert.equal(nestedAttempts, 1)
+  assert.equal(ackOutbox.pendingEnvelopes().length, 1)
+})
+
 test('ACK replay stops immediately when the first send returns false or throws', () => {
   for (const mode of ['false', 'throw']) {
     const rootDir = temporaryDirectory()
