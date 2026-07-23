@@ -187,7 +187,11 @@ Example trusted policy:
   "cyf": {
     "root": "/home/isp/hosts/cyf/agent-workspaces",
     "repository": "/home/isp/hosts/cyf/repository.git",
-    "baseRef": "refs/heads/master"
+    "baseRef": "refs/heads/master",
+    "remote": {
+      "name": "origin",
+      "url": "https://git.example.com/chaoyoufan/cyf.git"
+    }
   }
 }
 ```
@@ -208,14 +212,17 @@ workspaceNoTaskPolicy=reject
 
 Security and lifecycle rules:
 
-- `root`, `repository`, and `baseRef` come only from the local policy file/inline environment policy. Dispatch payload fields cannot replace them.
+- `root`, `repository`, `baseRef`, and the trusted remote name/URL come only from the local policy file/inline environment policy. Dispatch payload fields cannot replace them. Remote URLs must be absolute HTTPS or SSH URLs; local paths and `file://` remotes are rejected.
+- Policy loading canonicalizes resources and rejects duplicate or overlapping repositories/workspace roots across policy IDs. Workspace lock identity is derived from canonical repository/root plus task/agent, not from a policy alias.
 - `taskId`, canonical `agentId`, and role must be safe 1-64 character ASCII slugs. Traversal, symlink components, repository/root overlap, and arbitrary paths/refs fail closed.
 - The default layout is `/home/isp/hosts/cyf/agent-workspaces/<taskId>/agent-<agentId>` with deterministic branch `codex/<taskId>/agent-<agentId>-<role>`.
 - A cross-process durable lock serializes creation. Durable `creating` metadata is written before `git worktree add`, so a later process can validate and finish a partial creation without adopting an unknown directory or branch.
 - Reuse requires the Git worktree registration, branch, trusted repository, fixed baseline commit, path, task, agent, role, and durable metadata to match exactly.
 - Managed command runs force a fresh Codex exec with both process `cwd` and `--cd` set to the task worktree; a resume session from another worktree is not used.
-- A command without `taskId` is rejected by default. Compatibility is available only when `workspaceNoTaskPolicy=dedicated-workdir`, the command type is explicitly listed in `workspaceNonCodingCommandTypes`, and `workspaceFallbackWorkdir` is a trusted non-Git directory outside the repository and workspace root.
-- Workspaces are never automatically deleted. Archive is an explicit operator action and refuses modified, untracked, unmerged, or unpushed work. It removes only the metadata-owned worktree and preserves the branch and archived metadata.
+- A command without `taskId` is rejected by default. Compatibility is available only when `workspaceNoTaskPolicy=dedicated-workdir`, the command type is explicitly listed in `workspaceNonCodingCommandTypes`, and `workspaceFallbackWorkdir` is a trusted non-Git directory with no overlap in either direction with the repository or workspace root.
+- Workspaces are never automatically deleted. Archive is an explicit operator action and refuses modified, untracked, unmerged, index-hidden (`skip-worktree`, `assume-unchanged`, or any non-normal tracked flag), or unpushed work.
+- For a workspace beyond its baseline, archive verifies the configured remote URL exactly, performs a forced/pruned fetch of remote heads, and requires `HEAD` to be contained by a freshly fetched remote-tracking branch. Local upstream branches, stale refs, and locally substituted remotes are not publication proof.
+- Archive removes only the metadata-owned worktree and preserves the branch and archived metadata.
 
 Operator commands use the installed helper and never accept paths, repositories, refs, or cleanup instructions from an Agent message:
 
@@ -226,7 +233,7 @@ Operator commands use the installed helper and never accept paths, repositories,
 /home/isp/bin/codex_ws_agent.sh workspace archive --policy cyf --task task-123 --agent agent-a --role coder
 ```
 
-The service account needs `0700` create/fsync permissions below the workspace root and Git ref/worktree administrative permissions in the trusted repository. Prefer a dedicated bare repository or mirror so no Agent ever writes a shared main checkout.
+The service account needs `0700` create/fsync permissions below the workspace root, Git ref/worktree administrative permissions in the trusted repository, and credentials/network access to fetch the policy-pinned remote during archive. Prefer a dedicated bare repository or mirror so no Agent ever writes a shared main checkout.
 
 ## Protocol v1 Message Handling
 

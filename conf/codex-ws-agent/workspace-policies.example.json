@@ -2,6 +2,10 @@
   "cyf": {
     "root": "/home/isp/hosts/cyf/agent-workspaces",
     "repository": "/home/isp/hosts/cyf/repository.git",
-    "baseRef": "refs/heads/master"
+    "baseRef": "refs/heads/master",
+    "remote": {
+      "name": "origin",
+      "url": "https://git.example.com/chaoyoufan/cyf.git"
+    }
   }
 }
