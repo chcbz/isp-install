@@ -837,13 +837,12 @@ test('ack outbox retains pending ACKs when send fails and replays on reconnect',
 
   await processor1.handle(command(1))
   await processor1.waitForIdle()
-  assert.equal(runs, 1)
+  assert.equal(runs, 0, 'STARTED not sent in FIFO order must prevent command execution')
 
-  // At this point: RECEIVED/STARTED/SUCCEEDED should be in outbox since send failed
   const pendingPreReplay = ackOutbox.pendingEnvelopes()
   assert.ok(pendingPreReplay.length >= 1, 'outbox should have pending ACKs after failed sends')
 
-  // Now simulate reconnect: create new processor with same ledger/outbox, send succeeds
+  // Simulate reconnect and drain the already-initialized durable outbox.
   sendSucceeds = true
   const processor2 = new AgentMessageProcessor({
     profile,
@@ -852,14 +851,169 @@ test('ack outbox retains pending ACKs when send fails and replays on reconnect',
     runChat: async () => {},
     ledger,
     ackOutbox,
-    sendFn: () => true
+    sendFn: () => sendSucceeds
   })
-  processor2.start({ drain: false })
   const replayed = processor2.replayAcks()
   assert.ok(replayed >= 1, 'should replay at least one pending ACK')
 
   const pendingPostReplay = ackOutbox.pendingEnvelopes()
   assert.equal(pendingPostReplay.length, 0, 'outbox should be empty after successful replay')
+})
+
+test('live command ACKs recover from an initial RECEIVED send failure in global FIFO order', async () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ledger.initialize()
+  ackOutbox.initialize()
+
+  const attempts = []
+  const delivered = []
+  let firstAttempt = true
+  let runs = 0
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => {
+      attempts.push(envelope.ackStatus)
+      if (firstAttempt) {
+        firstAttempt = false
+        return false
+      }
+      delivered.push(envelope.ackStatus)
+      return true
+    }
+  })
+  processor.start()
+
+  await processor.handle(command(81))
+  await processor.waitForIdle()
+
+  assert.equal(runs, 1)
+  assert.deepEqual(attempts, [
+    ACK_STATUS.RECEIVED,
+    ACK_STATUS.RECEIVED,
+    ACK_STATUS.STARTED,
+    ACK_STATUS.SUCCEEDED
+  ])
+  assert.deepEqual(delivered, [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED])
+  assert.equal(ackOutbox.pendingEnvelopes().length, 0)
+  const entry = ledger.getEntry('command-81')
+  assert.equal(entry.ackReceivedEmitted, true)
+  assert.equal(entry.ackStartedEmitted, true)
+  assert.equal(entry.ackCompletedEmitted, true)
+})
+
+test('older pending ACK blocks a live ACK and leaves the current durable marker false', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ledger.initialize()
+  ackOutbox.initialize()
+
+  const current = normalizeInboundMessage(command(82))
+  ledger.checkOrRecord(current.commandId, CommandFingerprint.compute(current), {
+    messageId: current.messageId,
+    commandType: current.commandType,
+    targetAgentId: current.targetAgentId,
+    taskId: current.taskId,
+    workItemId: current.workItemId
+  })
+  ackOutbox.enqueue(
+    buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: 'older-pending' }),
+    { kind: 'none' }
+  )
+  const attempted = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => {
+      attempted.push(envelope.commandId)
+      return envelope.commandId !== 'older-pending'
+    }
+  })
+
+  const delivery = processor._emitAck(ACK_STATUS.RECEIVED, {
+    commandId: current.commandId,
+    messageId: current.messageId
+  })
+
+  assert.deepEqual(delivery, {
+    persisted: true,
+    sent: false,
+    markerPersisted: false,
+    dequeued: false
+  })
+  assert.deepEqual(attempted, ['older-pending'])
+  assert.deepEqual(
+    ackOutbox.pendingEnvelopes().map(item => item.envelope.commandId),
+    ['older-pending', current.commandId]
+  )
+  assert.equal(ledger.getEntry(current.commandId).ackReceivedEmitted, false)
+})
+
+test('live ACK reports success only after its own ordered marker and dequeue complete', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ledger.initialize()
+  ackOutbox.initialize()
+
+  const older = normalizeInboundMessage(command(83))
+  const current = normalizeInboundMessage(command(84))
+  for (const message of [older, current]) {
+    ledger.checkOrRecord(message.commandId, CommandFingerprint.compute(message), {
+      messageId: message.messageId,
+      commandType: message.commandType,
+      targetAgentId: message.targetAgentId,
+      taskId: message.taskId,
+      workItemId: message.workItemId
+    })
+  }
+  ackOutbox.enqueue(
+    buildAckEnvelope(profile, ACK_STATUS.RECEIVED, {
+      commandId: older.commandId,
+      messageId: older.messageId
+    }),
+    { kind: 'entry' }
+  )
+  const delivered = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => { delivered.push(envelope.commandId); return true }
+  })
+
+  const delivery = processor._emitAck(ACK_STATUS.RECEIVED, {
+    commandId: current.commandId,
+    messageId: current.messageId
+  })
+
+  assert.deepEqual(delivery, {
+    persisted: true,
+    sent: true,
+    markerPersisted: true,
+    dequeued: true
+  })
+  assert.deepEqual(delivered, [older.commandId, current.commandId])
+  assert.equal(ledger.getEntry(older.commandId).ackReceivedEmitted, true)
+  assert.equal(ledger.getEntry(current.commandId).ackReceivedEmitted, true)
+  assert.equal(ackOutbox.pendingEnvelopes().length, 0)
 })
 
 test('two initialized ACK outboxes allocate one FIFO sequence across instances and restart', () => {
