@@ -21,8 +21,10 @@ After files are installed, run `cd /home/isp/apps/codex-ws-agent && npm ci --omi
 
 A06 runtime notes:
 - keep one canonical `agentId` on one client at a time; the durable inbox, dedupe ledger, and ACK outbox are profile-local
-- `commandId` dedupe is fingerprint-based, so same payload re-deliveries replay only terminal ACKs while different payloads with the same `commandId` fail closed
-- reconnects must call the built-in ACK replay path; do not clear the outbox on send failure
+- `commandId` dedupe uses canonical business-payload fingerprints; transport redelivery metadata is ignored, deep payload/array changes are significant, and conflicts are stored separately without changing the original terminal entry
+- never auto-rerun a recovered `processing/` record; A06 moves it to `recovery-required/`, persists a `REJECTED` ACK, and pauses for reconciliation or a new server-issued `commandId`
+- reconnects must call the built-in ACK replay path; do not clear the outbox on send failure, marker failure, corrupt-record quarantine, or uncertain recovery
+- each ACK has an independent `messageId`; only `correlationId` references the dispatch `messageId`
 
 ## Config files
 
@@ -41,7 +43,7 @@ A06 runtime notes:
 - `COMMAND_INBOX_DIR=/home/isp/apps/codex-ws-agent/data/inbox`
 - `COMMAND_INBOX_SUCCESS_POLICY=archive`
 
-Use `archive` for initial rollout. Do not run old and new clients concurrently for the same canonical `agentId`. A rollback to the old client must preserve or drain `pending/` and `processing/`; the old client cannot consume A05 inbox files.
+Use `archive` for initial rollout. Do not run old and new clients concurrently for the same canonical `agentId`. A rollback must preserve `pending/`, `processing/`, `recovery-required/`, ledger, conflict, blocked/quarantine, and ACK outbox state; the old client cannot consume these records safely.
 
 ## Verify
 

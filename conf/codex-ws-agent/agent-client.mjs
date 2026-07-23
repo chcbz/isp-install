@@ -623,6 +623,7 @@ export class PersistentCommandInbox {
     this.pendingDir = resolve(this.profileDir, 'pending')
     this.processingDir = resolve(this.profileDir, 'processing')
     this.archiveDir = resolve(this.profileDir, 'archive')
+    this.recoveryDir = resolve(this.profileDir, 'recovery-required')
     this.quarantineDir = resolve(this.profileDir, 'quarantine')
     this.sequencePath = resolve(this.profileDir, 'sequence.json')
     this.lastSequence = 0
@@ -631,7 +632,7 @@ export class PersistentCommandInbox {
   initialize() {
     ensureSecureDirectory(this.fs, this.rootDir)
     ensureSecureDirectory(this.fs, this.profileDir)
-    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.quarantineDir]) {
+    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.recoveryDir, this.quarantineDir]) {
       ensureSecureDirectory(this.fs, directory)
     }
     this.secureExistingQueueFiles()
@@ -640,7 +641,7 @@ export class PersistentCommandInbox {
   }
 
   secureExistingQueueFiles() {
-    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.quarantineDir]) {
+    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.recoveryDir, this.quarantineDir]) {
       for (const fileName of this.fs.readdirSync(directory)) {
         if (!fileName.endsWith('.json') && !fileName.endsWith('.reason.txt')) continue
         const filePath = resolve(directory, fileName)
@@ -661,7 +662,7 @@ export class PersistentCommandInbox {
       persisted = sequence.lastSequence
     }
     let observed = 0
-    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.quarantineDir]) {
+    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.recoveryDir, this.quarantineDir]) {
       for (const fileName of this.listJsonFiles(directory)) {
         const filePath = resolve(directory, fileName)
         forceSecureFileMode(this.fs, filePath)
@@ -726,11 +727,29 @@ export class PersistentCommandInbox {
   }
 
   recover() {
-    const result = { recovered: 0, completed: 0, quarantined: 0 }
+    const result = {
+      recovered: 0,
+      completed: 0,
+      quarantined: 0,
+      recoveryRequired: 0,
+      recoveryRecords: [],
+      completedRecords: []
+    }
     for (const fileName of this.listJsonFiles(this.pendingDir)) {
       const filePath = resolve(this.pendingDir, fileName)
       try {
         this.readAndValidate(filePath, new Set(['pending']))
+      } catch (error) {
+        this.quarantine(filePath, error)
+        result.quarantined += 1
+      }
+    }
+    for (const fileName of this.listJsonFiles(this.recoveryDir)) {
+      const filePath = resolve(this.recoveryDir, fileName)
+      try {
+        const validated = this.readAndValidate(filePath, new Set(['recovery_required']))
+        result.recoveryRecords.push({ ...validated, fileName, path: filePath })
+        result.recoveryRequired += 1
       } catch (error) {
         this.quarantine(filePath, error)
         result.quarantined += 1
@@ -747,20 +766,24 @@ export class PersistentCommandInbox {
         continue
       }
       if (validated.record.state === 'completed' && validated.record.outcome) {
+        result.completedRecords.push(validated)
         this.settleCompletedFile(sourcePath, fileName, validated.record)
         result.completed += 1
-      } else {
-        const pendingPath = this.uniquePath(this.pendingDir, fileName)
-        durableRename(this.fs, sourcePath, pendingPath)
-        atomicWriteJson(this.fs, pendingPath, {
-          ...validated.record,
-          profileId: this.profile.profileId,
-          state: 'pending',
-          recoveredAt: this.now(),
-          recoveryCount: Number(validated.record.recoveryCount || 0) + 1
-        })
-        result.recovered += 1
+        continue
       }
+      const recoveryPath = this.uniquePath(this.recoveryDir, fileName)
+      durableRename(this.fs, sourcePath, recoveryPath)
+      const record = {
+        ...validated.record,
+        profileId: this.profile.profileId,
+        state: 'recovery_required',
+        recoveredAt: this.now(),
+        recoveryReason: 'PROCESSING_OUTCOME_UNKNOWN: automatic re-execution is forbidden',
+        recoveryCount: Number(validated.record.recoveryCount || 0) + 1
+      }
+      atomicWriteJson(this.fs, recoveryPath, record)
+      result.recoveryRecords.push({ record, normalized: validated.normalized, fileName, path: recoveryPath })
+      result.recoveryRequired += 1
     }
     return result
   }
@@ -830,13 +853,21 @@ export class PersistentCommandInbox {
   }
 
   count(state = 'pending') {
-    const directory = state === 'processing' ? this.processingDir : state === 'archive' ? this.archiveDir : this.pendingDir
+    const directory = state === 'processing' ? this.processingDir
+      : state === 'archive' ? this.archiveDir
+      : state === 'recovery' || state === 'recovery_required' ? this.recoveryDir
+      : this.pendingDir
     return this.listJsonFiles(directory).length
   }
 
   list(state = 'pending') {
-    const directory = state === 'processing' ? this.processingDir : state === 'archive' ? this.archiveDir : this.pendingDir
-    const expectedStates = state === 'archive' ? new Set(['completed']) : new Set([state])
+    const directory = state === 'processing' ? this.processingDir
+      : state === 'archive' ? this.archiveDir
+      : state === 'recovery' || state === 'recovery_required' ? this.recoveryDir
+      : this.pendingDir
+    const expectedStates = state === 'archive' ? new Set(['completed'])
+      : state === 'recovery' ? new Set(['recovery_required'])
+      : new Set([state])
     return this.listJsonFiles(directory).map(fileName => this.readAndValidate(resolve(directory, fileName), expectedStates).record)
   }
 
@@ -869,6 +900,9 @@ export class PersistentCommandInbox {
       }
     } else if (hasOwn(record, 'outcome')) {
       throw new Error('non-completed inbox record must not contain an outcome marker')
+    }
+    if (record.state === 'recovery_required' && typeof record.recoveryReason !== 'string') {
+      throw new Error('recovery-required inbox record requires a recoveryReason')
     }
     let normalized
     try {
@@ -920,31 +954,79 @@ export const ACK_STATUS = Object.freeze({
   REJECTED: 'REJECTED'
 })
 
+export const LEDGER_STATUS = Object.freeze({
+  ...ACK_STATUS,
+  RECOVERY_REQUIRED: 'RECOVERY_REQUIRED'
+})
+
+const ACK_STATUS_VALUES = new Set(Object.values(ACK_STATUS))
+const LEDGER_STATUS_VALUES = new Set(Object.values(LEDGER_STATUS))
+const TERMINAL_LEDGER_STATUSES = new Set([ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED, ACK_STATUS.REJECTED])
+const FINGERPRINT_TRANSPORT_FIELDS = new Set([
+  'schemaVersion', 'type', 'messageType', 'messageId', 'message_id', 'requestId', 'request_id', 'commandId',
+  'runtimeInstanceId', 'runtime_instance_id', 'runtimeId', 'runtime_id', 'runtime',
+  'tenantId', 'clientId', 'profileId',
+  'agentId', 'sourceAgentId', 'senderAgentId', 'senderId', 'senderType', 'senderName',
+  'receiverAgentId', 'correlationId', 'correlation_id', 'causationId', 'causation_id',
+  'conversationId', 'conversation_id', 'traceId', 'trace_id', 'spanId', 'span_id',
+  'timestamp', 'sentAt', 'sent_at', 'issuedAt', 'issued_at', 'expiresAt', 'expires_at', 'attempt',
+  'sessionId', 'session_id', 'session', 'runtimeSessionId', 'codexSessionId'
+])
+const FINGERPRINT_SEMANTIC_ENVELOPE_FIELDS = Object.freeze([
+  'commandType', 'targetAgentId', 'taskId', 'workItemId'
+])
+const FINGERPRINT_COMPAT_BUSINESS_FIELDS = Object.freeze([
+  'prompt', 'content', 'instruction', 'description', 'title', 'currentTaskTitle'
+])
+const FINGERPRINT_PAYLOAD_ROOT_CONTROL_FIELDS = new Set([
+  ...FINGERPRINT_TRANSPORT_FIELDS,
+  ...FINGERPRINT_SEMANTIC_ENVELOPE_FIELDS
+])
+
 const computeSha256 = text => {
   const hash = createHash('sha256')
   hash.update(text, 'utf8')
   return hash.digest('hex')
 }
 
-const canonicalizeFingerprintValue = value => {
-  if (value === null || typeof value !== 'object') return value
-  if (Array.isArray(value)) return value.map(canonicalizeFingerprintValue)
-  const entries = []
-  for (const key of Object.keys(value).sort()) {
-    if (value[key] === undefined) continue
-    entries.push([key, canonicalizeFingerprintValue(value[key])])
+const canonicalizeFingerprintValue = (value, path = '$') => {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new AgentProtocolError('INVALID_COMMAND_PAYLOAD', `${path} must contain finite JSON numbers`)
+    return Object.is(value, -0) ? 0 : value
   }
-  return Object.fromEntries(entries)
+  if (Array.isArray(value)) {
+    return value.map((entry, index) => canonicalizeFingerprintValue(entry, `${path}[${index}]`))
+  }
+  if (!isObject(value)) {
+    throw new AgentProtocolError('INVALID_COMMAND_PAYLOAD', `${path} contains a non-JSON value`)
+  }
+  const canonical = {}
+  for (const key of Object.keys(value).sort()) {
+    if (FINGERPRINT_TRANSPORT_FIELDS.has(key) || value[key] === undefined) continue
+    canonical[key] = canonicalizeFingerprintValue(value[key], `${path}.${key}`)
+  }
+  return canonical
 }
 
 const buildFingerprintSource = normalized => {
-  const source = {}
-  for (const [key, value] of Object.entries(normalized || {})) {
-    if (key === 'rawPayload' || key === 'payload' || key === 'type' || key === 'messageType' || key === 'schemaVersion') continue
-    if (value === undefined) continue
-    source[key] = value
+  const businessPayload = {}
+  if (isObject(normalized?.payload)) {
+    for (const key of Object.keys(normalized.payload).sort()) {
+      if (FINGERPRINT_PAYLOAD_ROOT_CONTROL_FIELDS.has(key) || normalized.payload[key] === undefined) continue
+      businessPayload[key] = normalized.payload[key]
+    }
   }
-  return source
+  for (const field of FINGERPRINT_COMPAT_BUSINESS_FIELDS) {
+    if (hasOwn(normalized || {}, field) && normalized[field] !== undefined) businessPayload[field] = normalized[field]
+  }
+  return {
+    commandType: String(normalized?.commandType || ''),
+    targetAgentId: String(normalized?.targetAgentId || ''),
+    taskId: String(normalized?.taskId || ''),
+    workItemId: String(normalized?.workItemId || ''),
+    businessPayload: canonicalizeFingerprintValue(businessPayload)
+  }
 }
 
 export class CommandFingerprint {
@@ -954,94 +1036,194 @@ export class CommandFingerprint {
 }
 
 export class DurableDedupeLedger {
-  constructor({ rootDir, profile, now = () => Date.now(), fs = DEFAULT_FS_OPERATIONS }) {
+  constructor({ rootDir, profile, now = () => Date.now(), createId = () => randomUUID(), fs = DEFAULT_FS_OPERATIONS }) {
     if (!profile?.agentId) throw new Error('profile.agentId is required for the dedupe ledger')
     this.rootDir = resolve(rootDir)
     this.profile = profile
     this.now = now
+    this.createId = createId
     this.fs = { ...DEFAULT_FS_OPERATIONS, ...fs }
     this.ledgerDir = resolve(this.rootDir, 'ledger')
+    this.conflictsDir = resolve(this.rootDir, 'ledger-conflicts')
+    this.quarantineDir = resolve(this.rootDir, 'ledger-quarantine')
+    this.blockedDir = resolve(this.rootDir, 'ledger-blocked')
+    this.corruptions = []
   }
 
   initialize() {
-    ensureSecureDirectory(this.fs, this.ledgerDir)
+    for (const directory of [this.ledgerDir, this.conflictsDir, this.quarantineDir, this.blockedDir]) {
+      ensureSecureDirectory(this.fs, directory)
+    }
+    this.corruptions = []
+    for (const fileName of this.fs.readdirSync(this.blockedDir)) {
+      if (!fileName.endsWith('.json')) continue
+      const path = resolve(this.blockedDir, fileName)
+      forceSecureFileMode(this.fs, path)
+      try {
+        const marker = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+        this.corruptions.push(isObject(marker) ? marker : { reason: 'invalid ledger blocked marker', fileName })
+      } catch (error) {
+        this.corruptions.push({ reason: `invalid ledger blocked marker: ${error.message}`, fileName })
+      }
+    }
     for (const fileName of this.fs.readdirSync(this.ledgerDir)) {
       if (!fileName.endsWith('.json')) continue
-      forceSecureFileMode(this.fs, resolve(this.ledgerDir, fileName))
+      const path = resolve(this.ledgerDir, fileName)
+      forceSecureFileMode(this.fs, path)
+      const commandId = this._decodeCommandId(fileName)
+      try {
+        const entry = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+        this._validateEntry(entry, commandId || undefined)
+      } catch (error) {
+        this._quarantineLedgerFile(path, commandId, error)
+      }
     }
+    for (const fileName of this.fs.readdirSync(this.conflictsDir)) {
+      if (!fileName.endsWith('.json')) continue
+      const path = resolve(this.conflictsDir, fileName)
+      forceSecureFileMode(this.fs, path)
+      try {
+        this._validateConflict(JSON.parse(this.fs.readFileSync(path, 'utf8')), fileName.slice(0, -5))
+      } catch (error) {
+        this._quarantineLedgerFile(path, '', error)
+      }
+    }
+    for (const directory of [this.quarantineDir, this.blockedDir]) {
+      for (const fileName of this.fs.readdirSync(directory)) {
+        if (fileName.endsWith('.json') || fileName.endsWith('.reason.txt')) {
+          forceSecureFileMode(this.fs, resolve(directory, fileName))
+        }
+      }
+    }
+    return { corruptions: this.corruptions.length }
+  }
+
+  hasCorruption() {
+    return this.corruptions.length > 0
+  }
+
+  corruptionSummary() {
+    return this.corruptions.map(entry => entry.reason || entry.message || 'corrupt durable ledger').join('; ')
   }
 
   _entryPath(commandId) {
-    const safe = Buffer.from(String(commandId), 'utf8').toString('hex')
-    return resolve(this.ledgerDir, safe + '.json')
+    return resolve(this.ledgerDir, `${Buffer.from(String(commandId), 'utf8').toString('hex')}.json`)
+  }
+
+  _blockedPath(commandId) {
+    const name = commandId
+      ? `${Buffer.from(String(commandId), 'utf8').toString('hex')}.json`
+      : `unknown-${this.createId()}.json`
+    return resolve(this.blockedDir, name)
+  }
+
+  _conflictPath(recordId) {
+    return resolve(this.conflictsDir, `${recordId}.json`)
+  }
+
+  _decodeCommandId(fileName) {
+    const encoded = fileName.replace(/\.json$/, '')
+    if (!encoded || !/^[0-9a-f]+$/i.test(encoded) || encoded.length % 2) return ''
+    try {
+      const decoded = Buffer.from(encoded, 'hex').toString('utf8')
+      return Buffer.from(decoded, 'utf8').toString('hex') === encoded.toLowerCase() ? decoded : ''
+    } catch { return '' }
+  }
+
+  _validateEntry(entry, expectedCommandId) {
+    if (!isObject(entry) || entry.formatVersion !== 1 || typeof entry.commandId !== 'string' || !entry.commandId.trim()) {
+      throw new Error('invalid dedupe ledger entry shape')
+    }
+    if (expectedCommandId && entry.commandId !== expectedCommandId) throw new Error('dedupe ledger commandId/file mismatch')
+    if (typeof entry.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(entry.fingerprint)) {
+      throw new Error('invalid dedupe ledger fingerprint')
+    }
+    if (!LEDGER_STATUS_VALUES.has(entry.status)) throw new Error(`invalid dedupe ledger status: ${entry.status}`)
+    if (entry.agentId && entry.agentId !== this.profile.agentId) throw new Error('dedupe ledger agent identity mismatch')
+    if ([ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry.status) && !isObject(entry.outcome)) {
+      throw new Error('terminal dedupe ledger entry requires outcome')
+    }
+    if (entry.status === LEDGER_STATUS.RECOVERY_REQUIRED && typeof entry.rejectReason !== 'string') {
+      throw new Error('recovery-required ledger entry requires rejectReason')
+    }
+    return entry
+  }
+
+  _validateConflict(conflict, expectedRecordId) {
+    if (!isObject(conflict) || conflict.formatVersion !== 1
+        || typeof conflict.recordId !== 'string' || !conflict.recordId
+        || typeof conflict.commandId !== 'string' || !conflict.commandId) {
+      throw new Error('invalid dedupe conflict record shape')
+    }
+    if (expectedRecordId && conflict.recordId !== expectedRecordId) throw new Error('dedupe conflict record/file mismatch')
+    if (!/^[0-9a-f]{64}$/.test(conflict.existingFingerprint || '')
+        || !/^[0-9a-f]{64}$/.test(conflict.conflictingFingerprint || '')) {
+      throw new Error('invalid dedupe conflict fingerprint')
+    }
+    if (!LEDGER_STATUS_VALUES.has(conflict.existingStatus)) throw new Error('invalid dedupe conflict existingStatus')
+    if (conflict.agentId && conflict.agentId !== this.profile.agentId) throw new Error('dedupe conflict agent identity mismatch')
+    return conflict
+  }
+
+  _uniquePath(directory, fileName) {
+    const target = resolve(directory, fileName)
+    if (!this.fs.existsSync(target)) return target
+    const stem = fileName.endsWith('.json') ? fileName.slice(0, -5) : fileName
+    return resolve(directory, `${stem}-${this.createId()}.json`)
+  }
+
+  _quarantineLedgerFile(sourcePath, commandId, error) {
+    if (!this.fs.existsSync(sourcePath)) return
+    const fileName = sourcePath.split('/').pop()
+    const targetPath = this._uniquePath(this.quarantineDir, fileName)
+    durableRename(this.fs, sourcePath, targetPath)
+    atomicWriteText(this.fs, `${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
+    const marker = {
+      formatVersion: 1,
+      commandId: commandId || '',
+      profileId: this.profile.profileId,
+      agentId: this.profile.agentId,
+      quarantinedAt: this.now(),
+      quarantinedFile: targetPath.split('/').pop(),
+      reason: `CORRUPT_LEDGER: ${error.message}`
+    }
+    atomicWriteJson(this.fs, this._blockedPath(commandId), marker)
+    this.corruptions.push(marker)
+  }
+
+  _assertHealthy() {
+    if (this.hasCorruption()) {
+      throw new AgentProtocolError('DEDUPE_LEDGER_CORRUPT', this.corruptionSummary() || 'durable dedupe ledger requires reconciliation')
+    }
   }
 
   getEntry(commandId) {
+    this._assertHealthy()
     const path = this._entryPath(commandId)
     if (!this.fs.existsSync(path)) return null
     forceSecureFileMode(this.fs, path)
     try {
-      const entry = JSON.parse(this.fs.readFileSync(path, 'utf8'))
-      if (!isObject(entry) || entry.formatVersion !== 1 || entry.commandId !== commandId) {
-        throw new Error('invalid dedupe ledger entry')
-      }
-      return entry
-    } catch { return null }
+      return this._validateEntry(JSON.parse(this.fs.readFileSync(path, 'utf8')), commandId)
+    } catch (error) {
+      this._quarantineLedgerFile(path, commandId, error)
+      throw new AgentProtocolError('DEDUPE_LEDGER_CORRUPT', `Corrupt ledger entry for ${commandId}: ${error.message}`)
+    }
   }
 
   _writeEntry(commandId, entry) {
+    this._assertHealthy()
     atomicWriteJson(this.fs, this._entryPath(commandId), entry)
   }
 
-  checkOrRecord(commandId, fingerprint, meta) {
-    const existing = this.getEntry(commandId)
+  _newEntry(commandId, fingerprint, meta, status = ACK_STATUS.RECEIVED) {
     const now = this.now()
-
-    if (existing) {
-      if (existing.fingerprint !== fingerprint) {
-        this._writeEntry(commandId, {
-          ...existing,
-          status: ACK_STATUS.REJECTED,
-          rejectedAt: now,
-          rejectReason: 'FINGERPRINT_CONFLICT: same commandId with different payload'
-        })
-        return { action: 'conflict', entry: this.getEntry(commandId) }
-      }
-      return { action: 'duplicate', entry: existing }
-    }
-
-    if (Number.isSafeInteger(meta.expiresAt) && meta.expiresAt > 0 && now > meta.expiresAt) {
-      const entry = {
-        formatVersion: 1,
-        commandId,
-        fingerprint,
-        status: ACK_STATUS.REJECTED,
-        queueSequence: 0,
-        messageId: meta.messageId || '',
-        commandType: meta.commandType || '',
-        targetAgentId: meta.targetAgentId || '',
-        taskId: meta.taskId || '',
-        workItemId: meta.workItemId || '',
-        receivedAt: now,
-        startedAt: null,
-        completedAt: null,
-        rejectedAt: now,
-        rejectReason: 'EXPIRED: command expired before execution',
-        outcome: null,
-        ackReceivedEmitted: false,
-        ackStartedEmitted: false,
-        ackCompletedEmitted: false,
-        ackRejectedEmitted: false
-      }
-      this._writeEntry(commandId, entry)
-      return { action: 'expired', entry }
-    }
-
-    const entry = {
+    return {
       formatVersion: 1,
+      profileId: this.profile.profileId,
+      agentId: this.profile.agentId,
       commandId,
       fingerprint,
-      status: ACK_STATUS.RECEIVED,
+      status,
       queueSequence: 0,
       messageId: meta.messageId || '',
       commandType: meta.commandType || '',
@@ -1051,27 +1233,76 @@ export class DurableDedupeLedger {
       receivedAt: now,
       startedAt: null,
       completedAt: null,
-      rejectedAt: null,
-      rejectReason: null,
+      rejectedAt: status === ACK_STATUS.REJECTED ? now : null,
+      recoveryRequiredAt: status === LEDGER_STATUS.RECOVERY_REQUIRED ? now : null,
+      rejectReason: meta.rejectReason || null,
       outcome: null,
       ackReceivedEmitted: false,
       ackStartedEmitted: false,
       ackCompletedEmitted: false,
       ackRejectedEmitted: false
     }
+  }
+
+  _recordConflict(commandId, existing, fingerprint, meta) {
+    const recordId = this.createId()
+    const conflict = {
+      formatVersion: 1,
+      recordId,
+      profileId: this.profile.profileId,
+      agentId: this.profile.agentId,
+      commandId,
+      existingFingerprint: existing.fingerprint,
+      conflictingFingerprint: fingerprint,
+      existingStatus: existing.status,
+      messageId: meta.messageId || '',
+      commandType: meta.commandType || '',
+      targetAgentId: meta.targetAgentId || '',
+      taskId: meta.taskId || '',
+      workItemId: meta.workItemId || '',
+      detectedAt: this.now(),
+      rejectReason: 'FINGERPRINT_CONFLICT: same commandId with different payload',
+      ackRejectedEmitted: false
+    }
+    atomicWriteJson(this.fs, this._conflictPath(recordId), conflict)
+    return conflict
+  }
+
+  checkOrRecord(commandId, fingerprint, meta) {
+    this._assertHealthy()
+    const existing = this.getEntry(commandId)
+    const now = this.now()
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        const conflict = this._recordConflict(commandId, existing, fingerprint, meta)
+        return { action: 'conflict', entry: existing, conflict }
+      }
+      return { action: 'duplicate', entry: existing }
+    }
+    if (Number.isSafeInteger(meta.expiresAt) && meta.expiresAt > 0 && now > meta.expiresAt) {
+      const entry = this._newEntry(commandId, fingerprint, {
+        ...meta,
+        rejectReason: 'EXPIRED: command expired before execution'
+      }, ACK_STATUS.REJECTED)
+      this._writeEntry(commandId, entry)
+      return { action: 'expired', entry }
+    }
+    const entry = this._newEntry(commandId, fingerprint, meta)
     this._writeEntry(commandId, entry)
     return { action: 'accept', entry }
   }
 
   recordQueueSequence(commandId, queueSequence) {
     const existing = this.getEntry(commandId)
-    if (!existing) return
+    if (!existing) throw new Error(`dedupe ledger entry missing for ${commandId}`)
     this._writeEntry(commandId, { ...existing, queueSequence })
   }
 
   markStarted(commandId) {
     const existing = this.getEntry(commandId)
-    if (!existing) return null
+    if (!existing) throw new Error(`dedupe ledger entry missing for ${commandId}`)
+    if (existing.status === ACK_STATUS.STARTED) return existing
+    if (existing.status !== ACK_STATUS.RECEIVED) throw new Error(`cannot start command from ledger status ${existing.status}`)
     const entry = { ...existing, status: ACK_STATUS.STARTED, startedAt: this.now() }
     this._writeEntry(commandId, entry)
     return entry
@@ -1079,7 +1310,11 @@ export class DurableDedupeLedger {
 
   markCompleted(commandId, outcome) {
     const existing = this.getEntry(commandId)
-    if (!existing) return null
+    if (!existing) throw new Error(`dedupe ledger entry missing for ${commandId}`)
+    if ([ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(existing.status)) return existing
+    if (![ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(existing.status)) {
+      throw new Error(`cannot complete command from ledger status ${existing.status}`)
+    }
     const status = outcome?.status === 'failed' ? ACK_STATUS.FAILED : ACK_STATUS.SUCCEEDED
     const entry = {
       ...existing,
@@ -1098,6 +1333,7 @@ export class DurableDedupeLedger {
   markRejected(commandId, reason) {
     const existing = this.getEntry(commandId)
     if (!existing) return null
+    if (TERMINAL_LEDGER_STATUSES.has(existing.status)) return existing
     const entry = {
       ...existing,
       status: ACK_STATUS.REJECTED,
@@ -1108,53 +1344,67 @@ export class DurableDedupeLedger {
     return entry
   }
 
-  markAckEmitted(commandId, ackStatus) {
+  markRecoveryRequired(commandId, fingerprint, meta, reason) {
     const existing = this.getEntry(commandId)
-    if (!existing) return
+    if (existing && TERMINAL_LEDGER_STATUSES.has(existing.status)) return { entry: existing, conflict: null }
+    const entry = existing || this._newEntry(commandId, fingerprint, meta)
+    if (entry.fingerprint !== fingerprint) {
+      const conflict = this._recordConflict(commandId, entry, fingerprint, meta)
+      return { entry, conflict }
+    }
+    const recoveryEntry = {
+      ...entry,
+      status: LEDGER_STATUS.RECOVERY_REQUIRED,
+      recoveryRequiredAt: this.now(),
+      rejectReason: reason
+    }
+    this._writeEntry(commandId, recoveryEntry)
+    return { entry: recoveryEntry, conflict: null }
+  }
+
+  markAckEmitted(commandId, ackStatus, marker = {}) {
     const field = ackStatus === ACK_STATUS.RECEIVED ? 'ackReceivedEmitted'
       : ackStatus === ACK_STATUS.STARTED ? 'ackStartedEmitted'
       : ackStatus === ACK_STATUS.SUCCEEDED || ackStatus === ACK_STATUS.FAILED ? 'ackCompletedEmitted'
       : ackStatus === ACK_STATUS.REJECTED ? 'ackRejectedEmitted'
       : null
-    if (!field) return
+    if (!field) throw new Error(`unsupported ACK marker status: ${ackStatus}`)
+    if (marker.kind === 'none') return
+    if (marker.kind === 'conflict') {
+      const path = this._conflictPath(marker.recordId)
+      if (!this.fs.existsSync(path)) throw new Error(`conflict record missing: ${marker.recordId}`)
+      forceSecureFileMode(this.fs, path)
+      let conflict
+      try {
+        conflict = this._validateConflict(JSON.parse(this.fs.readFileSync(path, 'utf8')), marker.recordId)
+        if (conflict.commandId !== commandId) throw new Error(`conflict commandId mismatch: ${marker.recordId}`)
+      } catch (error) {
+        this._quarantineLedgerFile(path, commandId, error)
+        throw new AgentProtocolError('DEDUPE_LEDGER_CORRUPT', `Corrupt conflict record ${marker.recordId}: ${error.message}`)
+      }
+      atomicWriteJson(this.fs, path, { ...conflict, [field]: true, ackEmittedAt: this.now() })
+      return
+    }
+    const existing = this.getEntry(commandId)
+    if (!existing) throw new Error(`dedupe ledger entry missing for ACK marker ${commandId}`)
     this._writeEntry(commandId, { ...existing, [field]: true })
   }
 
-  reconcileWithInbox(inboxState) {
-    const results = { staleLedgerEntries: 0, orphanAcks: 0 }
-    for (const fileName of this.fs.readdirSync(this.ledgerDir)) {
+  getConflicts(commandId) {
+    const conflicts = []
+    for (const fileName of this.fs.readdirSync(this.conflictsDir).sort()) {
       if (!fileName.endsWith('.json')) continue
-      const path = resolve(this.ledgerDir, fileName)
-      forceSecureFileMode(this.fs, path)
-      let entry
-      try { entry = JSON.parse(this.fs.readFileSync(path, 'utf8')) } catch { continue }
-      if (!isObject(entry) || entry.formatVersion !== 1) continue
-
-      if (entry.status === ACK_STATUS.RECEIVED && !inboxState.has(entry.commandId)) {
-        this._writeEntry(entry.commandId, {
-          ...entry,
-          status: ACK_STATUS.REJECTED,
-          rejectedAt: this.now(),
-          rejectReason: 'STALE_RECEIVED: command not found in inbox after restart'
-        })
-        results.staleLedgerEntries += 1
-      }
-    }
-    return results
-  }
-
-  allPendingAckEntries() {
-    const entries = []
-    for (const fileName of this.fs.readdirSync(this.ledgerDir)) {
-      if (!fileName.endsWith('.json')) continue
-      const path = resolve(this.ledgerDir, fileName)
+      const path = resolve(this.conflictsDir, fileName)
       forceSecureFileMode(this.fs, path)
       try {
-        const entry = JSON.parse(this.fs.readFileSync(path, 'utf8'))
-        if (isObject(entry) && entry.formatVersion === 1) entries.push(entry)
-      } catch {}
+        const conflict = this._validateConflict(JSON.parse(this.fs.readFileSync(path, 'utf8')), fileName.slice(0, -5))
+        if (conflict.commandId === commandId) conflicts.push(conflict)
+      } catch (error) {
+        this._quarantineLedgerFile(path, commandId, error)
+        throw new AgentProtocolError('DEDUPE_LEDGER_CORRUPT', `Corrupt conflict record ${fileName}: ${error.message}`)
+      }
     }
-    return entries
+    return conflicts
   }
 }
 
@@ -1167,22 +1417,95 @@ export class AckOutbox {
     this.createId = createId
     this.fs = { ...DEFAULT_FS_OPERATIONS, ...fs }
     this.acksDir = resolve(this.rootDir, 'acks')
+    this.quarantineDir = resolve(this.rootDir, 'acks-quarantine')
+    this.corruptions = []
   }
 
   initialize() {
     ensureSecureDirectory(this.fs, this.acksDir)
+    ensureSecureDirectory(this.fs, this.quarantineDir)
+    this.corruptions = []
+    for (const fileName of this.fs.readdirSync(this.quarantineDir)) {
+      if (fileName.endsWith('.json')) this.corruptions.push({ fileName, reason: 'previously quarantined ACK requires reconciliation' })
+      if (fileName.endsWith('.json') || fileName.endsWith('.reason.txt')) {
+        forceSecureFileMode(this.fs, resolve(this.quarantineDir, fileName))
+      }
+    }
     for (const fileName of this.fs.readdirSync(this.acksDir)) {
       if (!fileName.endsWith('.json')) continue
-      forceSecureFileMode(this.fs, resolve(this.acksDir, fileName))
+      const path = resolve(this.acksDir, fileName)
+      forceSecureFileMode(this.fs, path)
+      try {
+        this._readAndValidate(path)
+      } catch (error) {
+        this._quarantine(path, error)
+      }
     }
+    return { corruptions: this.corruptions.length }
   }
 
-  enqueue(ackEnvelope) {
+  hasCorruption() {
+    return this.corruptions.length > 0
+  }
+
+  corruptionSummary() {
+    return this.corruptions.map(entry => entry.reason || 'corrupt ACK outbox record').join('; ')
+  }
+
+  _uniquePath(fileName) {
+    const target = resolve(this.quarantineDir, fileName)
+    if (!this.fs.existsSync(target)) return target
+    const stem = fileName.endsWith('.json') ? fileName.slice(0, -5) : fileName
+    return resolve(this.quarantineDir, `${stem}-${this.createId()}.json`)
+  }
+
+  _quarantine(sourcePath, error) {
+    if (!this.fs.existsSync(sourcePath)) return
+    const targetPath = this._uniquePath(sourcePath.split('/').pop())
+    durableRename(this.fs, sourcePath, targetPath)
+    atomicWriteText(this.fs, `${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
+    this.corruptions.push({ fileName: targetPath.split('/').pop(), reason: `CORRUPT_ACK: ${error.message}` })
+  }
+
+  _readAndValidate(path) {
+    let record
+    try {
+      record = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+    } catch (error) {
+      throw new Error(`invalid ACK outbox JSON: ${error.message}`)
+    }
+    if (!isObject(record) || record.formatVersion !== 1 || !isObject(record.envelope)) {
+      throw new Error('invalid ACK outbox record shape')
+    }
+    let normalized
+    try {
+      normalized = normalizeInboundMessage(record.envelope)
+    } catch (error) {
+      throw new Error(`invalid ACK envelope: ${error.code || error.message}`)
+    }
+    if (normalized.messageType !== MESSAGE_TYPES.COMMAND_ACK) throw new Error('ACK outbox envelope is not command.ack')
+    if (!ACK_STATUS_VALUES.has(record.envelope.ackStatus)) throw new Error('ACK outbox envelope has invalid ackStatus')
+    if (typeof record.envelope.commandId !== 'string' || !record.envelope.commandId.trim()) {
+      throw new Error('ACK outbox envelope requires commandId')
+    }
+    if (normalized.sourceAgentId !== this.profile.agentId) throw new Error('ACK outbox agent identity mismatch')
+    if (hasOwn(record, 'marker')) {
+      if (!isObject(record.marker)) throw new Error('ACK outbox marker must be an object')
+      if (!['entry', 'conflict', 'none'].includes(record.marker.kind)) throw new Error('ACK outbox marker has invalid kind')
+      if (record.marker.kind === 'conflict' && (typeof record.marker.recordId !== 'string' || !record.marker.recordId)) {
+        throw new Error('ACK outbox conflict marker requires recordId')
+      }
+    }
+    return record
+  }
+
+  enqueue(ackEnvelope, marker = { kind: 'entry' }) {
     const now = this.now()
-    const fileName = String(now).padStart(15, '0') + '-' + this.createId() + '.json'
+    const fileName = `${String(now).padStart(15, '0')}-${this.createId()}.json`
     const record = {
       formatVersion: 1,
       envelope: ackEnvelope,
+      marker,
       createdAt: now,
       attempts: 0
     }
@@ -1203,11 +1526,12 @@ export class AckOutbox {
       const path = resolve(this.acksDir, fileName)
       forceSecureFileMode(this.fs, path)
       try {
-        const record = JSON.parse(this.fs.readFileSync(path, 'utf8'))
-        if (isObject(record) && record.formatVersion === 1 && isObject(record.envelope)) {
-          envelopes.push({ fileName, envelope: record.envelope, record })
-        }
-      } catch {}
+        const record = this._readAndValidate(path)
+        envelopes.push({ fileName, envelope: record.envelope, marker: record.marker || { kind: 'entry' }, record })
+      } catch (error) {
+        this._quarantine(path, error)
+        throw new AgentProtocolError('ACK_OUTBOX_CORRUPT', `ACK outbox record ${fileName} quarantined: ${error.message}`)
+      }
     }
     return envelopes
   }
@@ -1225,13 +1549,11 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = P
     ackStatus,
     ackAt: Date.now()
   }
-  if (meta.messageId) {
-    envelope.correlationId = meta.messageId
-    envelope.messageId = meta.messageId
-  }
+  if (meta.messageId) envelope.correlationId = meta.messageId
   if (meta.taskId) envelope.taskId = meta.taskId
   if (meta.workItemId) envelope.workItemId = meta.workItemId
   if (meta.rejectReason) envelope.rejectReason = meta.rejectReason
+  if (meta.outcome) envelope.outcome = meta.outcome
   return envelope
 }
 
@@ -1253,13 +1575,86 @@ export class AgentMessageProcessor {
     this.commandActive = false
     this.paused = false
     this.stopped = false
+    this.failClosedError = null
   }
 
   start({ drain = true } = {}) {
     const recovery = this.inbox.initialize()
-    this.paused = !drain
-    if (drain) void this.drain()
-    return recovery
+    try {
+      for (const completed of recovery.completedRecords || []) this._reconcileCompletedRecord(completed)
+      for (const recovered of recovery.recoveryRecords || []) this._recordRecoveryRequired(recovered)
+    } catch (error) {
+      this._failClosed(new AgentProtocolError('COMMAND_RECOVERY_ERROR', `Failed to persist recovery state: ${error.message}`), {})
+    }
+    if (this.ledger?.hasCorruption()) {
+      this._failClosed(new AgentProtocolError(
+        'DEDUPE_LEDGER_CORRUPT',
+        this.ledger.corruptionSummary() || 'Durable dedupe ledger requires reconciliation'
+      ), {})
+    }
+    if (this.ackOutbox?.hasCorruption()) {
+      this._failClosed(new AgentProtocolError(
+        'ACK_OUTBOX_CORRUPT',
+        this.ackOutbox.corruptionSummary() || 'Durable ACK outbox requires reconciliation'
+      ), {})
+    }
+    this.paused = !drain || Boolean(this.failClosedError)
+    if (drain && !this.failClosedError) void this.drain()
+    return { ...recovery, paused: this.paused, failClosedCode: this.failClosedError?.code || '' }
+  }
+
+  _commandMeta(message) {
+    return {
+      messageId: message.messageId || '',
+      commandType: message.commandType || '',
+      targetAgentId: message.targetAgentId || '',
+      taskId: message.taskId || '',
+      workItemId: message.workItemId || '',
+      expiresAt: message.expiresAt
+    }
+  }
+
+  _reconcileCompletedRecord(completed) {
+    if (!this.ledger) return
+    const message = completed.normalized
+    const meta = this._commandMeta(message)
+    const fingerprint = CommandFingerprint.compute(message)
+    const check = this.ledger.checkOrRecord(message.commandId, fingerprint, { ...meta, expiresAt: null })
+    if (check.action === 'conflict') {
+      throw new Error(`completed inbox record conflicts with ledger for ${message.commandId}`)
+    }
+    const entry = this.ledger.markCompleted(message.commandId, completed.record.outcome)
+    this._emitAck(entry.status, {
+      ...meta,
+      commandId: message.commandId,
+      outcome: entry.outcome
+    })
+  }
+
+  _recordRecoveryRequired(recovered) {
+    const message = recovered.normalized
+    const meta = this._commandMeta(message)
+    const reason = recovered.record.recoveryReason
+      || 'PROCESSING_OUTCOME_UNKNOWN: automatic re-execution is forbidden; reconcile or dispatch a new commandId'
+    let marker = { kind: 'none' }
+    if (this.ledger) {
+      const fingerprint = CommandFingerprint.compute(message)
+      const result = this.ledger.markRecoveryRequired(message.commandId, fingerprint, meta, reason)
+      if (result.conflict) marker = { kind: 'conflict', recordId: result.conflict.recordId }
+      else marker = { kind: 'entry' }
+    }
+    this._emitAck(ACK_STATUS.REJECTED, {
+      ...meta,
+      commandId: message.commandId,
+      rejectReason: reason
+    }, marker)
+    this._failClosed(new AgentProtocolError('COMMAND_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
+  }
+
+  _failClosed(error, raw) {
+    if (!this.failClosedError) this.failClosedError = error
+    this.paused = true
+    this.onReject(error, raw)
   }
 
   pause() {
@@ -1267,7 +1662,7 @@ export class AgentMessageProcessor {
   }
 
   resume() {
-    if (this.stopped) return
+    if (this.stopped || this.failClosedError) return
     this.paused = false
     void this.drain()
   }
@@ -1279,6 +1674,60 @@ export class AgentMessageProcessor {
 
   isBusy() {
     return this.chatActive || this.commandActive
+  }
+
+  _ackForLedgerEntry(entry) {
+    if (entry.status === LEDGER_STATUS.RECOVERY_REQUIRED) {
+      return { ackStatus: ACK_STATUS.REJECTED, rejectReason: entry.rejectReason || 'RECOVERY_REQUIRED' }
+    }
+    if (ACK_STATUS_VALUES.has(entry.status)) {
+      return { ackStatus: entry.status, rejectReason: entry.rejectReason || '', outcome: entry.outcome || undefined }
+    }
+    return { ackStatus: ACK_STATUS.REJECTED, rejectReason: `UNSUPPORTED_LEDGER_STATUS: ${entry.status}` }
+  }
+
+  _replayLedgerEntry(entry, meta) {
+    const replay = this._ackForLedgerEntry(entry)
+    this._emitAck(replay.ackStatus, {
+      ...meta,
+      commandId: entry.commandId,
+      rejectReason: replay.rejectReason,
+      outcome: replay.outcome
+    })
+    return replay
+  }
+
+  _rejectWhileFailClosed(message, fingerprint, meta) {
+    if (!this.ledger || this.ledger.hasCorruption()) {
+      const reason = this.failClosedError?.message || 'processor is fail-closed pending durable reconciliation'
+      this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId: message.commandId, rejectReason: reason }, { kind: 'none' })
+      return { kind: 'rejected', error: this.failClosedError || new AgentProtocolError('PROCESSOR_FAIL_CLOSED', reason) }
+    }
+    try {
+      const existing = this.ledger.getEntry(message.commandId)
+      if (!existing) {
+        const reason = this.failClosedError?.message || 'processor is fail-closed pending durable reconciliation'
+        this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId: message.commandId, rejectReason: reason }, { kind: 'none' })
+        return { kind: 'rejected', error: this.failClosedError || new AgentProtocolError('PROCESSOR_FAIL_CLOSED', reason) }
+      }
+      if (existing.fingerprint !== fingerprint) {
+        const check = this.ledger.checkOrRecord(message.commandId, fingerprint, meta)
+        this._emitAck(ACK_STATUS.REJECTED, {
+          ...meta,
+          commandId: message.commandId,
+          rejectReason: check.conflict.rejectReason
+        }, { kind: 'conflict', recordId: check.conflict.recordId })
+        return { kind: 'rejected', error: new AgentProtocolError('COMMAND_FINGERPRINT_CONFLICT', check.conflict.rejectReason) }
+      }
+      this._replayLedgerEntry(existing, meta)
+      return { kind: 'command-duplicate', commandId: message.commandId }
+    } catch (error) {
+      const protocolError = error instanceof AgentProtocolError
+        ? error
+        : new AgentProtocolError('PROCESSOR_FAIL_CLOSED', error.message)
+      this._failClosed(protocolError, message.rawPayload)
+      return { kind: 'rejected', error: protocolError }
+    }
   }
 
   async handle(raw) {
@@ -1301,30 +1750,59 @@ export class AgentMessageProcessor {
 
     switch (message.messageType) {
       case MESSAGE_TYPES.COMMAND_DISPATCH: {
-        if (this.ledger) {
-          const commandId = message.commandId
-          const fingerprint = CommandFingerprint.compute(message)
-          const meta = {
-            messageId: message.messageId || '',
-            commandType: message.commandType || '',
-            targetAgentId: message.targetAgentId || '',
-            taskId: message.taskId || '',
-            workItemId: message.workItemId || '',
-            expiresAt: message.expiresAt
+        const commandId = message.commandId
+        const meta = this._commandMeta(message)
+        let fingerprint
+        try {
+          fingerprint = CommandFingerprint.compute(message)
+        } catch (error) {
+          const protocolError = error instanceof AgentProtocolError
+            ? error
+            : new AgentProtocolError('INVALID_COMMAND_PAYLOAD', error.message)
+          this.onReject(protocolError, raw)
+          this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId, rejectReason: protocolError.message }, { kind: 'none' })
+          return { kind: 'rejected', error: protocolError }
+        }
+
+        if (this.failClosedError || this.ledger?.hasCorruption() || this.ackOutbox?.hasCorruption()) {
+          if (!this.failClosedError) {
+            const code = this.ledger?.hasCorruption() ? 'DEDUPE_LEDGER_CORRUPT' : 'ACK_OUTBOX_CORRUPT'
+            const detail = this.ledger?.hasCorruption()
+              ? this.ledger.corruptionSummary()
+              : this.ackOutbox.corruptionSummary()
+            this._failClosed(new AgentProtocolError(code, detail), raw)
           }
-          const check = this.ledger.checkOrRecord(commandId, fingerprint, meta)
+          return this._rejectWhileFailClosed(message, fingerprint, meta)
+        }
+
+        if (this.ledger) {
+          let check
+          try {
+            check = this.ledger.checkOrRecord(commandId, fingerprint, meta)
+          } catch (error) {
+            const protocolError = error instanceof AgentProtocolError
+              ? error
+              : new AgentProtocolError('DEDUPE_LEDGER_ERROR', error.message)
+            this._failClosed(protocolError, raw)
+            this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId, rejectReason: protocolError.message }, { kind: 'none' })
+            return { kind: 'rejected', error: protocolError }
+          }
 
           if (check.action === 'conflict') {
-            this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId, rejectReason: check.entry.rejectReason })
-            return { kind: 'rejected', error: new AgentProtocolError('COMMAND_FINGERPRINT_CONFLICT', check.entry.rejectReason) }
+            this._emitAck(ACK_STATUS.REJECTED, {
+              ...meta,
+              commandId,
+              rejectReason: check.conflict.rejectReason
+            }, { kind: 'conflict', recordId: check.conflict.recordId })
+            return { kind: 'rejected', error: new AgentProtocolError('COMMAND_FINGERPRINT_CONFLICT', check.conflict.rejectReason) }
           }
           if (check.action === 'expired') {
             this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId, rejectReason: check.entry.rejectReason })
             return { kind: 'rejected', error: new AgentProtocolError('COMMAND_EXPIRED', check.entry.rejectReason) }
           }
           if (check.action === 'duplicate') {
-            this._emitAck(ACK_STATUS.RECEIVED, { ...meta, commandId })
-            void this.drain()
+            this._replayLedgerEntry(check.entry, meta)
+            if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(check.entry.status)) void this.drain()
             return { kind: 'command-duplicate', commandId }
           }
         }
@@ -1332,22 +1810,18 @@ export class AgentMessageProcessor {
         try {
           const item = this.inbox.enqueue(message)
           if (this.ledger) {
-            this.ledger.recordQueueSequence(message.commandId, item.record.queueSequence)
-            const meta = {
-              messageId: message.messageId || '',
-              commandType: message.commandType || '',
-              targetAgentId: message.targetAgentId || '',
-              taskId: message.taskId || '',
-              workItemId: message.workItemId || ''
-            }
-            this._emitAck(ACK_STATUS.RECEIVED, { ...meta, commandId: message.commandId })
+            this.ledger.recordQueueSequence(commandId, item.record.queueSequence)
+            this._emitAck(ACK_STATUS.RECEIVED, { ...meta, commandId })
           }
           void this.drain()
           return { kind: 'command', item }
         } catch (error) {
           const protocolError = new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to persist command: ${error.message}`)
-          this.paused = true
-          this.onReject(protocolError, raw)
+          try {
+            this.ledger?.markRejected(commandId, protocolError.message)
+            this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId, rejectReason: protocolError.message })
+          } catch {}
+          this._failClosed(protocolError, raw)
           return { kind: 'rejected', error: protocolError }
         }
       }
@@ -1373,13 +1847,13 @@ export class AgentMessageProcessor {
   }
 
   drain() {
-    if (this.paused || this.stopped || this.chatActive) return this.drainPromise || Promise.resolve()
+    if (this.paused || this.stopped || this.chatActive || this.failClosedError) return this.drainPromise || Promise.resolve()
     if (this.drainPromise) return this.drainPromise
     this.drainPromise = Promise.resolve()
       .then(() => this.runDrain())
       .finally(() => {
         this.drainPromise = null
-        if (!this.paused && !this.stopped && !this.chatActive && this.inbox.count('pending')) {
+        if (!this.paused && !this.stopped && !this.chatActive && !this.failClosedError && this.inbox.count('pending')) {
           queueMicrotask(() => { void this.drain() })
         }
       })
@@ -1387,13 +1861,12 @@ export class AgentMessageProcessor {
   }
 
   async runDrain() {
-    while (!this.paused && !this.stopped && !this.chatActive) {
+    while (!this.paused && !this.stopped && !this.chatActive && !this.failClosedError) {
       let item
       try {
         item = this.inbox.claimNext()
       } catch (error) {
-        this.paused = true
-        this.onReject(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to claim durable command: ${error.message}`), {})
+        this._failClosed(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to claim durable command: ${error.message}`), {})
         return
       }
       if (!item) return
@@ -1405,8 +1878,7 @@ export class AgentMessageProcessor {
         try {
           this.inbox.quarantine(item.path, error)
         } catch (quarantineError) {
-          this.paused = true
-          this.onReject(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to quarantine invalid command: ${quarantineError.message}`), item.record.rawPayload)
+          this._failClosed(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to quarantine invalid command: ${quarantineError.message}`), item.record.rawPayload)
           return
         }
         this.onReject(new AgentProtocolError('INVALID_PERSISTED_COMMAND', error.message), item.record.rawPayload)
@@ -1414,14 +1886,31 @@ export class AgentMessageProcessor {
       }
 
       if (this.ledger && validated.normalized.commandId) {
-        this.ledger.markStarted(validated.normalized.commandId)
-        this._emitAck(ACK_STATUS.STARTED, {
-          commandId: validated.normalized.commandId,
-          messageId: validated.normalized.messageId || '',
-          commandType: validated.normalized.commandType || '',
-          taskId: validated.normalized.taskId || '',
-          workItemId: validated.normalized.workItemId || ''
-        })
+        try {
+          const fingerprint = CommandFingerprint.compute(validated.normalized)
+          let entry = this.ledger.getEntry(validated.normalized.commandId)
+          if (!entry) {
+            const check = this.ledger.checkOrRecord(
+              validated.normalized.commandId,
+              fingerprint,
+              this._commandMeta(validated.normalized)
+            )
+            entry = check.entry
+            this.ledger.recordQueueSequence(validated.normalized.commandId, validated.record.queueSequence)
+          }
+          if (entry.fingerprint !== fingerprint || entry.status !== ACK_STATUS.RECEIVED) {
+            throw new Error(`queued command ledger mismatch/status ${entry.status}`)
+          }
+          this.ledger.markStarted(validated.normalized.commandId)
+          this._emitAck(ACK_STATUS.STARTED, {
+            ...this._commandMeta(validated.normalized),
+            commandId: validated.normalized.commandId
+          })
+        } catch (error) {
+          try { this.inbox.restoreProcessing(item, 'pre-execution durable ledger failure') } catch {}
+          this._failClosed(new AgentProtocolError('DEDUPE_LEDGER_ERROR', `Command not executed: ${error.message}`), item.record.rawPayload)
+          return
+        }
       }
 
       this.commandActive = true
@@ -1431,70 +1920,129 @@ export class AgentMessageProcessor {
       } catch (error) {
         outcome = { status: 'failed', errorMessage: error.message }
       }
+      const durableOutcome = {
+        status: outcome?.status === 'failed' ? 'failed' : 'completed',
+        exitCode: outcome?.exitCode,
+        errorMessage: outcome?.errorMessage || ''
+      }
       try {
-        this.inbox.complete(item, {
-          status: outcome?.status === 'failed' ? 'failed' : 'completed',
-          exitCode: outcome?.exitCode,
-          errorMessage: outcome?.errorMessage
-        })
+        const completed = this.inbox.markCompleted(item, durableOutcome)
+        let entry = null
         if (this.ledger && validated.normalized.commandId) {
-          this.ledger.markCompleted(validated.normalized.commandId, {
-            status: outcome?.status === 'failed' ? 'failed' : 'completed',
-            exitCode: outcome?.exitCode,
-            errorMessage: outcome?.errorMessage || ''
-          })
-          const ackStatus = outcome?.status === 'failed' ? ACK_STATUS.FAILED : ACK_STATUS.SUCCEEDED
-          this._emitAck(ackStatus, {
+          entry = this.ledger.markCompleted(validated.normalized.commandId, durableOutcome)
+          this._emitAck(entry.status, {
+            ...this._commandMeta(validated.normalized),
             commandId: validated.normalized.commandId,
-            messageId: validated.normalized.messageId || '',
-            commandType: validated.normalized.commandType || '',
-            taskId: validated.normalized.taskId || '',
-            workItemId: validated.normalized.workItemId || ''
+            outcome: entry.outcome
           })
         }
+        this.inbox.settleCompletedFile(item.path, item.fileName, completed)
       } catch (error) {
-        this.paused = true
-        this.onReject(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to settle command inbox record: ${error.message}`), item.record.rawPayload)
+        this._failClosed(new AgentProtocolError(
+          'COMMAND_COMPLETION_PERSIST_ERROR',
+          `Command outcome may have side effects and requires reconciliation: ${error.message}`
+        ), item.record.rawPayload)
       } finally {
         this.commandActive = false
       }
     }
   }
 
-  _emitAck(ackStatus, meta) {
-    if (!this.ackOutbox || !this.sendFn) return
+  _emitAck(ackStatus, meta, marker = { kind: 'entry' }) {
+    if (!this.ackOutbox) return false
     const envelope = buildAckEnvelope(this.profile, ackStatus, meta)
-    const result = this.ackOutbox.enqueue(envelope)
-    if (this.ledger) this.ledger.markAckEmitted(meta.commandId, ackStatus)
+    let queued
     try {
-      const sent = this.sendFn(envelope)
-      if (sent) this.ackOutbox.dequeue(result.fileName)
-    } catch {}
+      queued = this.ackOutbox.enqueue(envelope, marker)
+    } catch (error) {
+      this._failClosed(new AgentProtocolError('ACK_OUTBOX_PERSIST_ERROR', `Failed to persist ACK before send: ${error.message}`), meta)
+      return false
+    }
+    if (!this.sendFn) return false
+    let sent = false
+    try {
+      sent = this.sendFn(envelope) === true
+    } catch {
+      return false
+    }
+    if (!sent) return false
+    try {
+      if (this.ledger && marker.kind !== 'none') this.ledger.markAckEmitted(meta.commandId, ackStatus, marker)
+    } catch (error) {
+      this._failClosed(new AgentProtocolError(
+        'ACK_MARKER_PERSIST_ERROR',
+        `ACK was sent but durable emitted marker failed; replay remains enabled for at-least-once delivery: ${error.message}`
+      ), meta)
+      return false
+    }
+    try {
+      this.ackOutbox.dequeue(queued.fileName)
+      return true
+    } catch (error) {
+      this._failClosed(new AgentProtocolError(
+        'ACK_OUTBOX_DEQUEUE_ERROR',
+        `ACK was sent but outbox dequeue failed; delivery remains at-least-once: ${error.message}`
+      ), meta)
+      return false
+    }
   }
 
   replayAcks() {
     if (!this.ackOutbox || !this.sendFn) return 0
+    let pending
+    try {
+      pending = this.ackOutbox.pendingEnvelopes()
+    } catch (error) {
+      const protocolError = error instanceof AgentProtocolError
+        ? error
+        : new AgentProtocolError('ACK_OUTBOX_CORRUPT', error.message)
+      this._failClosed(protocolError, {})
+      return 0
+    }
     let replayed = 0
-    for (const pending of this.ackOutbox.pendingEnvelopes()) {
+    for (const item of pending) {
+      let sent = false
       try {
-        const sent = this.sendFn(pending.envelope)
-        if (sent) {
-          this.ackOutbox.dequeue(pending.fileName)
-          replayed += 1
+        sent = this.sendFn(item.envelope) === true
+      } catch {
+        continue
+      }
+      if (!sent) continue
+      try {
+        if (this.ledger && item.marker.kind !== 'none') {
+          this.ledger.markAckEmitted(item.envelope.commandId, item.envelope.ackStatus, item.marker)
         }
-      } catch {}
+      } catch (error) {
+        this._failClosed(new AgentProtocolError(
+          'ACK_MARKER_PERSIST_ERROR',
+          `Replayed ACK was sent but marker persistence failed; outbox retained: ${error.message}`
+        ), item.envelope)
+        break
+      }
+      try {
+        this.ackOutbox.dequeue(item.fileName)
+        replayed += 1
+      } catch (error) {
+        this._failClosed(new AgentProtocolError(
+          'ACK_OUTBOX_DEQUEUE_ERROR',
+          `Replayed ACK was sent but dequeue failed; outbox retained: ${error.message}`
+        ), item.envelope)
+        break
+      }
     }
     return replayed
   }
 
   async waitForIdle(timeoutMs = 5000) {
     const startedAt = Date.now()
-    while (this.isBusy() || this.drainPromise || this.inbox.count('pending') || this.inbox.count('processing')) {
+    while (this.isBusy() || this.drainPromise
+      || (!this.paused && !this.failClosedError && (this.inbox.count('pending') || this.inbox.count('processing')))) {
       if (Date.now() - startedAt > timeoutMs) throw new Error('Timed out waiting for AgentMessageProcessor to become idle')
       await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
     }
   }
 }
+
 
 const loadCodexSessionMap = () => {
   try {
@@ -1975,8 +2523,16 @@ const createProfileState = profile => {
     sendFn: sendAckFn
   })
   const recovery = state.processor.start({ drain: false })
-  if (recovery.recovered || recovery.completed || recovery.quarantined) {
-    console.warn(`command inbox recovered | profile=${profile.profileId} | ${JSON.stringify(recovery)}`)
+  if (recovery.recovered || recovery.completed || recovery.quarantined || recovery.recoveryRequired || recovery.failClosedCode) {
+    const summary = {
+      recovered: recovery.recovered,
+      completed: recovery.completed,
+      quarantined: recovery.quarantined,
+      recoveryRequired: recovery.recoveryRequired,
+      paused: recovery.paused,
+      failClosedCode: recovery.failClosedCode
+    }
+    console.warn(`command inbox recovered | profile=${profile.profileId} | ${JSON.stringify(summary)}`)
   }
   return state
 }
@@ -2041,9 +2597,9 @@ const connectProfile = profile => {
     state.reconnectStartedAt = 0
     registerAgent(profile)
     sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-    state.processor.resume()
     const replayed = state.processor.replayAcks()
     if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
+    state.processor.resume()
     state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
   })
   state.ws.addEventListener('message', event => { void handleMessage(profile, event.data) })

@@ -13,6 +13,7 @@ import {
   AgentMessageProcessor,
   CommandFingerprint,
   DurableDedupeLedger,
+  LEDGER_STATUS,
   MESSAGE_TYPES,
   PersistentCommandInbox,
   PROCESS_RUNTIME_INSTANCE_ID,
@@ -89,6 +90,10 @@ const taskEvent = () => ({
 })
 
 const createInbox = (rootDir, options = {}) => new PersistentCommandInbox({ rootDir, profile, ...options })
+const profileStorageRoot = (rootDir, selectedProfile = profile) => resolve(
+  rootDir,
+  Buffer.from(selectedProfile.agentId, 'utf8').toString('hex')
+)
 
 const deferred = () => {
   let resolvePromise
@@ -125,12 +130,24 @@ test('busy command is durably queued instead of dropped', async () => {
   assert.equal(inbox.count('archive'), 2)
 })
 
-test('processing command is recovered after process restart', async () => {
+test('processing command restart enters durable recovery-required state without re-execution', async () => {
   const rootDir = temporaryDirectory()
   const firstInbox = createInbox(rootDir)
+  const firstLedger = new DurableDedupeLedger({ rootDir: profileStorageRoot(rootDir), profile })
   firstInbox.initialize()
-  firstInbox.enqueue(normalizeInboundMessage(command(1)))
+  firstLedger.initialize()
+  const normalized = normalizeInboundMessage(command(1))
+  const queued = firstInbox.enqueue(normalized)
+  firstLedger.checkOrRecord(normalized.commandId, CommandFingerprint.compute(normalized), {
+    messageId: normalized.messageId,
+    commandType: normalized.commandType,
+    targetAgentId: normalized.targetAgentId,
+    taskId: normalized.taskId,
+    workItemId: normalized.workItemId
+  })
+  firstLedger.recordQueueSequence(normalized.commandId, queued.record.queueSequence)
   const claimed = firstInbox.claimNext()
+  firstLedger.markStarted(normalized.commandId)
   assert.equal(claimed.record.commandId, 'command-1')
   assert.equal(claimed.record.messageId, 'message-1')
   assert.equal(claimed.record.taskId, 'task-1')
@@ -140,12 +157,13 @@ test('processing command is recovered after process restart', async () => {
   assert.equal(firstInbox.count('processing'), 1)
 
   const restartedInbox = createInbox(rootDir)
-  const recovery = restartedInbox.initialize()
-  assert.equal(recovery.recovered, 1)
-  assert.equal(restartedInbox.count('processing'), 0)
-  assert.equal(restartedInbox.count('pending'), 1)
-
+  const ledger = new DurableDedupeLedger({ rootDir: profileStorageRoot(rootDir), profile })
+  const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile })
+  ledger.initialize()
+  ackOutbox.initialize()
   const executed = []
+  const acks = []
+  const rejected = []
   const processor = new AgentMessageProcessor({
     profile,
     inbox: restartedInbox,
@@ -153,11 +171,27 @@ test('processing command is recovered after process restart', async () => {
       executed.push(message.commandId)
       return { status: 'completed' }
     },
-    runChat: async () => {}
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => { acks.push(envelope); return true },
+    onReject: error => rejected.push(error.code)
   })
-  processor.start()
+  const recovery = processor.start()
   await processor.waitForIdle()
-  assert.deepEqual(executed, ['command-1'])
+
+  assert.equal(recovery.recoveryRequired, 1)
+  assert.equal(recovery.failClosedCode, 'COMMAND_RECOVERY_REQUIRED')
+  assert.equal(restartedInbox.count('processing'), 0)
+  assert.equal(restartedInbox.count('pending'), 0)
+  assert.equal(restartedInbox.count('recovery'), 1)
+  assert.deepEqual(executed, [])
+  assert.deepEqual(rejected, ['COMMAND_RECOVERY_REQUIRED'])
+  assert.equal(acks.at(-1).ackStatus, ACK_STATUS.REJECTED)
+  assert.match(acks.at(-1).rejectReason, /automatic re-execution is forbidden/)
+  const entry = ledger.getEntry('command-1')
+  assert.equal(entry.status, LEDGER_STATUS.RECOVERY_REQUIRED)
+  assert.equal(entry.ackRejectedEmitted, true)
 })
 
 test('chat run emits only chat.message.delta and chat.message', async () => {
@@ -495,21 +529,21 @@ test('queue initialization repairs existing directory and record permissions', (
   writeFileSync(resolve(inbox.pendingDir, 'corrupt.json'), '{not json', { mode: 0o666 })
   createInbox(rootDir).initialize()
 
-  for (const directory of [inbox.profileDir, inbox.pendingDir, inbox.processingDir, inbox.archiveDir, inbox.quarantineDir]) {
+  for (const directory of [inbox.profileDir, inbox.pendingDir, inbox.processingDir, inbox.archiveDir, inbox.recoveryDir, inbox.quarantineDir]) {
     chmodSync(directory, 0o755)
   }
   chmodSync(inbox.sequencePath, 0o644)
-  for (const directory of [inbox.pendingDir, inbox.processingDir, inbox.archiveDir, inbox.quarantineDir]) {
+  for (const directory of [inbox.pendingDir, inbox.processingDir, inbox.archiveDir, inbox.recoveryDir, inbox.quarantineDir]) {
     for (const fileName of readdirSync(directory)) chmodSync(resolve(directory, fileName), 0o666)
   }
 
   const restarted = createInbox(rootDir)
   restarted.initialize()
-  for (const directory of [restarted.profileDir, restarted.pendingDir, restarted.processingDir, restarted.archiveDir, restarted.quarantineDir]) {
+  for (const directory of [restarted.profileDir, restarted.pendingDir, restarted.processingDir, restarted.archiveDir, restarted.recoveryDir, restarted.quarantineDir]) {
     assert.equal(statSync(directory).mode & 0o777, 0o700)
   }
   assert.equal(statSync(restarted.sequencePath).mode & 0o777, 0o600)
-  for (const directory of [restarted.pendingDir, restarted.processingDir, restarted.archiveDir, restarted.quarantineDir]) {
+  for (const directory of [restarted.pendingDir, restarted.processingDir, restarted.archiveDir, restarted.recoveryDir, restarted.quarantineDir]) {
     for (const fileName of readdirSync(directory)) {
       assert.equal(statSync(resolve(directory, fileName)).mode & 0o777, 0o600, `${directory}/${fileName}`)
     }
@@ -619,17 +653,14 @@ test('same commandId triggers dedupe and does not re-enqueue', async () => {
 
   await processor.handle(command(1))
   await processor.waitForIdle()
-  const firstRunCount = runs
-
   // Same commandId second time
   await processor.handle(command(1))
   await processor.waitForIdle()
 
   assert.equal(runs, 1)
-  assert.equal(receivedAcks.length, 2)
-  assert.deepEqual(receivedAcks, ['command-1', 'command-1'])
+  assert.deepEqual(receivedAcks, ['command-1'])
   assert.deepEqual(startedAcks, ['command-1'])
-  assert.deepEqual(completedAcks, ['command-1'])
+  assert.deepEqual(completedAcks, ['command-1', 'command-1'])
 })
 
 test('same commandId with different payload causes fingerprint conflict and REJECTED', async () => {
@@ -665,6 +696,7 @@ test('same commandId with different payload causes fingerprint conflict and REJE
 
   await processor.handle(command(1))
   await processor.waitForIdle()
+  const terminalBeforeConflict = ledger.getEntry('command-1')
 
   const differentPayloadCmd = {
     ...command(1),
@@ -678,6 +710,18 @@ test('same commandId with different payload causes fingerprint conflict and REJE
   assert.equal(rejectedAcks.length, 1)
   assert.equal(rejectedAcks[0].ackStatus, ACK_STATUS.REJECTED)
   assert.equal(rejectedAcks[0].rejectReason, 'FINGERPRINT_CONFLICT: same commandId with different payload')
+
+  const terminalAfterConflict = ledger.getEntry('command-1')
+  assert.equal(terminalAfterConflict.status, ACK_STATUS.SUCCEEDED)
+  assert.equal(terminalAfterConflict.fingerprint, terminalBeforeConflict.fingerprint)
+  assert.equal(terminalAfterConflict.completedAt, terminalBeforeConflict.completedAt)
+  assert.deepEqual(terminalAfterConflict.outcome, terminalBeforeConflict.outcome)
+  assert.equal(terminalAfterConflict.ackRejectedEmitted, terminalBeforeConflict.ackRejectedEmitted)
+  const conflicts = ledger.getConflicts('command-1')
+  assert.equal(conflicts.length, 1)
+  assert.notEqual(conflicts[0].conflictingFingerprint, terminalBeforeConflict.fingerprint)
+  assert.equal(conflicts[0].existingStatus, ACK_STATUS.SUCCEEDED)
+  assert.equal(conflicts[0].ackRejectedEmitted, true)
 })
 
 test('completed commandId re-delivery replays terminal ACK only', async () => {
@@ -717,9 +761,9 @@ test('completed commandId re-delivery replays terminal ACK only', async () => {
   await processor.handle(command(1))
   await processor.waitForIdle()
 
-  // Should only emit RECEIVED (duplicate), not re-execute
+  // Duplicate replays the durable terminal state, not a fresh RECEIVED.
   assert.equal(runs, 1)
-  assert.deepEqual(allAcks, ['RECEIVED'])
+  assert.deepEqual(allAcks, ['SUCCEEDED'])
 })
 
 test('expired command before execution is REJECTED', async () => {
@@ -818,7 +862,191 @@ test('ack outbox retains pending ACKs when send fails and replays on reconnect',
   assert.equal(pendingPostReplay.length, 0, 'outbox should be empty after successful replay')
 })
 
-test('ack envelope has required canonical fields', () => {
+
+test('send false or throw keeps ACK markers false and records in the durable outbox', async () => {
+  for (const [index, sendFn] of [
+    ['false', () => false],
+    ['throw', () => { throw new Error('offline') }]
+  ].entries()) {
+    const rootDir = temporaryDirectory()
+    const ledger = new DurableDedupeLedger({ rootDir: profileStorageRoot(rootDir), profile })
+    const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile })
+    ledger.initialize()
+    ackOutbox.initialize()
+    const processor = new AgentMessageProcessor({
+      profile,
+      inbox: createInbox(rootDir),
+      runCommand: async () => ({ status: 'completed' }),
+      runChat: async () => {},
+      ledger,
+      ackOutbox,
+      sendFn
+    })
+    processor.start()
+    await processor.handle(command(60 + index))
+    await processor.waitForIdle()
+
+    const entry = ledger.getEntry(`command-${60 + index}`)
+    assert.equal(entry.ackReceivedEmitted, false, sendFn.name)
+    assert.equal(entry.ackStartedEmitted, false, sendFn.name)
+    assert.equal(entry.ackCompletedEmitted, false, sendFn.name)
+    assert.equal(ackOutbox.pendingEnvelopes().length, 3)
+  }
+})
+
+test('ACK marker persistence failure retains sent ACK for at-least-once replay', () => {
+  const rootDir = temporaryDirectory()
+  const ledger = new DurableDedupeLedger({ rootDir: profileStorageRoot(rootDir), profile })
+  const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile })
+  ledger.initialize()
+  ackOutbox.initialize()
+  const normalized = normalizeInboundMessage(command(70))
+  ledger.checkOrRecord(normalized.commandId, CommandFingerprint.compute(normalized), {
+    messageId: normalized.messageId,
+    commandType: normalized.commandType,
+    targetAgentId: normalized.targetAgentId,
+    taskId: normalized.taskId,
+    workItemId: normalized.workItemId
+  })
+  const errors = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: () => true,
+    onReject: error => errors.push(error.code)
+  })
+  processor.start({ drain: false })
+  ledger.markAckEmitted = () => { throw new Error('marker fsync failed') }
+
+  const emitted = processor._emitAck(ACK_STATUS.RECEIVED, {
+    commandId: normalized.commandId,
+    messageId: normalized.messageId,
+    taskId: normalized.taskId,
+    workItemId: normalized.workItemId
+  })
+
+  assert.equal(emitted, false)
+  assert.deepEqual(errors, ['ACK_MARKER_PERSIST_ERROR'])
+  assert.equal(ackOutbox.pendingEnvelopes().length, 1)
+  const persisted = JSON.parse(readFileSync(resolve(ledger.ledgerDir, `${Buffer.from(normalized.commandId).toString('hex')}.json`), 'utf8'))
+  assert.equal(persisted.ackReceivedEmitted, false)
+})
+
+test('corrupt ledger is quarantined and the profile rejects and pauses', async () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const firstLedger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  firstLedger.initialize()
+  writeFileSync(resolve(firstLedger.ledgerDir, `${Buffer.from('command-80').toString('hex')}.json`), '{bad ledger', { mode: 0o600 })
+
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const initialization = ledger.initialize()
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ackOutbox.initialize()
+  const errors = []
+  let runs = 0
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: () => true,
+    onReject: error => errors.push(error.code)
+  })
+  const recovery = processor.start()
+  const result = await processor.handle(command(80))
+
+  assert.equal(initialization.corruptions, 1)
+  assert.equal(recovery.paused, true)
+  assert.equal(result.kind, 'rejected')
+  assert.equal(result.error.code, 'DEDUPE_LEDGER_CORRUPT')
+  assert.equal(runs, 0)
+  assert.ok(errors.includes('DEDUPE_LEDGER_CORRUPT'))
+  assert.ok(readdirSync(ledger.quarantineDir).some(name => name.endsWith('.json')))
+  assert.ok(readdirSync(ledger.blockedDir).some(name => name.endsWith('.json')))
+})
+
+test('corrupt ACK is quarantined with an explicit fail-closed error', async () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  ledger.initialize()
+  const firstOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  firstOutbox.initialize()
+  writeFileSync(resolve(firstOutbox.acksDir, '000000000000001-corrupt.json'), '{bad ack', { mode: 0o600 })
+
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  const initialization = ackOutbox.initialize()
+  const errors = []
+  let runs = 0
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: () => true,
+    onReject: error => errors.push(error.code)
+  })
+  const recovery = processor.start()
+  const result = await processor.handle(command(81))
+
+  assert.equal(initialization.corruptions, 1)
+  assert.equal(recovery.paused, true)
+  assert.equal(result.kind, 'rejected')
+  assert.equal(result.error.code, 'ACK_OUTBOX_CORRUPT')
+  assert.equal(runs, 0)
+  assert.ok(errors.includes('ACK_OUTBOX_CORRUPT'))
+  assert.ok(readdirSync(ackOutbox.quarantineDir).some(name => name.endsWith('.json')))
+  assert.ok(readdirSync(ackOutbox.quarantineDir).some(name => name.endsWith('.reason.txt')))
+})
+
+
+test('A06 durable ledger and ACK paths enforce private permissions', async () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ledger.initialize()
+  ackOutbox.initialize()
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: () => false
+  })
+  processor.start()
+  await processor.handle(command(82))
+  await processor.waitForIdle()
+
+  for (const directory of [
+    ledger.ledgerDir,
+    ledger.conflictsDir,
+    ledger.quarantineDir,
+    ledger.blockedDir,
+    ackOutbox.acksDir,
+    ackOutbox.quarantineDir
+  ]) {
+    assert.equal(statSync(directory).mode & 0o777, 0o700, directory)
+  }
+  for (const directory of [ledger.ledgerDir, ackOutbox.acksDir]) {
+    for (const fileName of readdirSync(directory)) {
+      assert.equal(statSync(resolve(directory, fileName)).mode & 0o777, 0o600, `${directory}/${fileName}`)
+    }
+  }
+})
+
+test('ack envelope uses an independent messageId and remains A03 normalizer-compatible', () => {
   const meta = {
     commandId: 'cmd-1',
     messageId: 'msg-1',
@@ -827,10 +1055,13 @@ test('ack envelope has required canonical fields', () => {
     workItemId: 'work-1'
   }
   const envelope = buildAckEnvelope(profile, ACK_STATUS.RECEIVED, meta)
+  const secondEnvelope = buildAckEnvelope(profile, ACK_STATUS.STARTED, meta)
 
   assert.equal(envelope.schemaVersion, 1)
   assert.equal(envelope.messageType, MESSAGE_TYPES.COMMAND_ACK)
   assert.equal(envelope.commandId, 'cmd-1')
+  assert.notEqual(envelope.messageId, 'msg-1')
+  assert.notEqual(envelope.messageId, secondEnvelope.messageId)
   assert.equal(envelope.correlationId, 'msg-1')
   assert.equal(envelope.targetAgentId, undefined)
   assert.equal(envelope.ackStatus, ACK_STATUS.RECEIVED)
@@ -839,6 +1070,11 @@ test('ack envelope has required canonical fields', () => {
   assert.equal(envelope.workItemId, 'work-1')
   assert.equal(envelope.sourceAgentId, profile.agentId)
   assert.equal(envelope.runtimeInstanceId, PROCESS_RUNTIME_INSTANCE_ID)
+
+  const normalized = normalizeInboundMessage({ ...envelope, requestId: envelope.messageId })
+  assert.equal(normalized.messageId, envelope.messageId)
+  assert.equal(normalized.correlationId, 'msg-1')
+  assert.equal(normalized.messageType, MESSAGE_TYPES.COMMAND_ACK)
 })
 
 test('rejected ack includes rejectReason', () => {
@@ -935,7 +1171,121 @@ test('fingerprint differs for different payloads', () => {
     ...command(1),
     payload: { instruction: 'different', details: { alpha: 1 } }
   })
+  const changedOuterPrompt = normalizeInboundMessage({
+    ...command(1),
+    content: 'different effective prompt'
+  })
   assert.notEqual(CommandFingerprint.compute(cmd1), CommandFingerprint.compute(cmd2))
+  assert.notEqual(CommandFingerprint.compute(cmd1), CommandFingerprint.compute(changedOuterPrompt))
+})
+
+
+test('fingerprint includes deep business payload and ignores transport redelivery metadata', () => {
+  const first = normalizeInboundMessage({
+    ...command(90),
+    messageId: 'dispatch-a',
+    requestId: 'dispatch-a',
+    runtimeInstanceId: 'runtime-a',
+    correlationId: 'correlation-a',
+    sentAt: 100,
+    payload: {
+      instruction: 'run deep task',
+      plan: {
+        transport: { messageId: 'nested-message-a', sessionId: 'session-a' },
+        steps: [{ name: 'one', values: [1, 2, 3] }, { name: 'two', enabled: true }]
+      }
+    }
+  })
+  const redelivery = normalizeInboundMessage({
+    ...command(90),
+    messageId: 'dispatch-b',
+    requestId: 'dispatch-b',
+    runtimeInstanceId: 'runtime-b',
+    correlationId: 'correlation-b',
+    sentAt: 200,
+    payload: {
+      plan: {
+        steps: [{ values: [1, 2, 3], name: 'one' }, { enabled: true, name: 'two' }],
+        transport: { sessionId: 'session-b', messageId: 'nested-message-b' }
+      },
+      instruction: 'run deep task'
+    }
+  })
+  const reorderedArray = normalizeInboundMessage({
+    ...command(90),
+    messageId: 'dispatch-c',
+    requestId: 'dispatch-c',
+    payload: {
+      instruction: 'run deep task',
+      plan: {
+        transport: { messageId: 'ignored', sessionId: 'ignored' },
+        steps: [{ name: 'two', enabled: true }, { name: 'one', values: [1, 2, 3] }]
+      }
+    }
+  })
+  const changedNestedValue = normalizeInboundMessage({
+    ...command(90),
+    messageId: 'dispatch-d',
+    requestId: 'dispatch-d',
+    payload: {
+      instruction: 'run deep task',
+      plan: {
+        steps: [{ name: 'one', values: [1, 2, 4] }, { name: 'two', enabled: true }]
+      }
+    }
+  })
+
+  const fingerprint = CommandFingerprint.compute(first)
+  assert.equal(fingerprint, CommandFingerprint.compute(redelivery))
+  assert.notEqual(fingerprint, CommandFingerprint.compute(reorderedArray))
+  assert.notEqual(fingerprint, CommandFingerprint.compute(changedNestedValue))
+})
+
+test('same commandId is isolated across agent profiles', async () => {
+  const rootDir = temporaryDirectory()
+  const profileB = { ...profile, profileId: 'profile-b', agentId: 'agent-b', agentName: 'Agent B', personaName: 'Agent B' }
+  const runs = { a: 0, b: 0 }
+  const createRuntime = (selectedProfile, key, instruction) => {
+    const storageRoot = profileStorageRoot(rootDir, selectedProfile)
+    const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile: selectedProfile })
+    const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile: selectedProfile })
+    ledger.initialize()
+    ackOutbox.initialize()
+    const inbox = new PersistentCommandInbox({ rootDir, profile: selectedProfile })
+    const processor = new AgentMessageProcessor({
+      profile: selectedProfile,
+      inbox,
+      runCommand: async () => { runs[key] += 1; return { status: 'completed' } },
+      runChat: async () => {},
+      ledger,
+      ackOutbox,
+      sendFn: () => true
+    })
+    processor.start()
+    const dispatch = {
+      ...command(91),
+      messageId: `message-${key}`,
+      requestId: `message-${key}`,
+      commandId: 'shared-command-id',
+      targetAgentId: selectedProfile.agentId,
+      content: instruction,
+      payload: { instruction }
+    }
+    return { storageRoot, ledger, processor, dispatch }
+  }
+
+  const runtimeA = createRuntime(profile, 'a', 'payload for agent a')
+  const runtimeB = createRuntime(profileB, 'b', 'different payload for agent b')
+  await runtimeA.processor.handle(runtimeA.dispatch)
+  await runtimeB.processor.handle(runtimeB.dispatch)
+  await Promise.all([runtimeA.processor.waitForIdle(), runtimeB.processor.waitForIdle()])
+
+  assert.deepEqual(runs, { a: 1, b: 1 })
+  assert.notEqual(runtimeA.storageRoot, runtimeB.storageRoot)
+  assert.equal(runtimeA.ledger.getEntry('shared-command-id').status, ACK_STATUS.SUCCEEDED)
+  assert.equal(runtimeB.ledger.getEntry('shared-command-id').status, ACK_STATUS.SUCCEEDED)
+  assert.equal(runtimeA.ledger.getConflicts('shared-command-id').length, 0)
+  assert.equal(runtimeB.ledger.getConflicts('shared-command-id').length, 0)
 })
 
 test('completed command across restart replays terminal ACK without re-execution', async () => {
@@ -986,7 +1336,7 @@ test('completed command across restart replays terminal ACK without re-execution
   await processor2.handle(command(10))
   await processor2.waitForIdle()
   assert.equal(runs, 1, 'must not re-execute completed command after restart')
-  assert.deepEqual(replayedAcks, ['RECEIVED'], 'completed duplicate replays RECEIVED only')
+  assert.deepEqual(replayedAcks, ['SUCCEEDED'], 'completed duplicate replays current terminal ACK')
 })
 
 test('command fails and ACK reflects FAILED status', async () => {
@@ -1023,6 +1373,11 @@ test('command fails and ACK reflects FAILED status', async () => {
   assert.equal(entry.status, ACK_STATUS.FAILED)
   assert.ok(entry.outcome)
   assert.equal(entry.outcome.status, 'failed')
+
+  allAcks.length = 0
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+  assert.deepEqual(allAcks, ['FAILED'])
 })
 
 test('all 5 ACK status constants are defined', () => {

@@ -196,8 +196,15 @@ COMMAND_INBOX_DIR/
   <agent-id-as-utf8-hex>/
     pending/
     processing/
+    recovery-required/
     archive/
     quarantine/
+    ledger/
+    ledger-conflicts/
+    ledger-quarantine/
+    ledger-blocked/
+    acks/
+    acks-quarantine/
 ```
 
 Each command is one JSON file with `formatVersion: 1` and these durable fields:
@@ -232,16 +239,20 @@ Queue behavior:
 - The complete record is written to a temporary file, file-synced, and atomically renamed into `pending/` before execution can start.
 - A profile executes one command at a time in durable enqueue order. Commands arriving while Codex is busy remain in `pending/`.
 - Claiming is an atomic `pending/ -> processing/` rename.
-- On process startup, unfinished `processing/` records return to `pending/`; records already marked completed are settled without re-execution.
+- On process startup, an unfinished `processing/` record moves to durable `recovery-required/`, emits a persistent `REJECTED` ACK, and pauses the profile. It is never automatically re-executed because its external side effects are unknown. Reconciliation or a server dispatch with a new `commandId` is required.
+- A `processing/` record already durably marked completed is settled without re-execution and its terminal ledger state is reconciled/replayed.
 - Recovery and the final pre-execution gate fully revalidate Protocol v1 semantics, `command.dispatch`, target, and message/command fields. Invalid records move to `quarantine/` with a `.reason.txt` sidecar and never execute.
-- Queue directories are forced to `0700`; sequence, queue, archive, quarantine, and reason files are forced to `0600`.
+- Inbox, recovery, ledger, conflict, ACK outbox, blocked, and quarantine directories are forced to `0700`; durable records and reason files are forced to `0600`.
 - Critical file/directory `fsync`, rename, unlink, and cross-directory move failures propagate and pause execution rather than claiming durability.
 - With the default `archive` policy, successful and failed executions move to `archive/`. With `delete`, successful executions are removed and failures remain archived.
 
 A06 closes the A05 crash window with two durable guards:
 
-- `commandId` is deduped in a persistent ledger by a canonical fingerprint of the resolved semantic payload. Reordered fields hash the same; the same `commandId` with a different payload is rejected closed.
-- `RECEIVED`, `STARTED`, `SUCCEEDED`, `FAILED`, and `REJECTED` ACKs are written to a persistent outbox before send; failed sends are replayed on reconnect.
+- `commandId` is deduped in a persistent ledger by a canonical fingerprint containing only command semantics plus the complete nested business payload. Object-key order is normalized, array values/order remain significant, and transport redelivery metadata such as message/runtime/session/correlation ids and timestamps is excluded.
+- A fingerprint conflict creates a separate durable conflict record and `REJECTED` ACK; it never overwrites the original command fingerprint, terminal status, outcome, or completion timestamp.
+- `RECEIVED`, `STARTED`, `SUCCEEDED`, `FAILED`, and `REJECTED` ACKs are written to a persistent outbox before send. `ack*Emitted` is persisted only after `send` explicitly succeeds; marker/dequeue failures retain the outbox record for documented at-least-once replay.
+- Corrupt ledger or ACK records are durably quarantined and the profile pauses fail-closed for manual reconciliation.
+- Every ACK has a new `messageId`; `correlationId` alone points to the dispatch `messageId`. Duplicate delivery replays the ledger's current ACK state, including terminal `SUCCEEDED` or `FAILED`.
 
 Completed failures are archived rather than retried in a hot loop.
 
@@ -272,14 +283,14 @@ The test suite uses only Node built-ins (`node:test`). The production installer 
 Before upgrade:
 
 1. Create `COMMAND_INBOX_DIR` and grant the service account ownership/write access.
-2. Stop the old process cleanly before starting the A05 client; do not run old and new clients concurrently for the same canonical `agentId`.
+2. Stop the old process cleanly before starting the A06 client; do not run old and new clients concurrently for the same canonical `agentId`.
 3. Keep the default `archive` policy through initial rollout so command outcomes are inspectable.
 
-Rollback to the pre-A05 client does not understand `pending/` or `processing/` files and can therefore strand queued commands. Drain or preserve the inbox and coordinate server redispatch before rollback. Never delete `processing/` blindly; it may represent a command whose external side effect already occurred.
+Rollback to the pre-A05 client does not understand the durable inbox, ledger, ACK outbox, or `recovery-required/` files. Preserve all profile-local state and coordinate reconciliation/server redispatch before rollback. Never delete `processing/` or `recovery-required/` blindly; either may represent a command whose external side effect already occurred.
 
 ## Runtime Notes
 
 - Each configured profile keeps its own `CODEX_HOME`.
-- On shutdown, the agent sends `offline`, terminates active Codex children, and leaves any unsettled `processing/` record recoverable by the next process.
-- Pending recovery waits until the profile WebSocket reconnects before executing, reducing the chance that a result is produced with no live transport.
+- On shutdown, the agent sends `offline` and terminates active Codex children. Any unsettled `processing/` record becomes fail-closed `recovery-required/` on the next process and is not automatically retried.
+- Pending commands wait until the profile WebSocket reconnects before executing; recovery-required commands remain paused until explicit reconciliation.
 - Runtime logs are available from `journalctl -u codex-ws-agent`.
