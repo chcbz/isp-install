@@ -12,6 +12,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   unwatchFile,
@@ -522,6 +523,7 @@ const DEFAULT_FS_OPERATIONS = Object.freeze({
   readFileSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync
@@ -598,6 +600,13 @@ const durableUnlink = (fs, targetPath) => {
   fs.unlinkSync(targetPath)
   fsyncDirectory(fs, directory)
 }
+
+const blockingSleep = milliseconds => {
+  if (milliseconds <= 0) return
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
+}
+
+const monotonicMilliseconds = () => Number(process.hrtime.bigint() / 1000000n)
 
 const safeProfileDirectory = profile => Buffer.from(String(profile.agentId), 'utf8').toString('hex')
 const equalRecordField = (left, right) => sameEnvelopeValue(left ?? '', right ?? '')
@@ -1488,23 +1497,43 @@ export class DurableDedupeLedger {
 }
 
 export class AckOutbox {
-  constructor({ rootDir, profile, now = () => Date.now(), createId = () => randomUUID(), fs = DEFAULT_FS_OPERATIONS }) {
+  constructor({
+    rootDir,
+    profile,
+    now = () => Date.now(),
+    createId = () => randomUUID(),
+    fs = DEFAULT_FS_OPERATIONS,
+    lockTimeoutMs = 250,
+    lockRetryMs = 5,
+    lockClock = monotonicMilliseconds,
+    sleepSync = blockingSleep
+  }) {
     if (!profile?.agentId) throw new Error('profile.agentId is required for the ACK outbox')
+    if (!Number.isFinite(lockTimeoutMs) || lockTimeoutMs < 0) throw new Error('lockTimeoutMs must be non-negative')
+    if (!Number.isFinite(lockRetryMs) || lockRetryMs < 0) throw new Error('lockRetryMs must be non-negative')
     this.rootDir = resolve(rootDir)
     this.profile = profile
     this.now = now
     this.createId = createId
     this.fs = { ...DEFAULT_FS_OPERATIONS, ...fs }
+    this.lockTimeoutMs = lockTimeoutMs
+    this.lockRetryMs = lockRetryMs
+    this.lockClock = lockClock
+    this.sleepSync = sleepSync
     this.acksDir = resolve(this.rootDir, 'acks')
     this.quarantineDir = resolve(this.rootDir, 'acks-quarantine')
     this.sequencePath = resolve(this.rootDir, 'ack-sequence.json')
-    this.lastSequence = 0
+    this.highWaterDir = resolve(this.rootDir, 'ack-sequence-high-water')
+    this.highWaterInitializedPath = resolve(this.highWaterDir, 'initialized.json')
+    this.lockPath = resolve(this.rootDir, 'ack-sequence.lock')
+    this.lockOwnerPath = resolve(this.lockPath, 'owner.json')
     this.corruptions = []
   }
 
   initialize() {
     ensureSecureDirectory(this.fs, this.acksDir)
     ensureSecureDirectory(this.fs, this.quarantineDir)
+    ensureSecureDirectory(this.fs, this.highWaterDir)
     this.corruptions = []
     for (const fileName of this.fs.readdirSync(this.quarantineDir)) {
       if (fileName.endsWith('.json')) this.corruptions.push({ fileName, reason: 'previously quarantined ACK requires reconciliation' })
@@ -1512,62 +1541,260 @@ export class AckOutbox {
         forceSecureFileMode(this.fs, resolve(this.quarantineDir, fileName))
       }
     }
-    const validRecords = []
+    try {
+      this._withSequenceLock('initialize', () => this._initializeLocked())
+    } catch (error) {
+      if (error instanceof AgentProtocolError && error.code === 'ACK_OUTBOX_SEQUENCE_CORRUPT') {
+        return { corruptions: this.corruptions.length }
+      }
+      throw error
+    }
+    return { corruptions: this.corruptions.length }
+  }
+
+  _initializeLocked() {
+    const records = this._scanPendingRecords({ failOnInvalid: false })
+    const state = this._readSequenceState()
+    const highWater = this._readHighWater()
+
+    if (!highWater.initialized) {
+      if (highWater.maximum > 0) {
+        this._sequenceCorruption('ACK high-water markers exist without the durable initialization marker')
+      }
+      if (!state) {
+        if (records.length) {
+          this._sequenceCorruption('ACK sequence state is missing while pending ACK records exist')
+        }
+        this._writeSequenceState(0)
+        this._writeHighWaterInitialized()
+        return
+      }
+      this._validatePendingSequences(records, state.lastSequence)
+      if (state.lastSequence > 0) this._writeHighWaterMarker(state.lastSequence)
+      this._writeHighWaterInitialized()
+      return
+    }
+
+    this._validateSequenceEvidence(state, highWater, records)
+  }
+
+  _withSequenceLock(operation, callback) {
+    this._acquireSequenceLock(operation)
+    let callbackError = null
+    try {
+      return callback()
+    } catch (error) {
+      callbackError = error
+      throw error
+    } finally {
+      try {
+        this._releaseSequenceLock()
+      } catch (releaseError) {
+        if (!callbackError) throw releaseError
+      }
+    }
+  }
+
+  _acquireSequenceLock(operation) {
+    const startedAt = this.lockClock()
+    while (true) {
+      try {
+        this.fs.mkdirSync(this.lockPath, { mode: 0o700 })
+        this.fs.chmodSync(this.lockPath, 0o700)
+        fsyncDirectory(this.fs, this.rootDir)
+        atomicWriteJson(this.fs, this.lockOwnerPath, {
+          formatVersion: 1,
+          pid: process.pid,
+          runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+          operation,
+          acquiredAt: this.lockClock()
+        })
+        return
+      } catch (error) {
+        if (error?.code === 'EEXIST') {
+          if (this.lockClock() - startedAt >= this.lockTimeoutMs) {
+            throw new AgentProtocolError(
+              'ACK_OUTBOX_LOCK_TIMEOUT',
+              `Timed out waiting for durable ACK sequence lock during ${operation}; stale locks are never stolen automatically`
+            )
+          }
+          this.sleepSync(Math.max(1, Math.min(this.lockRetryMs || 1, this.lockTimeoutMs)))
+          continue
+        }
+        try {
+          if (this.fs.existsSync(this.lockPath)) this._releaseSequenceLock()
+        } catch {}
+        throw new AgentProtocolError('ACK_OUTBOX_LOCK_ERROR', `Failed to acquire durable ACK sequence lock during ${operation}: ${error.message}`)
+      }
+    }
+  }
+
+  _releaseSequenceLock() {
+    try {
+      if (this.fs.existsSync(this.lockOwnerPath)) durableUnlink(this.fs, this.lockOwnerPath)
+      this.fs.rmdirSync(this.lockPath)
+      fsyncDirectory(this.fs, this.rootDir)
+    } catch (error) {
+      throw new AgentProtocolError('ACK_OUTBOX_LOCK_RELEASE_ERROR', `Failed to release durable ACK sequence lock: ${error.message}`)
+    }
+  }
+
+  _readSequenceState() {
+    if (!this.fs.existsSync(this.sequencePath)) return null
+    forceSecureFileMode(this.fs, this.sequencePath)
+    try {
+      const sequence = JSON.parse(this.fs.readFileSync(this.sequencePath, 'utf8'))
+      if (!isObject(sequence) || sequence.formatVersion !== 1
+          || !Number.isSafeInteger(sequence.lastSequence) || sequence.lastSequence < 0) {
+        throw new Error('invalid ACK outbox sequence state')
+      }
+      return sequence
+    } catch (error) {
+      this._sequenceCorruption(`Invalid ACK sequence state: ${error.message}`, this.sequencePath)
+    }
+  }
+
+  _writeSequenceState(lastSequence) {
+    atomicWriteJson(this.fs, this.sequencePath, { formatVersion: 1, lastSequence })
+  }
+
+  _readHighWater() {
+    let initialized = false
+    if (this.fs.existsSync(this.highWaterInitializedPath)) {
+      forceSecureFileMode(this.fs, this.highWaterInitializedPath)
+      try {
+        const marker = JSON.parse(this.fs.readFileSync(this.highWaterInitializedPath, 'utf8'))
+        if (!isObject(marker) || marker.formatVersion !== 1 || marker.agentId !== this.profile.agentId) {
+          throw new Error('invalid ACK high-water initialization marker')
+        }
+        initialized = true
+      } catch (error) {
+        this._sequenceCorruption(`Invalid ACK high-water initialization marker: ${error.message}`, this.highWaterInitializedPath)
+      }
+    }
+
+    let maximum = 0
+    for (const fileName of this.fs.readdirSync(this.highWaterDir)) {
+      if (fileName === 'initialized.json') continue
+      const path = resolve(this.highWaterDir, fileName)
+      if (!fileName.endsWith('.json')) continue
+      forceSecureFileMode(this.fs, path)
+      try {
+        const match = /^(\d{20})\.json$/.exec(fileName)
+        if (!match) throw new Error('invalid ACK high-water marker filename')
+        const queueSequence = Number(match[1])
+        const marker = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+        if (!Number.isSafeInteger(queueSequence) || queueSequence <= 0
+            || !isObject(marker) || marker.formatVersion !== 1
+            || marker.queueSequence !== queueSequence || marker.agentId !== this.profile.agentId) {
+          throw new Error('invalid ACK high-water marker')
+        }
+        maximum = Math.max(maximum, queueSequence)
+      } catch (error) {
+        this._sequenceCorruption(`Invalid ACK high-water evidence ${fileName}: ${error.message}`, path)
+      }
+    }
+    return { initialized, maximum }
+  }
+
+  _writeHighWaterInitialized() {
+    if (this.fs.existsSync(this.highWaterInitializedPath)) {
+      this._sequenceCorruption('ACK high-water initialization marker already exists during bootstrap')
+    }
+    atomicWriteJson(this.fs, this.highWaterInitializedPath, {
+      formatVersion: 1,
+      agentId: this.profile.agentId,
+      initializedAt: this.now()
+    })
+  }
+
+  _writeHighWaterMarker(queueSequence) {
+    const path = resolve(this.highWaterDir, `${String(queueSequence).padStart(20, '0')}.json`)
+    if (this.fs.existsSync(path)) {
+      this._sequenceCorruption(`ACK high-water sequence ${queueSequence} already exists`, path)
+    }
+    atomicWriteJson(this.fs, path, {
+      formatVersion: 1,
+      agentId: this.profile.agentId,
+      queueSequence,
+      allocatedAt: this.now()
+    })
+  }
+
+  _validateSequenceEvidence(state, highWater, records) {
+    if (!state) this._sequenceCorruption('ACK sequence state is missing after high-water initialization')
+    if (state.lastSequence !== highWater.maximum) {
+      this._sequenceCorruption(
+        `ACK sequence rollback/conflict: state=${state.lastSequence}, durableHighWater=${highWater.maximum}`,
+        this.sequencePath
+      )
+    }
+    this._validatePendingSequences(records, highWater.maximum)
+    return state
+  }
+
+  _validatePendingSequences(records, highWater) {
+    const observed = new Map()
+    for (const item of records) {
+      const queueSequence = item.record.queueSequence
+      const fileMatch = /^(\d{20})-.+\.json$/.exec(item.fileName)
+      if (!fileMatch || Number(fileMatch[1]) !== queueSequence) {
+        this._quarantine(item.path, new Error(`ACK pending filename/queueSequence conflict for sequence ${queueSequence}`))
+        throw new AgentProtocolError('ACK_OUTBOX_SEQUENCE_CORRUPT', `ACK pending filename/queueSequence conflict: ${item.fileName}`)
+      }
+      if (observed.has(queueSequence)) {
+        this._quarantine(item.path, new Error(`duplicate ACK queueSequence ${queueSequence}`))
+        throw new AgentProtocolError(
+          'ACK_OUTBOX_SEQUENCE_CORRUPT',
+          `Duplicate ACK queueSequence ${queueSequence}: ${observed.get(queueSequence)} and ${item.fileName}`
+        )
+      }
+      if (queueSequence > highWater) {
+        this._quarantine(item.path, new Error(`ACK queueSequence ${queueSequence} exceeds durable high-water ${highWater}`))
+        throw new AgentProtocolError(
+          'ACK_OUTBOX_SEQUENCE_CORRUPT',
+          `ACK queueSequence ${queueSequence} exceeds durable high-water ${highWater}`
+        )
+      }
+      observed.set(queueSequence, item.fileName)
+    }
+  }
+
+  _sequenceCorruption(reason, sourcePath = '') {
+    if (sourcePath && this.fs.existsSync(sourcePath)) {
+      this._quarantine(sourcePath, new Error(reason))
+    } else {
+      const fileName = `sequence-corruption-${this.now()}-${randomUUID()}.json`
+      const markerPath = resolve(this.quarantineDir, fileName)
+      atomicWriteJson(this.fs, markerPath, {
+        formatVersion: 1,
+        profileId: this.profile.profileId,
+        agentId: this.profile.agentId,
+        detectedAt: this.now(),
+        reason
+      })
+      atomicWriteText(this.fs, `${markerPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${reason}\n`)
+      this.corruptions.push({ fileName, reason: `CORRUPT_ACK_SEQUENCE: ${reason}` })
+    }
+    throw new AgentProtocolError('ACK_OUTBOX_SEQUENCE_CORRUPT', reason)
+  }
+
+  _scanPendingRecords({ failOnInvalid }) {
+    const records = []
     for (const fileName of this.fs.readdirSync(this.acksDir)) {
       if (!fileName.endsWith('.json')) continue
       const path = resolve(this.acksDir, fileName)
       forceSecureFileMode(this.fs, path)
       try {
-        validRecords.push({ fileName, path, record: this._readAndValidate(path) })
+        records.push({ fileName, path, record: this._readAndValidate(path) })
       } catch (error) {
         this._quarantine(path, error)
-      }
-    }
-    this._loadSequence(validRecords)
-    return { corruptions: this.corruptions.length }
-  }
-
-  _loadSequence(records) {
-    let persisted = 0
-    if (this.fs.existsSync(this.sequencePath)) {
-      forceSecureFileMode(this.fs, this.sequencePath)
-      try {
-        const sequence = JSON.parse(this.fs.readFileSync(this.sequencePath, 'utf8'))
-        if (!isObject(sequence) || sequence.formatVersion !== 1
-            || !Number.isSafeInteger(sequence.lastSequence) || sequence.lastSequence < 0) {
-          throw new Error('invalid ACK outbox sequence state')
+        if (failOnInvalid) {
+          throw new AgentProtocolError('ACK_OUTBOX_CORRUPT', `ACK outbox record ${fileName} quarantined: ${error.message}`)
         }
-        persisted = sequence.lastSequence
-      } catch (error) {
-        this._quarantine(this.sequencePath, error)
       }
     }
-    const observed = records.reduce((maximum, item) => (
-      Number.isSafeInteger(item.record.queueSequence)
-        ? Math.max(maximum, item.record.queueSequence)
-        : maximum
-    ), 0)
-    this.lastSequence = Math.max(persisted, observed)
-    if (!this.fs.existsSync(this.sequencePath) || this.lastSequence !== persisted) this._persistSequence()
-
-    // Legacy timestamp-named records have no reliable same-millisecond order.
-    // Preserve their prior lexical order once, then use the durable sequence forever.
-    for (const item of records.filter(entry => !Number.isSafeInteger(entry.record.queueSequence)).sort((left, right) => left.fileName.localeCompare(right.fileName))) {
-      const queueSequence = this._nextSequence()
-      item.record = { ...item.record, queueSequence }
-      atomicWriteJson(this.fs, item.path, item.record)
-    }
-  }
-
-  _persistSequence() {
-    atomicWriteJson(this.fs, this.sequencePath, { formatVersion: 1, lastSequence: this.lastSequence })
-  }
-
-  _nextSequence() {
-    if (this.lastSequence >= Number.MAX_SAFE_INTEGER) throw new Error('ACK outbox sequence exhausted')
-    this.lastSequence += 1
-    this._persistSequence()
-    return this.lastSequence
+    return records
   }
 
   hasCorruption() {
@@ -1576,6 +1803,18 @@ export class AckOutbox {
 
   corruptionSummary() {
     return this.corruptions.map(entry => entry.reason || 'corrupt ACK outbox record').join('; ')
+  }
+
+  _assertHealthy() {
+    const known = new Set(this.corruptions.map(entry => entry.fileName))
+    for (const fileName of this.fs.readdirSync(this.quarantineDir)) {
+      if (!fileName.endsWith('.json') || known.has(fileName)) continue
+      forceSecureFileMode(this.fs, resolve(this.quarantineDir, fileName))
+      this.corruptions.push({ fileName, reason: 'durable ACK quarantine requires reconciliation' })
+    }
+    if (this.hasCorruption()) {
+      throw new AgentProtocolError('ACK_OUTBOX_CORRUPT', this.corruptionSummary() || 'durable ACK outbox requires reconciliation')
+    }
   }
 
   _uniquePath(fileName) {
@@ -1603,8 +1842,7 @@ export class AckOutbox {
     if (!isObject(record) || record.formatVersion !== 1 || !isObject(record.envelope)) {
       throw new Error('invalid ACK outbox record shape')
     }
-    if (hasOwn(record, 'queueSequence')
-        && (!Number.isSafeInteger(record.queueSequence) || record.queueSequence <= 0)) {
+    if (!Number.isSafeInteger(record.queueSequence) || record.queueSequence <= 0) {
       throw new Error('ACK outbox record has invalid queueSequence')
     }
     let normalized
@@ -1630,19 +1868,27 @@ export class AckOutbox {
   }
 
   enqueue(ackEnvelope, marker = { kind: 'entry' }) {
-    const now = this.now()
-    const queueSequence = this._nextSequence()
-    const fileName = `${String(queueSequence).padStart(20, '0')}-${this.createId()}.json`
-    const record = {
-      formatVersion: 1,
-      queueSequence,
-      envelope: ackEnvelope,
-      marker,
-      createdAt: now,
-      attempts: 0
-    }
-    atomicWriteJson(this.fs, resolve(this.acksDir, fileName), record)
-    return { fileName, record }
+    this._assertHealthy()
+    return this._withSequenceLock('enqueue', () => {
+      const records = this._scanPendingRecords({ failOnInvalid: true })
+      const state = this._validateSequenceEvidence(this._readSequenceState(), this._readHighWater(), records)
+      if (state.lastSequence >= Number.MAX_SAFE_INTEGER) throw new Error('ACK outbox sequence exhausted')
+      const queueSequence = state.lastSequence + 1
+      const now = this.now()
+      const fileName = `${String(queueSequence).padStart(20, '0')}-${this.createId()}.json`
+      const record = {
+        formatVersion: 1,
+        queueSequence,
+        envelope: ackEnvelope,
+        marker,
+        createdAt: now,
+        attempts: 0
+      }
+      this._writeHighWaterMarker(queueSequence)
+      this._writeSequenceState(queueSequence)
+      atomicWriteJson(this.fs, resolve(this.acksDir, fileName), record)
+      return { fileName, record }
+    })
   }
 
   dequeue(fileName) {
@@ -1652,22 +1898,19 @@ export class AckOutbox {
   }
 
   pendingEnvelopes() {
-    const envelopes = []
-    for (const fileName of this.fs.readdirSync(this.acksDir)) {
-      if (!fileName.endsWith('.json')) continue
-      const path = resolve(this.acksDir, fileName)
-      forceSecureFileMode(this.fs, path)
-      try {
-        const record = this._readAndValidate(path)
-        envelopes.push({ fileName, envelope: record.envelope, marker: record.marker || { kind: 'entry' }, record })
-      } catch (error) {
-        this._quarantine(path, error)
-        throw new AgentProtocolError('ACK_OUTBOX_CORRUPT', `ACK outbox record ${fileName} quarantined: ${error.message}`)
-      }
-    }
-    return envelopes.sort((left, right) => (
-      left.record.queueSequence - right.record.queueSequence || left.fileName.localeCompare(right.fileName)
-    ))
+    this._assertHealthy()
+    return this._withSequenceLock('replay-scan', () => {
+      const records = this._scanPendingRecords({ failOnInvalid: true })
+      this._validateSequenceEvidence(this._readSequenceState(), this._readHighWater(), records)
+      return records
+        .sort((left, right) => left.record.queueSequence - right.record.queueSequence)
+        .map(item => ({
+          fileName: item.fileName,
+          envelope: item.record.envelope,
+          marker: item.record.marker || { kind: 'entry' },
+          record: item.record
+        }))
+    })
   }
 }
 

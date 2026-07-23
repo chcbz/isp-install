@@ -862,32 +862,38 @@ test('ack outbox retains pending ACKs when send fails and replays on reconnect',
   assert.equal(pendingPostReplay.length, 0, 'outbox should be empty after successful replay')
 })
 
-test('ACK outbox preserves FIFO for same-millisecond enqueue across restart', () => {
+test('two initialized ACK outboxes allocate one FIFO sequence across instances and restart', () => {
   const rootDir = temporaryDirectory()
   const storageRoot = profileStorageRoot(rootDir)
-  const ids = ['z-last-lexically', 'a-first-lexically', 'm-middle', 'restart']
-  const outbox = new AckOutbox({
+  const outboxA = new AckOutbox({
     rootDir: storageRoot,
     profile,
     now: () => 123456789,
-    createId: () => ids.shift()
+    createId: () => 'z-last-lexically'
   })
-  outbox.initialize()
-  for (const status of [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED]) {
-    outbox.enqueue(buildAckEnvelope(profile, status, { commandId: 'command-fifo', messageId: 'dispatch-fifo' }), { kind: 'none' })
-  }
+  const outboxB = new AckOutbox({
+    rootDir: storageRoot,
+    profile,
+    now: () => 123456789,
+    createId: () => 'a-first-lexically'
+  })
+  outboxA.initialize()
+  outboxB.initialize()
+  outboxA.enqueue(buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: 'command-fifo' }), { kind: 'none' })
+  outboxB.enqueue(buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'command-fifo' }), { kind: 'none' })
+  outboxA.enqueue(buildAckEnvelope(profile, ACK_STATUS.SUCCEEDED, { commandId: 'command-fifo' }), { kind: 'none' })
 
   assert.deepEqual(
-    outbox.pendingEnvelopes().map(item => item.envelope.ackStatus),
+    outboxB.pendingEnvelopes().map(item => item.envelope.ackStatus),
     [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED]
   )
-  assert.deepEqual(outbox.pendingEnvelopes().map(item => item.record.queueSequence), [1, 2, 3])
+  assert.deepEqual(outboxA.pendingEnvelopes().map(item => item.record.queueSequence), [1, 2, 3])
 
   const restarted = new AckOutbox({
     rootDir: storageRoot,
     profile,
     now: () => 123456789,
-    createId: () => ids.shift()
+    createId: () => 'restart'
   })
   restarted.initialize()
   restarted.enqueue(
@@ -901,6 +907,135 @@ test('ACK outbox preserves FIFO for same-millisecond enqueue across restart', ()
     [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED, ACK_STATUS.REJECTED]
   )
   assert.ok(pending.every(item => item.record.createdAt === 123456789))
+})
+
+test('duplicate ACK queueSequence is quarantined and replay fails closed before send', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ackOutbox.initialize()
+  ackOutbox.enqueue(buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: 'duplicate-sequence' }), { kind: 'none' })
+  ackOutbox.enqueue(buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'duplicate-sequence' }), { kind: 'none' })
+  const alreadyInitializedObserver = new AckOutbox({ rootDir: storageRoot, profile })
+  alreadyInitializedObserver.initialize()
+
+  const firstFile = readdirSync(ackOutbox.acksDir).filter(name => name.endsWith('.json')).sort()[0]
+  const duplicate = JSON.parse(readFileSync(resolve(ackOutbox.acksDir, firstFile), 'utf8'))
+  writeFileSync(
+    resolve(ackOutbox.acksDir, `${String(duplicate.queueSequence).padStart(20, '0')}-duplicate.json`),
+    `${JSON.stringify(duplicate)}\n`,
+    { mode: 0o600 }
+  )
+  let sends = 0
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: async () => {},
+    ackOutbox,
+    sendFn: () => { sends += 1; return true }
+  })
+
+  assert.equal(processor.replayAcks(), 0)
+  assert.equal(sends, 0)
+  assert.equal(processor.failClosedError?.code, 'ACK_OUTBOX_SEQUENCE_CORRUPT')
+  assert.equal(ackOutbox.hasCorruption(), true)
+  assert.ok(readdirSync(ackOutbox.quarantineDir).some(name => name.includes('duplicate')))
+  assert.throws(
+    () => alreadyInitializedObserver.pendingEnvelopes(),
+    error => error.code === 'ACK_OUTBOX_CORRUPT'
+  )
+})
+
+test('valid ACK sequence rollback is detected after the outbox becomes empty', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ackOutbox.initialize()
+  const queued = ackOutbox.enqueue(
+    buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: 'rollback-empty' }),
+    { kind: 'none' }
+  )
+  ackOutbox.dequeue(queued.fileName)
+  assert.equal(readdirSync(ackOutbox.acksDir).filter(name => name.endsWith('.json')).length, 0)
+  writeFileSync(ackOutbox.sequencePath, `${JSON.stringify({ formatVersion: 1, lastSequence: 0 })}\n`, { mode: 0o600 })
+
+  const restarted = new AckOutbox({ rootDir: storageRoot, profile })
+  const initialization = restarted.initialize()
+  assert.equal(initialization.corruptions, 1)
+  assert.equal(restarted.hasCorruption(), true)
+  assert.match(restarted.corruptionSummary(), /rollback\/conflict/)
+  assert.throws(
+    () => restarted.enqueue(buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'rollback-empty' })),
+    error => error.code === 'ACK_OUTBOX_CORRUPT'
+  )
+})
+
+test('pending ACK above durable high-water is quarantined on startup', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const first = new AckOutbox({ rootDir: storageRoot, profile })
+  first.initialize()
+  const record = {
+    formatVersion: 1,
+    queueSequence: 5,
+    envelope: buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'future-pending' }),
+    marker: { kind: 'none' },
+    createdAt: Date.now(),
+    attempts: 0
+  }
+  writeFileSync(
+    resolve(first.acksDir, '00000000000000000005-future.json'),
+    `${JSON.stringify(record)}\n`,
+    { mode: 0o600 }
+  )
+
+  const restarted = new AckOutbox({ rootDir: storageRoot, profile })
+  const initialization = restarted.initialize()
+  assert.equal(initialization.corruptions, 1)
+  assert.equal(restarted.hasCorruption(), true)
+  assert.match(restarted.corruptionSummary(), /exceeds durable high-water/)
+  assert.equal(readdirSync(restarted.acksDir).filter(name => name.endsWith('.json')).length, 0)
+})
+
+test('ACK sequence lock contention and lock fsync failure fail closed without allocation', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile, lockTimeoutMs: 0 })
+  ackOutbox.initialize()
+
+  ackOutbox.fs.mkdirSync(ackOutbox.lockPath, { mode: 0o700 })
+  writeFileSync(ackOutbox.lockOwnerPath, JSON.stringify({ acquiredAt: 0 }), { mode: 0o600 })
+  assert.throws(
+    () => ackOutbox.enqueue(buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: 'lock-contention' })),
+    error => error.code === 'ACK_OUTBOX_LOCK_TIMEOUT'
+  )
+  assert.equal(ackOutbox.fs.existsSync(ackOutbox.lockPath), true, 'stale lock must not be stolen')
+  rmSync(ackOutbox.lockPath, { recursive: true, force: true })
+
+  const originalMkdir = ackOutbox.fs.mkdirSync
+  const originalFsync = ackOutbox.fs.fsyncSync
+  let failLockFsync = false
+  ackOutbox.fs.mkdirSync = (path, options) => {
+    const result = originalMkdir(path, options)
+    if (path === ackOutbox.lockPath) failLockFsync = true
+    return result
+  }
+  ackOutbox.fs.fsyncSync = descriptor => {
+    if (failLockFsync) {
+      failLockFsync = false
+      const error = new Error('injected lock fsync failure')
+      error.code = 'EIO'
+      throw error
+    }
+    return originalFsync(descriptor)
+  }
+  assert.throws(
+    () => ackOutbox.enqueue(buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: 'lock-fsync' })),
+    error => error.code === 'ACK_OUTBOX_LOCK_ERROR'
+  )
+  assert.equal(JSON.parse(readFileSync(ackOutbox.sequencePath, 'utf8')).lastSequence, 0)
+  assert.equal(readdirSync(ackOutbox.acksDir).filter(name => name.endsWith('.json')).length, 0)
 })
 
 test('ACK replay stops immediately when the first send returns false or throws', () => {
@@ -1276,11 +1411,12 @@ test('A06 durable ledger and ACK paths enforce private permissions', async () =>
     ledger.quarantineDir,
     ledger.blockedDir,
     ackOutbox.acksDir,
-    ackOutbox.quarantineDir
+    ackOutbox.quarantineDir,
+    ackOutbox.highWaterDir
   ]) {
     assert.equal(statSync(directory).mode & 0o777, 0o700, directory)
   }
-  for (const directory of [ledger.ledgerDir, ackOutbox.acksDir]) {
+  for (const directory of [ledger.ledgerDir, ackOutbox.acksDir, ackOutbox.highWaterDir]) {
     for (const fileName of readdirSync(directory)) {
       assert.equal(statSync(resolve(directory, fileName)).mode & 0o777, 0o600, `${directory}/${fileName}`)
     }
