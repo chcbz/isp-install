@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, fsyncSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -61,6 +62,8 @@ const command = number => ({
 })
 
 const chat = () => ({
+  senderName: 'Caller Name',
+  personaName: 'Caller Persona',
   type: 'agent_direct_message',
   schemaVersion: 1,
   messageType: MESSAGE_TYPES.CHAT_MESSAGE,
@@ -308,4 +311,262 @@ test('runtimeInstanceId is process-scoped and reused by URL and v1 envelopes', (
   assert.equal(presence.runtimeInstanceId, PROCESS_RUNTIME_INSTANCE_ID)
   assert.equal(register.agentId, profile.agentId)
   assert.equal(register.sourceAgentId, profile.agentId)
+})
+
+
+test('fsync and rename failures fail closed before command execution', async () => {
+  for (const failure of ['fsync', 'rename']) {
+    const rootDir = temporaryDirectory()
+    let enabled = false
+    let runs = 0
+    const inbox = createInbox(rootDir, {
+      fs: {
+        fsyncSync: descriptor => {
+          if (enabled && failure === 'fsync') throw new Error('injected fsync failure')
+          return fsyncSync(descriptor)
+        },
+        renameSync: (source, target) => {
+          if (enabled && failure === 'rename') throw new Error('injected rename failure')
+          return renameSync(source, target)
+        }
+      }
+    })
+    const processor = new AgentMessageProcessor({
+      profile,
+      inbox,
+      runCommand: async () => { runs += 1 },
+      runChat: async () => {}
+    })
+    processor.start()
+    enabled = true
+    const result = await processor.handle(command(10))
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 20))
+    assert.equal(result.kind, 'rejected', failure)
+    assert.equal(runs, 0, failure)
+  }
+})
+
+test('claim rename and fsync failures pause the queue before execution', async () => {
+  for (const failure of ['rename', 'fsync']) {
+    const rootDir = temporaryDirectory()
+    let enabled = false
+    let runs = 0
+    const rejects = []
+    const inbox = createInbox(rootDir, {
+      fs: {
+        fsyncSync: descriptor => {
+          if (enabled && failure === 'fsync') throw new Error('injected claim fsync failure')
+          return fsyncSync(descriptor)
+        },
+        renameSync: (source, target) => {
+          if (enabled && failure === 'rename') throw new Error('injected claim rename failure')
+          return renameSync(source, target)
+        }
+      }
+    })
+    inbox.initialize()
+    inbox.enqueue(normalizeInboundMessage(command(11)))
+    const processor = new AgentMessageProcessor({
+      profile,
+      inbox,
+      runCommand: async () => { runs += 1 },
+      runChat: async () => {},
+      onReject: error => rejects.push(error.code)
+    })
+    processor.start({ drain: false })
+    enabled = true
+    processor.resume()
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 20))
+    assert.equal(runs, 0, failure)
+    assert.equal(processor.paused, true, failure)
+    assert.deepEqual(rejects, ['COMMAND_INBOX_ERROR'], failure)
+  }
+})
+
+test('malformed completed marker is quarantined instead of re-executed', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  inbox.initialize()
+  inbox.enqueue(normalizeInboundMessage(command(1)))
+  const item = inbox.claimNext()
+  const record = JSON.parse(readFileSync(item.path, 'utf8'))
+  record.state = 'completed'
+  delete record.outcome
+  writeFileSync(item.path, `${JSON.stringify(record)}\n`, { mode: 0o600 })
+
+  const restarted = createInbox(rootDir)
+  const recovery = restarted.initialize()
+  assert.equal(recovery.quarantined, 1)
+  let runs = 0
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: restarted,
+    runCommand: async () => { runs += 1 },
+    runChat: async () => {}
+  })
+  processor.start()
+  await processor.waitForIdle()
+  assert.equal(runs, 0)
+})
+
+test('completed marker is settled on recovery without re-execution', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  inbox.initialize()
+  inbox.enqueue(normalizeInboundMessage(command(1)))
+  const item = inbox.claimNext()
+  inbox.markCompleted(item, { status: 'completed' })
+
+  const restarted = createInbox(rootDir)
+  const recovery = restarted.initialize()
+  assert.equal(recovery.completed, 1)
+  assert.equal(restarted.count('processing'), 0)
+  assert.equal(restarted.count('archive'), 1)
+})
+
+test('pending commands and persistent sequence survive restart in FIFO order', async () => {
+  const rootDir = temporaryDirectory()
+  const first = createInbox(rootDir)
+  first.initialize()
+  const one = first.enqueue(normalizeInboundMessage(command(1)))
+  const two = first.enqueue(normalizeInboundMessage(command(2)))
+
+  const restarted = createInbox(rootDir)
+  restarted.initialize()
+  const three = restarted.enqueue(normalizeInboundMessage(command(3)))
+  assert.deepEqual([one.record.queueSequence, two.record.queueSequence, three.record.queueSequence], [1, 2, 3])
+
+  const order = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: restarted,
+    runCommand: async message => { order.push(message.commandId); return { status: 'completed' } },
+    runChat: async () => {}
+  })
+  processor.start()
+  await processor.waitForIdle()
+  assert.deepEqual(order, ['command-1', 'command-2', 'command-3'])
+})
+
+test('semantically invalid persisted commands are quarantined and never executed', async () => {
+  const mutations = [
+    record => { record.rawPayload = taskEvent() },
+    record => { record.rawPayload.targetAgentId = 'another-agent'; record.targetAgentId = 'another-agent' },
+    record => { record.rawPayload.messageId = ''; record.rawPayload.requestId = ''; record.messageId = '' },
+    record => { record.rawPayload.commandId = ''; record.commandId = '' },
+    record => { record.rawPayload.commandType = ''; record.commandType = '' }
+  ]
+  for (const [index, mutate] of mutations.entries()) {
+    const rootDir = temporaryDirectory()
+    const inbox = createInbox(rootDir)
+    inbox.initialize()
+    const item = inbox.enqueue(normalizeInboundMessage(command(index + 1)))
+    const record = JSON.parse(readFileSync(item.path, 'utf8'))
+    mutate(record)
+    writeFileSync(item.path, `${JSON.stringify(record)}\n`, { mode: 0o600 })
+
+    const restarted = createInbox(rootDir)
+    const recovery = restarted.initialize()
+    assert.equal(recovery.quarantined, 1, `mutation ${index}`)
+    let runs = 0
+    const processor = new AgentMessageProcessor({
+      profile,
+      inbox: restarted,
+      runCommand: async () => { runs += 1 },
+      runChat: async () => {}
+    })
+    processor.start()
+    await processor.waitForIdle()
+    assert.equal(runs, 0, `mutation ${index}`)
+  }
+})
+
+test('queue initialization repairs existing directory and record permissions', () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  inbox.initialize()
+  const archived = inbox.enqueue(normalizeInboundMessage(command(1)))
+  inbox.complete(inbox.claimNext(), { status: 'completed' })
+  writeFileSync(resolve(inbox.pendingDir, 'corrupt.json'), '{not json', { mode: 0o666 })
+  createInbox(rootDir).initialize()
+
+  for (const directory of [inbox.profileDir, inbox.pendingDir, inbox.processingDir, inbox.archiveDir, inbox.quarantineDir]) {
+    chmodSync(directory, 0o755)
+  }
+  chmodSync(inbox.sequencePath, 0o644)
+  for (const directory of [inbox.pendingDir, inbox.processingDir, inbox.archiveDir, inbox.quarantineDir]) {
+    for (const fileName of readdirSync(directory)) chmodSync(resolve(directory, fileName), 0o666)
+  }
+
+  const restarted = createInbox(rootDir)
+  restarted.initialize()
+  for (const directory of [restarted.profileDir, restarted.pendingDir, restarted.processingDir, restarted.archiveDir, restarted.quarantineDir]) {
+    assert.equal(statSync(directory).mode & 0o777, 0o700)
+  }
+  assert.equal(statSync(restarted.sequencePath).mode & 0o777, 0o600)
+  for (const directory of [restarted.pendingDir, restarted.processingDir, restarted.archiveDir, restarted.quarantineDir]) {
+    for (const fileName of readdirSync(directory)) {
+      assert.equal(statSync(resolve(directory, fileName)).mode & 0o777, 0o600, `${directory}/${fileName}`)
+    }
+  }
+  assert.equal(archived.record.commandId, 'command-1')
+})
+
+test('chat failure and busy branches emit chat responses only', async () => {
+  const protocol = []
+  const message = normalizeInboundMessage(chat())
+  await runCodex(profile, message, 'chat', {
+    spawnFn: () => { throw new Error('spawn failed') },
+    sendProtocolFn: (type, payload) => protocol.push({ type, payload }),
+    sendLegacyFn: () => assert.fail('chat must not send legacy result'),
+    sendStatusFn: () => assert.fail('chat must not send presence')
+  })
+  assert.deepEqual(protocol.map(entry => entry.type), [MESSAGE_TYPES.CHAT_MESSAGE_DELTA, MESSAGE_TYPES.CHAT_MESSAGE])
+  assert.ok(protocol.every(entry => entry.payload.senderName === profile.personaName))
+
+  const gate = deferred()
+  const busyReplies = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(temporaryDirectory()),
+    runCommand: async () => { await gate.promise; return { status: 'completed' } },
+    runChat: async () => assert.fail('busy chat must not start Codex'),
+    sendChatBusy: async inbound => busyReplies.push(inbound.senderName)
+  })
+  processor.start()
+  await processor.handle(command(20))
+  const result = await processor.handle(chat())
+  assert.equal(result.kind, 'chat-busy')
+  assert.deepEqual(busyReplies, ['Caller Name'])
+  gate.resolve()
+  await processor.waitForIdle()
+})
+
+test('public envelope preserves explicit sender identity and validate works without global WebSocket', () => {
+  const envelope = buildProtocolEnvelope(MESSAGE_TYPES.CHAT_MESSAGE, {
+    senderName: 'Explicit Sender',
+    personaName: 'Explicit Persona'
+  }, profile)
+  assert.equal(envelope.senderName, 'Explicit Sender')
+  assert.equal(envelope.personaName, 'Explicit Persona')
+
+  const bootstrap = `
+    delete globalThis.WebSocket;
+    process.argv.push('validate-bootstrap', '--validate');
+    const { main } = await import('./agent-client.mjs');
+    await main();
+  `
+  const output = execFileSync(process.execPath, ['--input-type=module', '--eval', bootstrap], {
+    cwd: resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      OPENCLAW_API_KEY: 'test',
+      CODEX_PROFILES_FILE: '',
+      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
+      DEFAULT_CODEX_PROFILE: 'validate',
+      CODEX_PROFILE_RELOAD_MS: '0'
+    }
+  })
+  assert.match(output, /configuration valid/)
 })

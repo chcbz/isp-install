@@ -7,7 +7,7 @@ description: Use when installing or configuring codex-ws-agent from this reposit
 
 ## Preconditions
 
-- Node.js 22 or newer is installed from this repo or otherwise available as `node`; verify the selected binary exposes the built-in `WebSocket` global.
+- Node.js 20 or newer is installed from this repo or otherwise available as `node`.
 - `codex` CLI exists on the target host.
 - The service account can create, rename, delete, and `fsync` files below `/home/isp/apps/codex-ws-agent/data/inbox`.
 
@@ -17,7 +17,7 @@ description: Use when installing or configuring codex-ws-agent from this reposit
 - Via profile: `sudo ./install.sh --profile agent`
 - Helper script after install: `/home/isp/bin/codex_ws_agent.sh start`
 
-The current shell installer accepts Node 20 at its outer version gate, so independently run `node -p "process.version + ' WebSocket=' + typeof WebSocket"` and require `WebSocket=function` before starting the A05 client.
+After files are installed, run `cd /home/isp/apps/codex-ws-agent && npm ci --omit=dev` so Node 20 can load the declared `ws` dependency. Node runtimes with a built-in WebSocket remain supported.
 
 ## Config files
 
@@ -40,7 +40,8 @@ Use `archive` for initial rollout. Do not run old and new clients concurrently f
 
 ## Verify
 
-- `node -p "process.version + ' WebSocket=' + typeof WebSocket"`
+- `cd /home/isp/apps/codex-ws-agent && npm ci --omit=dev`
+- `node -v` (must be Node 20+)
 - `cd /home/isp/apps/codex-ws-agent && node agent-client.mjs --validate`
 - `systemctl status codex-ws-agent`
 - `journalctl -u codex-ws-agent -f`

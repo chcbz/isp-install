@@ -6,6 +6,7 @@ Connects a local Codex runner to the OpenClaw agent WebSocket channel.
 
 ```bash
 cd /home/isp/apps/codex-ws-agent
+npm ci --omit=dev
 cp -n .env.example .env
 vi .env
 /home/isp/bin/codex_ws_agent.sh start
@@ -23,7 +24,7 @@ The helper script `/home/isp/bin/codex_ws_agent.sh` now delegates to `systemd` a
 
 Required:
 
-- Node.js 22 or newer (the client uses Node's built-in WebSocket implementation).
+- Node.js 20 or newer. Node 20 loads the declared `ws` dependency; newer runtimes may use their built-in WebSocket implementation.
 - `OPENCLAW_API_KEY`: API key accepted by `/ws/agent/channel`.
 - `WS_URL`: WebSocket endpoint. Default public endpoint is `wss://api.chaoyoufan.cn/ws/agent/channel`.
 
@@ -227,11 +228,14 @@ Each command is one JSON file with `formatVersion: 1` and these durable fields:
 
 Queue behavior:
 
+- A profile-local `sequence.json` counter is atomically persisted before each record; FIFO ordering uses this cross-restart monotonic sequence and never wall-clock time.
 - The complete record is written to a temporary file, file-synced, and atomically renamed into `pending/` before execution can start.
 - A profile executes one command at a time in durable enqueue order. Commands arriving while Codex is busy remain in `pending/`.
 - Claiming is an atomic `pending/ -> processing/` rename.
 - On process startup, unfinished `processing/` records return to `pending/`; records already marked completed are settled without re-execution.
-- Invalid JSON, invalid record shape, or canonical Agent identity mismatch moves the file to `quarantine/` with a `.reason.txt` sidecar. Other valid commands continue.
+- Recovery and the final pre-execution gate fully revalidate Protocol v1 semantics, `command.dispatch`, target, and message/command fields. Invalid records move to `quarantine/` with a `.reason.txt` sidecar and never execute.
+- Queue directories are forced to `0700`; sequence, queue, archive, quarantine, and reason files are forced to `0600`.
+- Critical file/directory `fsync`, rename, unlink, and cross-directory move failures propagate and pause execution rather than claiming durability.
 - With the default `archive` policy, successful and failed executions move to `archive/`. With `delete`, successful executions are removed and failures remain archived.
 
 A05 deliberately does **not** implement durable ACK or `commandId` idempotency. A crash after the external command side effect but before the local completion marker can execute the command again after restart. A06 must close that window. Completed failures are archived rather than retried in a hot loop.

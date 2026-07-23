@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
   accessSync,
+  chmodSync,
   closeSync,
   constants as fsConstants,
   existsSync,
@@ -509,41 +510,97 @@ let codexSessionMapPath = ''
 let codexSessionMap = {}
 const currentRuns = new Map()
 const profileStates = new Map()
+let WebSocketClient = globalThis.WebSocket || null
 
-const atomicWriteText = (targetPath, text) => {
-  mkdirSync(dirname(targetPath), { recursive: true })
+const DEFAULT_FS_OPERATIONS = Object.freeze({
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync
+})
+
+const fsyncDirectory = (fs, directory) => {
+  const descriptor = fs.openSync(directory, 'r')
+  try {
+    fs.fsyncSync(descriptor)
+  } finally {
+    fs.closeSync(descriptor)
+  }
+}
+
+const ensureSecureDirectory = (fs, directory) => {
+  const existed = fs.existsSync(directory)
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+  fs.chmodSync(directory, 0o700)
+  fsyncDirectory(fs, directory)
+  if (!existed) fsyncDirectory(fs, dirname(directory))
+}
+
+const forceSecureFileMode = (fs, filePath) => {
+  fs.chmodSync(filePath, 0o600)
+  const descriptor = fs.openSync(filePath, 'r')
+  try {
+    fs.fsyncSync(descriptor)
+  } finally {
+    fs.closeSync(descriptor)
+  }
+}
+
+const atomicWriteText = (fs, targetPath, text) => {
+  const directory = dirname(targetPath)
+  const directoryExisted = fs.existsSync(directory)
+  fs.mkdirSync(directory, { recursive: true })
+  if (!directoryExisted) {
+    fsyncDirectory(fs, directory)
+    fsyncDirectory(fs, dirname(directory))
+  }
   const temporaryPath = `${targetPath}.tmp-${process.pid}-${randomUUID()}`
   let descriptor
   try {
-    descriptor = openSync(temporaryPath, 'wx', 0o600)
-    writeFileSync(descriptor, text, 'utf8')
-    fsyncSync(descriptor)
-    closeSync(descriptor)
+    descriptor = fs.openSync(temporaryPath, 'wx', 0o600)
+    fs.writeFileSync(descriptor, text, 'utf8')
+    fs.fsyncSync(descriptor)
+    fs.closeSync(descriptor)
     descriptor = undefined
-    renameSync(temporaryPath, targetPath)
-    try {
-      const directoryDescriptor = openSync(dirname(targetPath), 'r')
-      fsyncSync(directoryDescriptor)
-      closeSync(directoryDescriptor)
-    } catch {}
+    fs.renameSync(temporaryPath, targetPath)
+    forceSecureFileMode(fs, targetPath)
+    fsyncDirectory(fs, directory)
   } catch (error) {
     if (descriptor !== undefined) {
-      try { closeSync(descriptor) } catch {}
+      try { fs.closeSync(descriptor) } catch {}
     }
-    try { unlinkSync(temporaryPath) } catch {}
     throw error
   }
 }
 
-const atomicWriteJson = (targetPath, value) => atomicWriteText(targetPath, `${JSON.stringify(value, null, 2)}\n`)
-const fsyncDirectory = directory => {
-  try {
-    const descriptor = openSync(directory, 'r')
-    fsyncSync(descriptor)
-    closeSync(descriptor)
-  } catch {}
+const atomicWriteJson = (fs, targetPath, value) => atomicWriteText(fs, targetPath, `${JSON.stringify(value, null, 2)}\n`)
+
+const durableRename = (fs, sourcePath, targetPath, mode = 0o600) => {
+  const sourceDirectory = dirname(sourcePath)
+  const targetDirectory = dirname(targetPath)
+  fs.renameSync(sourcePath, targetPath)
+  if (mode === 0o600) forceSecureFileMode(fs, targetPath)
+  else fs.chmodSync(targetPath, mode)
+  fsyncDirectory(fs, sourceDirectory)
+  if (targetDirectory !== sourceDirectory) fsyncDirectory(fs, targetDirectory)
 }
+
+const durableUnlink = (fs, targetPath) => {
+  const directory = dirname(targetPath)
+  fs.unlinkSync(targetPath)
+  fsyncDirectory(fs, directory)
+}
+
 const safeProfileDirectory = profile => Buffer.from(String(profile.agentId), 'utf8').toString('hex')
+const equalRecordField = (left, right) => sameEnvelopeValue(left ?? '', right ?? '')
 
 export class PersistentCommandInbox {
   constructor({
@@ -551,7 +608,8 @@ export class PersistentCommandInbox {
     profile,
     successPolicy = 'archive',
     now = () => Date.now(),
-    createId = () => randomUUID()
+    createId = () => randomUUID(),
+    fs = DEFAULT_FS_OPERATIONS
   }) {
     if (!profile?.agentId || !profile?.profileId) throw new Error('profileId and agentId are required for the command inbox')
     if (!['archive', 'delete'].includes(successPolicy)) throw new Error('successPolicy must be archive or delete')
@@ -560,25 +618,85 @@ export class PersistentCommandInbox {
     this.successPolicy = successPolicy
     this.now = now
     this.createId = createId
-    this.sequence = 0
+    this.fs = { ...DEFAULT_FS_OPERATIONS, ...fs }
     this.profileDir = resolve(this.rootDir, safeProfileDirectory(profile))
     this.pendingDir = resolve(this.profileDir, 'pending')
     this.processingDir = resolve(this.profileDir, 'processing')
     this.archiveDir = resolve(this.profileDir, 'archive')
     this.quarantineDir = resolve(this.profileDir, 'quarantine')
+    this.sequencePath = resolve(this.profileDir, 'sequence.json')
+    this.lastSequence = 0
   }
 
   initialize() {
+    ensureSecureDirectory(this.fs, this.rootDir)
+    ensureSecureDirectory(this.fs, this.profileDir)
     for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.quarantineDir]) {
-      mkdirSync(directory, { recursive: true })
+      ensureSecureDirectory(this.fs, directory)
     }
+    this.secureExistingQueueFiles()
+    this.loadSequence()
     return this.recover()
   }
 
+  secureExistingQueueFiles() {
+    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.quarantineDir]) {
+      for (const fileName of this.fs.readdirSync(directory)) {
+        if (!fileName.endsWith('.json') && !fileName.endsWith('.reason.txt')) continue
+        const filePath = resolve(directory, fileName)
+        if (this.fs.statSync(filePath).isFile()) forceSecureFileMode(this.fs, filePath)
+      }
+    }
+  }
+
+  loadSequence() {
+    let persisted = 0
+    if (this.fs.existsSync(this.sequencePath)) {
+      forceSecureFileMode(this.fs, this.sequencePath)
+      const sequence = JSON.parse(this.fs.readFileSync(this.sequencePath, 'utf8'))
+      if (!isObject(sequence) || sequence.formatVersion !== 1
+          || !Number.isSafeInteger(sequence.lastSequence) || sequence.lastSequence < 0) {
+        throw new Error('invalid persistent queue sequence state')
+      }
+      persisted = sequence.lastSequence
+    }
+    let observed = 0
+    for (const directory of [this.pendingDir, this.processingDir, this.archiveDir, this.quarantineDir]) {
+      for (const fileName of this.listJsonFiles(directory)) {
+        const filePath = resolve(directory, fileName)
+        forceSecureFileMode(this.fs, filePath)
+        try {
+          const record = JSON.parse(this.fs.readFileSync(filePath, 'utf8'))
+          if (Number.isSafeInteger(record?.queueSequence) && record.queueSequence > observed) observed = record.queueSequence
+        } catch {}
+      }
+    }
+    this.lastSequence = Math.max(persisted, observed)
+    if (!this.fs.existsSync(this.sequencePath) || this.lastSequence !== persisted) this.persistSequence()
+  }
+
+  persistSequence() {
+    atomicWriteJson(this.fs, this.sequencePath, { formatVersion: 1, lastSequence: this.lastSequence })
+  }
+
+  nextSequence() {
+    if (this.lastSequence >= Number.MAX_SAFE_INTEGER) throw new Error('persistent queue sequence exhausted')
+    this.lastSequence += 1
+    this.persistSequence()
+    return this.lastSequence
+  }
+
   enqueue(message) {
+    const normalized = normalizeInboundMessage(message?.rawPayload || message)
+    if (normalized.messageType !== MESSAGE_TYPES.COMMAND_DISPATCH) {
+      throw new AgentProtocolError('COMMAND_MESSAGE_TYPE_REQUIRED', 'Only command.dispatch may enter the persistent inbox')
+    }
+    if (normalized.targetAgentId !== this.profile.agentId) {
+      throw new AgentProtocolError('TARGET_AGENT_ID_MISMATCH', 'targetAgentId does not match this Agent profile')
+    }
+    const queueSequence = this.nextSequence()
     const now = this.now()
     const queueId = this.createId()
-    const queueSequence = ++this.sequence
     const record = {
       formatVersion: 1,
       queueId,
@@ -588,55 +706,60 @@ export class PersistentCommandInbox {
       state: 'pending',
       receivedAt: now,
       enqueuedAt: now,
-      messageId: message.messageId || '',
-      commandId: message.commandId || '',
-      commandType: message.commandType || '',
-      taskId: message.taskId || '',
-      workItemId: message.workItemId || '',
-      attempt: Number.isSafeInteger(message.attempt) ? message.attempt : 0,
-      issuedAt: Number.isSafeInteger(message.issuedAt) ? message.issuedAt : null,
-      expiresAt: Number.isSafeInteger(message.expiresAt) ? message.expiresAt : null,
-      correlationId: message.correlationId || '',
-      causationId: message.causationId || '',
-      rawPayload: message.rawPayload || message
+      messageId: normalized.messageId || '',
+      commandId: normalized.commandId || '',
+      commandType: normalized.commandType || '',
+      targetAgentId: normalized.targetAgentId || '',
+      taskId: normalized.taskId || '',
+      workItemId: normalized.workItemId || '',
+      attempt: Number.isSafeInteger(normalized.attempt) ? normalized.attempt : 0,
+      issuedAt: Number.isSafeInteger(normalized.issuedAt) ? normalized.issuedAt : null,
+      expiresAt: Number.isSafeInteger(normalized.expiresAt) ? normalized.expiresAt : null,
+      correlationId: normalized.correlationId || '',
+      causationId: normalized.causationId || '',
+      rawPayload: normalized.rawPayload
     }
-    const fileName = `${String(now).padStart(13, '0')}-${String(queueSequence).padStart(8, '0')}-${queueId}.json`
+    const fileName = `${String(queueSequence).padStart(20, '0')}-${queueId}.json`
     const targetPath = resolve(this.pendingDir, fileName)
-    atomicWriteJson(targetPath, record)
-    return { record, fileName, path: targetPath }
+    atomicWriteJson(this.fs, targetPath, record)
+    return { record, normalized, fileName, path: targetPath }
   }
 
   recover() {
     const result = { recovered: 0, completed: 0, quarantined: 0 }
-    for (const directory of [this.pendingDir, this.processingDir]) {
-      for (const fileName of this.listJsonFiles(directory)) {
-        const sourcePath = resolve(directory, fileName)
-        let record
-        try {
-          record = this.readAndValidate(sourcePath)
-        } catch (error) {
-          this.quarantine(sourcePath, error)
-          result.quarantined += 1
-          continue
-        }
-        if (directory === this.processingDir) {
-          if (record.state === 'completed' && record.outcome) {
-            this.settleCompletedFile(sourcePath, fileName, record)
-            result.completed += 1
-          } else {
-            const pendingPath = this.uniquePath(this.pendingDir, fileName)
-            renameSync(sourcePath, pendingPath)
-            fsyncDirectory(this.processingDir)
-            fsyncDirectory(this.pendingDir)
-            atomicWriteJson(pendingPath, {
-              ...record,
-              state: 'pending',
-              recoveredAt: this.now(),
-              recoveryCount: Number(record.recoveryCount || 0) + 1
-            })
-            result.recovered += 1
-          }
-        }
+    for (const fileName of this.listJsonFiles(this.pendingDir)) {
+      const filePath = resolve(this.pendingDir, fileName)
+      try {
+        this.readAndValidate(filePath, new Set(['pending']))
+      } catch (error) {
+        this.quarantine(filePath, error)
+        result.quarantined += 1
+      }
+    }
+    for (const fileName of this.listJsonFiles(this.processingDir)) {
+      const sourcePath = resolve(this.processingDir, fileName)
+      let validated
+      try {
+        validated = this.readAndValidate(sourcePath, new Set(['pending', 'processing', 'completed']))
+      } catch (error) {
+        this.quarantine(sourcePath, error)
+        result.quarantined += 1
+        continue
+      }
+      if (validated.record.state === 'completed' && validated.record.outcome) {
+        this.settleCompletedFile(sourcePath, fileName, validated.record)
+        result.completed += 1
+      } else {
+        const pendingPath = this.uniquePath(this.pendingDir, fileName)
+        durableRename(this.fs, sourcePath, pendingPath)
+        atomicWriteJson(this.fs, pendingPath, {
+          ...validated.record,
+          profileId: this.profile.profileId,
+          state: 'pending',
+          recoveredAt: this.now(),
+          recoveryCount: Number(validated.record.recoveryCount || 0) + 1
+        })
+        result.recovered += 1
       }
     }
     return result
@@ -647,33 +770,30 @@ export class PersistentCommandInbox {
     for (const fileName of this.listJsonFiles(this.pendingDir)) {
       const filePath = resolve(this.pendingDir, fileName)
       try {
-        candidates.push({ fileName, filePath, record: this.readAndValidate(filePath) })
+        candidates.push({ fileName, filePath, ...this.readAndValidate(filePath, new Set(['pending'])) })
       } catch (error) {
         this.quarantine(filePath, error)
       }
     }
-    candidates.sort((left, right) => (
-      Number(left.record.enqueuedAt) - Number(right.record.enqueuedAt)
-      || Number(left.record.queueSequence) - Number(right.record.queueSequence)
-      || left.fileName.localeCompare(right.fileName)
-    ))
+    candidates.sort((left, right) => left.record.queueSequence - right.record.queueSequence || left.record.queueId.localeCompare(right.record.queueId))
     const next = candidates[0]
     if (!next) return null
     const processingPath = resolve(this.processingDir, next.fileName)
-    renameSync(next.filePath, processingPath)
-    fsyncDirectory(this.pendingDir)
-    fsyncDirectory(this.processingDir)
-    const record = {
-      ...next.record,
-      profileId: this.profile.profileId,
-      state: 'processing',
-      startedAt: this.now()
-    }
-    atomicWriteJson(processingPath, record)
-    return { record, fileName: next.fileName, path: processingPath }
+    durableRename(this.fs, next.filePath, processingPath)
+    const record = { ...next.record, profileId: this.profile.profileId, state: 'processing', startedAt: this.now() }
+    atomicWriteJson(this.fs, processingPath, record)
+    return { record, normalized: next.normalized, fileName: next.fileName, path: processingPath }
   }
 
-  complete(item, outcome) {
+  assertExecutable(item) {
+    const validated = this.readAndValidate(item.path, new Set(['processing']))
+    if (validated.normalized.messageType !== MESSAGE_TYPES.COMMAND_DISPATCH) {
+      throw new AgentProtocolError('COMMAND_MESSAGE_TYPE_REQUIRED', 'Only command.dispatch may execute from the persistent inbox')
+    }
+    return validated
+  }
+
+  markCompleted(item, outcome) {
     const completed = {
       ...item.record,
       state: 'completed',
@@ -684,15 +804,20 @@ export class PersistentCommandInbox {
         errorMessage: outcome?.errorMessage || ''
       }
     }
-    atomicWriteJson(item.path, completed)
+    atomicWriteJson(this.fs, item.path, completed)
+    return completed
+  }
+
+  complete(item, outcome) {
+    const completed = this.markCompleted(item, outcome)
     this.settleCompletedFile(item.path, item.fileName, completed)
     return completed
   }
 
   restoreProcessing(item, reason = 'interrupted') {
-    if (!item?.path || !existsSync(item.path)) return null
+    if (!item?.path || !this.fs.existsSync(item.path)) return null
     const pendingPath = this.uniquePath(this.pendingDir, item.fileName)
-    renameSync(item.path, pendingPath)
+    durableRename(this.fs, item.path, pendingPath)
     const restored = {
       ...item.record,
       state: 'pending',
@@ -700,7 +825,7 @@ export class PersistentCommandInbox {
       recoveryReason: reason,
       recoveryCount: Number(item.record.recoveryCount || 0) + 1
     }
-    atomicWriteJson(pendingPath, restored)
+    atomicWriteJson(this.fs, pendingPath, restored)
     return { record: restored, fileName: pendingPath.split('/').pop(), path: pendingPath }
   }
 
@@ -711,52 +836,73 @@ export class PersistentCommandInbox {
 
   list(state = 'pending') {
     const directory = state === 'processing' ? this.processingDir : state === 'archive' ? this.archiveDir : this.pendingDir
-    return this.listJsonFiles(directory).map(fileName => this.readAndValidate(resolve(directory, fileName)))
+    const expectedStates = state === 'archive' ? new Set(['completed']) : new Set([state])
+    return this.listJsonFiles(directory).map(fileName => this.readAndValidate(resolve(directory, fileName), expectedStates).record)
   }
 
   listJsonFiles(directory) {
     try {
-      return readdirSync(directory).filter(name => name.endsWith('.json')).sort()
-    } catch {
-      return []
+      return this.fs.readdirSync(directory).filter(name => name.endsWith('.json')).sort()
+    } catch (error) {
+      if (error?.code === 'ENOENT') return []
+      throw error
     }
   }
 
-  readAndValidate(filePath) {
+  readAndValidate(filePath, expectedStates = null) {
+    forceSecureFileMode(this.fs, filePath)
     let record
     try {
-      record = JSON.parse(readFileSync(filePath, 'utf8'))
+      record = JSON.parse(this.fs.readFileSync(filePath, 'utf8'))
     } catch (error) {
       throw new Error(`invalid inbox JSON: ${error.message}`)
     }
-    if (!isObject(record) || record.formatVersion !== 1 || typeof record.queueId !== 'string' || !isObject(record.rawPayload)) {
+    if (!isObject(record) || record.formatVersion !== 1 || typeof record.queueId !== 'string'
+        || !Number.isSafeInteger(record.queueSequence) || record.queueSequence <= 0 || !isObject(record.rawPayload)) {
       throw new Error('invalid inbox record shape')
     }
-    if (record.agentId !== this.profile.agentId) {
-      throw new Error('inbox record canonical agent identity mismatch')
+    if (record.agentId !== this.profile.agentId) throw new Error('inbox record canonical agent identity mismatch')
+    if (expectedStates && !expectedStates.has(record.state)) throw new Error(`invalid inbox record state: ${record.state}`)
+    if (record.state === 'completed') {
+      if (!isObject(record.outcome) || !['completed', 'failed'].includes(record.outcome.status)) {
+        throw new Error('completed inbox record requires a valid outcome marker')
+      }
+    } else if (hasOwn(record, 'outcome')) {
+      throw new Error('non-completed inbox record must not contain an outcome marker')
     }
-    return record
+    let normalized
+    try {
+      normalized = normalizeInboundMessage(record.rawPayload)
+    } catch (error) {
+      throw new Error(`invalid persisted command envelope: ${error.code || error.message}`)
+    }
+    if (normalized.messageType !== MESSAGE_TYPES.COMMAND_DISPATCH) throw new Error('persisted record is not command.dispatch')
+    if (normalized.targetAgentId !== this.profile.agentId) throw new Error('persisted command targetAgentId mismatch')
+    for (const field of ['messageId', 'commandId', 'commandType', 'targetAgentId']) {
+      if (!equalRecordField(record[field], normalized[field])) throw new Error(`persisted command ${field} mismatch`)
+    }
+    return { record, normalized }
   }
 
   quarantine(sourcePath, error) {
-    if (!existsSync(sourcePath)) return
+    if (!this.fs.existsSync(sourcePath)) return
     const baseName = sourcePath.split('/').pop()
     const targetPath = this.uniquePath(this.quarantineDir, baseName)
-    renameSync(sourcePath, targetPath)
-    atomicWriteText(`${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
+    durableRename(this.fs, sourcePath, targetPath)
+    atomicWriteText(this.fs, `${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
   }
 
   settleCompletedFile(sourcePath, fileName, record) {
     if (record.outcome?.status === 'completed' && this.successPolicy === 'delete') {
-      unlinkSync(sourcePath)
+      durableUnlink(this.fs, sourcePath)
       return
     }
-    renameSync(sourcePath, this.uniquePath(this.archiveDir, fileName))
+    durableRename(this.fs, sourcePath, this.uniquePath(this.archiveDir, fileName))
   }
 
   uniquePath(directory, fileName) {
     let candidate = resolve(directory, fileName)
-    if (!existsSync(candidate)) return candidate
+    if (!this.fs.existsSync(candidate)) return candidate
     const suffix = fileName.endsWith('.json') ? '.json' : ''
     const stem = suffix ? fileName.slice(0, -suffix.length) : fileName
     candidate = resolve(directory, `${stem}-${this.createId()}${suffix}`)
@@ -826,9 +972,16 @@ export class AgentMessageProcessor {
 
     switch (message.messageType) {
       case MESSAGE_TYPES.COMMAND_DISPATCH: {
-        const item = this.inbox.enqueue(message)
-        void this.drain()
-        return { kind: 'command', item }
+        try {
+          const item = this.inbox.enqueue(message)
+          void this.drain()
+          return { kind: 'command', item }
+        } catch (error) {
+          const protocolError = new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to persist command: ${error.message}`)
+          this.paused = true
+          this.onReject(protocolError, raw)
+          return { kind: 'rejected', error: protocolError }
+        }
       }
       case MESSAGE_TYPES.CHAT_MESSAGE:
         if (this.isBusy()) {
@@ -867,12 +1020,34 @@ export class AgentMessageProcessor {
 
   async runDrain() {
     while (!this.paused && !this.stopped && !this.chatActive) {
-      const item = this.inbox.claimNext()
+      let item
+      try {
+        item = this.inbox.claimNext()
+      } catch (error) {
+        this.paused = true
+        this.onReject(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to claim durable command: ${error.message}`), {})
+        return
+      }
       if (!item) return
+      let validated
+      try {
+        validated = this.inbox.assertExecutable(item)
+        item.record = validated.record
+      } catch (error) {
+        try {
+          this.inbox.quarantine(item.path, error)
+        } catch (quarantineError) {
+          this.paused = true
+          this.onReject(new AgentProtocolError('COMMAND_INBOX_ERROR', `Failed to quarantine invalid command: ${quarantineError.message}`), item.record.rawPayload)
+          return
+        }
+        this.onReject(new AgentProtocolError('INVALID_PERSISTED_COMMAND', error.message), item.record.rawPayload)
+        continue
+      }
       this.commandActive = true
       let outcome
       try {
-        outcome = await this.runCommand(item.record.rawPayload, item.record)
+        outcome = await this.runCommand(validated.normalized, validated.record)
       } catch (error) {
         outcome = { status: 'failed', errorMessage: error.message }
       }
@@ -913,7 +1088,7 @@ const loadCodexSessionMap = () => {
 
 const saveCodexSessionMap = () => {
   try {
-    atomicWriteJson(codexSessionMapPath, codexSessionMap)
+    atomicWriteJson(DEFAULT_FS_OPERATIONS, codexSessionMapPath, codexSessionMap)
   } catch (error) {
     console.warn(`failed to save codex session map | path=${codexSessionMapPath} | ${error.message}`)
   }
@@ -941,7 +1116,7 @@ export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInst
   sourceAgentId: profile.agentId,
   runtimeInstanceId,
   senderType: 'agent',
-  senderName: profile.agentName,
+  senderName: payload?.senderName || payload?.personaName || profile.personaName || profile.agentName,
   sentAt: Date.now()
 })
 
@@ -950,7 +1125,7 @@ const getProfileState = profile => profileStates.get(profile.agentId)
 
 const sendRaw = (event, profile = defaultProfile) => {
   const state = getProfileState(profile)
-  if (!state?.ws || state.ws.readyState !== WebSocket.OPEN) return false
+  if (!state?.ws || state.ws.readyState !== WebSocketClient.OPEN) return false
   state.ws.send(JSON.stringify(event))
   return true
 }
@@ -1343,7 +1518,7 @@ const createProfileState = profile => {
   state.processor = new AgentMessageProcessor({
     profile,
     inbox,
-    runCommand: rawMessage => runCodex(profile, normalizeInboundMessage(rawMessage), 'command'),
+    runCommand: message => runCodex(profile, message, 'command'),
     runChat: message => runCodex(profile, message, 'chat'),
     onTaskEvent: message => {
       const key = message.workItemId || message.taskId || message.messageId
@@ -1416,11 +1591,11 @@ const connectProfile = profile => {
   if (!state) return
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
-  if (state.ws && state.ws.readyState !== WebSocket.CLOSED) {
+  if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
     try { state.ws.close() } catch {}
   }
   let closeFired = false
-  state.ws = new WebSocket(buildWebSocketUrl(config.wsUrl, config.apiKey, profile))
+  state.ws = new WebSocketClient(buildWebSocketUrl(config.wsUrl, config.apiKey, profile))
   state.ws.addEventListener('open', () => {
     clearReconnectState(state)
     state.reconnectAttempt = 0
@@ -1547,10 +1722,16 @@ const shutdown = (exitCode = 0, reason = '') => {
   setTimeout(() => process.exit(exitCode), 100)
 }
 
-export const main = () => {
-  if (typeof WebSocket !== 'function') {
-    configError('Node.js >= 22 with the built-in WebSocket client is required')
-  }
+export const loadWebSocketClient = async () => {
+  if (typeof globalThis.WebSocket === 'function') return globalThis.WebSocket
+  const module = await import('ws')
+  const implementation = module.WebSocket || module.default
+  if (typeof implementation !== 'function') throw new Error('No WebSocket implementation is available')
+  return implementation
+}
+
+export const main = async () => {
+  WebSocketClient = await loadWebSocketClient()
   const runtimeConfig = loadRuntimeConfig()
   config = {
     wsUrl: process.env.WS_URL || 'wss://api.chaoyoufan.cn/ws/agent/channel',
@@ -1587,4 +1768,9 @@ export const main = () => {
 }
 
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url
-if (isMain) main()
+if (isMain) {
+  main().catch(error => {
+    console.error(error.message || error)
+    process.exit(1)
+  })
+}
