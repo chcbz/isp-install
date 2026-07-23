@@ -21,6 +21,7 @@ import {
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -423,6 +424,10 @@ const parseSectionProfiles = (raw, fallbackProfile, options = {}) => {
   return profiles.map((profile, index) => normalizeProfile({ ...defaults, ...profile }, fallbackProfile, index))
 }
 
+const parseStringList = value => (Array.isArray(value) ? value : String(value || '').split(','))
+  .map(item => String(item).trim())
+  .filter(Boolean)
+
 const normalizeProfile = (profile, fallback = {}, index = 0) => {
   const agentId = profile.agentId || fallback.agentId || `local-codex-${index + 1}`
   const status = String(profile.status || fallback.status || '').trim().toLowerCase()
@@ -440,6 +445,13 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     codexSessionMode: profile.codexSessionMode || fallback.codexSessionMode || 'new',
     codexTimeoutMs: parseNonNegativeMs(profile.codexTimeoutMs, fallback.codexTimeoutMs || 900000),
     codexModel: profile.codexModel || fallback.codexModel || '',
+    workspacePolicyId: profile.workspacePolicyId || fallback.workspacePolicyId || '',
+    workspaceRole: profile.workspaceRole || fallback.workspaceRole || 'coder',
+    workspaceNoTaskPolicy: profile.workspaceNoTaskPolicy || fallback.workspaceNoTaskPolicy || 'reject',
+    workspaceNonCodingCommandTypes: parseStringList(
+      profile.workspaceNonCodingCommandTypes ?? fallback.workspaceNonCodingCommandTypes
+    ),
+    workspaceFallbackWorkdir: profile.workspaceFallbackWorkdir || fallback.workspaceFallbackWorkdir || '',
     enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
@@ -458,6 +470,11 @@ const legacyProfile = () => normalizeProfile({
   codexApproval: process.env.CODEX_APPROVAL || 'never',
   codexSessionMode: process.env.CODEX_SESSION_MODE || 'new',
   codexTimeoutMs: parseNonNegativeMs(process.env.CODEX_TIMEOUT_MS, 900000),
+  workspacePolicyId: process.env.CODEX_WORKSPACE_POLICY_ID || '',
+  workspaceRole: process.env.CODEX_WORKSPACE_ROLE || 'coder',
+  workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
+  workspaceNonCodingCommandTypes: process.env.CODEX_WORKSPACE_NON_CODING_COMMAND_TYPES || '',
+  workspaceFallbackWorkdir: process.env.CODEX_WORKSPACE_FALLBACK_WORKDIR || '',
   isDefault: true
 })
 
@@ -497,7 +514,8 @@ const loadRuntimeConfig = (options = {}) => {
   )
   return {
     profiles: loadedProfiles,
-    defaultProfileId: selected?.profileId || loadedProfiles.find(profile => profile.isDefault)?.profileId || loadedProfiles[0].profileId
+    defaultProfileId: selected?.profileId || loadedProfiles.find(profile => profile.isDefault)?.profileId || loadedProfiles[0].profileId,
+    workspacePolicies: loadWorkspacePolicies()
   }
 }
 
@@ -2861,9 +2879,9 @@ const rememberCodexSession = (profile, message, sessionId) => {
   saveCodexSessionMap()
 }
 
-const buildCodexArgs = (profile, message, prompt) => {
+const buildCodexArgs = (profile, message, prompt, codexWorkdir = profile.codexWorkdir, forceNewSession = false) => {
   const mappedSessionId = getMappedCodexSessionId(profile, message)
-  if (profile.codexSessionMode === 'resume' && (mappedSessionId || hasCodexSession(profile))) {
+  if (!forceNewSession && profile.codexSessionMode === 'resume' && (mappedSessionId || hasCodexSession(profile))) {
     return [
       '--ask-for-approval', profile.codexApproval,
       'exec', 'resume', '--json', '--skip-git-repo-check',
@@ -2874,7 +2892,7 @@ const buildCodexArgs = (profile, message, prompt) => {
   }
   return [
     '--ask-for-approval', profile.codexApproval,
-    'exec', '--json', '--cd', profile.codexWorkdir,
+    'exec', '--json', '--cd', codexWorkdir,
     '--sandbox', profile.codexSandbox, '--skip-git-repo-check',
     ...(profile.codexModel ? ['--model', profile.codexModel] : []),
     prompt
@@ -2889,6 +2907,32 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   const prompt = resolvePrompt(message)
   const taskId = message.taskId || message.workItemId || message.commandId || message.messageId || `codex-${Date.now()}`
   const title = message.title || message.currentTaskTitle || (mode === 'chat' ? 'Agent 聊天' : 'Codex 执行任务')
+  let codexWorkdir = overrides.codexWorkdir || profile.codexWorkdir
+  let workspace = null
+
+  if (mode === 'command' && overrides.requireWorkspace === true) {
+    try {
+      if (!overrides.workspaceManager) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_POLICY_REQUIRED',
+          `Profile ${profile.profileId} has no trusted workspacePolicyId; shared writable code workdirs are forbidden`
+        )
+      }
+      workspace = overrides.workspaceManager.resolveCommandWorkspace(message, {
+        noTaskPolicy: profile.workspaceNoTaskPolicy,
+        nonCodingCommandTypes: profile.workspaceNonCodingCommandTypes,
+        fallbackWorkdir: profile.workspaceFallbackWorkdir
+      })
+      codexWorkdir = workspace.workspacePath
+    } catch (error) {
+      const errorMessage = `${error.code || 'WORKSPACE_ERROR'}: ${error.message}`
+      const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
+      sendLegacyFn('task.report', payload, profile)
+      sendLegacyFn('codex.result', payload, profile)
+      resolveRun({ ...payload, workspaceErrorCode: error.code || 'WORKSPACE_ERROR' })
+      return
+    }
+  }
 
   if (!prompt) {
     const errorMessage = 'No prompt/content/instruction/title found in inbound event'
@@ -2901,12 +2945,12 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   if (mode === 'command') sendStatusFn(profile, 'busy', { taskId, title })
   if (mode === 'chat') sendChatDelta(profile, message, '收到，正在整理回复。\n\n', { phase: 'intro' }, sendProtocolFn)
 
-  const args = buildCodexArgs(profile, message, prompt)
+  const args = buildCodexArgs(profile, message, prompt, codexWorkdir, Boolean(workspace))
   const startedAt = Date.now()
   let child
   try {
     child = spawnFn(profile.codexBin, args, {
-      cwd: profile.codexWorkdir,
+      cwd: codexWorkdir,
       env: { ...process.env, ...(profile.codexHome ? { CODEX_HOME: profile.codexHome } : {}) },
       stdio: ['ignore', 'pipe', 'pipe']
     })
@@ -3008,6 +3052,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
       status,
       currentTaskTitle: title,
       durationMs: Date.now() - startedAt,
+      workspacePath: workspace?.workspacePath || '',
       output: replyContent,
       errorMessage
     }
@@ -3031,7 +3076,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   child.on('error', error => { void finish(null, error) })
 })
 
-const ensureProfiles = (profiles, defaultProfileId, exitOnError = true) => {
+const ensureProfiles = (profiles, defaultProfileId, workspacePolicies = new Map(), exitOnError = true) => {
   const profileIds = new Set()
   const agentIds = new Set()
   for (const profile of profiles) {
@@ -3043,6 +3088,37 @@ const ensureProfiles = (profiles, defaultProfileId, exitOnError = true) => {
     if (!resolvedCodexBin) configError(`codex binary not found or not executable for profile ${profile.profileId}: ${profile.codexBin}`, exitOnError)
     profile.codexBin = resolvedCodexBin
     if (!existsSync(profile.codexWorkdir)) configError(`codex workdir not found for profile ${profile.profileId}: ${profile.codexWorkdir}`, exitOnError)
+    if (!['reject', 'dedicated-workdir'].includes(profile.workspaceNoTaskPolicy)) {
+      configError(`workspaceNoTaskPolicy must be reject or dedicated-workdir for profile ${profile.profileId}`, exitOnError)
+    }
+    if (profile.workspacePolicyId && !workspacePolicies.has(profile.workspacePolicyId)) {
+      configError(`workspacePolicyId not found for profile ${profile.profileId}: ${profile.workspacePolicyId}`, exitOnError)
+    }
+    if (profile.workspaceNoTaskPolicy === 'dedicated-workdir'
+        && (!profile.workspacePolicyId || !profile.workspaceFallbackWorkdir || !profile.workspaceNonCodingCommandTypes.length)) {
+      configError(`dedicated-workdir requires workspacePolicyId, workspaceFallbackWorkdir, and workspaceNonCodingCommandTypes for profile ${profile.profileId}`, exitOnError)
+    }
+    if (profile.workspacePolicyId) {
+      try {
+        const manager = new GitWorkspaceManager({
+          policy: workspacePolicies.get(profile.workspacePolicyId),
+          agentId: profile.agentId,
+          role: profile.workspaceRole
+        }).initialize()
+        if (profile.workspaceNoTaskPolicy === 'dedicated-workdir') {
+          manager.resolveCommandWorkspace({
+            taskId: '',
+            commandType: profile.workspaceNonCodingCommandTypes[0]
+          }, {
+            noTaskPolicy: profile.workspaceNoTaskPolicy,
+            nonCodingCommandTypes: profile.workspaceNonCodingCommandTypes,
+            fallbackWorkdir: profile.workspaceFallbackWorkdir
+          })
+        }
+      } catch (error) {
+        configError(`invalid workspace configuration for profile ${profile.profileId}: ${error.code || 'WORKSPACE_ERROR'} ${error.message}`, exitOnError)
+      }
+    }
   }
   if (!profiles.find(profile => profile.profileId === defaultProfileId || profile.agentId === defaultProfileId)) {
     configError(`DEFAULT_CODEX_PROFILE not found: ${defaultProfileId}`, exitOnError)
@@ -3077,6 +3153,12 @@ const terminateAllRuns = () => {
 }
 
 const createProfileState = profile => {
+  const workspacePolicy = profile.workspacePolicyId
+    ? config.workspacePolicies.get(profile.workspacePolicyId)
+    : null
+  const workspaceManager = workspacePolicy
+    ? new GitWorkspaceManager({ policy: workspacePolicy, agentId: profile.agentId, role: profile.workspaceRole }).initialize()
+    : null
   const inbox = new PersistentCommandInbox({
     rootDir: config.commandInboxDir,
     profile,
@@ -3108,12 +3190,16 @@ const createProfileState = profile => {
     inbox,
     ledger,
     ackOutbox,
+    workspaceManager,
     processor: null
   }
   state.processor = new AgentMessageProcessor({
     profile,
     inbox,
-    runCommand: message => runCodex(profile, message, 'command'),
+    runCommand: message => runCodex(profile, message, 'command', {
+      workspaceManager,
+      requireWorkspace: true
+    }),
     runChat: message => runCodex(profile, message, 'chat'),
     onTaskEvent: message => {
       const key = message.workItemId || message.taskId || message.messageId
@@ -3285,7 +3371,7 @@ const reloadProfiles = (reason = 'config reload') => {
   profileReloadInFlight = true
   try {
     const next = loadRuntimeConfig({ exitOnError: false })
-    ensureProfiles(next.profiles, next.defaultProfileId, false)
+    ensureProfiles(next.profiles, next.defaultProfileId, config.workspacePolicies, false)
     if (profileSignature(next.profiles, next.defaultProfileId) !== lastProfileSignature) {
       applyProfileConfig(next.profiles, next.defaultProfileId, reason)
     }
@@ -3346,6 +3432,7 @@ export const main = async () => {
     apiKey: process.env.OPENCLAW_API_KEY || '',
     profiles: runtimeConfig.profiles,
     defaultProfileId: runtimeConfig.defaultProfileId,
+    workspacePolicies: runtimeConfig.workspacePolicies,
     heartbeatMs: parseNonNegativeMs(process.env.HEARTBEAT_MS, 30000),
     reconnectMaxMs: parseNonNegativeMs(process.env.RECONNECT_MAX_MS, 30 * 60 * 1000),
     profileReloadMs: parseNonNegativeMs(process.env.CODEX_PROFILE_RELOAD_MS, 5000),
@@ -3358,13 +3445,16 @@ export const main = async () => {
   if (!['archive', 'delete'].includes(config.commandInboxSuccessPolicy)) {
     configError('COMMAND_INBOX_SUCCESS_POLICY must be archive or delete')
   }
-  ensureProfiles(config.profiles, config.defaultProfileId)
+  ensureProfiles(config.profiles, config.defaultProfileId, config.workspacePolicies)
   defaultProfile = getProfileById(config.defaultProfileId) || config.profiles[0]
   codexSessionMapPath = resolve(process.env.CODEX_SESSION_MAP_FILE || resolve(process.cwd(), 'codex-session-map.json'))
   codexSessionMap = loadCodexSessionMap()
 
   if (hasFlag('--validate')) {
-    console.log(`configuration valid | profiles=${config.profiles.length} | defaultProfile=${defaultProfile.profileId} | runtimeInstanceId=${PROCESS_RUNTIME_INSTANCE_ID}`)
+    for (const policy of config.workspacePolicies.values()) {
+      new GitWorkspaceManager({ policy, agentId: 'validation-agent', role: 'validator' }).initialize()
+    }
+    console.log(`configuration valid | profiles=${config.profiles.length} | workspacePolicies=${config.workspacePolicies.size} | defaultProfile=${defaultProfile.profileId} | runtimeInstanceId=${PROCESS_RUNTIME_INSTANCE_ID}`)
     return
   }
 

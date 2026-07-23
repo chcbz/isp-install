@@ -51,6 +51,11 @@ Each profile can define:
 - `codexApproval`
 - `codexSessionMode`
 - `codexTimeoutMs`
+- `workspacePolicyId`
+- `workspaceRole`
+- `workspaceNoTaskPolicy`
+- `workspaceNonCodingCommandTypes`
+- `workspaceFallbackWorkdir`
 - `isDefault`
 
 Recommended `.env`:
@@ -70,6 +75,10 @@ codexSandbox=danger-full-access
 codexApproval=never
 codexSessionMode=resume
 codexTimeoutMs=900000
+# Select a trusted entry from workspace-policies.json before accepting coding commands.
+# workspacePolicyId=cyf
+workspaceRole=coder
+workspaceNoTaskPolicy=reject
 
 [agent.default]
 profileId=codex-default
@@ -158,6 +167,66 @@ Reconnect behavior:
 - A successful connection resets the retry window.
 - If the reconnect window is exhausted, the process exits and should be restarted by `systemd`.
 - Reconnect scheduling is de-duplicated per profile to avoid repeated `error` + `close` races.
+
+## A07 Isolated Task Worktrees
+
+`command.dispatch` no longer runs in a profile's shared writable `codexWorkdir`. Production command execution sets `requireWorkspace=true` and fails closed unless the profile selects a trusted workspace policy. Chat remains on the profile workdir and never receives workspace-management privileges.
+
+Create an active policy file from the installed example:
+
+```bash
+cp /home/isp/apps/codex-ws-agent/workspace-policies.example.json \
+  /home/isp/apps/codex-ws-agent/workspace-policies.json
+chmod 600 /home/isp/apps/codex-ws-agent/workspace-policies.json
+```
+
+Example trusted policy:
+
+```json
+{
+  "cyf": {
+    "root": "/home/isp/hosts/cyf/agent-workspaces",
+    "repository": "/home/isp/hosts/cyf/repository.git",
+    "baseRef": "refs/heads/master"
+  }
+}
+```
+
+Then configure:
+
+```bash
+CODEX_WORKSPACE_POLICIES_FILE=/home/isp/apps/codex-ws-agent/workspace-policies.json
+```
+
+and select the policy in each coding profile:
+
+```ini
+workspacePolicyId=cyf
+workspaceRole=coder
+workspaceNoTaskPolicy=reject
+```
+
+Security and lifecycle rules:
+
+- `root`, `repository`, and `baseRef` come only from the local policy file/inline environment policy. Dispatch payload fields cannot replace them.
+- `taskId`, canonical `agentId`, and role must be safe 1-64 character ASCII slugs. Traversal, symlink components, repository/root overlap, and arbitrary paths/refs fail closed.
+- The default layout is `/home/isp/hosts/cyf/agent-workspaces/<taskId>/agent-<agentId>` with deterministic branch `codex/<taskId>/agent-<agentId>-<role>`.
+- A cross-process durable lock serializes creation. Durable `creating` metadata is written before `git worktree add`, so a later process can validate and finish a partial creation without adopting an unknown directory or branch.
+- Reuse requires the Git worktree registration, branch, trusted repository, fixed baseline commit, path, task, agent, role, and durable metadata to match exactly.
+- Managed command runs force a fresh Codex exec with both process `cwd` and `--cd` set to the task worktree; a resume session from another worktree is not used.
+- A command without `taskId` is rejected by default. Compatibility is available only when `workspaceNoTaskPolicy=dedicated-workdir`, the command type is explicitly listed in `workspaceNonCodingCommandTypes`, and `workspaceFallbackWorkdir` is a trusted non-Git directory outside the repository and workspace root.
+- Workspaces are never automatically deleted. Archive is an explicit operator action and refuses modified, untracked, unmerged, or unpushed work. It removes only the metadata-owned worktree and preserves the branch and archived metadata.
+
+Operator commands use the installed helper and never accept paths, repositories, refs, or cleanup instructions from an Agent message:
+
+```bash
+/home/isp/bin/codex_ws_agent.sh workspace inspect --policy cyf --task task-123 --agent agent-a --role coder
+/home/isp/bin/codex_ws_agent.sh workspace ensure  --policy cyf --task task-123 --agent agent-a --role coder
+# Stop the service first; archive is refused while the Agent process is running.
+/home/isp/bin/codex_ws_agent.sh workspace archive --policy cyf --task task-123 --agent agent-a --role coder
+```
+
+The service account needs `0700` create/fsync permissions below the workspace root and Git ref/worktree administrative permissions in the trusted repository. Prefer a dedicated bare repository or mirror so no Agent ever writes a shared main checkout.
 
 ## Protocol v1 Message Handling
 
@@ -258,11 +327,14 @@ Completed failures are archived rather than retried in a hot loop.
 
 ## Codex Invocation
 
-The client calls, per selected profile:
+For a managed command, the client calls Codex with the resolved task/Agent worktree as both process cwd and `--cd`:
 
 ```bash
-codex exec --cd "$CODEX_WORKDIR" --ask-for-approval "$CODEX_APPROVAL" --sandbox "$CODEX_SANDBOX" "$PROMPT"
+codex exec --cd "/home/isp/hosts/cyf/agent-workspaces/$TASK_ID/agent-$AGENT_ID" \
+  --ask-for-approval "$CODEX_APPROVAL" --sandbox "$CODEX_SANDBOX" "$PROMPT"
 ```
+
+`codexWorkdir` remains the chat workdir and is not a coding-command fallback unless the explicit non-coding compatibility policy above is configured.
 
 Command compatibility results remain `task.report` plus `codex.result` until the later ACK/result migration. Chat and task-event paths never use those result types.
 
@@ -276,7 +348,7 @@ npm test
 OPENCLAW_API_KEY=test CODEX_BIN=/bin/true CODEX_WORKDIR=/tmp node agent-client.mjs --validate
 ```
 
-The test suite uses only Node built-ins (`node:test`). The production installer copies the runtime files, not the repository-only test directory.
+The test suite uses only Node built-ins (`node:test`). A07 tests create temporary local Git repositories/worktrees and do not touch production paths. The production installer copies the runtime files, not the repository-only test directory.
 
 ## Upgrade and Rollback
 
