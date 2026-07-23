@@ -862,6 +862,112 @@ test('ack outbox retains pending ACKs when send fails and replays on reconnect',
   assert.equal(pendingPostReplay.length, 0, 'outbox should be empty after successful replay')
 })
 
+test('ACK outbox preserves FIFO for same-millisecond enqueue across restart', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const ids = ['z-last-lexically', 'a-first-lexically', 'm-middle', 'restart']
+  const outbox = new AckOutbox({
+    rootDir: storageRoot,
+    profile,
+    now: () => 123456789,
+    createId: () => ids.shift()
+  })
+  outbox.initialize()
+  for (const status of [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED]) {
+    outbox.enqueue(buildAckEnvelope(profile, status, { commandId: 'command-fifo', messageId: 'dispatch-fifo' }), { kind: 'none' })
+  }
+
+  assert.deepEqual(
+    outbox.pendingEnvelopes().map(item => item.envelope.ackStatus),
+    [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED]
+  )
+  assert.deepEqual(outbox.pendingEnvelopes().map(item => item.record.queueSequence), [1, 2, 3])
+
+  const restarted = new AckOutbox({
+    rootDir: storageRoot,
+    profile,
+    now: () => 123456789,
+    createId: () => ids.shift()
+  })
+  restarted.initialize()
+  restarted.enqueue(
+    buildAckEnvelope(profile, ACK_STATUS.REJECTED, { commandId: 'command-fifo', messageId: 'dispatch-fifo' }),
+    { kind: 'none' }
+  )
+  const pending = restarted.pendingEnvelopes()
+  assert.deepEqual(pending.map(item => item.record.queueSequence), [1, 2, 3, 4])
+  assert.deepEqual(
+    pending.map(item => item.envelope.ackStatus),
+    [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED, ACK_STATUS.REJECTED]
+  )
+  assert.ok(pending.every(item => item.record.createdAt === 123456789))
+})
+
+test('ACK replay stops immediately when the first send returns false or throws', () => {
+  for (const mode of ['false', 'throw']) {
+    const rootDir = temporaryDirectory()
+    const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile, now: () => 1000 })
+    ackOutbox.initialize()
+    for (const status of [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED]) {
+      ackOutbox.enqueue(buildAckEnvelope(profile, status, { commandId: `first-${mode}` }), { kind: 'none' })
+    }
+    const attempted = []
+    const processor = new AgentMessageProcessor({
+      profile,
+      inbox: createInbox(rootDir),
+      runCommand: async () => ({ status: 'completed' }),
+      runChat: async () => {},
+      ackOutbox,
+      sendFn: envelope => {
+        attempted.push(envelope.ackStatus)
+        if (mode === 'throw') throw new Error('offline')
+        return false
+      }
+    })
+
+    assert.equal(processor.replayAcks(), 0, mode)
+    assert.deepEqual(attempted, [ACK_STATUS.RECEIVED], mode)
+    assert.deepEqual(
+      ackOutbox.pendingEnvelopes().map(item => item.envelope.ackStatus),
+      [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED],
+      mode
+    )
+  }
+})
+
+test('ACK replay stops at a failed middle item and never sends later ACKs', () => {
+  for (const mode of ['false', 'throw']) {
+    const rootDir = temporaryDirectory()
+    const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile, now: () => 1000 })
+    ackOutbox.initialize()
+    for (const status of [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED]) {
+      ackOutbox.enqueue(buildAckEnvelope(profile, status, { commandId: `middle-${mode}` }), { kind: 'none' })
+    }
+    const attempted = []
+    const processor = new AgentMessageProcessor({
+      profile,
+      inbox: createInbox(rootDir),
+      runCommand: async () => ({ status: 'completed' }),
+      runChat: async () => {},
+      ackOutbox,
+      sendFn: envelope => {
+        attempted.push(envelope.ackStatus)
+        if (envelope.ackStatus !== ACK_STATUS.STARTED) return true
+        if (mode === 'throw') throw new Error('offline')
+        return false
+      }
+    })
+
+    assert.equal(processor.replayAcks(), 1, mode)
+    assert.deepEqual(attempted, [ACK_STATUS.RECEIVED, ACK_STATUS.STARTED], mode)
+    assert.deepEqual(
+      ackOutbox.pendingEnvelopes().map(item => item.envelope.ackStatus),
+      [ACK_STATUS.STARTED, ACK_STATUS.SUCCEEDED],
+      mode
+    )
+  }
+})
+
 
 test('send false or throw keeps ACK markers false and records in the durable outbox', async () => {
   for (const [index, sendFn] of [
@@ -1179,6 +1285,7 @@ test('A06 durable ledger and ACK paths enforce private permissions', async () =>
       assert.equal(statSync(resolve(directory, fileName)).mode & 0o777, 0o600, `${directory}/${fileName}`)
     }
   }
+  assert.equal(statSync(ackOutbox.sequencePath).mode & 0o777, 0o600, ackOutbox.sequencePath)
 })
 
 test('ack envelope uses an independent messageId and remains A03 normalizer-compatible', () => {

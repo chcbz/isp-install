@@ -1497,6 +1497,8 @@ export class AckOutbox {
     this.fs = { ...DEFAULT_FS_OPERATIONS, ...fs }
     this.acksDir = resolve(this.rootDir, 'acks')
     this.quarantineDir = resolve(this.rootDir, 'acks-quarantine')
+    this.sequencePath = resolve(this.rootDir, 'ack-sequence.json')
+    this.lastSequence = 0
     this.corruptions = []
   }
 
@@ -1510,17 +1512,62 @@ export class AckOutbox {
         forceSecureFileMode(this.fs, resolve(this.quarantineDir, fileName))
       }
     }
+    const validRecords = []
     for (const fileName of this.fs.readdirSync(this.acksDir)) {
       if (!fileName.endsWith('.json')) continue
       const path = resolve(this.acksDir, fileName)
       forceSecureFileMode(this.fs, path)
       try {
-        this._readAndValidate(path)
+        validRecords.push({ fileName, path, record: this._readAndValidate(path) })
       } catch (error) {
         this._quarantine(path, error)
       }
     }
+    this._loadSequence(validRecords)
     return { corruptions: this.corruptions.length }
+  }
+
+  _loadSequence(records) {
+    let persisted = 0
+    if (this.fs.existsSync(this.sequencePath)) {
+      forceSecureFileMode(this.fs, this.sequencePath)
+      try {
+        const sequence = JSON.parse(this.fs.readFileSync(this.sequencePath, 'utf8'))
+        if (!isObject(sequence) || sequence.formatVersion !== 1
+            || !Number.isSafeInteger(sequence.lastSequence) || sequence.lastSequence < 0) {
+          throw new Error('invalid ACK outbox sequence state')
+        }
+        persisted = sequence.lastSequence
+      } catch (error) {
+        this._quarantine(this.sequencePath, error)
+      }
+    }
+    const observed = records.reduce((maximum, item) => (
+      Number.isSafeInteger(item.record.queueSequence)
+        ? Math.max(maximum, item.record.queueSequence)
+        : maximum
+    ), 0)
+    this.lastSequence = Math.max(persisted, observed)
+    if (!this.fs.existsSync(this.sequencePath) || this.lastSequence !== persisted) this._persistSequence()
+
+    // Legacy timestamp-named records have no reliable same-millisecond order.
+    // Preserve their prior lexical order once, then use the durable sequence forever.
+    for (const item of records.filter(entry => !Number.isSafeInteger(entry.record.queueSequence)).sort((left, right) => left.fileName.localeCompare(right.fileName))) {
+      const queueSequence = this._nextSequence()
+      item.record = { ...item.record, queueSequence }
+      atomicWriteJson(this.fs, item.path, item.record)
+    }
+  }
+
+  _persistSequence() {
+    atomicWriteJson(this.fs, this.sequencePath, { formatVersion: 1, lastSequence: this.lastSequence })
+  }
+
+  _nextSequence() {
+    if (this.lastSequence >= Number.MAX_SAFE_INTEGER) throw new Error('ACK outbox sequence exhausted')
+    this.lastSequence += 1
+    this._persistSequence()
+    return this.lastSequence
   }
 
   hasCorruption() {
@@ -1556,6 +1603,10 @@ export class AckOutbox {
     if (!isObject(record) || record.formatVersion !== 1 || !isObject(record.envelope)) {
       throw new Error('invalid ACK outbox record shape')
     }
+    if (hasOwn(record, 'queueSequence')
+        && (!Number.isSafeInteger(record.queueSequence) || record.queueSequence <= 0)) {
+      throw new Error('ACK outbox record has invalid queueSequence')
+    }
     let normalized
     try {
       normalized = normalizeInboundMessage(record.envelope)
@@ -1580,9 +1631,11 @@ export class AckOutbox {
 
   enqueue(ackEnvelope, marker = { kind: 'entry' }) {
     const now = this.now()
-    const fileName = `${String(now).padStart(15, '0')}-${this.createId()}.json`
+    const queueSequence = this._nextSequence()
+    const fileName = `${String(queueSequence).padStart(20, '0')}-${this.createId()}.json`
     const record = {
       formatVersion: 1,
+      queueSequence,
       envelope: ackEnvelope,
       marker,
       createdAt: now,
@@ -1600,7 +1653,7 @@ export class AckOutbox {
 
   pendingEnvelopes() {
     const envelopes = []
-    for (const fileName of this.fs.readdirSync(this.acksDir).sort()) {
+    for (const fileName of this.fs.readdirSync(this.acksDir)) {
       if (!fileName.endsWith('.json')) continue
       const path = resolve(this.acksDir, fileName)
       forceSecureFileMode(this.fs, path)
@@ -1612,7 +1665,9 @@ export class AckOutbox {
         throw new AgentProtocolError('ACK_OUTBOX_CORRUPT', `ACK outbox record ${fileName} quarantined: ${error.message}`)
       }
     }
-    return envelopes
+    return envelopes.sort((left, right) => (
+      left.record.queueSequence - right.record.queueSequence || left.fileName.localeCompare(right.fileName)
+    ))
   }
 }
 
@@ -2268,9 +2323,9 @@ export class AgentMessageProcessor {
       try {
         sent = this.sendFn(item.envelope) === true
       } catch {
-        continue
+        break
       }
-      if (!sent) continue
+      if (!sent) break
       try {
         if (this.ledger && item.marker.kind !== 'none') {
           this.ledger.markAckEmitted(item.envelope.commandId, item.envelope.ackStatus, item.marker)
