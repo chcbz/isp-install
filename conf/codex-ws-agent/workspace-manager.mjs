@@ -3,15 +3,20 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync,
   closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   renameSync,
+  rmSync,
   rmdirSync,
   statSync,
   unlinkSync,
@@ -29,7 +34,8 @@ const DEFAULT_LOCK_RETRY_MS = 10
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SAFE_POLICY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/@{}^~:+-]{0,254}$/
-const SAFE_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+const SAFE_REMOTE_REF = /^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]{0,240}$/
+const VERIFICATION_TMP_PREFIX = '/tmp/codex-ws-agent-publish-'
 
 const blockingSleep = milliseconds => {
   const buffer = new SharedArrayBuffer(4)
@@ -129,16 +135,25 @@ const canonicalizeResourcePath = path => {
 const validateTrustedRemoteUrl = (value, policyId) => {
   const remoteUrl = String(value || '').trim()
   if (!remoteUrl || /[\u0000-\u0020\u007f]/.test(remoteUrl)) {
-    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace remote URL is missing or unsafe for policy ${policyId}`)
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace trustedRemoteUrl is missing or unsafe for policy ${policyId}`)
   }
   let parsed
   try { parsed = new URL(remoteUrl) } catch {
-    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace remote URL must be an absolute HTTPS or SSH URL for policy ${policyId}`)
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace trustedRemoteUrl must be an absolute HTTPS URL for policy ${policyId}`)
   }
-  if (!['https:', 'ssh:'].includes(parsed.protocol) || !parsed.hostname) {
-    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace remote URL must use HTTPS or SSH and cannot be a local/file URL for policy ${policyId}`)
+  if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace trustedRemoteUrl must be credential-free HTTPS for policy ${policyId}`)
   }
   return remoteUrl
+}
+
+const validateTrustedRemoteRef = (value, policyId) => {
+  const remoteRef = String(value || '').trim()
+  if (!SAFE_REMOTE_REF.test(remoteRef) || remoteRef.includes('..') || remoteRef.includes('//')
+      || remoteRef.includes('@{') || remoteRef.endsWith('/') || remoteRef.endsWith('.') || remoteRef.endsWith('.lock')) {
+    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace trustedRemoteRef must be one fixed refs/heads/* ref for policy ${policyId}`)
+  }
+  return remoteRef
 }
 
 const validatePolicyShape = policy => {
@@ -166,16 +181,9 @@ const validatePolicyShape = policy => {
   if (!baseRef || !SAFE_REF.test(baseRef) || baseRef.startsWith('-') || baseRef.includes('..')) {
     throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace baseRef is missing or unsafe for policy ${policyId}`)
   }
-  const remote = policy.remote
-  if (!remote || typeof remote !== 'object' || Array.isArray(remote)) {
-    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace trusted remote is required for policy ${policyId}`)
-  }
-  const remoteName = String(remote.name || '').trim()
-  if (!SAFE_REMOTE_NAME.test(remoteName) || remoteName === '.' || remoteName === '..') {
-    throw new WorkspaceManagerError('WORKSPACE_POLICY_INVALID', `Workspace remote name is missing or unsafe for policy ${policyId}`)
-  }
-  const remoteUrl = validateTrustedRemoteUrl(remote.url, policyId)
-  return { policyId, root, repository, baseRef, remote: { name: remoteName, url: remoteUrl } }
+  const trustedRemoteUrl = validateTrustedRemoteUrl(policy.trustedRemoteUrl, policyId)
+  const trustedRemoteRef = validateTrustedRemoteRef(policy.trustedRemoteRef, policyId)
+  return { policyId, root, repository, baseRef, trustedRemoteUrl, trustedRemoteRef }
 }
 
 const assertDistinctPolicyResources = policies => {
@@ -195,10 +203,12 @@ const assertDistinctPolicyResources = policies => {
   }
 }
 
-export const runGitProcess = ({ gitBin = 'git', cwd, args }) => spawnSync(gitBin, args, {
+export const runGitProcess = ({ gitBin = 'git', cwd, args, env = process.env, input }) => spawnSync(gitBin, args, {
   cwd,
+  env,
+  input,
   encoding: 'utf8',
-  stdio: ['ignore', 'pipe', 'pipe']
+  stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
 })
 
 const loadDotEnv = cwd => {
@@ -300,6 +310,7 @@ export class GitWorkspaceManager {
     if (this.repository !== repository) {
       throw new WorkspaceManagerError('WORKSPACE_SYMLINK_ESCAPE', `Workspace repository resolves through a symlink: ${repository}`)
     }
+    this._git(['check-ref-format', this.policy.trustedRemoteRef], { cwd: this.repository })
     const bare = this._git(['rev-parse', '--is-bare-repository'], { cwd: this.repository }).trim() === 'true'
     if (!bare) {
       const topLevel = resolve(this._git(['rev-parse', '--show-toplevel'], { cwd: this.repository }).trim())
@@ -433,27 +444,15 @@ export class GitWorkspaceManager {
         throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', `Only active workspaces can be archived; current state=${metadata.state}`)
       }
       this._validateActive(metadata, expected)
-      const unmerged = this._git(['diff', '--name-only', '--diff-filter=U'], { cwd: expected.workspacePath })
-      if (unmerged.trim()) throw new WorkspaceManagerError('WORKSPACE_UNMERGED', 'Workspace has unmerged files; archive refused')
-      const dirty = this._git(['status', '--porcelain=v1', '--untracked-files=all'], { cwd: expected.workspacePath })
-      if (dirty.trim()) throw new WorkspaceManagerError('WORKSPACE_DIRTY', 'Workspace has modified or untracked files; archive refused')
-      const ignored = this._git(
-        ['ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--'],
-        { cwd: expected.workspacePath }
-      )
-      if (ignored) throw new WorkspaceManagerError('WORKSPACE_DIRTY', 'Workspace has ignored untracked files; archive refused')
-      const indexEntries = this._git(['ls-files', '-v', '-z', '--'], { cwd: expected.workspacePath })
-        .split('\0')
-        .filter(Boolean)
-      const hiddenEntries = indexEntries.filter(entry => !entry.startsWith('H '))
-      if (hiddenEntries.length) {
-        throw new WorkspaceManagerError(
-          'WORKSPACE_INDEX_HIDDEN',
-          'Workspace index contains skip-worktree, assume-unchanged, or another non-normal tracked-file flag; archive refused'
-        )
-      }
+      this._assertNoVisibleWorkspaceChanges(expected)
       const head = this._git(['rev-parse', 'HEAD'], { cwd: expected.workspacePath }).trim()
       if (head !== metadata.baseCommit) this._assertHeadPublishedToTrustedRemote(expected, head)
+      this._assertNoVisibleWorkspaceChanges(expected)
+      this._assertTrackedFilesMatchIndex(expected)
+      const verifiedHead = this._git(['rev-parse', 'HEAD'], { cwd: expected.workspacePath }).trim()
+      if (verifiedHead !== head) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace HEAD changed during archive verification; archive refused')
+      }
       this._git(['worktree', 'remove', '--', expected.workspacePath], { cwd: this.repository })
       if (existsSync(expected.workspacePath)) {
         throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_FAILED', 'Git reported success but workspace path still exists')
@@ -464,39 +463,168 @@ export class GitWorkspaceManager {
     })
   }
 
-  _assertHeadPublishedToTrustedRemote(expected, head) {
-    const { name, url } = this.policy.remote
-    const configuredUrls = this._git(['remote', 'get-url', '--all', name], { cwd: this.repository })
-      .split(/\r?\n/)
-      .map(value => value.trim())
+  _assertNoVisibleWorkspaceChanges(expected) {
+    const unmerged = this._git(['diff', '--name-only', '--diff-filter=U'], { cwd: expected.workspacePath })
+    if (unmerged.trim()) throw new WorkspaceManagerError('WORKSPACE_UNMERGED', 'Workspace has unmerged files; archive refused')
+    const dirty = this._git(['status', '--porcelain=v1', '--untracked-files=all'], { cwd: expected.workspacePath })
+    if (dirty.trim()) throw new WorkspaceManagerError('WORKSPACE_DIRTY', 'Workspace has modified or untracked files; archive refused')
+    const ignored = this._git(
+      ['ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--'],
+      { cwd: expected.workspacePath }
+    )
+    if (ignored) throw new WorkspaceManagerError('WORKSPACE_DIRTY', 'Workspace has ignored untracked files; archive refused')
+    const indexEntries = this._git(['ls-files', '-v', '-z', '--'], { cwd: expected.workspacePath })
+      .split('\0')
       .filter(Boolean)
-    if (configuredUrls.length !== 1 || configuredUrls[0] !== url) {
+    if (indexEntries.some(entry => !entry.startsWith('H '))) {
       throw new WorkspaceManagerError(
-        'WORKSPACE_REMOTE_UNTRUSTED',
-        `Trusted remote ${name} URL does not exactly match workspace policy; archive refused`
+        'WORKSPACE_INDEX_HIDDEN',
+        'Workspace index contains skip-worktree, assume-unchanged, or another non-normal tracked-file flag; archive refused'
       )
     }
-    this._git([
-      'fetch', '--prune', '--no-tags', name,
-      `+refs/heads/*:refs/remotes/${name}/*`
-    ], { cwd: this.repository })
-    const prefix = `refs/remotes/${name}/`
-    const remoteRefs = this._git(['for-each-ref', '--format=%(refname)', prefix], { cwd: this.repository })
-      .split(/\r?\n/)
-      .map(value => value.trim())
-      .filter(value => value.startsWith(prefix) && value !== `${prefix}HEAD`)
-    for (const remoteRef of remoteRefs) {
-      const containment = this._gitResult(['merge-base', '--is-ancestor', head, remoteRef], { cwd: expected.workspacePath })
-      if (containment.status === 0 && !containment.error) return
-      if (containment.status > 1 || containment.error) {
-        const detail = containment.stderr.trim() || containment.error?.message || `exit ${containment.status}`
-        throw new WorkspaceManagerError('WORKSPACE_GIT_ERROR', `git merge-base publication check failed: ${detail}`)
+  }
+
+  _assertTrackedFilesMatchIndex(expected) {
+    const entries = this._git(['ls-files', '--stage', '-z', '--'], { cwd: expected.workspacePath })
+      .split('\0')
+      .filter(Boolean)
+    const seen = new Set()
+    for (const entry of entries) {
+      const tab = entry.indexOf('\t')
+      const match = tab > 0 ? /^(\d{6}) ([0-9a-f]{40,64}) ([0-3])$/.exec(entry.slice(0, tab)) : null
+      const relativePath = tab > 0 ? entry.slice(tab + 1) : ''
+      if (!match || !relativePath || relativePath.includes('\ufffd') || match[3] !== '0' || seen.has(relativePath)) {
+        throw new WorkspaceManagerError('WORKSPACE_TRACKED_MISMATCH', 'Workspace index contains an invalid, unmerged, duplicate, or non-UTF-8 tracked entry')
+      }
+      seen.add(relativePath)
+      const actualPath = resolve(expected.workspacePath, relativePath)
+      if (!isInside(expected.workspacePath, actualPath) || actualPath === expected.workspacePath) {
+        throw new WorkspaceManagerError('WORKSPACE_TRACKED_MISMATCH', `Tracked path escaped workspace: ${JSON.stringify(relativePath)}`)
+      }
+      const expectedMode = match[1]
+      const expectedObject = match[2]
+      let data
+      let actualMode
+      try {
+        if (expectedMode === '120000') {
+          const before = lstatSync(actualPath, { bigint: true })
+          if (!before.isSymbolicLink()) throw new Error('expected a symbolic link')
+          data = readlinkSync(actualPath, { encoding: 'buffer' })
+          const after = lstatSync(actualPath, { bigint: true })
+          if (!this._sameFileSnapshot(before, after)) throw new Error('symbolic link changed during verification')
+          actualMode = '120000'
+        } else if (expectedMode === '100644' || expectedMode === '100755') {
+          const before = lstatSync(actualPath, { bigint: true })
+          if (!before.isFile()) throw new Error('expected a regular file')
+          const descriptor = openSync(actualPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+          try {
+            const opened = fstatSync(descriptor, { bigint: true })
+            if (!opened.isFile() || before.dev !== opened.dev || before.ino !== opened.ino) {
+              throw new Error('tracked file changed before open')
+            }
+            data = readFileSync(descriptor)
+            const afterRead = fstatSync(descriptor, { bigint: true })
+            if (!this._sameFileSnapshot(opened, afterRead)) throw new Error('tracked file changed during read')
+            actualMode = (opened.mode & 0o111n) === 0n ? '100644' : '100755'
+          } finally {
+            closeSync(descriptor)
+          }
+          const afterPath = lstatSync(actualPath, { bigint: true })
+          if (!this._sameFileSnapshot(before, afterPath)) throw new Error('tracked path changed during verification')
+        } else {
+          throw new Error(`unsupported tracked mode ${expectedMode}`)
+        }
+      } catch (error) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_TRACKED_MISMATCH',
+          `Tracked path ${JSON.stringify(relativePath)} cannot be safely verified: ${error.message}`
+        )
+      }
+      if (actualMode !== expectedMode) {
+        throw new WorkspaceManagerError('WORKSPACE_TRACKED_MISMATCH', `Tracked mode differs from index for ${JSON.stringify(relativePath)}`)
+      }
+      const actualObject = this._git(['hash-object', '--stdin'], { cwd: expected.workspacePath, input: data }).trim()
+      if (actualObject !== expectedObject) {
+        throw new WorkspaceManagerError('WORKSPACE_TRACKED_MISMATCH', `Tracked content differs from index for ${JSON.stringify(relativePath)}`)
       }
     }
-    throw new WorkspaceManagerError(
-      'WORKSPACE_UNPUSHED',
-      `Workspace HEAD is not contained by any freshly fetched ${name} remote-tracking branch; archive refused`
-    )
+  }
+
+  _sameFileSnapshot(left, right) {
+    return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+      && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
+  }
+
+  _verificationEnvironment(home) {
+    return {
+      PATH: '/usr/bin:/bin',
+      HOME: home,
+      XDG_CONFIG_HOME: resolve(home, 'xdg'),
+      LANG: 'C',
+      LC_ALL: 'C',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_ASKPASS: '/bin/false',
+      SSH_ASKPASS: '/bin/false',
+      GIT_SSH_COMMAND: '/bin/false',
+      GCM_INTERACTIVE: 'Never',
+      NO_PROXY: '*'
+    }
+  }
+
+  _verificationGit(args, { cwd, env }) {
+    return this._git([
+      '-c', 'http.sslVerify=true',
+      '-c', 'http.proxy=',
+      '-c', 'credential.helper=',
+      '-c', 'core.askPass=/bin/false',
+      '-c', 'protocol.file.allow=never',
+      '-c', 'protocol.ext.allow=never',
+      ...args
+    ], { cwd, env })
+  }
+
+  _assertHeadPublishedToTrustedRemote(_expected, head) {
+    const temporaryRoot = mkdtempSync(VERIFICATION_TMP_PREFIX)
+    try {
+      chmodSync(temporaryRoot, 0o700)
+      const home = resolve(temporaryRoot, 'home')
+      const verificationRepository = resolve(temporaryRoot, 'repository.git')
+      mkdirSync(home, { mode: 0o700 })
+      mkdirSync(resolve(home, 'xdg'), { mode: 0o700 })
+      const env = this._verificationEnvironment(home)
+      const objectFormat = this._git(['rev-parse', '--show-object-format=storage'], { cwd: this.repository }).trim()
+      if (!['sha1', 'sha256'].includes(objectFormat)) {
+        throw new WorkspaceManagerError('WORKSPACE_GIT_ERROR', `Unsupported repository object format: ${objectFormat || '(missing)'}`)
+      }
+      this._verificationGit(['init', '--bare', `--object-format=${objectFormat}`, verificationRepository], { cwd: temporaryRoot, env })
+      this._verificationGit([
+        'fetch', '--no-tags', '--force', '--prune', '--no-write-fetch-head',
+        this.policy.trustedRemoteUrl,
+        `+${this.policy.trustedRemoteRef}:refs/remotes/trusted/published`
+      ], { cwd: verificationRepository, env })
+      const fetchedHead = 'refs/remotes/trusted/published'
+      const object = this._gitResult(['cat-file', '-e', `${head}^{commit}`], { cwd: verificationRepository, env })
+      if (object.status !== 0 || object.error) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_UNPUSHED',
+          `Workspace HEAD was not fetched from trusted HTTPS ref ${this.policy.trustedRemoteRef}; archive refused`
+        )
+      }
+      const containment = this._gitResult(['merge-base', '--is-ancestor', head, fetchedHead], { cwd: verificationRepository, env })
+      if (containment.status === 0 && !containment.error) return
+      if (containment.status === 1 && !containment.error) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_UNPUSHED',
+          `Workspace HEAD is not contained by trusted HTTPS ref ${this.policy.trustedRemoteRef}; archive refused`
+        )
+      }
+      const detail = containment.stderr.trim() || containment.error?.message || `exit ${containment.status}`
+      throw new WorkspaceManagerError('WORKSPACE_GIT_ERROR', `isolated publication verification failed: ${detail}`)
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true })
+    }
   }
 
   _ensureLocked(expected) {
@@ -537,8 +665,8 @@ export class GitWorkspaceManager {
       root: this.root,
       repository: this.repository,
       baseRef: this.policy.baseRef,
-      remoteName: this.policy.remote.name,
-      remoteUrl: this.policy.remote.url,
+      trustedRemoteUrl: this.policy.trustedRemoteUrl,
+      trustedRemoteRef: this.policy.trustedRemoteRef,
       baseCommit,
       taskId: expected.taskId,
       agentId: expected.agentId,
@@ -617,8 +745,8 @@ export class GitWorkspaceManager {
       root: this.root,
       repository: this.repository,
       baseRef: this.policy.baseRef,
-      remoteName: this.policy.remote.name,
-      remoteUrl: this.policy.remote.url,
+      trustedRemoteUrl: this.policy.trustedRemoteUrl,
+      trustedRemoteRef: this.policy.trustedRemoteRef,
       taskId: expected.taskId,
       agentId: expected.agentId,
       role: expected.role,
@@ -724,8 +852,8 @@ export class GitWorkspaceManager {
     fsyncDirectory(this.locksRoot)
   }
 
-  _gitResult(args, { cwd }) {
-    const result = this.gitRunner({ gitBin: this.gitBin, cwd, args }) || {}
+  _gitResult(args, { cwd, env, input } = {}) {
+    const result = this.gitRunner({ gitBin: this.gitBin, cwd, args, env: env || process.env, input }) || {}
     return {
       status: Number.isInteger(result.status) ? result.status : (result.error ? 1 : 0),
       stdout: String(result.stdout || ''),
@@ -734,8 +862,8 @@ export class GitWorkspaceManager {
     }
   }
 
-  _git(args, { cwd }) {
-    const result = this._gitResult(args, { cwd })
+  _git(args, { cwd, env, input } = {}) {
+    const result = this._gitResult(args, { cwd, env, input })
     if (result.status !== 0 || result.error) {
       const detail = result.stderr.trim() || result.error?.message || `exit ${result.status}`
       throw new WorkspaceManagerError('WORKSPACE_GIT_ERROR', `git ${args.join(' ')} failed: ${detail}`)

@@ -124,7 +124,7 @@ if [ -f "$APP_HOME/workspace-policies.json" ]; then
 else
     __yellow "尚未启用 A07 workspace policy。command.dispatch 将 fail closed，不会回退到共享可写代码目录。"
     echo "  cp $APP_HOME/workspace-policies.example.json $APP_HOME/workspace-policies.json"
-    echo "  编辑可信 repository/baseRef/remote，并在 .env 设置 CODEX_WORKSPACE_POLICIES_FILE"
+    echo "  编辑可信 repository/baseRef/trustedRemoteUrl/trustedRemoteRef，并在 .env 设置 CODEX_WORKSPACE_POLICIES_FILE"
 fi
 
 if [ "${START_CODEX_WS_AGENT:-n}" = "y" ]; then

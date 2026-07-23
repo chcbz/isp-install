@@ -30,14 +30,14 @@ A06 runtime notes:
 ## A07 workspace policy
 
 1. Copy `/home/isp/apps/codex-ws-agent/workspace-policies.example.json` to `workspace-policies.json` and set mode `0600`.
-2. Set only trusted local values for `root`, `repository`, `baseRef`, and `remote.name`/`remote.url`; never derive them from a dispatch payload. Remote URLs must use HTTPS or SSH, not local paths or `file://`.
+2. Set only trusted local values for `root`, `repository`, `baseRef`, `trustedRemoteUrl`, and `trustedRemoteRef`; never derive them from a dispatch payload. This version accepts only credential-free HTTPS publication URLs and one fixed `refs/heads/*` ref; SSH, local paths, and `file://` are rejected.
 3. Set `CODEX_WORKSPACE_POLICIES_FILE=/home/isp/apps/codex-ws-agent/workspace-policies.json`.
 4. Add `workspacePolicyId=<policy>` and `workspaceRole=coder` to every coding Agent profile.
 5. Keep `workspaceNoTaskPolicy=reject` unless a specific non-coding command type needs compatibility. If needed, use `dedicated-workdir`, list exact command types, and provide a non-Git `workspaceFallbackWorkdir` with no overlap in either direction with repository or workspace root.
 
 Each `taskId + canonical agentId` receives one deterministic worktree. Creation is cross-process locked and durable metadata must match the repository, fixed baseline commit, trusted remote, branch, role, and path before reuse. Policy loading rejects duplicate/overlapping canonical repositories or roots across policy IDs. Missing policy/task id, path traversal, symlink escape, branch collision, unknown partial state, or Git failure is fail-closed.
 
-There is no automatic cleanup. Operators may inspect or explicitly archive with `/home/isp/bin/codex_ws_agent.sh workspace ...`; archive requires the Agent service to be stopped and refuses dirty, ignored/untracked, unmerged, index-hidden (`skip-worktree`, `assume-unchanged`, or other non-normal index flags), or unpushed work. Publication is proven only after the configured remote URL matches exactly, a fresh forced/pruned fetch succeeds, and `HEAD` is contained by that trusted remote's tracking refs. Never expose archive arguments to Agent-generated commands.
+There is no automatic cleanup. Operators may inspect or explicitly archive with `/home/isp/bin/codex_ws_agent.sh workspace ...`; archive requires the Agent service to be stopped and refuses dirty, ignored/untracked, unmerged, index-hidden (`skip-worktree`, `assume-unchanged`, or other non-normal index flags), stat-cache-hidden content/mode differences, or unpushed work. Every tracked regular file/symlink is hashed and mode-checked against the index. Publication is proven only in a fresh temporary bare repository with system/global/local config and inherited Git/proxy/askpass/SSH environment excluded, TLS verification forced, and the exact trusted HTTPS URL/ref fetched. Never expose archive arguments to Agent-generated commands.
 
 ## Config files
 
