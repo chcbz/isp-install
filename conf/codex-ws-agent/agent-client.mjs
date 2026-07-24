@@ -439,6 +439,7 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     codexApproval: profile.codexApproval || fallback.codexApproval || 'never',
     codexSessionMode: profile.codexSessionMode || fallback.codexSessionMode || 'new',
     codexTimeoutMs: parseNonNegativeMs(profile.codexTimeoutMs, fallback.codexTimeoutMs || 900000),
+    codexModel: profile.codexModel || fallback.codexModel || '',
     enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
@@ -2866,6 +2867,7 @@ const buildCodexArgs = (profile, message, prompt) => {
     return [
       '--ask-for-approval', profile.codexApproval,
       'exec', 'resume', '--json', '--skip-git-repo-check',
+      ...(profile.codexModel ? ['--model', profile.codexModel] : []),
       ...(mappedSessionId ? [mappedSessionId] : ['--last', '--all']),
       prompt
     ]
@@ -2873,7 +2875,9 @@ const buildCodexArgs = (profile, message, prompt) => {
   return [
     '--ask-for-approval', profile.codexApproval,
     'exec', '--json', '--cd', profile.codexWorkdir,
-    '--sandbox', profile.codexSandbox, '--skip-git-repo-check', prompt
+    '--sandbox', profile.codexSandbox, '--skip-git-repo-check',
+    ...(profile.codexModel ? ['--model', profile.codexModel] : []),
+    prompt
   ]
 }
 
