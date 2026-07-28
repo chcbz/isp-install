@@ -155,6 +155,61 @@ const runChildEnsure = (fixture, agentId, taskId) => new Promise((resolvePromise
   })
 })
 
+const runChildWorkspaceProbe = (fixture, taskId, action = 'inspect') => {
+  const moduleUrl = new URL('../workspace-manager.mjs', import.meta.url).href
+  const script = `
+    import { GitWorkspaceManager } from ${JSON.stringify(moduleUrl)};
+    const manager = new GitWorkspaceManager({
+      policy: JSON.parse(process.env.A07_POLICY),
+      agentId: process.env.A07_AGENT,
+      role: 'coder'
+    });
+    try {
+      const value = process.env.A07_ACTION === 'ensure'
+        ? manager.ensureWorkspace(process.env.A07_TASK)
+        : manager.inspectWorkspace(process.env.A07_TASK);
+      console.log(JSON.stringify({ ok: true, value }));
+    } catch (error) {
+      console.log(JSON.stringify({ ok: false, code: error.code || '', message: error.message }));
+    }
+  `
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      A07_POLICY: JSON.stringify(fixture.policy),
+      A07_AGENT: 'agent-a',
+      A07_TASK: taskId,
+      A07_ACTION: action
+    },
+    encoding: 'utf8'
+  })
+  assert.equal(child.status, 0, child.stderr)
+  return JSON.parse(child.stdout.trim())
+}
+
+const archiveBaselineWorkspace = taskId => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace(taskId)
+  const archived = manager(fixture).archiveWorkspace(taskId)
+  const metadataPath = manager(fixture).describe(taskId).metadataPath
+  return { fixture, active, archived, metadataPath }
+}
+
+const assertArchivedRestartRecoveryRequired = (fixture, taskId, messagePattern) => {
+  for (const action of ['inspect', 'ensure']) {
+    const probe = runChildWorkspaceProbe(fixture, taskId, action)
+    assert.equal(probe.ok, false)
+    assert.equal(probe.code, 'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED')
+    if (messagePattern) assert.match(probe.message, messagePattern)
+  }
+}
+
+const createAlternateCommit = (fixture, parent) => {
+  const tree = git(fixture.repository, ['rev-parse', `${parent}^{tree}`])
+  return git(fixture.repository, ['commit-tree', tree, '-p', parent, '-m', 'alternate retained state'])
+}
+
 test('concurrent processes idempotently create one task-agent worktree', async () => {
   const fixture = createRepository()
   const [left, right] = await Promise.all([
@@ -512,10 +567,71 @@ test('archive retains the quarantined Git worktree and persists its location acr
   const persisted = JSON.parse(readFileSync(retaining.describe('task-retained-archive').metadataPath, 'utf8'))
   assert.equal(persisted.state, 'archived')
   assert.equal(persisted.quarantinePath, archived.quarantinePath)
-  assert.throws(
-    () => manager(fixture).ensureWorkspace('task-retained-archive'),
-    error => error.code === 'WORKSPACE_NOT_ACTIVE'
-  )
+  const inspected = runChildWorkspaceProbe(fixture, 'task-retained-archive', 'inspect')
+  assert.equal(inspected.ok, true)
+  assert.equal(inspected.value.state, 'archived')
+  assert.equal(inspected.value.quarantinePath, archived.quarantinePath)
+  const ensured = runChildWorkspaceProbe(fixture, 'task-retained-archive', 'ensure')
+  assert.equal(ensured.ok, false)
+  assert.equal(ensured.code, 'WORKSPACE_NOT_ACTIVE')
+})
+
+test('archived restart probe rejects a missing retained worktree registration', () => {
+  const taskId = 'task-archived-registration-missing'
+  const { fixture, archived } = archiveBaselineWorkspace(taskId)
+  const gitDirectory = git(archived.quarantinePath, ['rev-parse', '--path-format=absolute', '--git-dir'])
+  rmSync(gitDirectory, { recursive: true, force: true })
+  assert.equal(existsSync(archived.quarantinePath), true)
+  assert.equal(readFileSync(resolve(archived.quarantinePath, 'tracked.txt'), 'utf8'), 'baseline\n')
+
+  assertArchivedRestartRecoveryRequired(fixture, taskId, /registration/)
+})
+
+test('archived restart probes reject detached and wrong retained branches', () => {
+  for (const variant of ['detached', 'wrong-branch']) {
+    const taskId = `task-archived-${variant}`
+    const { fixture, archived } = archiveBaselineWorkspace(taskId)
+    if (variant === 'detached') {
+      git(archived.quarantinePath, ['checkout', '--detach', archived.archivedHead])
+    } else {
+      git(archived.quarantinePath, ['checkout', '-b', 'wrong-retained-branch'])
+    }
+    assertArchivedRestartRecoveryRequired(fixture, taskId, /branch|detached/)
+  }
+})
+
+test('archived restart probe rejects actual HEAD mismatch with metadata archivedHead', () => {
+  const taskId = 'task-archived-head-mismatch'
+  const { fixture, archived, metadataPath } = archiveBaselineWorkspace(taskId)
+  const alternateHead = createAlternateCommit(fixture, archived.archivedHead)
+  const persisted = JSON.parse(readFileSync(metadataPath, 'utf8'))
+  writeFileSync(metadataPath, `${JSON.stringify({ ...persisted, archivedHead: alternateHead }, null, 2)}\n`)
+
+  assertArchivedRestartRecoveryRequired(fixture, taskId, /HEAD|branch ref/)
+})
+
+test('archived restart probe rejects retained branch ref drift', () => {
+  const taskId = 'task-archived-ref-drift'
+  const { fixture, archived } = archiveBaselineWorkspace(taskId)
+  const alternateHead = createAlternateCommit(fixture, archived.archivedHead)
+  git(fixture.repository, [
+    'update-ref', `refs/heads/${archived.branch}`, alternateHead, archived.archivedHead
+  ])
+
+  assertArchivedRestartRecoveryRequired(fixture, taskId, /HEAD|branch ref/)
+})
+
+test('archived restart probe rejects Git top-level mismatch at the retained path', () => {
+  const taskId = 'task-archived-top-level-mismatch'
+  const { fixture, archived } = archiveBaselineWorkspace(taskId)
+  const wrongTopLevel = resolve(fixture.root, 'wrong-retained-top-level')
+  mkdirSync(wrongTopLevel)
+  git(fixture.repository, ['config', 'extensions.worktreeConfig', 'true'])
+  git(archived.quarantinePath, ['config', '--worktree', 'core.worktree', wrongTopLevel])
+  assert.equal(git(archived.quarantinePath, ['rev-parse', '--show-toplevel']), wrongTopLevel)
+  assert.match(git(fixture.repository, ['worktree', 'list', '--porcelain']), new RegExp(`worktree ${archived.quarantinePath}`))
+
+  assertArchivedRestartRecoveryRequired(fixture, taskId, /top-level/)
 })
 
 test('archive preserves a late ignored file injected after final validation', () => {
