@@ -486,36 +486,124 @@ test('archive atomically restores the worktree and quarantines data recreated at
   assert.equal(git(active.workspacePath, ['rev-parse', '--show-toplevel']), active.workspacePath)
 })
 
-test('archive remove rechecks ctime and preserves hidden dirty injected at the delete boundary', () => {
+test('archive retains the quarantined Git worktree and persists its location across restart', () => {
   const fixture = createRepository()
-  const active = manager(fixture).ensureWorkspace('task-delete-boundary-dirty')
+  const active = manager(fixture).ensureWorkspace('task-retained-archive')
   const delegated = httpsVerificationRunner(fixture)
-  let injected = false
-  const racing = manager(fixture, 'agent-a', {
+  let removeCalls = 0
+  const retaining = manager(fixture, 'agent-a', {
     gitRunner: input => {
-      if (!injected && input.args.includes('worktree') && input.args.includes('remove')) {
-        assertHardenedWorktreeGit(input.args)
-        const trackedPath = resolve(input.args.at(-1), 'tracked.txt')
-        const before = statSync(trackedPath)
-        git(input.args.at(-1), ['config', 'core.trustctime', 'false'])
-        writeFileSync(trackedPath, 'tampered\n')
-        utimesSync(trackedPath, before.atime, before.mtime)
-        injected = true
-      }
+      const command = gitCommandArgs(input.args)
+      if (command[0] === 'worktree' && command[1] === 'remove') removeCalls += 1
       return delegated(input)
     }
   })
 
+  const archived = retaining.archiveWorkspace('task-retained-archive')
+  assert.equal(archived.state, 'archived')
+  assert.match(archived.quarantinePath, /\.archive-quarantine\//)
+  assert.equal(removeCalls, 0)
+  assert.equal(existsSync(active.workspacePath), false)
+  assert.equal(existsSync(archived.quarantinePath), true)
+  assert.equal(readFileSync(resolve(archived.quarantinePath, 'tracked.txt'), 'utf8'), 'baseline\n')
+  assert.equal(git(archived.quarantinePath, ['rev-parse', '--show-toplevel']), archived.quarantinePath)
+  assert.match(git(fixture.repository, ['worktree', 'list', '--porcelain']), new RegExp(`worktree ${archived.quarantinePath}`))
+
+  const persisted = JSON.parse(readFileSync(retaining.describe('task-retained-archive').metadataPath, 'utf8'))
+  assert.equal(persisted.state, 'archived')
+  assert.equal(persisted.quarantinePath, archived.quarantinePath)
   assert.throws(
-    () => racing.archiveWorkspace('task-delete-boundary-dirty'),
-    error => error.code === 'WORKSPACE_GIT_ERROR'
+    () => manager(fixture).ensureWorkspace('task-retained-archive'),
+    error => error.code === 'WORKSPACE_NOT_ACTIVE'
   )
-  assert.equal(injected, true)
-  assert.equal(existsSync(active.workspacePath), true)
-  assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'tampered\n')
-  assert.equal(JSON.parse(readFileSync(racing.describe('task-delete-boundary-dirty').metadataPath, 'utf8')).state, 'active')
 })
 
+test('archive preserves a late ignored file injected after final validation', () => {
+  const fixture = createRepository()
+  writeFileSync(resolve(fixture.repository, '.gitignore'), 'late-ignored.txt\n')
+  git(fixture.repository, ['add', '.gitignore'])
+  git(fixture.repository, ['commit', '-m', 'ignore late file'])
+  const active = manager(fixture).ensureWorkspace('task-late-ignored-file')
+  const delegated = httpsVerificationRunner(fixture)
+  let branchChecks = 0
+  let injectedPath = ''
+  let removeCalls = 0
+  const racing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      const command = gitCommandArgs(input.args)
+      if (command[0] === 'worktree' && command[1] === 'remove') removeCalls += 1
+      if (input.cwd === fixture.repository
+          && command[0] === 'rev-parse'
+          && command[1] === '--verify'
+          && command.at(-1) === `refs/heads/${active.branch}^{commit}`) {
+        branchChecks += 1
+        if (branchChecks === 2) {
+          const archiving = JSON.parse(readFileSync(manager(fixture).describe('task-late-ignored-file').metadataPath, 'utf8'))
+          injectedPath = resolve(archiving.quarantinePath, 'late-ignored.txt')
+          writeFileSync(injectedPath, 'must survive archive\n')
+          assert.equal(git(archiving.quarantinePath, ['check-ignore', 'late-ignored.txt']), 'late-ignored.txt')
+          assert.equal(git(archiving.quarantinePath, ['status', '--porcelain=v1', '--untracked-files=all']), '')
+        }
+      }
+      return result
+    }
+  })
+
+  const archived = racing.archiveWorkspace('task-late-ignored-file')
+  assert.equal(branchChecks, 2)
+  assert.equal(removeCalls, 0)
+  assert.equal(archived.state, 'archived')
+  assert.equal(injectedPath, resolve(archived.quarantinePath, 'late-ignored.txt'))
+  assert.equal(existsSync(active.workspacePath), false)
+  assert.equal(existsSync(archived.quarantinePath), true)
+  assert.equal(readFileSync(injectedPath, 'utf8'), 'must survive archive\n')
+  assert.equal(JSON.parse(readFileSync(racing.describe('task-late-ignored-file').metadataPath, 'utf8')).quarantinePath, archived.quarantinePath)
+})
+
+test('archive preserves a late ignored directory injected after final validation', () => {
+  const fixture = createRepository()
+  writeFileSync(resolve(fixture.repository, '.gitignore'), 'late-ignored-dir/\n')
+  git(fixture.repository, ['add', '.gitignore'])
+  git(fixture.repository, ['commit', '-m', 'ignore late directory'])
+  const active = manager(fixture).ensureWorkspace('task-late-ignored-dir')
+  const delegated = httpsVerificationRunner(fixture)
+  let branchChecks = 0
+  let injectedDirectory = ''
+  let removeCalls = 0
+  const racing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      const command = gitCommandArgs(input.args)
+      if (command[0] === 'worktree' && command[1] === 'remove') removeCalls += 1
+      if (input.cwd === fixture.repository
+          && command[0] === 'rev-parse'
+          && command[1] === '--verify'
+          && command.at(-1) === `refs/heads/${active.branch}^{commit}`) {
+        branchChecks += 1
+        if (branchChecks === 2) {
+          const archiving = JSON.parse(readFileSync(manager(fixture).describe('task-late-ignored-dir').metadataPath, 'utf8'))
+          injectedDirectory = resolve(archiving.quarantinePath, 'late-ignored-dir')
+          mkdirSync(injectedDirectory)
+          writeFileSync(resolve(injectedDirectory, 'payload.txt'), 'directory data survives\n')
+          assert.equal(git(archiving.quarantinePath, ['check-ignore', 'late-ignored-dir/payload.txt']), 'late-ignored-dir/payload.txt')
+          assert.equal(git(archiving.quarantinePath, ['status', '--porcelain=v1', '--untracked-files=all']), '')
+        }
+      }
+      return result
+    }
+  })
+
+  const archived = racing.archiveWorkspace('task-late-ignored-dir')
+  assert.equal(branchChecks, 2)
+  assert.equal(removeCalls, 0)
+  assert.equal(archived.state, 'archived')
+  assert.equal(injectedDirectory, resolve(archived.quarantinePath, 'late-ignored-dir'))
+  assert.equal(existsSync(active.workspacePath), false)
+  assert.equal(existsSync(archived.quarantinePath), true)
+  assert.equal(readFileSync(resolve(injectedDirectory, 'payload.txt'), 'utf8'), 'directory data survives\n')
+  assert.equal(JSON.parse(readFileSync(racing.describe('task-late-ignored-dir').metadataPath, 'utf8')).quarantinePath, archived.quarantinePath)
+})
 
 test('archive final lease hardens checkStat minimal against same-second same-length rewrites', () => {
   const fixture = createRepository()

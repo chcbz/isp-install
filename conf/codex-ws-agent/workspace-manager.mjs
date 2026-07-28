@@ -584,23 +584,21 @@ export class GitWorkspaceManager {
         throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Original workspace path reappeared after quarantine; archive refused')
       }
 
-      // Persist the terminal decision before the irreversible remove. If Git remove
-      // fails, the catch path restores both the worktree registration and active
-      // metadata. After Git reports success there are deliberately no fallible Git
-      // or metadata operations left that could turn a committed deletion into an
-      // apparent failed archive.
+      // Archive is a non-destructive logical operation only. The Agent process must
+      // never physically delete a worktree because the quarantine remains writable
+      // by the Agent UID and therefore cannot establish a race-free delete boundary.
+      // Persist the retained path so an interrupted/restarted process can always
+      // locate the complete worktree. Any future physical deletion belongs to a
+      // separately authorized root-owned GC, which is intentionally absent/disabled.
       const archived = {
-        ...metadata,
+        ...archiving,
         state: 'archived',
+        quarantinePath,
         archivedHead: verifiedHead,
         archivedAt: this.now(),
         updatedAt: this.now()
       }
       atomicWriteJson(expected.metadataPath, archived)
-      this._hardenedGit(['worktree', 'remove', '--', quarantinePath], { cwd: this.repository })
-      if (existsSync(quarantinePath)) {
-        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_FAILED', 'Git reported success but quarantined worktree still exists')
-      }
       return archived
     } catch (error) {
       try {
@@ -1032,16 +1030,23 @@ export class GitWorkspaceManager {
     if (!['creating', 'active', 'archiving', 'archived'].includes(metadata.state)) {
       throw new WorkspaceManagerError('WORKSPACE_METADATA_CONFLICT', `Durable workspace metadata has invalid state ${metadata.state}`)
     }
-    if (metadata.state === 'archiving') {
+    if (metadata.state === 'archiving' || metadata.state === 'archived') {
       const quarantinePath = String(metadata.quarantinePath || '')
+      const archiveHead = metadata.state === 'archived' ? metadata.archivedHead : metadata.archiveHead
       if (!quarantinePath
           || !isInside(this.archiveQuarantineRoot, quarantinePath)
           || dirname(quarantinePath) !== this.archiveQuarantineRoot
-          || !/^[0-9a-f]{40,64}$/.test(String(metadata.archiveHead || ''))) {
-        throw new WorkspaceManagerError('WORKSPACE_METADATA_CONFLICT', 'Durable archiving metadata has an unsafe quarantine path or HEAD')
+          || !/^[0-9a-f]{40,64}$/.test(String(archiveHead || ''))) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_METADATA_CONFLICT',
+          `Durable ${metadata.state} metadata has an unsafe quarantine path or HEAD`
+        )
       }
       if (existsSync(quarantinePath) && lstatSync(quarantinePath).isSymbolicLink()) {
         throw new WorkspaceManagerError('WORKSPACE_SYMLINK_ESCAPE', 'Durable archive quarantine path became a symlink')
+      }
+      if (metadata.state === 'archived' && !existsSync(quarantinePath)) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RECOVERY_REQUIRED', 'Archived workspace quarantine path is missing; physical deletion is not permitted here')
       }
     }
   }
