@@ -2909,6 +2909,18 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   const title = message.title || message.currentTaskTitle || (mode === 'chat' ? 'Agent 聊天' : 'Codex 执行任务')
   let codexWorkdir = overrides.codexWorkdir || profile.codexWorkdir
   let workspace = null
+  let workspaceLease = null
+  const releaseWorkspaceLease = () => {
+    if (!workspaceLease) return null
+    const lease = workspaceLease
+    workspaceLease = null
+    try {
+      lease.release()
+      return null
+    } catch (error) {
+      return error
+    }
+  }
 
   if (mode === 'command' && overrides.requireWorkspace === true) {
     try {
@@ -2918,11 +2930,12 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
           `Profile ${profile.profileId} has no trusted workspacePolicyId; shared writable code workdirs are forbidden`
         )
       }
-      workspace = overrides.workspaceManager.resolveCommandWorkspace(message, {
+      workspaceLease = overrides.workspaceManager.acquireCommandWorkspace(message, {
         noTaskPolicy: profile.workspaceNoTaskPolicy,
         nonCodingCommandTypes: profile.workspaceNonCodingCommandTypes,
         fallbackWorkdir: profile.workspaceFallbackWorkdir
       })
+      workspace = workspaceLease.workspace
       codexWorkdir = workspace.workspacePath
     } catch (error) {
       const errorMessage = `${error.code || 'WORKSPACE_ERROR'}: ${error.message}`
@@ -2935,10 +2948,13 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   }
 
   if (!prompt) {
-    const errorMessage = 'No prompt/content/instruction/title found in inbound event'
+    const leaseError = releaseWorkspaceLease()
+    const errorMessage = leaseError
+      ? `No prompt/content/instruction/title found in inbound event; WORKSPACE_LOCK_ERROR: ${leaseError.message}`
+      : 'No prompt/content/instruction/title found in inbound event'
     if (mode === 'chat') sendChatFinal(profile, message, `无法处理：${errorMessage}`, { status: 'failed' }, sendProtocolFn)
     else sendLegacyFn('codex.result', { taskId, status: 'failed', errorMessage }, profile)
-    resolveRun({ status: 'failed', errorMessage })
+    resolveRun({ status: 'failed', errorMessage, ...(leaseError ? { workspaceErrorCode: 'WORKSPACE_LOCK_ERROR' } : {}) })
     return
   }
 
@@ -2955,14 +2971,18 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
       stdio: ['ignore', 'pipe', 'pipe']
     })
   } catch (error) {
-    if (mode === 'chat') sendChatFinal(profile, message, `执行失败：${error.message}`, { status: 'failed' }, sendProtocolFn)
+    const leaseError = releaseWorkspaceLease()
+    const errorMessage = leaseError
+      ? `${error.message}; WORKSPACE_LOCK_ERROR: ${leaseError.message}`
+      : error.message
+    if (mode === 'chat') sendChatFinal(profile, message, `执行失败：${errorMessage}`, { status: 'failed' }, sendProtocolFn)
     else {
-      const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage: error.message }
+      const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
       sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
     }
     if (mode === 'command') sendStatusFn(profile, 'online')
-    resolveRun({ status: 'failed', errorMessage: error.message })
+    resolveRun({ status: 'failed', errorMessage, ...(leaseError ? { workspaceErrorCode: 'WORKSPACE_LOCK_ERROR' } : {}) })
     return
   }
 
@@ -3040,10 +3060,12 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
       const latestSession = findLatestCodexSession(profile, startedAt - 5000)
       if (latestSession?.id) rememberCodexSession(profile, message, latestSession.id)
     }
-    const status = !spawnError && code === 0 ? 'completed' : 'failed'
+    const leaseError = releaseWorkspaceLease()
+    const effectiveError = spawnError || leaseError
+    const status = !effectiveError && code === 0 ? 'completed' : 'failed'
     const replyContent = trimReply(agentReplyText) || trimReply(stdout) || trimReply(stderr)
       || (status === 'completed' ? '已处理，但无可返回内容。' : '执行失败，暂无详细输出。')
-    const errorMessage = spawnError?.message || stderr.trim()
+    const errorMessage = effectiveError?.message || stderr.trim()
     const payload = {
       taskId,
       workItemId: message.workItemId || '',
