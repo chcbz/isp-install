@@ -81,6 +81,25 @@ const createRepository = () => {
 
 const verificationFetchIndex = args => args.indexOf('fetch')
 
+const gitCommandArgs = args => {
+  let index = 0
+  while (args[index] === '-c' && index + 1 < args.length) index += 2
+  return args.slice(index)
+}
+
+const assertHardenedWorktreeGit = args => {
+  for (const setting of [
+    'core.trustctime=true',
+    'core.filemode=true',
+    'core.checkStat=default',
+    'core.ignoreStat=false',
+    'core.fsmonitor=false',
+    'core.untrackedCache=false'
+  ]) {
+    assert.equal(args.some((value, index) => value === '-c' && args[index + 1] === setting), true, `missing ${setting}`)
+  }
+}
+
 const httpsVerificationRunner = (fixture, onFetch = () => {}) => input => {
   const fetchIndex = verificationFetchIndex(input.args)
   if (fetchIndex >= 0) {
@@ -371,8 +390,9 @@ test('archive rejects hidden dirty injected after the quarantined final hash and
   const racing = manager(fixture, 'agent-a', {
     gitRunner: input => {
       const result = delegated(input)
+      const command = gitCommandArgs(input.args)
       if (!injected && input.cwd.includes('.archive-quarantine')
-          && input.args[0] === 'hash-object' && input.args[1] === '--stdin') {
+          && command[0] === 'hash-object' && command[1] === '--stdin') {
         const trackedPath = resolve(input.cwd, 'tracked.txt')
         utimesSync(trackedPath, timestamp, timestamp)
         git(input.cwd, ['update-index', '--refresh'])
@@ -395,23 +415,25 @@ test('archive rejects hidden dirty injected after the quarantined final hash and
   assert.equal(JSON.parse(readFileSync(racing.describe('task-final-hash-race').metadataPath, 'utf8')).state, 'active')
 })
 
-test('archive rejects a new unpushed commit injected after the quarantined final HEAD and restores it', () => {
+test('archive branch lease rejects a commit attempted after the quarantined final HEAD and restores its data', () => {
   const fixture = createRepository()
   const active = manager(fixture).ensureWorkspace('task-final-head-race')
+  const originalHead = git(active.workspacePath, ['rev-parse', 'HEAD'])
   const delegated = httpsVerificationRunner(fixture)
   let quarantineHeadChecks = 0
-  let injectedHead = ''
+  let attempted = false
   const racing = manager(fixture, 'agent-a', {
     gitRunner: input => {
       const result = delegated(input)
+      const command = gitCommandArgs(input.args)
       if (input.cwd.includes('.archive-quarantine')
-          && input.args.length === 2 && input.args[0] === 'rev-parse' && input.args[1] === 'HEAD') {
+          && command.length === 2 && command[0] === 'rev-parse' && command[1] === 'HEAD') {
         quarantineHeadChecks += 1
         if (quarantineHeadChecks === 2) {
+          attempted = true
           writeFileSync(resolve(input.cwd, 'tracked.txt'), 'late unpushed commit\n')
           git(input.cwd, ['add', 'tracked.txt'])
           git(input.cwd, ['commit', '-m', 'late unpushed commit after final HEAD'])
-          injectedHead = git(input.cwd, ['rev-parse', 'HEAD'])
         }
       }
       return result
@@ -420,12 +442,12 @@ test('archive rejects a new unpushed commit injected after the quarantined final
 
   assert.throws(
     () => racing.archiveWorkspace('task-final-head-race'),
-    error => error.code === 'WORKSPACE_ARCHIVE_RACE'
+    error => /cannot lock ref|无法创建/.test(error.message)
   )
   assert.equal(quarantineHeadChecks, 2)
-  assert.match(injectedHead, /^[0-9a-f]{40}$/)
+  assert.equal(attempted, true)
   assert.equal(existsSync(active.workspacePath), true)
-  assert.equal(git(active.workspacePath, ['rev-parse', 'HEAD']), injectedHead)
+  assert.equal(git(active.workspacePath, ['rev-parse', 'HEAD']), originalHead)
   assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'late unpushed commit\n')
   assert.equal(JSON.parse(readFileSync(racing.describe('task-final-head-race').metadataPath, 'utf8')).state, 'active')
 })
@@ -439,8 +461,9 @@ test('archive atomically restores the worktree and quarantines data recreated at
   const racing = manager(fixture, 'agent-a', {
     gitRunner: input => {
       const result = delegated(input)
+      const command = gitCommandArgs(input.args)
       if (input.cwd.includes('.archive-quarantine')
-          && input.args.length === 2 && input.args[0] === 'rev-parse' && input.args[1] === 'HEAD') {
+          && command.length === 2 && command[0] === 'rev-parse' && command[1] === 'HEAD') {
         quarantineHeadChecks += 1
         if (quarantineHeadChecks === 2) {
           mkdirSync(active.workspacePath, { recursive: true })
@@ -471,6 +494,7 @@ test('archive remove rechecks ctime and preserves hidden dirty injected at the d
   const racing = manager(fixture, 'agent-a', {
     gitRunner: input => {
       if (!injected && input.args.includes('worktree') && input.args.includes('remove')) {
+        assertHardenedWorktreeGit(input.args)
         const trackedPath = resolve(input.args.at(-1), 'tracked.txt')
         const before = statSync(trackedPath)
         git(input.args.at(-1), ['config', 'core.trustctime', 'false'])
@@ -490,6 +514,99 @@ test('archive remove rechecks ctime and preserves hidden dirty injected at the d
   assert.equal(existsSync(active.workspacePath), true)
   assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'tampered\n')
   assert.equal(JSON.parse(readFileSync(racing.describe('task-delete-boundary-dirty').metadataPath, 'utf8')).state, 'active')
+})
+
+
+test('archive final lease hardens checkStat minimal against same-second same-length rewrites', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-checkstat-minimal-delete')
+  const trackedPath = resolve(active.workspacePath, 'tracked.txt')
+  const timestamp = new Date((Math.floor(Date.now() / 1000) - 240) * 1000 + 123)
+  utimesSync(trackedPath, timestamp, timestamp)
+  git(active.workspacePath, ['update-index', '--refresh'])
+  git(active.workspacePath, ['config', 'core.trustctime', 'false'])
+  git(active.workspacePath, ['config', 'core.checkStat', 'minimal'])
+  assert.equal(git(active.workspacePath, ['status', '--porcelain=v1', '--untracked-files=all']), '')
+
+  const delegated = httpsVerificationRunner(fixture)
+  let sawHardenedRefresh = false
+  let injected = false
+  const hardened = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      const command = gitCommandArgs(input.args)
+      if (!injected && input.cwd === active.workspacePath
+          && command.length === 2 && command[0] === 'rev-parse' && command[1] === 'HEAD') {
+        writeFileSync(trackedPath, 'tampered\n')
+        utimesSync(trackedPath, timestamp, timestamp)
+        injected = true
+        assert.equal(git(active.workspacePath, ['status', '--porcelain=v1', '--untracked-files=all']), '')
+      }
+      if (command[0] === 'update-index' && command[1] === '--really-refresh') {
+        assertHardenedWorktreeGit(input.args)
+        sawHardenedRefresh = true
+      }
+      return result
+    }
+  })
+
+  assert.throws(
+    () => hardened.archiveWorkspace('task-checkstat-minimal-delete'),
+    error => ['WORKSPACE_GIT_ERROR', 'WORKSPACE_TRACKED_MISMATCH', 'WORKSPACE_DIRTY'].includes(error.code)
+  )
+  assert.equal(injected, true)
+  assert.equal(sawHardenedRefresh, true)
+  assert.equal(existsSync(active.workspacePath), true)
+  assert.equal(readFileSync(trackedPath, 'utf8'), 'tampered\n')
+  assert.equal(JSON.parse(readFileSync(hardened.describe('task-checkstat-minimal-delete').metadataPath, 'utf8')).state, 'active')
+})
+
+test('archive final lease disables a lying fsmonitor and restores hidden data', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-lying-fsmonitor-delete')
+  const trackedPath = resolve(active.workspacePath, 'tracked.txt')
+  const hookPath = resolve(fixture.root, 'lying-fsmonitor.mjs')
+  const hookLog = resolve(fixture.root, 'lying-fsmonitor.log')
+  writeFileSync(hookPath, `#!/usr/bin/env node\nimport { appendFileSync } from 'node:fs'\nappendFileSync(${JSON.stringify(hookLog)}, 'called\\n')\nprocess.stdout.write('liar-token\\0')\n`)
+  chmodSync(hookPath, 0o755)
+  git(active.workspacePath, ['config', 'core.fsmonitor', hookPath])
+  git(active.workspacePath, ['config', 'core.fsmonitorHookVersion', '2'])
+  git(active.workspacePath, ['config', 'core.trustctime', 'false'])
+  assert.equal(git(active.workspacePath, ['status', '--porcelain=v1', '--untracked-files=all']), '')
+  assert.equal(readFileSync(hookLog, 'utf8').includes('called'), true)
+
+  const delegated = httpsVerificationRunner(fixture)
+  let sawHardenedRefresh = false
+  let injected = false
+  const hardened = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      const command = gitCommandArgs(input.args)
+      if (!injected && input.cwd === active.workspacePath
+          && command.length === 2 && command[0] === 'rev-parse' && command[1] === 'HEAD') {
+        const before = statSync(trackedPath)
+        writeFileSync(trackedPath, 'tampered\n')
+        utimesSync(trackedPath, before.atime, before.mtime)
+        injected = true
+        assert.equal(git(active.workspacePath, ['status', '--porcelain=v1', '--untracked-files=all']), '')
+      }
+      if (command[0] === 'update-index' && command[1] === '--really-refresh') {
+        assertHardenedWorktreeGit(input.args)
+        sawHardenedRefresh = true
+      }
+      return result
+    }
+  })
+
+  assert.throws(
+    () => hardened.archiveWorkspace('task-lying-fsmonitor-delete'),
+    error => ['WORKSPACE_GIT_ERROR', 'WORKSPACE_TRACKED_MISMATCH', 'WORKSPACE_DIRTY'].includes(error.code)
+  )
+  assert.equal(injected, true)
+  assert.equal(sawHardenedRefresh, true)
+  assert.equal(existsSync(active.workspacePath), true)
+  assert.equal(readFileSync(trackedPath, 'utf8'), 'tampered\n')
+  assert.equal(JSON.parse(readFileSync(hardened.describe('task-lying-fsmonitor-delete').metadataPath, 'utf8')).state, 'active')
 })
 
 test('archive ignores target-repository local upstream and remote configuration', () => {

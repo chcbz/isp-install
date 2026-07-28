@@ -36,6 +36,14 @@ const SAFE_POLICY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/@{}^~:+-]{0,254}$/
 const SAFE_REMOTE_REF = /^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]{0,240}$/
 const VERIFICATION_TMP_PREFIX = '/tmp/codex-ws-agent-publish-'
+const HARDENED_WORKTREE_GIT_CONFIG = Object.freeze([
+  '-c', 'core.trustctime=true',
+  '-c', 'core.filemode=true',
+  '-c', 'core.checkStat=default',
+  '-c', 'core.ignoreStat=false',
+  '-c', 'core.fsmonitor=false',
+  '-c', 'core.untrackedCache=false'
+])
 
 const blockingSleep = milliseconds => {
   const buffer = new SharedArrayBuffer(4)
@@ -547,17 +555,30 @@ export class GitWorkspaceManager {
       if (quarantinedHead !== metadata.baseCommit) {
         this._assertHeadPublishedToTrustedRemote(quarantinedExpected, quarantinedHead)
       }
-      this._assertNoVisibleWorkspaceChanges(quarantinedExpected)
-      this._assertTrackedFilesMatchIndex(quarantinedExpected)
-      this._assertNoVisibleWorkspaceChanges(quarantinedExpected)
-      const verifiedHead = this._git(['rev-parse', 'HEAD'], { cwd: quarantinePath }).trim()
-      if (verifiedHead !== quarantinedHead) {
-        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace HEAD changed during quarantine verification; archive refused')
+
+      branchRefLease = this._acquireBranchRefLease(expected, quarantinedHead)
+      const leasedBranchHead = this._hardenedGit(
+        ['rev-parse', '--verify', '--end-of-options', `refs/heads/${expected.branch}^{commit}`],
+        { cwd: this.repository }
+      ).trim()
+      if (leasedBranchHead !== quarantinedHead) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace branch changed before final hardened verification; archive refused')
       }
-      branchRefLease = this._acquireBranchRefLease(expected, verifiedHead)
-      const verifiedBranchHead = this._branchCommit(expected.branch)
-      if (verifiedBranchHead !== verifiedHead) {
-        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace branch changed at the final HEAD boundary; archive refused')
+
+      // Do not trust repository/worktree stat-cache, fsmonitor, ignoreStat, or
+      // untracked-cache settings at the deletion boundary. Refresh under the
+      // ref lease, then independently verify every tracked object/type/mode.
+      this._hardenedGit(['update-index', '--really-refresh'], { cwd: quarantinePath })
+      this._assertNoVisibleWorkspaceChanges(quarantinedExpected, { hardened: true })
+      this._assertTrackedFilesMatchIndex(quarantinedExpected, { hardened: true })
+      this._assertNoVisibleWorkspaceChanges(quarantinedExpected, { hardened: true })
+      const verifiedHead = this._hardenedGit(['rev-parse', 'HEAD'], { cwd: quarantinePath }).trim()
+      const verifiedBranchHead = this._hardenedGit(
+        ['rev-parse', '--verify', '--end-of-options', `refs/heads/${expected.branch}^{commit}`],
+        { cwd: this.repository }
+      ).trim()
+      if (verifiedHead !== quarantinedHead || verifiedBranchHead !== verifiedHead) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace HEAD changed during final hardened verification; archive refused')
       }
       if (existsSync(expected.workspacePath)) {
         throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Original workspace path reappeared after quarantine; archive refused')
@@ -576,11 +597,7 @@ export class GitWorkspaceManager {
         updatedAt: this.now()
       }
       atomicWriteJson(expected.metadataPath, archived)
-      this._git([
-        '-c', 'core.trustctime=true',
-        '-c', 'core.filemode=true',
-        'worktree', 'remove', '--', quarantinePath
-      ], { cwd: this.repository })
+      this._hardenedGit(['worktree', 'remove', '--', quarantinePath], { cwd: this.repository })
       if (existsSync(quarantinePath)) {
         throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_FAILED', 'Git reported success but quarantined worktree still exists')
       }
@@ -692,17 +709,18 @@ export class GitWorkspaceManager {
     atomicWriteJson(expected.metadataPath, restored)
   }
 
-  _assertNoVisibleWorkspaceChanges(expected) {
-    const unmerged = this._git(['diff', '--name-only', '--diff-filter=U'], { cwd: expected.workspacePath })
+  _assertNoVisibleWorkspaceChanges(expected, { hardened = false } = {}) {
+    const runGit = (args, options) => hardened ? this._hardenedGit(args, options) : this._git(args, options)
+    const unmerged = runGit(['diff', '--name-only', '--diff-filter=U'], { cwd: expected.workspacePath })
     if (unmerged.trim()) throw new WorkspaceManagerError('WORKSPACE_UNMERGED', 'Workspace has unmerged files; archive refused')
-    const dirty = this._git(['status', '--porcelain=v1', '--untracked-files=all'], { cwd: expected.workspacePath })
+    const dirty = runGit(['status', '--porcelain=v1', '--untracked-files=all'], { cwd: expected.workspacePath })
     if (dirty.trim()) throw new WorkspaceManagerError('WORKSPACE_DIRTY', 'Workspace has modified or untracked files; archive refused')
-    const ignored = this._git(
+    const ignored = runGit(
       ['ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--'],
       { cwd: expected.workspacePath }
     )
     if (ignored) throw new WorkspaceManagerError('WORKSPACE_DIRTY', 'Workspace has ignored untracked files; archive refused')
-    const indexEntries = this._git(['ls-files', '-v', '-z', '--'], { cwd: expected.workspacePath })
+    const indexEntries = runGit(['ls-files', '-v', '-z', '--'], { cwd: expected.workspacePath })
       .split('\0')
       .filter(Boolean)
     if (indexEntries.some(entry => !entry.startsWith('H '))) {
@@ -713,8 +731,9 @@ export class GitWorkspaceManager {
     }
   }
 
-  _assertTrackedFilesMatchIndex(expected) {
-    const entries = this._git(['ls-files', '--stage', '-z', '--'], { cwd: expected.workspacePath })
+  _assertTrackedFilesMatchIndex(expected, { hardened = false } = {}) {
+    const runGit = (args, options) => hardened ? this._hardenedGit(args, options) : this._git(args, options)
+    const entries = runGit(['ls-files', '--stage', '-z', '--'], { cwd: expected.workspacePath })
       .split('\0')
       .filter(Boolean)
     const seen = new Set()
@@ -775,7 +794,7 @@ export class GitWorkspaceManager {
       if (actualMode !== expectedMode) {
         throw new WorkspaceManagerError('WORKSPACE_TRACKED_MISMATCH', `Tracked mode differs from index for ${JSON.stringify(relativePath)}`)
       }
-      const actualObject = this._git(['hash-object', '--stdin'], { cwd: expected.workspacePath, input: data }).trim()
+      const actualObject = runGit(['hash-object', '--stdin'], { cwd: expected.workspacePath, input: data }).trim()
       try {
         const afterHash = lstatSync(actualPath, { bigint: true })
         if (!this._sameFileSnapshot(finalSnapshot, afterHash)) {
@@ -1118,6 +1137,10 @@ export class GitWorkspaceManager {
     if (leftovers.length) throw new WorkspaceManagerError('WORKSPACE_LOCK_ERROR', 'Workspace lock contains unexpected files')
     rmdirSync(lockPath)
     fsyncDirectory(this.locksRoot)
+  }
+
+  _hardenedGit(args, options = {}) {
+    return this._git([...HARDENED_WORKTREE_GIT_CONFIG, ...args], options)
   }
 
   _gitResult(args, { cwd, env, input } = {}) {
