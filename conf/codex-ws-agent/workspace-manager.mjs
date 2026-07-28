@@ -276,7 +276,7 @@ const parseWorktreeList = output => {
     const space = line.indexOf(' ')
     const key = space < 0 ? line : line.slice(0, space)
     const value = space < 0 ? true : line.slice(space + 1)
-    if (key === 'worktree') current = { path: resolve(String(value)) }
+    if (key === 'worktree') current = { path: String(value) }
     else if (current) current[key] = value
   }
   if (current) records.push(current)
@@ -479,6 +479,10 @@ export class GitWorkspaceManager {
           'Interrupted archive metadata requires operator reconciliation before inspection'
         )
       }
+      if (metadata.state === 'archived') {
+        this._validateArchived(metadata, expected)
+        return metadata
+      }
       if (metadata.state !== 'active') {
         throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', `Workspace metadata state is ${metadata.state}`)
       }
@@ -501,6 +505,10 @@ export class GitWorkspaceManager {
         'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED',
         'An interrupted workspace archive requires operator reconciliation before reuse or deletion'
       )
+    }
+    if (metadata.state === 'archived') {
+      this._validateArchived(metadata, expected)
+      throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', 'Workspace is already logically archived; reuse is forbidden')
     }
     if (metadata.state !== 'active') {
       throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', `Only active workspaces can be archived; current state=${metadata.state}`)
@@ -903,6 +911,7 @@ export class GitWorkspaceManager {
           'Interrupted archive metadata requires operator reconciliation before command execution'
         )
       }
+      if (metadata.state === 'archived') this._validateArchived(metadata, expected)
       throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', `Workspace metadata state is ${metadata.state}; reuse is forbidden`)
     }
 
@@ -990,6 +999,66 @@ export class GitWorkspaceManager {
     this._validateWorktree(expected, metadata)
   }
 
+  _validateArchived(metadata, expected) {
+    const recoveryRequired = detail => {
+      throw new WorkspaceManagerError(
+        'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED',
+        `Archived workspace retained worktree validation failed: ${detail}`
+      )
+    }
+    try {
+      this._revalidateTrustedPaths(expected)
+      const quarantinePath = String(metadata.quarantinePath || '')
+      assertNoSymlinkComponents(quarantinePath, { allowMissing: false })
+      const quarantineEntry = lstatSync(quarantinePath)
+      if (!quarantineEntry.isDirectory() || quarantineEntry.isSymbolicLink()) {
+        recoveryRequired('quarantinePath is not the retained worktree directory')
+      }
+
+      const registrations = this._listWorktrees().filter(entry => entry.path === quarantinePath)
+      if (registrations.length !== 1) {
+        recoveryRequired(`expected one exact Git worktree registration for ${quarantinePath}; found ${registrations.length}`)
+      }
+      const registration = registrations[0]
+      const expectedBranchRef = `refs/heads/${metadata.branch}`
+      if (registration.path !== quarantinePath) recoveryRequired('registered worktree path differs from metadata quarantinePath')
+      if (registration.branch !== expectedBranchRef) {
+        recoveryRequired(`registered branch differs from metadata branch: ${registration.branch || 'detached'}`)
+      }
+      if (registration.HEAD !== metadata.archivedHead) {
+        recoveryRequired('registered worktree HEAD differs from metadata archivedHead')
+      }
+
+      const topLevel = this._hardenedGit(
+        ['rev-parse', '--path-format=absolute', '--show-toplevel'],
+        { cwd: quarantinePath }
+      ).trim()
+      if (topLevel !== quarantinePath) recoveryRequired('Git top-level differs from metadata quarantinePath')
+
+      const symbolicBranch = this._hardenedGit(['symbolic-ref', '--quiet', 'HEAD'], { cwd: quarantinePath }).trim()
+      if (symbolicBranch !== expectedBranchRef) recoveryRequired('actual worktree branch differs from metadata branch')
+
+      const actualHead = this._hardenedGit(
+        ['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'],
+        { cwd: quarantinePath }
+      ).trim()
+      if (actualHead !== metadata.archivedHead) recoveryRequired('actual worktree HEAD differs from metadata archivedHead')
+
+      const branchHead = this._hardenedGit(
+        ['rev-parse', '--verify', '--end-of-options', `${expectedBranchRef}^{commit}`],
+        { cwd: this.repository }
+      ).trim()
+      if (branchHead !== metadata.archivedHead) recoveryRequired('branch ref differs from metadata archivedHead')
+      return metadata
+    } catch (error) {
+      if (error?.code === 'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED') throw error
+      throw new WorkspaceManagerError(
+        'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED',
+        `Archived workspace retained worktree validation failed: ${error.message}`
+      )
+    }
+  }
+
   _validateWorktree(expected, metadata) {
     const entry = this._findWorktree(expected.workspacePath)
     if (!entry) throw new WorkspaceManagerError('WORKSPACE_CONFLICT', 'Expected Git worktree registration is missing')
@@ -1042,11 +1111,8 @@ export class GitWorkspaceManager {
           `Durable ${metadata.state} metadata has an unsafe quarantine path or HEAD`
         )
       }
-      if (existsSync(quarantinePath) && lstatSync(quarantinePath).isSymbolicLink()) {
+      if (metadata.state === 'archiving' && existsSync(quarantinePath) && lstatSync(quarantinePath).isSymbolicLink()) {
         throw new WorkspaceManagerError('WORKSPACE_SYMLINK_ESCAPE', 'Durable archive quarantine path became a symlink')
-      }
-      if (metadata.state === 'archived' && !existsSync(quarantinePath)) {
-        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RECOVERY_REQUIRED', 'Archived workspace quarantine path is missing; physical deletion is not permitted here')
       }
     }
   }
@@ -1066,9 +1132,13 @@ export class GitWorkspaceManager {
     return result.stdout.trim()
   }
 
-  _findWorktree(path) {
+  _listWorktrees() {
     const output = this._git(['worktree', 'list', '--porcelain'], { cwd: this.repository })
-    return parseWorktreeList(output).find(entry => entry.path === path) || null
+    return parseWorktreeList(output)
+  }
+
+  _findWorktree(path) {
+    return this._listWorktrees().find(entry => entry.path === path) || null
   }
 
   _revalidateTrustedPaths(expected) {

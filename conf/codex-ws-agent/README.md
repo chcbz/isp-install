@@ -219,9 +219,11 @@ Security and lifecycle rules:
 - Managed command runs force a fresh Codex exec with both process `cwd` and `--cd` set to the task worktree; a resume session from another worktree is not used.
 - A command without `taskId` is rejected by default. Compatibility is available only when `workspaceNoTaskPolicy=dedicated-workdir`, the command type is explicitly listed in `workspaceNonCodingCommandTypes`, and `workspaceFallbackWorkdir` is a trusted non-Git directory with no overlap in either direction with the repository or workspace root.
 - Workspaces are never automatically deleted. Archive is an explicit operator action and refuses modified, ignored/untracked, unmerged, index-hidden (`skip-worktree`, `assume-unchanged`, or any non-normal tracked flag), or unpushed work.
-- Before removal, archive enumerates every stage-0 index entry and independently verifies the actual regular-file/symlink type, executable mode, and raw blob hash. This does not trust Git's stat cache, `core.trustctime`, `core.filemode`, file length, or restored mtimes.
+- Archive is logical and non-destructive: it moves the metadata-owned worktree into the private `.archive-quarantine` directory, keeps the Git worktree registration and all files indefinitely, and persists `state=archived`, `quarantinePath`, branch, and `archivedHead`. It never invokes `git worktree remove` or `git worktree prune`.
+- Before the logical archive transition, archive enumerates every stage-0 index entry and independently verifies the actual regular-file/symlink type, executable mode, and raw blob hash. This does not trust Git's stat cache, `core.trustctime`, `core.filemode`, file length, or restored mtimes.
 - For a workspace beyond its baseline, archive creates a new temporary bare verification repository, disables system/global configuration, supplies a fresh HOME/XDG config, clears inherited proxy/askpass/SSH/Git configuration environment, forces TLS verification, and fetches only `trustedRemoteRef` from the exact `trustedRemoteUrl`. The managed repository is never used as the fetch destination. Local upstreams, `insteadOf`, proxy/credential helpers, stale refs, and substituted remotes are not publication proof.
-- Archive removes only the metadata-owned worktree and preserves the branch and archived metadata.
+- Every archived record is bound to exactly one retained Git worktree. On restart, inspection/reuse validates the exact registered path, Git top-level, symbolic branch, worktree HEAD, and repository branch ref against `quarantinePath`, `branch`, and `archivedHead`. Any registration, path, branch, HEAD, or ref drift fails with `WORKSPACE_ARCHIVE_RECOVERY_REQUIRED` before returning a generic inactive-state result.
+- This version has no Agent-side GC, delete, prune, recover, or reconcile command. Archived quarantine usage therefore grows with every logical archive; operators must monitor filesystem capacity and inode usage below the policy workspace root. Physical deletion is outside the Agent trust boundary and is not enabled by this package.
 
 Operator commands use the installed helper and never accept paths, repositories, refs, or cleanup instructions from an Agent message:
 
@@ -232,7 +234,9 @@ Operator commands use the installed helper and never accept paths, repositories,
 /home/isp/bin/codex_ws_agent.sh workspace archive --policy cyf --task task-123 --agent agent-a --role coder
 ```
 
-The service account needs `0700` create/fsync permissions below the workspace root, Git ref/worktree administrative permissions in the trusted repository, and credentials/network access to fetch the policy-pinned remote during archive. Prefer a dedicated bare repository or mirror so no Agent ever writes a shared main checkout.
+`workspace inspect` is diagnostic-only. For a valid archived workspace it returns the retained metadata, including `quarantinePath`; it does not reactivate, move, repair, or delete anything. If it reports `WORKSPACE_ARCHIVE_RECOVERY_REQUIRED`, stop the Agent service and preserve the metadata file, quarantine directory, repository refs, and Git worktree administrative records as evidence. Do not run `git worktree remove`, `git worktree prune`, or manually edit/move/delete those paths through the Agent account. Manual recovery starts only after an operator has made a separate backup and reconciled the exact path/registration/branch/HEAD/ref mismatch under an independently authorized administrative procedure.
+
+The service account needs `0700` create/fsync permissions below the workspace root, Git ref/worktree administrative permissions in the trusted repository, and credentials/network access to fetch the policy-pinned remote during archive. Prefer a dedicated bare repository or mirror so no Agent ever writes a shared main checkout. Capacity monitoring is mandatory because archived quarantine directories are retained permanently by this version.
 
 ## Protocol v1 Message Handling
 
