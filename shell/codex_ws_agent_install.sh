@@ -9,16 +9,66 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-check_root
-detect_os
-
 APP_NAME="codex-ws-agent"
-APP_HOME="$ISP_APPS/$APP_NAME"
+APP_HOME="${CODEX_WS_AGENT_TEST_APP_HOME:-${ISP_APPS:-/home/isp/apps}/$APP_NAME}"
 CONF_SRC="$ROOT_DIR/conf/$APP_NAME"
 SERVICE_SRC="$ROOT_DIR/systemd/$APP_NAME.service"
 SERVICE_DST="/etc/systemd/system/$APP_NAME.service"
 BIN_SRC="$ROOT_DIR/bin/codex_ws_agent.sh"
-BIN_DST="$ISP_BIN/codex_ws_agent.sh"
+BIN_DST="${ISP_BIN:-/home/isp/bin}/codex_ws_agent.sh"
+
+validate_workspace_policy_schema() {
+    local checker="$APP_HOME/install-policy-check.mjs"
+    local policy="$APP_HOME/workspace-policies.json"
+    if [ ! -f "$checker" ]; then
+        __red "缺少 workspace policy 迁移检查器: $checker"
+        return 1
+    fi
+    "$NODE_BIN" "$checker" "$policy"
+}
+
+validate_agent_configuration() {
+    (cd "$APP_HOME" && "$NODE_BIN" agent-client.mjs --validate)
+}
+
+run_validation_gate() {
+    if ! validate_workspace_policy_schema; then
+        __red "Workspace policy schema 检查失败；拒绝继续安装或重启。"
+        return 1
+    fi
+    if ! validate_agent_configuration; then
+        __red "配置验证失败；拒绝继续安装或重启。"
+        return 1
+    fi
+    __green "配置验证通过"
+}
+
+restart_agent_service() {
+    if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ]; then
+        if [ -n "${CODEX_WS_AGENT_TEST_RESTART_MARKER:-}" ]; then
+            printf 'restart requested\n' > "$CODEX_WS_AGENT_TEST_RESTART_MARKER"
+        fi
+        return 0
+    fi
+    systemctl restart "$APP_NAME.service"
+    systemctl --no-pager --full status "$APP_NAME.service"
+}
+
+if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ]; then
+    NODE_BIN="${CODEX_WS_AGENT_TEST_NODE_BIN:-$(command -v node || true)}"
+    if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+        __red "测试模式未提供可执行 Node.js"
+        exit 1
+    fi
+    run_validation_gate || exit 1
+    if [ "${START_CODEX_WS_AGENT:-n}" = "y" ]; then
+        restart_agent_service
+    fi
+    exit 0
+fi
+
+check_root
+detect_os
 
 echo "=========================================="
 echo "Codex WebSocket Agent 安装脚本"
@@ -79,6 +129,7 @@ echo ""
 echo "[2/6] 部署应用文件..."
 install -m 0644 "$CONF_SRC/agent-client.mjs" "$APP_HOME/agent-client.mjs"
 install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$APP_HOME/workspace-manager.mjs"
+install -m 0644 "$CONF_SRC/install-policy-check.mjs" "$APP_HOME/install-policy-check.mjs"
 install -m 0644 "$CONF_SRC/package.json" "$APP_HOME/package.json"
 install -m 0644 "$CONF_SRC/README.md" "$APP_HOME/README.md"
 install -m 0644 "$CONF_SRC/env.example" "$APP_HOME/.env.example"
@@ -111,11 +162,7 @@ systemctl enable "$APP_NAME.service"
 
 echo ""
 echo "[5/6] 验证配置..."
-if (cd "$APP_HOME" && "$NODE_BIN" agent-client.mjs --validate); then
-    __green "配置验证通过"
-else
-    __yellow "配置验证未通过。请确认 codex CLI、codexWorkdir、API key/profile 配置后再启动服务。"
-fi
+run_validation_gate || exit 1
 
 echo ""
 echo "[6/6] 检查 A07 workspace policy..."
@@ -128,8 +175,7 @@ else
 fi
 
 if [ "${START_CODEX_WS_AGENT:-n}" = "y" ]; then
-    systemctl restart "$APP_NAME.service"
-    systemctl --no-pager --full status "$APP_NAME.service"
+    restart_agent_service
 else
     __yellow "未自动启动服务。如需启动请执行:"
     echo "  systemctl restart $APP_NAME.service"

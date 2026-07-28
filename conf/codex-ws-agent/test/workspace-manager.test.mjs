@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import {
   chmodSync,
+  cpSync,
+  existsSync,
   lutimesSync,
   mkdirSync,
   mkdtempSync,
@@ -17,6 +19,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { PassThrough } from 'node:stream'
 import test, { afterEach } from 'node:test'
 
@@ -291,6 +294,202 @@ test('archive hashes tracked symlink targets instead of trusting cached metadata
     error => error.code === 'WORKSPACE_TRACKED_MISMATCH'
   )
   assert.equal(readlinkSync(trackedLink), 'missing.txt')
+})
+
+test('archive quarantines then catches stat-cache-hidden content injected after the original final hash', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-quarantine-hidden-race')
+  const trackedPath = resolve(active.workspacePath, 'tracked.txt')
+  const timestamp = Math.floor(Date.now() / 1000) - 120
+  utimesSync(trackedPath, timestamp, timestamp)
+  git(active.workspacePath, ['update-index', '--refresh'])
+  git(active.workspacePath, ['config', 'core.trustctime', 'false'])
+
+  const delegated = httpsVerificationRunner(fixture)
+  let injected = false
+  const racing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      if (!injected && input.cwd === active.workspacePath
+          && input.args[0] === 'hash-object' && input.args[1] === '--stdin') {
+        injected = true
+        writeFileSync(trackedPath, 'tampered\n')
+        utimesSync(trackedPath, timestamp, timestamp)
+      }
+      return result
+    }
+  })
+
+  assert.throws(
+    () => racing.archiveWorkspace('task-quarantine-hidden-race'),
+    error => error.code === 'WORKSPACE_TRACKED_MISMATCH'
+  )
+  assert.equal(injected, true)
+  assert.equal(existsSync(active.workspacePath), true)
+  assert.equal(readFileSync(trackedPath, 'utf8'), 'tampered\n')
+  assert.equal(JSON.parse(readFileSync(racing.describe('task-quarantine-hidden-race').metadataPath, 'utf8')).state, 'active')
+  assert.deepEqual([...new Set(git(fixture.repository, ['worktree', 'list', '--porcelain'])
+    .split('\n').filter(line => line.startsWith('worktree ')))].filter(line => line.includes('.archive-quarantine')), [])
+})
+
+test('archive quarantines then catches a new commit injected after the original final HEAD check', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-quarantine-head-race')
+  const delegated = httpsVerificationRunner(fixture)
+  let injectedHead = ''
+  const racing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      if (!injectedHead && input.cwd === active.workspacePath
+          && input.args.length === 2 && input.args[0] === 'rev-parse' && input.args[1] === 'HEAD') {
+        writeFileSync(resolve(active.workspacePath, 'tracked.txt'), 'new commit survives\n')
+        git(active.workspacePath, ['add', 'tracked.txt'])
+        git(active.workspacePath, ['commit', '-m', 'injected after final head'])
+        injectedHead = git(active.workspacePath, ['rev-parse', 'HEAD'])
+      }
+      return result
+    }
+  })
+
+  assert.throws(
+    () => racing.archiveWorkspace('task-quarantine-head-race'),
+    error => error.code === 'WORKSPACE_ARCHIVE_RACE'
+  )
+  assert.match(injectedHead, /^[0-9a-f]{40}$/)
+  assert.equal(existsSync(active.workspacePath), true)
+  assert.equal(git(active.workspacePath, ['rev-parse', 'HEAD']), injectedHead)
+  assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'new commit survives\n')
+  assert.equal(JSON.parse(readFileSync(racing.describe('task-quarantine-head-race').metadataPath, 'utf8')).state, 'active')
+})
+
+test('archive rejects hidden dirty injected after the quarantined final hash and restores the data', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-final-hash-race')
+  const timestamp = Math.floor(Date.now() / 1000) - 180
+  const delegated = httpsVerificationRunner(fixture)
+  let injected = false
+  const racing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      if (!injected && input.cwd.includes('.archive-quarantine')
+          && input.args[0] === 'hash-object' && input.args[1] === '--stdin') {
+        const trackedPath = resolve(input.cwd, 'tracked.txt')
+        utimesSync(trackedPath, timestamp, timestamp)
+        git(input.cwd, ['update-index', '--refresh'])
+        git(input.cwd, ['config', 'core.trustctime', 'false'])
+        writeFileSync(trackedPath, 'tampered\n')
+        utimesSync(trackedPath, timestamp, timestamp)
+        injected = true
+      }
+      return result
+    }
+  })
+
+  assert.throws(
+    () => racing.archiveWorkspace('task-final-hash-race'),
+    error => error.code === 'WORKSPACE_TRACKED_MISMATCH'
+  )
+  assert.equal(injected, true)
+  assert.equal(existsSync(active.workspacePath), true)
+  assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'tampered\n')
+  assert.equal(JSON.parse(readFileSync(racing.describe('task-final-hash-race').metadataPath, 'utf8')).state, 'active')
+})
+
+test('archive rejects a new unpushed commit injected after the quarantined final HEAD and restores it', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-final-head-race')
+  const delegated = httpsVerificationRunner(fixture)
+  let quarantineHeadChecks = 0
+  let injectedHead = ''
+  const racing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      if (input.cwd.includes('.archive-quarantine')
+          && input.args.length === 2 && input.args[0] === 'rev-parse' && input.args[1] === 'HEAD') {
+        quarantineHeadChecks += 1
+        if (quarantineHeadChecks === 2) {
+          writeFileSync(resolve(input.cwd, 'tracked.txt'), 'late unpushed commit\n')
+          git(input.cwd, ['add', 'tracked.txt'])
+          git(input.cwd, ['commit', '-m', 'late unpushed commit after final HEAD'])
+          injectedHead = git(input.cwd, ['rev-parse', 'HEAD'])
+        }
+      }
+      return result
+    }
+  })
+
+  assert.throws(
+    () => racing.archiveWorkspace('task-final-head-race'),
+    error => error.code === 'WORKSPACE_ARCHIVE_RACE'
+  )
+  assert.equal(quarantineHeadChecks, 2)
+  assert.match(injectedHead, /^[0-9a-f]{40}$/)
+  assert.equal(existsSync(active.workspacePath), true)
+  assert.equal(git(active.workspacePath, ['rev-parse', 'HEAD']), injectedHead)
+  assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'late unpushed commit\n')
+  assert.equal(JSON.parse(readFileSync(racing.describe('task-final-head-race').metadataPath, 'utf8')).state, 'active')
+})
+
+test('archive atomically restores the worktree and quarantines data recreated at the original path', () => {
+  const fixture = createRepository()
+  const workspaceManager = manager(fixture)
+  const active = workspaceManager.ensureWorkspace('task-late-original-writer')
+  const delegated = httpsVerificationRunner(fixture)
+  let quarantineHeadChecks = 0
+  const racing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      const result = delegated(input)
+      if (input.cwd.includes('.archive-quarantine')
+          && input.args.length === 2 && input.args[0] === 'rev-parse' && input.args[1] === 'HEAD') {
+        quarantineHeadChecks += 1
+        if (quarantineHeadChecks === 2) {
+          mkdirSync(active.workspacePath, { recursive: true })
+          writeFileSync(resolve(active.workspacePath, 'late-writer.txt'), 'preserve me\n')
+        }
+      }
+      return result
+    }
+  })
+
+  assert.throws(
+    () => racing.archiveWorkspace('task-late-original-writer'),
+    error => error.code === 'WORKSPACE_ARCHIVE_RACE'
+  )
+  const metadata = JSON.parse(readFileSync(racing.describe('task-late-original-writer').metadataPath, 'utf8'))
+  assert.equal(metadata.state, 'active')
+  assert.match(metadata.archiveRecoveryConflictPath, /late-writer-/)
+  assert.equal(readFileSync(resolve(metadata.archiveRecoveryConflictPath, 'late-writer.txt'), 'utf8'), 'preserve me\n')
+  assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'baseline\n')
+  assert.equal(git(active.workspacePath, ['rev-parse', '--show-toplevel']), active.workspacePath)
+})
+
+test('archive remove rechecks ctime and preserves hidden dirty injected at the delete boundary', () => {
+  const fixture = createRepository()
+  const active = manager(fixture).ensureWorkspace('task-delete-boundary-dirty')
+  const delegated = httpsVerificationRunner(fixture)
+  let injected = false
+  const racing = manager(fixture, 'agent-a', {
+    gitRunner: input => {
+      if (!injected && input.args.includes('worktree') && input.args.includes('remove')) {
+        const trackedPath = resolve(input.args.at(-1), 'tracked.txt')
+        const before = statSync(trackedPath)
+        git(input.args.at(-1), ['config', 'core.trustctime', 'false'])
+        writeFileSync(trackedPath, 'tampered\n')
+        utimesSync(trackedPath, before.atime, before.mtime)
+        injected = true
+      }
+      return delegated(input)
+    }
+  })
+
+  assert.throws(
+    () => racing.archiveWorkspace('task-delete-boundary-dirty'),
+    error => error.code === 'WORKSPACE_GIT_ERROR'
+  )
+  assert.equal(injected, true)
+  assert.equal(existsSync(active.workspacePath), true)
+  assert.equal(readFileSync(resolve(active.workspacePath, 'tracked.txt'), 'utf8'), 'tampered\n')
+  assert.equal(JSON.parse(readFileSync(racing.describe('task-delete-boundary-dirty').metadataPath, 'utf8')).state, 'active')
 })
 
 test('archive ignores target-repository local upstream and remote configuration', () => {
@@ -588,6 +787,101 @@ test('client command execution passes the managed worktree as spawn cwd and --cd
   assert.equal(invocation.args.includes('resume'), false, 'managed command must not resume a session from another worktree')
 })
 
+test('command runner lease blocks archive until the child exits', async () => {
+  const fixture = createRepository()
+  const workspaceManager = manager(fixture)
+  const child = new FakeChild()
+  const run = runCodex(runtimeProfile(fixture), dispatch('task-runner-lease'), 'command', {
+    workspaceManager,
+    requireWorkspace: true,
+    spawnFn: () => child,
+    sendLegacyFn: () => true,
+    sendStatusFn: () => true
+  })
+  const descriptor = workspaceManager.describe('task-runner-lease')
+  assert.equal(existsSync(descriptor.lockPath), true)
+  const owner = JSON.parse(readFileSync(resolve(descriptor.lockPath, 'owner.json'), 'utf8'))
+  assert.equal(owner.kind, 'command-runner')
+
+  const archiveManager = manager(fixture, 'agent-a', { lockTimeoutMs: 20, lockRetryMs: 1 })
+  assert.throws(
+    () => archiveManager.archiveWorkspace('task-runner-lease'),
+    error => error.code === 'WORKSPACE_LOCK_TIMEOUT'
+  )
+  assert.equal(existsSync(descriptor.workspacePath), true)
+
+  child.stdout.end()
+  child.stderr.end()
+  child.exitCode = 0
+  child.emit('close', 0)
+  const result = await run
+  assert.equal(result.status, 'completed')
+  assert.equal(existsSync(descriptor.lockPath), false)
+})
+
+test('a separate command-runner process holds the same workspace lease for its full execution', async () => {
+  const fixture = createRepository()
+  const workspaceManager = manager(fixture)
+  const active = workspaceManager.ensureWorkspace('task-cross-process-runner')
+  const moduleUrl = new URL('../workspace-manager.mjs', import.meta.url).href
+  const script = `
+    import { GitWorkspaceManager } from ${JSON.stringify(moduleUrl)};
+    const manager = new GitWorkspaceManager({
+      policy: JSON.parse(process.env.A07_POLICY),
+      agentId: process.env.A07_AGENT,
+      role: 'coder'
+    });
+    const lease = manager.acquireCommandWorkspace({ taskId: process.env.A07_TASK });
+    console.log('LEASE_READY');
+    process.stdin.resume();
+    process.stdin.on('end', () => { lease.release(); process.exit(0); });
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      A07_POLICY: JSON.stringify(fixture.policy),
+      A07_AGENT: 'agent-a',
+      A07_TASK: 'task-cross-process-runner'
+    },
+    stdio: ['pipe', 'pipe', 'pipe']
+  })
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr += chunk })
+  try {
+    await new Promise((resolvePromise, rejectPromise) => {
+      let stdout = ''
+      const timeout = setTimeout(() => rejectPromise(new Error(`lease child timeout: ${stderr}`)), 5000)
+      child.stdout.on('data', chunk => {
+        stdout += chunk
+        if (stdout.includes('LEASE_READY')) {
+          clearTimeout(timeout)
+          resolvePromise()
+        }
+      })
+      child.on('error', rejectPromise)
+      child.on('close', code => {
+        if (!stdout.includes('LEASE_READY')) rejectPromise(new Error(stderr || `lease child exited ${code}`))
+      })
+    })
+    const descriptor = workspaceManager.describe('task-cross-process-runner')
+    const owner = JSON.parse(readFileSync(resolve(descriptor.lockPath, 'owner.json'), 'utf8'))
+    assert.equal(owner.kind, 'command-runner')
+    assert.notEqual(owner.pid, process.pid)
+    assert.throws(
+      () => manager(fixture, 'agent-a', { lockTimeoutMs: 25, lockRetryMs: 1 })
+        .archiveWorkspace('task-cross-process-runner'),
+      error => error.code === 'WORKSPACE_LOCK_TIMEOUT'
+    )
+    assert.equal(existsSync(active.workspacePath), true)
+  } finally {
+    child.stdin.end()
+    const code = await new Promise(resolvePromise => child.once('close', resolvePromise))
+    assert.equal(code, 0, stderr)
+  }
+  assert.equal(existsSync(workspaceManager.describe('task-cross-process-runner').lockPath), false)
+})
+
 test('dedicated fallback rejects overlap in both containment directions', () => {
   const fixture = createRepository()
   const workspaceManager = manager(fixture)
@@ -652,4 +946,64 @@ test('no-task command requires an explicit non-coding dedicated-workdir policy',
   const accepted = await acceptedPromise
   assert.equal(accepted.status, 'completed', JSON.stringify(accepted))
   assert.equal(cwd, fallback)
+})
+
+const installerScript = fileURLToPath(new URL('../../../shell/codex_ws_agent_install.sh', import.meta.url))
+const policyChecker = fileURLToPath(new URL('../install-policy-check.mjs', import.meta.url))
+
+const runInstallerValidationGate = ({ policy, validateExit = 0, start = 'y' }) => {
+  const appHome = resolve(temporaryDirectory(), 'app')
+  mkdirSync(appHome)
+  cpSync(policyChecker, resolve(appHome, 'install-policy-check.mjs'))
+  if (policy !== undefined) writeFileSync(resolve(appHome, 'workspace-policies.json'), `${JSON.stringify(policy)}\n`)
+  writeFileSync(resolve(appHome, 'agent-client.mjs'), 'process.exit(Number(process.env.A07_VALIDATE_EXIT || 0))\n')
+  const restartMarker = resolve(appHome, 'restart.marker')
+  const result = spawnSync('bash', [installerScript], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
+      CODEX_WS_AGENT_TEST_APP_HOME: appHome,
+      CODEX_WS_AGENT_TEST_NODE_BIN: process.execPath,
+      CODEX_WS_AGENT_TEST_RESTART_MARKER: restartMarker,
+      A07_VALIDATE_EXIT: String(validateExit),
+      START_CODEX_WS_AGENT: start
+    }
+  })
+  return { ...result, restartMarker }
+}
+
+test('installer rejects legacy remote{name,url} policy schema and never restarts', () => {
+  const result = runInstallerValidationGate({
+    policy: {
+      legacy: {
+        repository: '/trusted/repository',
+        root: '/trusted/root',
+        baseRef: 'refs/heads/master',
+        remote: { name: 'origin', url: 'https://trusted.example/a07.git' }
+      }
+    }
+  })
+  assert.notEqual(result.status, 0)
+  assert.match(`${result.stdout}\n${result.stderr}`, /migrate explicitly to trustedRemoteUrl and trustedRemoteRef/)
+  assert.equal(existsSync(result.restartMarker), false)
+})
+
+test('installer propagates agent validation failure and never restarts', () => {
+  const result = runInstallerValidationGate({
+    policy: { current: { trustedRemoteUrl: 'https://trusted.example/a07.git', trustedRemoteRef: 'refs/heads/master' } },
+    validateExit: 9
+  })
+  assert.notEqual(result.status, 0)
+  assert.match(`${result.stdout}\n${result.stderr}`, /配置验证失败/)
+  assert.equal(existsSync(result.restartMarker), false)
+})
+
+test('installer restarts only after policy and agent validation both succeed', () => {
+  const result = runInstallerValidationGate({
+    policy: { current: { trustedRemoteUrl: 'https://trusted.example/a07.git', trustedRemoteRef: 'refs/heads/master' } },
+    validateExit: 0
+  })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.equal(readFileSync(result.restartMarker, 'utf8'), 'restart requested\n')
 })

@@ -329,8 +329,10 @@ export class GitWorkspaceManager {
     }
     this.metadataRoot = resolve(this.root, '.metadata')
     this.locksRoot = resolve(this.root, '.locks')
+    this.archiveQuarantineRoot = resolve(this.root, '.archive-quarantine')
     ensurePrivateDirectory(this.metadataRoot)
     ensurePrivateDirectory(this.locksRoot)
+    ensurePrivateDirectory(this.archiveQuarantineRoot)
     this.initialized = true
     return this
   }
@@ -365,18 +367,55 @@ export class GitWorkspaceManager {
 
   ensureWorkspace(taskId) {
     const expected = this.describe(taskId)
-    return this._withLock(expected, () => this._ensureLocked(expected))
+    return this._withLock(expected, () => this._ensureLocked(expected), 'ensure')
   }
 
-  resolveCommandWorkspace(message, {
+  acquireCommandWorkspace(message, options = {}) {
+    this.initialize()
+    const taskId = String(message?.taskId || '').trim()
+    if (!taskId) {
+      return {
+        workspace: this._resolveUnmanagedCommandWorkspace(message, options),
+        release: () => {}
+      }
+    }
+
+    const expected = this.describe(taskId)
+    this._acquireLock(expected, 'command-runner')
+    let released = false
+    const release = () => {
+      if (released) return
+      this._releaseLock(expected.lockPath)
+      released = true
+    }
+    try {
+      return {
+        workspace: { ...this._ensureLocked(expected), managed: true },
+        release
+      }
+    } catch (error) {
+      try { release() } catch (releaseError) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_LOCK_ERROR',
+          `${error.code || 'WORKSPACE_ERROR'}: ${error.message}; additionally failed to release command-runner lease: ${releaseError.message}`
+        )
+      }
+      throw error
+    }
+  }
+
+  resolveCommandWorkspace(message, options = {}) {
+    this.initialize()
+    const taskId = String(message?.taskId || '').trim()
+    if (taskId) return { ...this.ensureWorkspace(taskId), managed: true }
+    return this._resolveUnmanagedCommandWorkspace(message, options)
+  }
+
+  _resolveUnmanagedCommandWorkspace(message, {
     noTaskPolicy = 'reject',
     nonCodingCommandTypes = [],
     fallbackWorkdir = ''
   } = {}) {
-    this.initialize()
-    const taskId = String(message?.taskId || '').trim()
-    if (taskId) return { ...this.ensureWorkspace(taskId), managed: true }
-
     const commandType = String(message?.commandType || '').trim()
     const allowedTypes = new Set(
       (Array.isArray(nonCodingCommandTypes) ? nonCodingCommandTypes : String(nonCodingCommandTypes).split(','))
@@ -426,6 +465,12 @@ export class GitWorkspaceManager {
       if (!metadata) throw new WorkspaceManagerError('WORKSPACE_METADATA_MISSING', 'Durable workspace metadata is missing')
       this._validateMetadata(metadata, expected)
       if (metadata.state === 'creating') return this._recoverCreating(metadata, expected)
+      if (metadata.state === 'archiving') {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED',
+          'Interrupted archive metadata requires operator reconciliation before inspection'
+        )
+      }
       if (metadata.state !== 'active') {
         throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', `Workspace metadata state is ${metadata.state}`)
       }
@@ -436,31 +481,215 @@ export class GitWorkspaceManager {
 
   archiveWorkspace(taskId) {
     const expected = this.describe(taskId)
-    return this._withLock(expected, () => {
-      const metadata = this._readMetadata(expected.metadataPath)
-      if (!metadata) throw new WorkspaceManagerError('WORKSPACE_METADATA_MISSING', 'Durable workspace metadata is missing')
-      this._validateMetadata(metadata, expected)
-      if (metadata.state !== 'active') {
-        throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', `Only active workspaces can be archived; current state=${metadata.state}`)
+    return this._withLock(expected, () => this._archiveLocked(expected), 'archive')
+  }
+
+  _archiveLocked(expected) {
+    const metadata = this._readMetadata(expected.metadataPath)
+    if (!metadata) throw new WorkspaceManagerError('WORKSPACE_METADATA_MISSING', 'Durable workspace metadata is missing')
+    this._validateMetadata(metadata, expected)
+    if (metadata.state === 'archiving') {
+      throw new WorkspaceManagerError(
+        'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED',
+        'An interrupted workspace archive requires operator reconciliation before reuse or deletion'
+      )
+    }
+    if (metadata.state !== 'active') {
+      throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', `Only active workspaces can be archived; current state=${metadata.state}`)
+    }
+
+    this._validateActive(metadata, expected)
+    this._assertNoVisibleWorkspaceChanges(expected)
+    this._assertTrackedFilesMatchIndex(expected)
+    const head = this._git(['rev-parse', 'HEAD'], { cwd: expected.workspacePath }).trim()
+    if (!/^[0-9a-f]{40,64}$/.test(head)) {
+      throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace HEAD could not be fixed before quarantine')
+    }
+
+    ensurePrivateDirectory(this.archiveQuarantineRoot)
+    const quarantinePath = resolve(
+      this.archiveQuarantineRoot,
+      `${expected.taskId}-agent-${expected.agentId}-${randomUUID()}`
+    )
+    if (!isInside(this.archiveQuarantineRoot, quarantinePath)
+        || dirname(quarantinePath) !== this.archiveQuarantineRoot
+        || existsSync(quarantinePath)
+        || this._findWorktree(quarantinePath)) {
+      throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_FAILED', 'Cannot allocate a private workspace archive quarantine path')
+    }
+
+    const archiving = {
+      ...metadata,
+      state: 'archiving',
+      quarantinePath,
+      archiveHead: head,
+      archiveStartedAt: this.now(),
+      updatedAt: this.now()
+    }
+    atomicWriteJson(expected.metadataPath, archiving)
+
+    let branchRefLease = null
+    try {
+      this._git(['worktree', 'move', expected.workspacePath, quarantinePath], { cwd: this.repository })
+      fsyncDirectory(dirname(expected.workspacePath))
+      fsyncDirectory(this.archiveQuarantineRoot)
+      if (existsSync(expected.workspacePath) || !existsSync(quarantinePath)) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_FAILED', 'Workspace quarantine move did not establish an exclusive path boundary')
       }
-      this._validateActive(metadata, expected)
-      this._assertNoVisibleWorkspaceChanges(expected)
-      const head = this._git(['rev-parse', 'HEAD'], { cwd: expected.workspacePath }).trim()
-      if (head !== metadata.baseCommit) this._assertHeadPublishedToTrustedRemote(expected, head)
-      this._assertNoVisibleWorkspaceChanges(expected)
-      this._assertTrackedFilesMatchIndex(expected)
-      const verifiedHead = this._git(['rev-parse', 'HEAD'], { cwd: expected.workspacePath }).trim()
-      if (verifiedHead !== head) {
-        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace HEAD changed during archive verification; archive refused')
+
+      const quarantinedExpected = { ...expected, workspacePath: quarantinePath }
+      this._validateQuarantinedWorktree(quarantinedExpected, metadata)
+      this._assertNoVisibleWorkspaceChanges(quarantinedExpected)
+      const quarantinedHead = this._git(['rev-parse', 'HEAD'], { cwd: quarantinePath }).trim()
+      if (quarantinedHead !== head) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace HEAD changed before the quarantine boundary; archive refused')
       }
-      this._git(['worktree', 'remove', '--', expected.workspacePath], { cwd: this.repository })
+      if (quarantinedHead !== metadata.baseCommit) {
+        this._assertHeadPublishedToTrustedRemote(quarantinedExpected, quarantinedHead)
+      }
+      this._assertNoVisibleWorkspaceChanges(quarantinedExpected)
+      this._assertTrackedFilesMatchIndex(quarantinedExpected)
+      this._assertNoVisibleWorkspaceChanges(quarantinedExpected)
+      const verifiedHead = this._git(['rev-parse', 'HEAD'], { cwd: quarantinePath }).trim()
+      if (verifiedHead !== quarantinedHead) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace HEAD changed during quarantine verification; archive refused')
+      }
+      branchRefLease = this._acquireBranchRefLease(expected, verifiedHead)
+      const verifiedBranchHead = this._branchCommit(expected.branch)
+      if (verifiedBranchHead !== verifiedHead) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Workspace branch changed at the final HEAD boundary; archive refused')
+      }
       if (existsSync(expected.workspacePath)) {
-        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_FAILED', 'Git reported success but workspace path still exists')
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RACE', 'Original workspace path reappeared after quarantine; archive refused')
       }
-      const archived = { ...metadata, state: 'archived', archivedAt: this.now(), updatedAt: this.now() }
+
+      // Persist the terminal decision before the irreversible remove. If Git remove
+      // fails, the catch path restores both the worktree registration and active
+      // metadata. After Git reports success there are deliberately no fallible Git
+      // or metadata operations left that could turn a committed deletion into an
+      // apparent failed archive.
+      const archived = {
+        ...metadata,
+        state: 'archived',
+        archivedHead: verifiedHead,
+        archivedAt: this.now(),
+        updatedAt: this.now()
+      }
       atomicWriteJson(expected.metadataPath, archived)
+      this._git([
+        '-c', 'core.trustctime=true',
+        '-c', 'core.filemode=true',
+        'worktree', 'remove', '--', quarantinePath
+      ], { cwd: this.repository })
+      if (existsSync(quarantinePath)) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_FAILED', 'Git reported success but quarantined worktree still exists')
+      }
       return archived
-    })
+    } catch (error) {
+      try {
+        this._restoreArchiveAfterFailure(expected, metadata, quarantinePath)
+      } catch (restoreError) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED',
+          `${error.code || 'WORKSPACE_ARCHIVE_FAILED'}: ${error.message}; automatic restore failed: ${restoreError.message}`
+        )
+      }
+      throw error
+    } finally {
+      if (branchRefLease) branchRefLease.release()
+    }
+  }
+
+  _acquireBranchRefLease(expected, expectedHead) {
+    const commonDirOutput = this._git(
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { cwd: this.repository }
+    ).trim()
+    if (!isAbsolute(commonDirOutput)) {
+      throw new WorkspaceManagerError('WORKSPACE_GIT_ERROR', 'Git common directory is not absolute')
+    }
+    assertNoSymlinkComponents(commonDirOutput, { allowMissing: false })
+    const commonDir = realpathSync(commonDirOutput)
+    const refsRoot = resolve(commonDir, 'refs', 'heads')
+    const refPath = resolve(refsRoot, expected.branch)
+    const lockPath = `${refPath}.lock`
+    if (!isInside(refsRoot, refPath) || refPath === refsRoot || !isInside(commonDir, lockPath)) {
+      throw new WorkspaceManagerError('WORKSPACE_PATH_ESCAPE', 'Workspace branch lock escaped the trusted Git common directory')
+    }
+    mkdirSync(dirname(refPath), { recursive: true, mode: 0o700 })
+    assertNoSymlinkComponents(dirname(refPath), { allowMissing: false })
+    let descriptor
+    try {
+      descriptor = openSync(lockPath, 'wx', 0o600)
+      writeFileSync(descriptor, `${expectedHead}\n`, 'utf8')
+      fsyncSync(descriptor)
+      fsyncDirectory(dirname(lockPath))
+    } catch (error) {
+      if (descriptor !== undefined) {
+        try { closeSync(descriptor) } catch {}
+        try { durableUnlink(lockPath) } catch {}
+      }
+      if (error?.code === 'EEXIST') {
+        throw new WorkspaceManagerError('WORKSPACE_REF_LOCKED', 'Workspace branch is being updated; archive refused')
+      }
+      throw error instanceof WorkspaceManagerError
+        ? error
+        : new WorkspaceManagerError('WORKSPACE_LOCK_ERROR', `Cannot seal workspace branch ref: ${error.message}`)
+    }
+    let released = false
+    return {
+      release: () => {
+        if (released) return
+        closeSync(descriptor)
+        durableUnlink(lockPath)
+        released = true
+      }
+    }
+  }
+
+  _validateQuarantinedWorktree(expected, metadata) {
+    assertNoSymlinkComponents(expected.workspacePath, { allowMissing: false })
+    if (!isInside(this.archiveQuarantineRoot, expected.workspacePath)
+        || dirname(expected.workspacePath) !== this.archiveQuarantineRoot
+        || lstatSync(expected.workspacePath).isSymbolicLink()) {
+      throw new WorkspaceManagerError('WORKSPACE_PATH_ESCAPE', 'Quarantined workspace escaped the private archive root')
+    }
+    this._validateWorktree(expected, metadata)
+  }
+
+  _restoreArchiveAfterFailure(expected, metadata, quarantinePath) {
+    let originalExists = existsSync(expected.workspacePath)
+    const quarantineExists = existsSync(quarantinePath)
+    let recoveryConflictPath = ''
+    if (originalExists && quarantineExists) {
+      recoveryConflictPath = resolve(
+        this.archiveQuarantineRoot,
+        `${expected.taskId}-agent-${expected.agentId}-late-writer-${randomUUID()}`
+      )
+      if (existsSync(recoveryConflictPath) || dirname(recoveryConflictPath) !== this.archiveQuarantineRoot) {
+        throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RECOVERY_REQUIRED', 'Cannot preserve a late writer path during archive recovery')
+      }
+      renameSync(expected.workspacePath, recoveryConflictPath)
+      fsyncDirectory(dirname(expected.workspacePath))
+      fsyncDirectory(this.archiveQuarantineRoot)
+      originalExists = false
+    }
+    if (!originalExists && !quarantineExists) {
+      throw new WorkspaceManagerError('WORKSPACE_ARCHIVE_RECOVERY_REQUIRED', 'Neither original nor quarantine workspace path exists')
+    }
+    if (quarantineExists) {
+      this._git(['worktree', 'move', quarantinePath, expected.workspacePath], { cwd: this.repository })
+      fsyncDirectory(this.archiveQuarantineRoot)
+      fsyncDirectory(dirname(expected.workspacePath))
+    }
+    const restored = {
+      ...metadata,
+      state: 'active',
+      ...(recoveryConflictPath ? { archiveRecoveryConflictPath: recoveryConflictPath } : {}),
+      updatedAt: this.now()
+    }
+    this._validateActive(restored, expected)
+    atomicWriteJson(expected.metadataPath, restored)
   }
 
   _assertNoVisibleWorkspaceChanges(expected) {
@@ -505,6 +734,7 @@ export class GitWorkspaceManager {
       const expectedObject = match[2]
       let data
       let actualMode
+      let finalSnapshot
       try {
         if (expectedMode === '120000') {
           const before = lstatSync(actualPath, { bigint: true })
@@ -512,6 +742,7 @@ export class GitWorkspaceManager {
           data = readlinkSync(actualPath, { encoding: 'buffer' })
           const after = lstatSync(actualPath, { bigint: true })
           if (!this._sameFileSnapshot(before, after)) throw new Error('symbolic link changed during verification')
+          finalSnapshot = after
           actualMode = '120000'
         } else if (expectedMode === '100644' || expectedMode === '100755') {
           const before = lstatSync(actualPath, { bigint: true })
@@ -531,6 +762,7 @@ export class GitWorkspaceManager {
           }
           const afterPath = lstatSync(actualPath, { bigint: true })
           if (!this._sameFileSnapshot(before, afterPath)) throw new Error('tracked path changed during verification')
+          finalSnapshot = afterPath
         } else {
           throw new Error(`unsupported tracked mode ${expectedMode}`)
         }
@@ -544,6 +776,17 @@ export class GitWorkspaceManager {
         throw new WorkspaceManagerError('WORKSPACE_TRACKED_MISMATCH', `Tracked mode differs from index for ${JSON.stringify(relativePath)}`)
       }
       const actualObject = this._git(['hash-object', '--stdin'], { cwd: expected.workspacePath, input: data }).trim()
+      try {
+        const afterHash = lstatSync(actualPath, { bigint: true })
+        if (!this._sameFileSnapshot(finalSnapshot, afterHash)) {
+          throw new Error('tracked path changed after its final content hash')
+        }
+      } catch (error) {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_TRACKED_MISMATCH',
+          `Tracked path ${JSON.stringify(relativePath)} changed at the final hash boundary: ${error.message}`
+        )
+      }
       if (actualObject !== expectedObject) {
         throw new WorkspaceManagerError('WORKSPACE_TRACKED_MISMATCH', `Tracked content differs from index for ${JSON.stringify(relativePath)}`)
       }
@@ -637,6 +880,12 @@ export class GitWorkspaceManager {
         return metadata
       }
       if (metadata.state === 'creating') return this._recoverCreating(metadata, expected)
+      if (metadata.state === 'archiving') {
+        throw new WorkspaceManagerError(
+          'WORKSPACE_ARCHIVE_RECOVERY_REQUIRED',
+          'Interrupted archive metadata requires operator reconciliation before command execution'
+        )
+      }
       throw new WorkspaceManagerError('WORKSPACE_NOT_ACTIVE', `Workspace metadata state is ${metadata.state}; reuse is forbidden`)
     }
 
@@ -761,8 +1010,20 @@ export class GitWorkspaceManager {
     if (!/^[0-9a-f]{40,64}$/.test(String(metadata.baseCommit || ''))) {
       throw new WorkspaceManagerError('WORKSPACE_METADATA_CONFLICT', 'Durable workspace metadata has an invalid baseCommit')
     }
-    if (!['creating', 'active', 'archived'].includes(metadata.state)) {
+    if (!['creating', 'active', 'archiving', 'archived'].includes(metadata.state)) {
       throw new WorkspaceManagerError('WORKSPACE_METADATA_CONFLICT', `Durable workspace metadata has invalid state ${metadata.state}`)
+    }
+    if (metadata.state === 'archiving') {
+      const quarantinePath = String(metadata.quarantinePath || '')
+      if (!quarantinePath
+          || !isInside(this.archiveQuarantineRoot, quarantinePath)
+          || dirname(quarantinePath) !== this.archiveQuarantineRoot
+          || !/^[0-9a-f]{40,64}$/.test(String(metadata.archiveHead || ''))) {
+        throw new WorkspaceManagerError('WORKSPACE_METADATA_CONFLICT', 'Durable archiving metadata has an unsafe quarantine path or HEAD')
+      }
+      if (existsSync(quarantinePath) && lstatSync(quarantinePath).isSymbolicLink()) {
+        throw new WorkspaceManagerError('WORKSPACE_SYMLINK_ESCAPE', 'Durable archive quarantine path became a symlink')
+      }
     }
   }
 
@@ -789,6 +1050,7 @@ export class GitWorkspaceManager {
   _revalidateTrustedPaths(expected) {
     assertNoSymlinkComponents(this.root, { allowMissing: false })
     assertNoSymlinkComponents(this.repository, { allowMissing: false })
+    assertNoSymlinkComponents(this.archiveQuarantineRoot, { allowMissing: false })
     assertNoSymlinkComponents(dirname(expected.workspacePath))
     if (existsSync(expected.workspacePath) && lstatSync(expected.workspacePath).isSymbolicLink()) {
       throw new WorkspaceManagerError('WORKSPACE_SYMLINK_ESCAPE', 'Workspace path symlinks are forbidden')
@@ -798,16 +1060,32 @@ export class GitWorkspaceManager {
     }
   }
 
-  _withLock(expected, callback) {
+  _withLock(expected, callback, ownerKind = 'operation') {
+    this._acquireLock(expected, ownerKind)
+    let callbackError = null
+    try { return callback() } catch (error) {
+      callbackError = error
+      throw error
+    } finally {
+      try { this._releaseLock(expected.lockPath) } catch (error) {
+        if (!callbackError) throw error
+      }
+    }
+  }
+
+  _acquireLock(expected, ownerKind = 'operation') {
     ensurePrivateDirectory(this.locksRoot)
     const startedAt = Date.now()
     while (true) {
+      let created = false
       try {
         mkdirSync(expected.lockPath, { mode: 0o700 })
+        created = true
         chmodSync(expected.lockPath, 0o700)
         fsyncDirectory(this.locksRoot)
         atomicWriteJson(resolve(expected.lockPath, 'owner.json'), {
           formatVersion: FORMAT_VERSION,
+          kind: ownerKind,
           pid: process.pid,
           hostname: hostname(),
           policyId: this.policy.policyId,
@@ -815,12 +1093,12 @@ export class GitWorkspaceManager {
           agentId: expected.agentId,
           acquiredAt: this.now()
         })
-        break
+        return
       } catch (error) {
+        if (created) {
+          try { this._releaseLock(expected.lockPath) } catch {}
+        }
         if (error?.code !== 'EEXIST') {
-          if (existsSync(expected.lockPath)) {
-            try { this._releaseLock(expected.lockPath) } catch {}
-          }
           throw error instanceof WorkspaceManagerError
             ? error
             : new WorkspaceManagerError('WORKSPACE_LOCK_ERROR', `Cannot acquire workspace lock: ${error.message}`)
@@ -829,16 +1107,6 @@ export class GitWorkspaceManager {
           throw new WorkspaceManagerError('WORKSPACE_LOCK_TIMEOUT', 'Timed out waiting for workspace lock; stale locks are never stolen automatically')
         }
         this.sleepSync(Math.max(1, this.lockRetryMs))
-      }
-    }
-
-    let callbackError = null
-    try { return callback() } catch (error) {
-      callbackError = error
-      throw error
-    } finally {
-      try { this._releaseLock(expected.lockPath) } catch (error) {
-        if (!callbackError) throw error
       }
     }
   }
