@@ -1081,7 +1081,8 @@ test('client command execution passes the managed worktree as spawn cwd and --cd
   const workspaceManager = manager(fixture)
   const child = new FakeChild()
   let invocation
-  const resultPromise = runCodex(runtimeProfile(fixture), dispatch(), 'command', {
+  const selectedProfile = { ...runtimeProfile(fixture), codexModel: 'gpt-m1-agent-a' }
+  const resultPromise = runCodex(selectedProfile, dispatch(), 'command', {
     workspaceManager,
     requireWorkspace: true,
     spawnFn: (binary, args, options) => {
@@ -1105,6 +1106,7 @@ test('client command execution passes the managed worktree as spawn cwd and --cd
   assert.equal(result.workspacePath, expected)
   assert.equal(invocation.options.cwd, expected)
   assert.equal(invocation.args[invocation.args.indexOf('--cd') + 1], expected)
+  assert.equal(invocation.args[invocation.args.indexOf('--model') + 1], selectedProfile.codexModel)
   assert.equal(invocation.args.includes('resume'), false, 'managed command must not resume a session from another worktree')
 })
 
