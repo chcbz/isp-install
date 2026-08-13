@@ -106,7 +106,7 @@ sudo systemctl start mysql nginx
 | **CI/CD** | Jenkins 2.440.1, Nexus 3.66.0-02 | 持续集成、制品库 |
 | **文件服务** | Pure-FTPd 1.0.53 | FTP 服务器 |
 | **目录服务** | OpenLDAP 2.6.13 | LDAP 目录服务 |
-| **VPN** | Libreswan, StrongSwan, PPTP | IPsec/L2TP VPN |
+| **VPN** | Xray Core, Libreswan, StrongSwan, PPTP | 代理与 VPN |
 | **邮件服务** | Postfix, Dovecot | 邮件服务器 |
 | **DNS** | BIND | DNS 服务器 |
 | **搜索引擎** | Elasticsearch 8.12.2 + IK分词, Logstash, Kibana | ELK 日志分析栈 |
@@ -122,6 +122,12 @@ export MYSQL_ROOT_PASSWORD="your_secure_password"
 
 # RabbitMQ
 export RABBITMQ_ADMIN_PASSWORD="your_rabbitmq_password"
+
+# VPN (Xray)
+export XRAY_VERSION="v26.3.27"
+export XRAY_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+export XRAY_UUID="your_client_uuid"
+export START_XRAY="y"  # 可选，安装后立即启动
 
 # VPN (StrongSwan)
 export VPN_PSK="your_psk_key"
@@ -151,6 +157,7 @@ export START_CODEX_WS_AGENT="y"  # 可选，安装后立即启动
 ├── java/
 ├── maven/
 ├── codex-ws-agent/
+├── xray/
 └── ...
 ```
 
@@ -171,6 +178,8 @@ conf/
 ├── codex-ws-agent/
 │   ├── env.example
 │   └── codex-profiles.conf
+├── xray/
+│   └── config.json.template
 └── ...
 ```
 

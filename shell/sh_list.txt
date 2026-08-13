@@ -67,8 +67,9 @@ php_install.sh      ✅  PHP 8.2.26 (安全修复版本)
 elasticsearch_install.sh ✅  Elasticsearch 8.12.2 + IK分词
 
 #===============================================================
-# VPN (仅 RHEL)
+# VPN
 #===============================================================
+xray_install.sh         ✅  Xray Core v26.3.27 (VLESS + WebSocket + TLS)
 vpn_install.sh          🔧  IPsec VPN (基于 hwdsl2)
 strongswan_install.sh   🔧  StrongSwan VPN
 

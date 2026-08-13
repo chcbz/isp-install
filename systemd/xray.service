@@ -1,0 +1,17 @@
+[Unit]
+Description=Xray Service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=isp
+Group=isp
+WorkingDirectory=/home/isp/apps/xray
+ExecStart=/home/isp/apps/xray/bin/xray run -config /home/isp/apps/xray/etc/config.json
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

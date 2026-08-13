@@ -86,6 +86,7 @@ list_profiles() {
     echo "  mysql, redis, nginx, php"
     echo "  rabbitmq, openldap, elasticsearch"
     echo "  jenkins, nexus, pureftpd"
+    echo "  xray"
 }
 
 #===============================================================
@@ -116,6 +117,8 @@ declare -A COMPONENT_SCRIPTS=(
     ["ftp"]="pureftpd_install.sh"
     ["codex-ws-agent"]="codex_ws_agent_install.sh"
     ["codex"]="codex_ws_agent_install.sh"
+    ["xray"]="xray_install.sh"
+    ["xray-core"]="xray_install.sh"
 )
 
 #===============================================================
