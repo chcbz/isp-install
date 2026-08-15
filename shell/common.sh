@@ -247,17 +247,24 @@ ISP_CONFIG="$ISP_HOME/.config"
 
 # 创建 ISP 目录结构
 create_isp_dirs() {
-    mkdir -p $ISP_APPS
-    mkdir -p $ISP_PKGS
-    mkdir -p $ISP_BIN
-    mkdir -p $ISP_LOGS
-    mkdir -p $ISP_HOSTS
-    mkdir -p $ISP_CONFIG
-    
-    chown -R $ISP_USER:$ISP_GROUP $ISP_HOME
-    chmod -R 775 $ISP_HOME
-    chmod -R 777 $ISP_LOGS
-    
+    # Only manage the shared directory entries themselves. Recursive chown/chmod
+    # would mutate existing applications, repositories, secrets, and worktrees.
+    local path
+    for path in "$ISP_HOME" "$ISP_APPS" "$ISP_PKGS" "$ISP_BIN" "$ISP_LOGS" "$ISP_HOSTS" "$ISP_CONFIG"; do
+        if [ -L "$path" ]; then
+            __red "拒绝符号链接目录: $path"
+            return 1
+        fi
+        if [ -e "$path" ] && [ ! -d "$path" ]; then
+            __red "目录路径已被非目录占用: $path"
+            return 1
+        fi
+    done
+
+    install -d -o "$ISP_USER" -g "$ISP_GROUP" -m 0775 \
+        "$ISP_HOME" "$ISP_APPS" "$ISP_PKGS" "$ISP_BIN" "$ISP_HOSTS" "$ISP_CONFIG"
+    install -d -o "$ISP_USER" -g "$ISP_GROUP" -m 0777 "$ISP_LOGS"
+
     __green "ISP 目录结构创建完成"
 }
 

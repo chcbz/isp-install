@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================
-# 服务器初始化脚本 - 支持 CentOS/Rocky/Ubuntu/Debian
+# 服务器初始化脚本 - 支持 RHEL 系、Alibaba Cloud Linux、Ubuntu/Debian
 #===============================================================
 
 set -e
@@ -45,18 +45,8 @@ if ! id -u isp &>/dev/null; then
     echo -e "${GREEN}用户 isp 创建成功${NC}"
 fi
 
-# 创建目录结构
-mkdir -p $ISP_APPS
-mkdir -p $ISP_PKGS
-mkdir -p $ISP_BIN
-mkdir -p $ISP_LOGS
-mkdir -p $ISP_HOSTS
-mkdir -p $ISP_CONFIG
-
-# 设置权限
-chown -R isp:isp /home/isp
-chmod -R 775 /home/isp
-chmod -R 777 /home/isp/logs
+# 创建目录结构；只设置共享目录项，不递归改动已有应用、仓库或密钥。
+create_isp_dirs
 
 echo -e "${GREEN}目录结构创建完成${NC}"
 
