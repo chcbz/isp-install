@@ -20,6 +20,7 @@ import {
   buildAckEnvelope,
   buildProtocolEnvelope,
   buildWebSocketUrl,
+  isLegacyInboundControlFrame,
   normalizeInboundMessage,
   runCodex
 } from '../agent-client.mjs'
@@ -303,6 +304,23 @@ test('corrupt queue file is quarantined while valid commands continue', async ()
   processor.start()
   await processor.waitForIdle()
   assert.deepEqual(executed, ['command-1'])
+})
+
+test('legacy agent status is ignored only as a non-executable control notification', () => {
+  assert.equal(isLegacyInboundControlFrame({
+    type: 'agent_status',
+    agentId: 'agent-peer',
+    status: 'online'
+  }), true)
+  assert.equal(isLegacyInboundControlFrame({ type: 'agent_capability_index', agents: [] }), true)
+  assert.equal(isLegacyInboundControlFrame({ type: 'task_assigned', content: 'do it' }), false)
+  assert.equal(isLegacyInboundControlFrame({ type: 'task.assign', content: 'do it' }), false)
+  assert.equal(isLegacyInboundControlFrame({ type: 'codex.exec', content: 'do it' }), false)
+  assert.equal(isLegacyInboundControlFrame({
+    type: 'agent_status',
+    schemaVersion: 1,
+    messageType: MESSAGE_TYPES.AGENT_PRESENCE
+  }), false)
 })
 
 test('legacy execution types, missing messageType, and ambiguous envelopes fail closed', () => {

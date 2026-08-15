@@ -75,7 +75,7 @@ const RESERVED_FIELDS = [
   'issuedAt', 'sentAt', 'timestamp', 'expiresAt', 'attempt'
 ]
 const INBOUND_CONTROL_TYPES = new Set([
-  'connected', 'ping', 'pong', 'agent_registered', 'agent_status_updated',
+  'connected', 'ping', 'pong', 'agent_registered', 'agent_status_updated', 'agent_status',
   'agent_capability_index', 'protocol_error', 'error', 'task_reported'
 ])
 const DISABLED_PROFILE_STATUSES = new Set(['disabled', 'inactive', 'unavailable'])
@@ -90,6 +90,10 @@ export class AgentProtocolError extends Error {
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
+
+export const isLegacyInboundControlFrame = frame => (
+  isObject(frame) && INBOUND_CONTROL_TYPES.has(frame.type) && !hasOwn(frame, 'messageType')
+)
 
 const sameEnvelopeValue = (left, right) => {
   if (typeof left === 'number' && typeof right === 'number') {
@@ -3268,7 +3272,7 @@ const handleMessage = async (profile, raw) => {
     getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object'), parsed)
     return
   }
-  if (INBOUND_CONTROL_TYPES.has(parsed.type) && !hasOwn(parsed, 'messageType')) {
+  if (isLegacyInboundControlFrame(parsed)) {
     if (parsed.type === 'connected') {
       registerAgent(profile)
       sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')

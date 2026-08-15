@@ -246,6 +246,7 @@ The client is fail-closed and uses the canonical `messageType` as the semantic d
 - `chat.message`: may invoke Codex for a conversational reply. That path emits only `chat.message.delta` and final `chat.message`; it never emits `task.report`, `work.result`, or `codex.result`.
 - `task.event`: updates the profile's local observed-task state and never invokes Codex.
 - Other recognized Protocol v1 messages are non-executable. Unknown, malformed, missing-version, missing-`messageType`, conflicting outer/nested Envelope, and legacy execution messages fail closed.
+- Known legacy server control notifications are handled without command execution. The existing `connected` and `ping` controls retain their protocol responses, while `agent_status` is ignored for compatibility with existing CYF API presence broadcasts; unknown and execution-like legacy frames still fail closed.
 
 The compatibility outer type `agent_direct_message` is accepted only when its canonical `messageType` is explicitly `chat.message` or `command.dispatch`. Legacy `codex.exec`, `task.assign`, and `task_assigned` messages do not execute.
 
