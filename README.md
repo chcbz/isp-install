@@ -10,6 +10,7 @@
 | Rocky Linux | 8, 9 | ✅ 完全支持 |
 | AlmaLinux | 8, 9 | ✅ 完全支持 |
 | RHEL | 7, 8, 9 | ✅ 完全支持 |
+| Alibaba Cloud Linux | 3 | ✅ codex-ws-agent 已验证 |
 | Ubuntu | 18.04, 20.04, 22.04, 24.04 | ✅ 完全支持 |
 | Debian | 10, 11, 12 | ✅ 完全支持 |
 
@@ -185,7 +186,7 @@ conf/
 
 ## 系统要求
 
-- **操作系统**: CentOS 7/8, Rocky Linux 8/9, Ubuntu 18.04+, Debian 10+
+- **操作系统**: CentOS 7/8, Rocky Linux 8/9, AlmaLinux 8/9, RHEL 7/8/9, Alibaba Cloud Linux 3, Ubuntu 18.04+, Debian 10+
 - **架构**: x86_64 (AMD64)
 - **权限**: 需要 root 权限执行安装脚本
 - **网络**: 需要访问外网下载源码包和配置文件

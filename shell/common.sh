@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================
-# 通用工具函数库 - 支持 CentOS/Rocky/Ubuntu/Debian
+# 通用工具函数库 - 支持 RHEL 系、Alibaba Cloud Linux、Ubuntu/Debian
 #===============================================================
 
 set -e
@@ -33,7 +33,7 @@ detect_os() {
     fi
     
     case $OS in
-        centos|rocky|almalinux|rhel)
+        centos|rocky|almalinux|rhel|alinux)
             OS_FAMILY="rhel"
             PKG_MANAGER="yum"
             if command -v dnf &> /dev/null; then
