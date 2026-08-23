@@ -51,6 +51,8 @@ Each profile can define:
 - `codexApproval`
 - `codexSessionMode`
 - `codexTimeoutMs`
+- `abilities` (optional comma-separated runtime labels)
+- `skills` (optional comma-separated skill names)
 - `workspacePolicyId`
 - `workspaceRole`
 - `workspaceNoTaskPolicy`
@@ -94,11 +96,15 @@ agentName=吴用
 personaName=智多星
 codexHome=/home/isp/apps/codex-ws-agent/.codex-wuyong
 codexWorkdir=/home/isp/wsps/cyf
+abilities=planning,review
+skills=cyf-quick-iterate
 enabled=true
 apiKey=cdx_optional_profile_specific_key
 ```
 
 Every `[agent.*]` section inherits fields from `[default]` and can override any of them.
+
+At registration and every presence heartbeat, the client rebuilds the reported ability snapshot from the built-in Codex capabilities, profile `abilities`/`skills`, and installed `SKILL.md` manifests under the profile `CODEX_HOME`, plugin cache, and workspace skill directories. This lets the server refresh `agent_runtime.abilities` without changing the bound persona. Ability labels are scheduling hints, not authorization.
 
 Set `enabled=false` on an `[agent.*]` section to take that profile out of service without deleting it. Hot reload closes the profile connection and skips registration; changing it back to `enabled=true` reconnects it. `active=false` and `status=disabled|inactive|unavailable` are also treated as disabled.
 

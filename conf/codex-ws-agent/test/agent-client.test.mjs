@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { chmodSync, fsyncSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -18,10 +18,14 @@ import {
   PersistentCommandInbox,
   PROCESS_RUNTIME_INSTANCE_ID,
   buildAckEnvelope,
+  buildAgentPresencePayload,
+  buildAgentRegistrationPayload,
   buildProtocolEnvelope,
   buildWebSocketUrl,
+  discoverCodexSkills,
   isLegacyInboundControlFrame,
   normalizeInboundMessage,
+  resolveProfileAbilities,
   runCodex
 } from '../agent-client.mjs'
 
@@ -370,6 +374,95 @@ test('runtimeInstanceId is process-scoped and reused by URL and v1 envelopes', (
   assert.equal(register.sourceAgentId, profile.agentId)
 })
 
+
+test('client abilities are rebuilt from profile config and installed Codex skills', () => {
+  const root = temporaryDirectory()
+  const codexHome = resolve(root, '.codex-agent-a')
+  const workdir = resolve(root, 'workspace')
+  mkdirSync(resolve(codexHome, 'skills', 'review-helper'), { recursive: true })
+  mkdirSync(resolve(workdir, '.agents', 'skills', 'repo-deploy'), { recursive: true })
+  writeFileSync(resolve(codexHome, 'skills', 'review-helper', 'SKILL.md'), `---
+name: review-helper
+description: review
+---
+`)
+  writeFileSync(resolve(workdir, '.agents', 'skills', 'repo-deploy', 'SKILL.md'), '# repo skill')
+  const configured = {
+    ...profile,
+    codexHome,
+    codexWorkdir: workdir,
+    abilities: ['planning', 'DEBUG'],
+    skills: ['acceptance-check']
+  }
+
+  assert.deepEqual(discoverCodexSkills(configured), ['review-helper', 'repo-deploy'])
+  assert.deepEqual(resolveProfileAbilities(configured), [
+    'codex', 'shell', 'code-edit', 'debug', 'deploy-assist',
+    'planning', 'acceptance-check', 'review-helper', 'repo-deploy'
+  ])
+  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, resolveProfileAbilities(configured))
+  assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, resolveProfileAbilities(configured))
+})
+
+test('skill discovery bounds oversized manifests and preserves a workspace quota', () => {
+  const root = temporaryDirectory()
+  const codexHome = resolve(root, '.codex-agent-a')
+  const workdir = resolve(root, 'workspace')
+
+  for (let index = 0; index < 100; index += 1) {
+    const directory = resolve(codexHome, 'skills', `home-skill-${String(index).padStart(3, '0')}`)
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(resolve(directory, 'SKILL.md'), `---\nname: home-skill-${index}\n---\n`)
+  }
+
+  const workspaceSkill = resolve(workdir, '.codex', 'skills', 'workspace-critical')
+  mkdirSync(workspaceSkill, { recursive: true })
+  writeFileSync(resolve(workspaceSkill, 'SKILL.md'), `---\nname: workspace-critical\n---\n`)
+
+  const oversized = resolve(workdir, '.agents', 'skills', 'oversized')
+  mkdirSync(oversized, { recursive: true })
+  writeFileSync(resolve(oversized, 'SKILL.md'), `---\n${'description: filler\n'.repeat(600)}name: hidden-after-limit\n---\n`)
+
+  const discovered = discoverCodexSkills({ ...profile, codexHome, codexWorkdir: workdir })
+  assert.equal(discovered.includes('workspace-critical'), true)
+  assert.equal(discovered.includes('oversized'), true)
+  assert.equal(discovered.includes('hidden-after-limit'), false)
+  assert.equal(discovered.filter(name => name.startsWith('home-skill-')).length, 24)
+})
+
+test('ability normalization rejects C1 control characters', () => {
+  const configured = {
+    ...profile,
+    codexHome: temporaryDirectory(),
+    codexWorkdir: temporaryDirectory(),
+    abilities: ['safe-label', `bad\u0085label`],
+    skills: []
+  }
+  const abilities = resolveProfileAbilities(configured)
+  assert.equal(abilities.includes('safe-label'), true)
+  assert.equal(abilities.some(ability => ability.includes('bad')), false)
+})
+
+test('presence refresh discovers skills installed after registration', () => {
+  const root = temporaryDirectory()
+  const codexHome = resolve(root, '.codex-agent-a')
+  const configured = { ...profile, codexHome, codexWorkdir: root, abilities: [], skills: [] }
+  const before = buildAgentRegistrationPayload(configured).abilities
+
+  mkdirSync(resolve(codexHome, 'skills', 'new-client-skill'), { recursive: true })
+  writeFileSync(resolve(codexHome, 'skills', 'new-client-skill', 'SKILL.md'), `---
+name: new-client-skill
+---
+`)
+
+  const after = buildAgentPresencePayload(configured, 'online').abilities
+  assert.equal(before.includes('new-client-skill'), false)
+  assert.equal(after.includes('new-client-skill'), true)
+
+  rmSync(resolve(codexHome, 'skills', 'new-client-skill'), { recursive: true, force: true })
+  const removed = buildAgentPresencePayload(configured, 'online').abilities
+  assert.equal(removed.includes('new-client-skill'), false)
+})
 
 test('fsync and rename failures fail closed before command execution', async () => {
   for (const failure of ['fsync', 'rename']) {

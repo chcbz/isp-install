@@ -10,6 +10,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmdirSync,
@@ -19,7 +20,8 @@ import {
   watchFile,
   writeFileSync
 } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
 
@@ -449,6 +451,8 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     codexSessionMode: profile.codexSessionMode || fallback.codexSessionMode || 'new',
     codexTimeoutMs: parseNonNegativeMs(profile.codexTimeoutMs, fallback.codexTimeoutMs || 900000),
     codexModel: profile.codexModel || fallback.codexModel || '',
+    abilities: parseStringList(profile.abilities ?? fallback.abilities),
+    skills: parseStringList(profile.skills ?? fallback.skills),
     workspacePolicyId: profile.workspacePolicyId || fallback.workspacePolicyId || '',
     workspaceRole: profile.workspaceRole || fallback.workspaceRole || 'coder',
     workspaceNoTaskPolicy: profile.workspaceNoTaskPolicy || fallback.workspaceNoTaskPolicy || 'reject',
@@ -544,6 +548,7 @@ const DEFAULT_FS_OPERATIONS = Object.freeze({
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmdirSync,
@@ -2744,19 +2749,106 @@ const sendLegacy = (type, payload = {}, profile = defaultProfile) => sendRaw({
   senderName: profile.agentName
 }, profile)
 
-const sendStatus = (profile, status, extra = {}) => sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, {
+const DEFAULT_CLIENT_ABILITIES = Object.freeze(['codex', 'shell', 'code-edit', 'debug', 'deploy-assist'])
+const MAX_DISCOVERED_SKILLS = 96
+const MAX_DISCOVERED_SKILLS_PER_ROOT = 24
+const MAX_SKILL_SCAN_ENTRIES = 2048
+const MAX_SKILL_SCAN_DEPTH = 8
+
+const normalizeAbilityList = values => {
+  const normalized = new Map()
+  for (const value of values || []) {
+    const ability = String(value || '').trim()
+    if (!ability || ability.length > 100 || /[\u0000-\u001f\u007f-\u009f]/.test(ability)) continue
+    const key = ability.toLowerCase()
+    if (!normalized.has(key)) normalized.set(key, ability)
+    if (normalized.size >= 128) break
+  }
+  return [...normalized.values()]
+}
+
+const skillNameFromManifest = manifestPath => {
+  let descriptor
+  try {
+    descriptor = openSync(manifestPath, 'r')
+    const buffer = Buffer.alloc(8192)
+    const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0)
+    const content = buffer.toString('utf8', 0, bytesRead)
+    const frontmatter = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] || ''
+    const declared = frontmatter.match(/^name\s*:\s*(.+?)\s*$/m)?.[1]
+    const name = String(declared || basename(dirname(manifestPath)))
+      .trim().replace(/^['"]|['"]$/g, '')
+    return name || ''
+  } catch {
+    return ''
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor) } catch {}
+    }
+  }
+}
+
+const collectSkillManifests = (root, manifests, state, depth = 0) => {
+  if (!root || depth > MAX_SKILL_SCAN_DEPTH || manifests.length >= MAX_DISCOVERED_SKILLS_PER_ROOT
+      || state.entries >= MAX_SKILL_SCAN_ENTRIES || !existsSync(root)) return
+  let entries
+  try { entries = readdirSync(root, { withFileTypes: true }) } catch { return }
+  entries.sort((left, right) => left.name.localeCompare(right.name))
+  for (const entry of entries) {
+    if (manifests.length >= MAX_DISCOVERED_SKILLS_PER_ROOT || state.entries >= MAX_SKILL_SCAN_ENTRIES) break
+    state.entries += 1
+    const path = resolve(root, entry.name)
+    if (entry.isFile() && entry.name === 'SKILL.md') manifests.push(path)
+    else if (entry.isDirectory()) collectSkillManifests(path, manifests, state, depth + 1)
+  }
+}
+
+export const discoverCodexSkills = profile => {
+  const codexHome = profile?.codexHome || process.env.CODEX_HOME || resolve(homedir(), '.codex')
+  const workdir = profile?.codexWorkdir || process.cwd()
+  const roots = [
+    resolve(codexHome, 'skills'),
+    resolve(codexHome, 'plugins', 'cache'),
+    resolve(workdir, '.codex', 'skills'),
+    resolve(workdir, '.agents', 'skills')
+  ]
+  const manifests = roots.flatMap(root => {
+    const rootManifests = []
+    collectSkillManifests(root, rootManifests, { entries: 0 })
+    return rootManifests
+  }).slice(0, MAX_DISCOVERED_SKILLS)
+  return normalizeAbilityList(manifests.map(skillNameFromManifest))
+}
+
+export const resolveProfileAbilities = profile => normalizeAbilityList([
+  ...DEFAULT_CLIENT_ABILITIES,
+  ...(profile?.abilities || []),
+  ...(profile?.skills || []),
+  ...discoverCodexSkills(profile)
+])
+
+export const buildAgentPresencePayload = (profile, status, extra = {}) => ({
   status,
   currentTaskId: extra.taskId || '',
   currentTaskTitle: extra.title || '',
-  errorMessage: extra.errorMessage || ''
-}, profile)
+  errorMessage: extra.errorMessage || '',
+  abilities: resolveProfileAbilities(profile)
+})
 
-const registerAgent = profile => sendProtocol(MESSAGE_TYPES.AGENT_REGISTER, {
+export const buildAgentRegistrationPayload = profile => ({
   name: profile.agentName,
   personaName: profile.personaName,
-  endpoint: config.wsUrl,
-  abilities: ['codex', 'shell', 'code-edit', 'debug', 'deploy-assist']
-}, profile)
+  endpoint: config?.wsUrl || '',
+  abilities: resolveProfileAbilities(profile)
+})
+
+const sendStatus = (profile, status, extra = {}) => sendProtocol(
+  MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, extra), profile
+)
+
+const registerAgent = profile => sendProtocol(
+  MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(profile), profile
+)
 
 const resolvePrompt = message => {
   if (message.prompt) return String(message.prompt)
