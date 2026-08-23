@@ -104,7 +104,9 @@ apiKey=cdx_optional_profile_specific_key
 
 Every `[agent.*]` section inherits fields from `[default]` and can override any of them.
 
-At registration and every presence heartbeat, the client rebuilds the reported ability snapshot from the built-in Codex capabilities, profile `abilities`/`skills`, and installed `SKILL.md` manifests under the profile `CODEX_HOME`, plugin cache, and workspace skill directories. This lets the server refresh `agent_runtime.abilities` without changing the bound persona. Ability labels are scheduling hints, not authorization.
+At registration and every presence heartbeat, the client rebuilds the reported ability snapshot from the built-in Codex capabilities, profile `abilities`/`skills`, installed `SKILL.md` manifests, and safe project signals from the profile `codexWorkdir`. This lets the server refresh `agent_runtime.abilities` without changing the bound persona. Ability labels are scheduling hints, not authorization.
+
+Workspace discovery recognizes an allowlisted set of project markers and technology signals such as `package.json`, Gradle/Maven/Python/Go/Rust manifests, source-file extensions, Docker/CI files, and common `web`/`api`/`tests`/`docs` module directories. It scans only the workdir root plus one level inside recognized project containers, caps each snapshot at 512 entries, reads at most eight canonical `package.json` manifests with a 64 KiB per-file and 128 KiB aggregate budget without following symlinks, and reports only canonical ability labels—not paths, filenames, dependency versions, or file contents. Broad home/host directories without a project manifest or source marker produce no inferred abilities.
 
 Set `enabled=false` on an `[agent.*]` section to take that profile out of service without deleting it. Hot reload closes the profile connection and skips registration; changing it back to `enabled=true` reconnects it. `active=false` and `status=disabled|inactive|unavailable` are also treated as disabled.
 

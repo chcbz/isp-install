@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { chmodSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -23,6 +23,7 @@ import {
   buildProtocolEnvelope,
   buildWebSocketUrl,
   discoverCodexSkills,
+  discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
   normalizeInboundMessage,
   resolveProfileAbilities,
@@ -428,6 +429,312 @@ test('skill discovery bounds oversized manifests and preserves a workspace quota
   assert.equal(discovered.includes('oversized'), true)
   assert.equal(discovered.includes('hidden-after-limit'), false)
   assert.equal(discovered.filter(name => name.startsWith('home-skill-')).length, 24)
+})
+
+test('workspace discovery infers safe scheduling abilities from project markers', () => {
+  const root = temporaryDirectory()
+  mkdirSync(resolve(root, '.git'))
+  writeFileSync(resolve(root, '.git', 'HEAD'), 'ref: refs/heads/main')
+  mkdirSync(resolve(root, '.ssh'))
+  mkdirSync(resolve(root, 'web'))
+  mkdirSync(resolve(root, 'api'))
+  mkdirSync(resolve(root, 'docs'))
+  mkdirSync(resolve(root, 'tests'))
+  mkdirSync(resolve(root, 'ops'))
+  mkdirSync(resolve(root, 'private-project'))
+  writeFileSync(resolve(root, 'AGENTS.md'), '# workspace guidance')
+  writeFileSync(resolve(root, 'web', 'package.json'), JSON.stringify({
+    dependencies: { vue: '^3.0.0' },
+    devDependencies: { vite: '^7.0.0', typescript: '^5.0.0', vitest: '^3.0.0' }
+  }))
+  writeFileSync(resolve(root, 'api', 'build.gradle'), 'plugins { id "java" }')
+  writeFileSync(resolve(root, 'api', 'Dockerfile'), 'FROM eclipse-temurin:21')
+  writeFileSync(resolve(root, 'private-project', 'package.json'), JSON.stringify({ dependencies: { react: '^19.0.0' } }))
+  writeFileSync(resolve(root, '.ssh', 'customer-secret.txt'), 'must not become an ability')
+
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), [
+    'git', 'source-code', 'workspace-guidance',
+    'frontend', 'backend', 'nodejs', 'javascript', 'typescript', 'vue', 'vite',
+    'java', 'gradle', 'docker', 'deployment', 'testing', 'documentation'
+  ])
+})
+
+test('broad home-style directories do not produce project abilities without project markers', () => {
+  const root = temporaryDirectory()
+  for (const directory of ['.git', 'apps', 'bin', 'docs', 'hosts', 'logs', 'wsps']) {
+    mkdirSync(resolve(root, directory))
+  }
+  writeFileSync(resolve(root, 'AGENTS.md'), '# host guidance')
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), [])
+})
+
+test('workspace discovery rejects a symlinked workdir root', () => {
+  const root = temporaryDirectory()
+  const project = resolve(root, 'project')
+  const link = resolve(root, 'project-link')
+  mkdirSync(project)
+  writeFileSync(resolve(project, 'weather.py'), 'print("sunny")')
+  symlinkSync(project, link, 'dir')
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: link }), [])
+})
+
+test('empty directory names do not claim unrelated workspace abilities', () => {
+  const root = temporaryDirectory()
+  writeFileSync(resolve(root, 'main.py'), 'print("safe")')
+  for (const directory of ['hosts', 'logs', 'services']) mkdirSync(resolve(root, directory))
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), ['source-code', 'python'])
+})
+
+test('workspace discovery rejects symlinks in workdir ancestors', () => {
+  const root = temporaryDirectory()
+  const realParent = resolve(root, 'real-parent')
+  const project = resolve(realParent, 'project')
+  const linkedParent = resolve(root, 'linked-parent')
+  mkdirSync(project, { recursive: true })
+  writeFileSync(resolve(project, 'package.json'), JSON.stringify({ dependencies: { react: '^19.0.0' } }))
+  symlinkSync(realParent, linkedParent, 'dir')
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: resolve(linkedParent, 'project') }), [])
+})
+
+test('workspace root identity check rejects ancestor replacement races', async () => {
+  const root = temporaryDirectory()
+  const switchPath = resolve(root, 'switch')
+  const holdingPath = resolve(root, 'holding')
+  const outside = resolve(root, 'outside')
+  const safeProject = resolve(switchPath, 'project')
+  mkdirSync(safeProject, { recursive: true })
+  mkdirSync(resolve(outside, 'project'), { recursive: true })
+  writeFileSync(resolve(safeProject, 'main.py'), 'pass')
+  writeFileSync(resolve(outside, 'project', 'package.json'), JSON.stringify({ dependencies: { react: '^19.0.0' } }))
+
+  const toggler = spawn('bash', ['-c', `
+    for i in $(seq 1 500); do
+      mv "$1" "$2" 2>/dev/null || continue
+      ln -s "$3" "$1" 2>/dev/null || true
+      rm -f "$1"
+      mv "$2" "$1" 2>/dev/null || true
+    done
+  `, '_', switchPath, holdingPath, outside], { stdio: 'ignore' })
+  try {
+    for (let index = 0; index < 1000; index += 1) {
+      const abilities = discoverWorkspaceAbilities({ ...profile, codexWorkdir: safeProject })
+      assert.equal(abilities.includes('react'), false)
+    }
+  } finally {
+    if (toggler.exitCode === null) await new Promise(resolveExit => toggler.once('exit', resolveExit))
+  }
+})
+
+test('workspace scan fails closed when the bounded entry budget is exceeded', () => {
+  const root = temporaryDirectory()
+  for (let index = 0; index < 513; index += 1) {
+    writeFileSync(resolve(root, `source-${String(index).padStart(3, '0')}.py`), 'pass')
+  }
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), [])
+})
+
+test('exactly 512 root entries may include an empty project container', () => {
+  const root = temporaryDirectory()
+  mkdirSync(resolve(root, 'web'))
+  writeFileSync(resolve(root, 'main.py'), 'pass')
+  for (let index = 0; index < 510; index += 1) {
+    writeFileSync(resolve(root, `note-${String(index).padStart(3, '0')}.txt`), 'note')
+  }
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), ['source-code', 'python'])
+})
+
+test('workspace entry budget is shared by root and project containers', () => {
+  const root = temporaryDirectory()
+  mkdirSync(resolve(root, 'web'))
+  writeFileSync(resolve(root, 'main.py'), 'pass')
+  for (let index = 0; index < 498; index += 1) {
+    writeFileSync(resolve(root, `root-${String(index).padStart(3, '0')}.txt`), 'note')
+  }
+  for (let index = 0; index < 12; index += 1) {
+    writeFileSync(resolve(root, 'web', `child-${String(index).padStart(2, '0')}.txt`), 'note')
+  }
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), [
+    'source-code', 'frontend', 'python'
+  ])
+  writeFileSync(resolve(root, 'web', 'child-12.txt'), 'note')
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), [])
+})
+
+test('empty git directory does not claim git capability', () => {
+  const root = temporaryDirectory()
+  mkdirSync(resolve(root, '.git'))
+  writeFileSync(resolve(root, 'main.py'), 'pass')
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), ['source-code', 'python'])
+})
+
+test('linked git worktree metadata file claims git capability', () => {
+  const root = temporaryDirectory()
+  writeFileSync(resolve(root, '.git'), 'gitdir: /srv/git/worktrees/example\n')
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), ['git', 'source-code'])
+})
+
+test('package.json FIFO is rejected without blocking or dependency inference', () => {
+  const root = temporaryDirectory()
+  writeFileSync(resolve(root, 'main.py'), 'pass')
+  execFileSync('mkfifo', [resolve(root, 'package.json')])
+  const moduleUrl = new URL('../agent-client.mjs', import.meta.url).href
+  const script = `
+    import { discoverWorkspaceAbilities } from ${JSON.stringify(moduleUrl)}
+    const abilities = discoverWorkspaceAbilities({ codexWorkdir: ${JSON.stringify(root)} })
+    process.stdout.write(JSON.stringify(abilities))
+  `
+  const output = execFileSync(process.execPath, ['--input-type=module', '--eval', script], {
+    encoding: 'utf8',
+    timeout: 1000
+  })
+  assert.deepEqual(JSON.parse(output), ['source-code', 'python'])
+})
+
+test('symlinked project containers cannot escape descriptor-scoped scanning', () => {
+  const root = temporaryDirectory()
+  const outside = temporaryDirectory()
+  writeFileSync(resolve(root, 'main.py'), 'pass')
+  writeFileSync(resolve(outside, 'package.json'), JSON.stringify({ dependencies: { react: '^19.0.0' } }))
+  symlinkSync(outside, resolve(root, 'web'), 'dir')
+  const abilities = discoverWorkspaceAbilities({ ...profile, codexWorkdir: root })
+  assert.deepEqual(abilities, ['source-code', 'python'])
+  assert.equal(abilities.includes('react'), false)
+})
+
+test('standalone supported markers produce matching inferred abilities', () => {
+  const fixtures = [
+    ['Jenkinsfile', 'pipeline {}', ['ci-cd']],
+    ['Makefile', 'all:', ['automation']],
+    ['go.sum', '', ['source-code', 'go']],
+    ['main.cjs', 'module.exports = {}', ['source-code', 'nodejs', 'javascript']]
+  ]
+  for (const [filename, content, expected] of fixtures) {
+    const root = temporaryDirectory()
+    writeFileSync(resolve(root, filename), content)
+    assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), expected)
+  }
+})
+
+test('only canonical package.json names consume the aggregate manifest budget', () => {
+  const root = temporaryDirectory()
+  mkdirSync(resolve(root, 'web'))
+  writeFileSync(resolve(root, 'web', 'PACKAGE.JSON'), JSON.stringify({ dependencies: { react: '^19.0.0' } }))
+  writeFileSync(resolve(root, 'web', 'package.json'), JSON.stringify({ dependencies: { vue: '^3.0.0' } }))
+  const abilities = discoverWorkspaceAbilities({ ...profile, codexWorkdir: root })
+  assert.equal(abilities.includes('vue'), true)
+  assert.equal(abilities.includes('react'), false)
+})
+
+test('workspace abilities retain reserved slots at the protocol limit', () => {
+  const root = temporaryDirectory()
+  writeFileSync(resolve(root, 'main.py'), 'pass')
+  const configured = {
+    ...profile,
+    codexHome: resolve(root, '.codex'),
+    codexWorkdir: root,
+    abilities: Array.from({ length: 123 }, (_, index) => `custom-${index}`),
+    skills: []
+  }
+  const abilities = resolveProfileAbilities(configured)
+  assert.equal(abilities.length, 128)
+  assert.equal(abilities.includes('source-code'), true)
+  assert.equal(abilities.includes('python'), true)
+})
+
+test('source marker recognition and inference remain consistent', () => {
+  const root = temporaryDirectory()
+  writeFileSync(resolve(root, 'App.jsx'), 'export default function App() {}')
+  assert.deepEqual(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }), [
+    'source-code', 'frontend', 'javascript', 'react'
+  ])
+})
+
+test('presence refresh follows package dependency changes', () => {
+  const root = temporaryDirectory()
+  const packagePath = resolve(root, 'package.json')
+  writeFileSync(packagePath, JSON.stringify({ dependencies: { react: '^19.0.0' } }))
+  const configured = { ...profile, codexHome: resolve(root, '.codex'), codexWorkdir: root, abilities: [], skills: [] }
+  const react = buildAgentRegistrationPayload(configured).abilities
+  assert.equal(react.includes('react'), true)
+  assert.equal(react.includes('vue'), false)
+
+  writeFileSync(packagePath, JSON.stringify({ dependencies: { vue: '^3.0.0' } }))
+  const vue = buildAgentPresencePayload(configured, 'online').abilities
+  assert.equal(vue.includes('react'), false)
+  assert.equal(vue.includes('vue'), true)
+})
+
+test('presence refresh follows workspace file additions and removals', () => {
+  const root = temporaryDirectory()
+  const configured = { ...profile, codexHome: resolve(root, '.codex'), codexWorkdir: root, abilities: [], skills: [] }
+  const before = buildAgentRegistrationPayload(configured).abilities
+  assert.equal(before.includes('python'), false)
+  assert.equal(before.includes('frontend'), false)
+
+  writeFileSync(resolve(root, 'weather.py'), 'print("sunny")')
+  writeFileSync(resolve(root, 'weather.html'), '<main>sunny</main>')
+  const after = buildAgentPresencePayload(configured, 'online').abilities
+  assert.equal(after.includes('python'), true)
+  assert.equal(after.includes('frontend'), true)
+
+  rmSync(resolve(root, 'weather.py'))
+  rmSync(resolve(root, 'weather.html'))
+  const removed = buildAgentPresencePayload(configured, 'online').abilities
+  assert.equal(removed.includes('python'), false)
+  assert.equal(removed.includes('frontend'), false)
+})
+
+test('workspace manifest reads are bounded and malformed manifests fail closed', () => {
+  const root = temporaryDirectory()
+  mkdirSync(resolve(root, 'web'))
+  writeFileSync(resolve(root, 'web', 'package.json'), `${'{"padding":"'}${'x'.repeat(70 * 1024)}${'","dependencies":{"react":"1"}}'}`)
+  const oversized = discoverWorkspaceAbilities({ ...profile, codexWorkdir: root })
+  assert.equal(oversized.includes('nodejs'), true)
+  assert.equal(oversized.includes('react'), false)
+
+  writeFileSync(resolve(root, 'web', 'package.json'), '{broken')
+  const malformed = discoverWorkspaceAbilities({ ...profile, codexWorkdir: root })
+  assert.equal(malformed.includes('nodejs'), true)
+  assert.equal(malformed.includes('react'), false)
+})
+
+const exactPackageManifest = (dependency, bytes) => {
+  const prefix = `{"dependencies":{"${dependency}":"1"},"padding":"`
+  const suffix = '"}'
+  return `${prefix}${'x'.repeat(bytes - Buffer.byteLength(prefix) - Buffer.byteLength(suffix))}${suffix}`
+}
+
+test('workspace manifest enforces exact 64 KiB per-file boundary', () => {
+  const root = temporaryDirectory()
+  const packagePath = resolve(root, 'package.json')
+  writeFileSync(packagePath, exactPackageManifest('react', 64 * 1024))
+  assert.equal(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }).includes('react'), true)
+  writeFileSync(packagePath, exactPackageManifest('react', (64 * 1024) + 1))
+  assert.equal(discoverWorkspaceAbilities({ ...profile, codexWorkdir: root }).includes('react'), false)
+})
+
+test('workspace manifest enforces eight-file and 128 KiB aggregate budgets', () => {
+  const fileCapRoot = temporaryDirectory()
+  const containers = ['api', 'backend', 'client', 'frontend', 'packages', 'server', 'service', 'services', 'src']
+  containers.forEach((container, index) => {
+    mkdirSync(resolve(fileCapRoot, container))
+    const dependency = index === 7 ? 'react' : index === 8 ? 'vue' : `ignored-${index}`
+    writeFileSync(resolve(fileCapRoot, container, 'package.json'), JSON.stringify({ dependencies: { [dependency]: '1' } }))
+  })
+  const fileCapAbilities = discoverWorkspaceAbilities({ ...profile, codexWorkdir: fileCapRoot })
+  assert.equal(fileCapAbilities.includes('react'), true)
+  assert.equal(fileCapAbilities.includes('vue'), false)
+
+  const aggregateRoot = temporaryDirectory()
+  for (const [container, dependency] of [['api', 'react'], ['backend', 'vue'], ['client', 'vite']]) {
+    mkdirSync(resolve(aggregateRoot, container))
+    const bytes = container === 'client' ? 1024 : 64 * 1024
+    writeFileSync(resolve(aggregateRoot, container, 'package.json'), exactPackageManifest(dependency, bytes))
+  }
+  const aggregateAbilities = discoverWorkspaceAbilities({ ...profile, codexWorkdir: aggregateRoot })
+  assert.equal(aggregateAbilities.includes('react'), true)
+  assert.equal(aggregateAbilities.includes('vue'), true)
+  assert.equal(aggregateAbilities.includes('vite'), false)
 })
 
 test('ability normalization rejects C1 control characters', () => {
