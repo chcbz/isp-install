@@ -2757,7 +2757,6 @@ const sendLegacy = (type, payload = {}, profile = defaultProfile) => sendRaw({
   senderName: profile.agentName
 }, profile)
 
-const DEFAULT_CLIENT_ABILITIES = Object.freeze(['codex', 'shell', 'code-edit', 'debug', 'deploy-assist'])
 const MAX_DISCOVERED_SKILLS = 96
 const MAX_WORKSPACE_SCAN_ENTRIES = 512
 const MAX_WORKSPACE_MANIFEST_BYTES = 64 * 1024
@@ -2766,11 +2765,27 @@ const MAX_WORKSPACE_MANIFEST_TOTAL_BYTES = 128 * 1024
 const WORKSPACE_PROJECT_CONTAINERS = new Set([
   'api', 'backend', 'client', 'frontend', 'packages', 'server', 'service', 'services', 'src', 'ui', 'web'
 ])
+const BUSINESS_MODULE_ABILITIES = Object.freeze({
+  agent: Object.freeze(['智能体管理', '智能体调度']),
+  chat: Object.freeze(['会话消息', '多智能体协作']),
+  task: Object.freeze(['任务协作']),
+  oauth: Object.freeze(['身份认证']),
+  user: Object.freeze(['用户体系']),
+  kefu: Object.freeze(['客服系统']),
+  point: Object.freeze(['积分体系']),
+  wx: Object.freeze(['微信生态']),
+  sms: Object.freeze(['短信服务']),
+  isp: Object.freeze(['域名与主机管理']),
+  material: Object.freeze(['内容管理']),
+  workflow: Object.freeze(['工作流编排']),
+  dwz: Object.freeze(['短链接服务'])
+})
+const WORKSPACE_BUSINESS_DIRECTORIES = new Set(Object.keys(BUSINESS_MODULE_ABILITIES))
+const CYF_AGGREGATE_SIGNATURE_MODULES = Object.freeze([
+  'agent', 'chat', 'task', 'oauth', 'user', 'kefu', 'point'
+])
 const WORKSPACE_SIGNAL_DIRECTORIES = new Set([
-  '.git', '.github', '__tests__', 'api', 'assets', 'backend', 'client', 'database', 'db', 'deploy',
-  'deployment', 'doc', 'docs', 'documentation', 'frontend', 'infra', 'infrastructure', 'migrations',
-  'ops', 'packages', 'public', 'releases', 'script', 'scripts', 'server', 'service', 'services', 'source',
-  'sources', 'spec', 'specs', 'sql', 'src', 'static', 'terraform', 'test', 'tests', 'tools', 'ui', 'web'
+  '.git', ...WORKSPACE_PROJECT_CONTAINERS, ...WORKSPACE_BUSINESS_DIRECTORIES
 ])
 const WORKSPACE_PROJECT_MANIFESTS = new Set([
   '.gitlab-ci.yml', 'Cargo.toml', 'Dockerfile', 'Jenkinsfile', 'Justfile', 'Makefile', 'Pipfile',
@@ -2781,12 +2796,10 @@ const WORKSPACE_SOURCE_EXTENSIONS = new Set([
   '.c', '.cc', '.cjs', '.cpp', '.css', '.go', '.html', '.java', '.js', '.jsx', '.kt', '.kts',
   '.less', '.mjs', '.php', '.py', '.rb', '.rs', '.sass', '.scss', '.sh', '.sql', '.ts', '.tsx', '.vue'
 ])
-const WORKSPACE_ABILITY_ORDER = Object.freeze([
-  'git', 'source-code', 'workspace-guidance',
-  'frontend', 'backend', 'nodejs', 'javascript', 'typescript', 'vue', 'react', 'vite',
-  'java', 'kotlin', 'gradle', 'maven', 'python', 'go', 'rust', 'c-cpp', 'php', 'ruby',
-  'database', 'docker', 'deployment', 'infrastructure', 'automation', 'ci-cd',
-  'testing', 'documentation', 'assets', 'observability', 'service-operations'
+const WORKSPACE_BUSINESS_ABILITY_ORDER = Object.freeze([
+  '聚义厅协作', '智能体管理', '智能体调度', '会话消息', '多智能体协作', '任务协作',
+  '身份认证', '用户体系', '客服系统', '积分体系', '微信生态', '短信服务',
+  '域名与主机管理', '内容管理', '工作流编排', '短链接服务', '天气查询'
 ])
 const MAX_DISCOVERED_SKILLS_PER_ROOT = 24
 const MAX_SKILL_SCAN_ENTRIES = 2048
@@ -2893,6 +2906,23 @@ const readBoundedPackageJson = (parentDescriptor, name, state) => {
   }
 }
 
+const prefixedBusinessModuleFromDirectoryName = name => {
+  const normalized = String(name || '').toLowerCase()
+  const match = normalized.match(/^jia-(agent|chat|task|oauth|user|kefu|point|wx|sms|isp|material|workflow|dwz)(?:-|$)/)
+  return match?.[1] || ''
+}
+
+const exactBusinessModuleFromDirectoryName = name => {
+  const normalized = String(name || '').toLowerCase()
+  return WORKSPACE_BUSINESS_DIRECTORIES.has(normalized) ? normalized : ''
+}
+
+const isWorkspaceSignalDirectoryName = name => {
+  const normalized = String(name || '').toLowerCase()
+  return WORKSPACE_SIGNAL_DIRECTORIES.has(normalized)
+    || Boolean(prefixedBusinessModuleFromDirectoryName(normalized))
+}
+
 const directoryEntryHasEvidence = (parentDescriptor, name) => {
   let descriptor
   let directory
@@ -2927,81 +2957,9 @@ const regularFileEntryHasContent = (parentDescriptor, name) => {
   }
 }
 
-const inferDirectoryAbilities = (entry, abilities) => {
-  const directory = entry.name.toLowerCase()
-  if (!entry.hasEvidence) return
-  if (directory === '.git') {
-    addWorkspaceAbilities(abilities, 'git', 'source-code')
-    return
-  }
-  if (directory === '.github') addWorkspaceAbilities(abilities, 'ci-cd')
-  if (['src', 'source', 'sources', 'packages'].includes(directory)) addWorkspaceAbilities(abilities, 'source-code')
-  if (['web', 'frontend', 'client', 'ui'].includes(directory)) addWorkspaceAbilities(abilities, 'frontend')
-  if (['api', 'backend', 'server', 'service', 'services'].includes(directory)) addWorkspaceAbilities(abilities, 'backend')
-  if (['test', 'tests', '__tests__', 'spec', 'specs'].includes(directory)) addWorkspaceAbilities(abilities, 'testing')
-  if (['docs', 'doc', 'documentation'].includes(directory)) addWorkspaceAbilities(abilities, 'documentation')
-  if (['ops', 'deploy', 'deployment', 'releases'].includes(directory)) addWorkspaceAbilities(abilities, 'deployment')
-  if (['infra', 'infrastructure', 'terraform'].includes(directory)) addWorkspaceAbilities(abilities, 'infrastructure', 'deployment')
-  if (['scripts', 'script', 'bin', 'tools'].includes(directory)) addWorkspaceAbilities(abilities, 'automation')
-  if (['db', 'database', 'migrations', 'sql'].includes(directory)) addWorkspaceAbilities(abilities, 'database')
-  if (['assets', 'public', 'static'].includes(directory)) addWorkspaceAbilities(abilities, 'assets')
-}
-
-const inferPackageAbilities = (manifest, abilities) => {
-  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return
-  const dependencies = {
-    ...(manifest.dependencies || {}),
-    ...(manifest.devDependencies || {}),
-    ...(manifest.peerDependencies || {})
-  }
-  const names = Object.keys(dependencies).map(name => name.toLowerCase())
-  const hasDependency = (...candidates) => candidates.some(candidate => names.some(name => name === candidate || name.startsWith(`${candidate}/`)))
-  if (hasDependency('vue', '@vue')) addWorkspaceAbilities(abilities, 'frontend', 'vue')
-  if (hasDependency('react', 'react-dom', 'next')) addWorkspaceAbilities(abilities, 'frontend', 'react')
-  if (hasDependency('vite')) addWorkspaceAbilities(abilities, 'frontend', 'vite')
-  if (hasDependency('typescript')) addWorkspaceAbilities(abilities, 'typescript')
-  if (hasDependency('express', '@nestjs', 'koa', 'fastify', 'hapi')) addWorkspaceAbilities(abilities, 'backend')
-  if (hasDependency('vitest', 'jest', 'mocha', 'playwright', '@playwright', 'cypress')) addWorkspaceAbilities(abilities, 'testing')
-}
-
 const inferFileAbilities = (entry, abilities) => {
   const name = entry.name.toLowerCase()
-  const extension = extname(name)
-  if (name === 'agents.md') addWorkspaceAbilities(abilities, 'workspace-guidance', 'documentation')
-  if (name.startsWith('readme')) addWorkspaceAbilities(abilities, 'documentation')
-  if (entry.name === '.git' && entry.fileHasEvidence) addWorkspaceAbilities(abilities, 'git', 'source-code')
-  if (entry.name === 'package.json') {
-    addWorkspaceAbilities(abilities, 'source-code', 'nodejs', 'javascript')
-    inferPackageAbilities(entry.packageManifest, abilities)
-  }
-  if (/^(vite|vue)\.config\./.test(name)) addWorkspaceAbilities(abilities, 'frontend', name.startsWith('vite') ? 'vite' : 'vue')
-  if (name.startsWith('tsconfig') && name.endsWith('.json')) addWorkspaceAbilities(abilities, 'typescript')
-  if (['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradlew'].includes(name)) {
-    addWorkspaceAbilities(abilities, 'source-code', 'backend', 'java', 'gradle')
-  }
-  if (name === 'pom.xml') addWorkspaceAbilities(abilities, 'source-code', 'backend', 'java', 'maven')
-  if (['pyproject.toml', 'requirements.txt', 'setup.py', 'pipfile'].includes(name) || extension === '.py') {
-    addWorkspaceAbilities(abilities, 'source-code', 'python')
-  }
-  if (['go.mod', 'go.sum'].includes(name) || extension === '.go') addWorkspaceAbilities(abilities, 'source-code', 'go')
-  if (name === 'cargo.toml' || extension === '.rs') addWorkspaceAbilities(abilities, 'source-code', 'rust')
-  if (name === 'dockerfile' || name.startsWith('dockerfile.') || /^(docker-)?compose.*\.ya?ml$/.test(name)) {
-    addWorkspaceAbilities(abilities, 'docker', 'deployment')
-  }
-  if (name === 'makefile' || name === 'justfile' || extension === '.sh') addWorkspaceAbilities(abilities, 'automation')
-  if (name === 'jenkinsfile' || name === '.gitlab-ci.yml') addWorkspaceAbilities(abilities, 'ci-cd')
-  if (extension === '.sql') addWorkspaceAbilities(abilities, 'database')
-  if (extension === '.vue') addWorkspaceAbilities(abilities, 'source-code', 'frontend', 'vue')
-  if (['.js', '.mjs', '.cjs'].includes(extension)) addWorkspaceAbilities(abilities, 'source-code', 'javascript', 'nodejs')
-  if (extension === '.jsx') addWorkspaceAbilities(abilities, 'source-code', 'frontend', 'javascript', 'react')
-  if (['.ts', '.tsx'].includes(extension)) addWorkspaceAbilities(abilities, 'source-code', 'javascript', 'typescript')
-  if (extension === '.tsx') addWorkspaceAbilities(abilities, 'frontend', 'react')
-  if (extension === '.java') addWorkspaceAbilities(abilities, 'source-code', 'backend', 'java')
-  if (['.kt', '.kts'].includes(extension)) addWorkspaceAbilities(abilities, 'source-code', 'backend', 'kotlin')
-  if (['.c', '.cc', '.cpp'].includes(extension)) addWorkspaceAbilities(abilities, 'source-code', 'c-cpp')
-  if (extension === '.php') addWorkspaceAbilities(abilities, 'source-code', 'backend', 'php')
-  if (extension === '.rb') addWorkspaceAbilities(abilities, 'source-code', 'backend', 'ruby')
-  if (['.html', '.css', '.scss', '.sass', '.less'].includes(extension)) addWorkspaceAbilities(abilities, 'frontend')
+  if (name === 'weather.py' || name === 'weather.html') addWorkspaceAbilities(abilities, '天气查询')
 }
 
 const openWorkspaceRoot = workdir => {
@@ -3063,7 +3021,7 @@ const readWorkspaceEntries = (descriptor, state) => {
         name: entry.name,
         isDirectory,
         isFile,
-        hasEvidence: isDirectory && WORKSPACE_SIGNAL_DIRECTORIES.has(lowerName)
+        hasEvidence: isDirectory && isWorkspaceSignalDirectoryName(lowerName)
           ? directoryEntryHasEvidence(descriptor, entry.name) : false,
         fileHasEvidence: isFile && entry.name === '.git'
           ? regularFileEntryHasContent(descriptor, entry.name) : false,
@@ -3114,31 +3072,36 @@ export const discoverWorkspaceAbilities = profile => {
     }
     if (![...rootEntries, ...containerEntries].some(isWorkspaceProjectMarker)) return []
 
+    const entries = [...rootEntries, ...containerEntries]
     const abilities = new Set()
-    for (const entry of [...rootEntries, ...containerEntries]) {
-      if (entry.isDirectory) inferDirectoryAbilities(entry, abilities)
+    const exactModules = new Set()
+    const prefixedModules = new Set()
+    for (const entry of entries) {
+      if (entry.isDirectory && entry.hasEvidence) {
+        const prefixedModule = prefixedBusinessModuleFromDirectoryName(entry.name)
+        const exactModule = exactBusinessModuleFromDirectoryName(entry.name)
+        if (prefixedModule) prefixedModules.add(prefixedModule)
+        else if (exactModule) exactModules.add(exactModule)
+      }
       if (entry.isFile) inferFileAbilities(entry, abilities)
     }
-    return WORKSPACE_ABILITY_ORDER.filter(ability => abilities.has(ability))
+    const hasGradleSettings = entries.some(entry => entry.isFile
+      && ['settings.gradle', 'settings.gradle.kts'].includes(entry.name.toLowerCase()))
+    const hasCyfAggregateSignature = hasGradleSettings
+      && CYF_AGGREGATE_SIGNATURE_MODULES.every(module => exactModules.has(module))
+    const modules = new Set(prefixedModules)
+    if (hasCyfAggregateSignature) exactModules.forEach(module => modules.add(module))
+    const rootModule = prefixedBusinessModuleFromDirectoryName(basename(resolve(workdir)))
+    if (rootModule) modules.add(rootModule)
+    modules.forEach(module => addWorkspaceAbilities(abilities, ...BUSINESS_MODULE_ABILITIES[module]))
+    if (modules.has('agent') && modules.has('chat') && modules.has('task')) abilities.add('聚义厅协作')
+    return WORKSPACE_BUSINESS_ABILITY_ORDER.filter(ability => abilities.has(ability))
   } finally {
     try { closeSync(rootDescriptor) } catch {}
   }
 }
 
-export const resolveProfileAbilities = profile => {
-  const workspaceAbilities = normalizeAbilityList(discoverWorkspaceAbilities(profile))
-  const workspaceKeys = new Set(workspaceAbilities.map(ability => ability.toLowerCase()))
-  const primaryAbilities = normalizeAbilityList([
-    ...DEFAULT_CLIENT_ABILITIES,
-    ...(profile?.abilities || []),
-    ...(profile?.skills || []),
-    ...discoverCodexSkills(profile)
-  ]).filter(ability => !workspaceKeys.has(ability.toLowerCase()))
-  return normalizeAbilityList([
-    ...primaryAbilities.slice(0, 128 - workspaceAbilities.length),
-    ...workspaceAbilities
-  ])
-}
+export const resolveProfileAbilities = profile => discoverWorkspaceAbilities(profile)
 
 export const buildAgentPresencePayload = (profile, status, extra = {}) => ({
   status,

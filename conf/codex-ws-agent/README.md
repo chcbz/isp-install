@@ -51,8 +51,8 @@ Each profile can define:
 - `codexApproval`
 - `codexSessionMode`
 - `codexTimeoutMs`
-- `abilities` (optional comma-separated runtime labels)
-- `skills` (optional comma-separated skill names)
+- `abilities` (legacy profile metadata; not reported as runtime scheduling abilities)
+- `skills` (legacy profile metadata; installed/tool skill names are not reported as scheduling abilities)
 - `workspacePolicyId`
 - `workspaceRole`
 - `workspaceNoTaskPolicy`
@@ -96,17 +96,15 @@ agentName=吴用
 personaName=智多星
 codexHome=/home/isp/apps/codex-ws-agent/.codex-wuyong
 codexWorkdir=/home/isp/wsps/cyf
-abilities=planning,review
-skills=cyf-quick-iterate
 enabled=true
 apiKey=cdx_optional_profile_specific_key
 ```
 
 Every `[agent.*]` section inherits fields from `[default]` and can override any of them.
 
-At registration and every presence heartbeat, the client rebuilds the reported ability snapshot from the built-in Codex capabilities, profile `abilities`/`skills`, installed `SKILL.md` manifests, and safe project signals from the profile `codexWorkdir`. This lets the server refresh `agent_runtime.abilities` without changing the bound persona. Ability labels are scheduling hints, not authorization.
+At registration and every presence heartbeat, the client rebuilds `agent_runtime.abilities` solely from the current profile `codexWorkdir`. Profile `abilities`/`skills`, generic execution/tool labels such as `codex`, `shell`, `debug`, `imagegen`, Vue, Java, and installed `SKILL.md` names are deliberately excluded, so Song Jiang routes work by current project-business capability rather than stale persona metadata or tools that every client may have. Ability labels remain scheduling hints, not authorization.
 
-Workspace discovery recognizes an allowlisted set of project markers and technology signals such as `package.json`, Gradle/Maven/Python/Go/Rust manifests, source-file extensions, Docker/CI files, and common `web`/`api`/`tests`/`docs` module directories. It scans only the workdir root plus one level inside recognized project containers, caps each snapshot at 512 entries, reads at most eight canonical `package.json` manifests with a 64 KiB per-file and 128 KiB aggregate budget without following symlinks, and reports only canonical ability labels—not paths, filenames, dependency versions, or file contents. Broad home/host directories without a project manifest or source marker produce no inferred abilities.
+Workspace discovery scans only the workdir root plus one level inside recognized project containers, with a shared 512-entry cap and descriptor-scoped no-follow access. CYF aggregate modules require a Gradle settings file plus the project signature modules `agent/chat/task/oauth/user/kefu/point`; module-local workspaces require an allowlisted `jia-*` module name. It reports a fixed Chinese allowlist including `聚义厅协作`, `智能体管理`, `智能体调度`, `会话消息`, `多智能体协作`, `任务协作`, `身份认证`, `用户体系`, `客服系统`, `积分体系`, `微信生态`, `短信服务`, `域名与主机管理`, `内容管理`, `工作流编排`, `短链接服务`, and `天气查询`. Unknown directory names, paths, dependency versions, file contents, and technology labels are never reported. Broad home/host directories without direct project evidence produce no inferred abilities.
 
 Set `enabled=false` on an `[agent.*]` section to take that profile out of service without deleting it. Hot reload closes the profile connection and skips registration; changing it back to `enabled=true` reconnects it. `active=false` and `status=disabled|inactive|unavailable` are also treated as disabled.
 
