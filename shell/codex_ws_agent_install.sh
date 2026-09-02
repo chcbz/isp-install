@@ -54,27 +54,6 @@ restart_agent_service() {
     systemctl --no-pager --full status "$APP_NAME.service"
 }
 
-if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ]; then
-    NODE_BIN="${CODEX_WS_AGENT_TEST_NODE_BIN:-$(command -v node || true)}"
-    if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
-        __red "测试模式未提供可执行 Node.js"
-        exit 1
-    fi
-    run_validation_gate || exit 1
-    if [ "${START_CODEX_WS_AGENT:-n}" = "y" ]; then
-        restart_agent_service
-    fi
-    exit 0
-fi
-
-check_root
-detect_os
-
-echo "=========================================="
-echo "Codex WebSocket Agent 安装脚本"
-echo "=========================================="
-show_os_info
-
 find_node_bin() {
     if [ -x "$ISP_APPS/nodejs/bin/node" ]; then
         echo "$ISP_APPS/nodejs/bin/node"
@@ -82,6 +61,17 @@ find_node_bin() {
         echo "$ISP_APPS/node/bin/node"
     elif command -v node >/dev/null 2>&1; then
         command -v node
+    fi
+}
+
+find_npm_bin() {
+    local node_bin="$1"
+    local adjacent
+    adjacent="$(dirname "$node_bin")/npm"
+    if [ -x "$adjacent" ]; then
+        echo "$adjacent"
+    elif command -v npm >/dev/null 2>&1; then
+        command -v npm
     fi
 }
 
@@ -102,6 +92,69 @@ copy_if_missing() {
     return 1
 }
 
+deploy_application_files() {
+    install -d -m 0755 "$APP_HOME" "$APP_HOME/logs"
+    install -d -m 0700 "$APP_HOME/data" "$APP_HOME/data/inbox"
+    install -m 0644 "$CONF_SRC/agent-client.mjs" "$APP_HOME/agent-client.mjs"
+    install -m 0644 "$CONF_SRC/skill-install-manager.mjs" "$APP_HOME/skill-install-manager.mjs"
+    install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$APP_HOME/workspace-manager.mjs"
+    install -m 0644 "$CONF_SRC/install-policy-check.mjs" "$APP_HOME/install-policy-check.mjs"
+    install -m 0644 "$CONF_SRC/package.json" "$APP_HOME/package.json"
+    install -m 0644 "$CONF_SRC/package-lock.json" "$APP_HOME/package-lock.json"
+    install -m 0644 "$CONF_SRC/README.md" "$APP_HOME/README.md"
+    install -m 0644 "$CONF_SRC/env.example" "$APP_HOME/.env.example"
+    install -m 0640 "$CONF_SRC/workspace-policies.example.json" "$APP_HOME/workspace-policies.example.json"
+    if [ -f "$APP_HOME/workspace-policies.json" ]; then
+        chmod 0600 "$APP_HOME/workspace-policies.json"
+    fi
+
+    if copy_if_missing "$CONF_SRC/env.example" "$APP_HOME/.env"; then
+        __yellow "已生成默认 .env，请编辑 OPENCLAW_API_KEY 和 WS_URL: $APP_HOME/.env"
+    else
+        __yellow "保留已有 .env: $APP_HOME/.env"
+    fi
+
+    if copy_if_missing "$CONF_SRC/codex-profiles.conf" "$APP_HOME/codex-profiles.conf"; then
+        __yellow "已生成默认 profile 配置: $APP_HOME/codex-profiles.conf"
+    else
+        __yellow "保留已有 profile 配置: $APP_HOME/codex-profiles.conf"
+    fi
+}
+
+install_runtime_dependencies() {
+    if [ -z "${NPM_BIN:-}" ] || [ ! -x "$NPM_BIN" ]; then
+        __red "未找到 npm，无法按 package-lock.json 安装运行时依赖。"
+        return 1
+    fi
+    (cd "$APP_HOME" && PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" ci --omit=dev --ignore-scripts --no-audit --no-fund)
+}
+
+if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ]; then
+    NODE_BIN="${CODEX_WS_AGENT_TEST_NODE_BIN:-$(command -v node || true)}"
+    NPM_BIN="${CODEX_WS_AGENT_TEST_NPM_BIN:-$(find_npm_bin "$NODE_BIN" || true)}"
+    if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+        __red "测试模式未提供可执行 Node.js"
+        exit 1
+    fi
+    if [ "${CODEX_WS_AGENT_INSTALL_TEST_COLLATE:-0}" = "1" ]; then
+        deploy_application_files
+        install_runtime_dependencies || exit 1
+    fi
+    run_validation_gate || exit 1
+    if [ "${START_CODEX_WS_AGENT:-n}" = "y" ]; then
+        restart_agent_service
+    fi
+    exit 0
+fi
+
+check_root
+detect_os
+
+echo "=========================================="
+echo "Codex WebSocket Agent 安装脚本"
+echo "=========================================="
+show_os_info
+
 if [ ! -d "$CONF_SRC" ]; then
     __red "配置目录不存在: $CONF_SRC"
     exit 1
@@ -119,53 +172,40 @@ if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 20 ]; then
     exit 1
 fi
 
+NPM_BIN="$(find_npm_bin "$NODE_BIN" || true)"
+if [ -z "$NPM_BIN" ]; then
+    __red "未找到 npm，无法按 package-lock.json 安装运行时依赖。"
+    exit 1
+fi
+
 echo ""
-echo "[1/6] 创建目录..."
+echo "[1/7] 创建目录..."
 create_isp_dirs
-install -d -m 0755 "$APP_HOME" "$APP_HOME/logs"
-install -d -m 0700 "$APP_HOME/data" "$APP_HOME/data/inbox"
 
 echo ""
-echo "[2/6] 部署应用文件..."
-install -m 0644 "$CONF_SRC/agent-client.mjs" "$APP_HOME/agent-client.mjs"
-install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$APP_HOME/workspace-manager.mjs"
-install -m 0644 "$CONF_SRC/install-policy-check.mjs" "$APP_HOME/install-policy-check.mjs"
-install -m 0644 "$CONF_SRC/package.json" "$APP_HOME/package.json"
-install -m 0644 "$CONF_SRC/README.md" "$APP_HOME/README.md"
-install -m 0644 "$CONF_SRC/env.example" "$APP_HOME/.env.example"
-install -m 0640 "$CONF_SRC/workspace-policies.example.json" "$APP_HOME/workspace-policies.example.json"
-if [ -f "$APP_HOME/workspace-policies.json" ]; then
-    chmod 0600 "$APP_HOME/workspace-policies.json"
-fi
-
-if copy_if_missing "$CONF_SRC/env.example" "$APP_HOME/.env"; then
-    __yellow "已生成默认 .env，请编辑 OPENCLAW_API_KEY 和 WS_URL: $APP_HOME/.env"
-else
-    __yellow "保留已有 .env: $APP_HOME/.env"
-fi
-
-if copy_if_missing "$CONF_SRC/codex-profiles.conf" "$APP_HOME/codex-profiles.conf"; then
-    __yellow "已生成默认 profile 配置: $APP_HOME/codex-profiles.conf"
-else
-    __yellow "保留已有 profile 配置: $APP_HOME/codex-profiles.conf"
-fi
+echo "[2/7] 部署应用文件..."
+deploy_application_files
 
 echo ""
-echo "[3/6] 安装管理脚本..."
+echo "[3/7] 按锁文件安装生产依赖..."
+install_runtime_dependencies
+
+echo ""
+echo "[4/7] 安装管理脚本..."
 install -m 0755 "$BIN_SRC" "$BIN_DST"
 
 echo ""
-echo "[4/6] 安装 systemd 服务..."
+echo "[5/7] 安装 systemd 服务..."
 install -m 0644 "$SERVICE_SRC" "$SERVICE_DST"
 systemctl daemon-reload
 systemctl enable "$APP_NAME.service"
 
 echo ""
-echo "[5/6] 验证配置..."
+echo "[6/7] 验证配置..."
 run_validation_gate || exit 1
 
 echo ""
-echo "[6/6] 检查 A07 workspace policy..."
+echo "[7/7] 检查 A07 workspace policy..."
 if [ -f "$APP_HOME/workspace-policies.json" ]; then
     __green "检测到受控 workspace policy: $APP_HOME/workspace-policies.json"
 else

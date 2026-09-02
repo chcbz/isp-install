@@ -1330,3 +1330,37 @@ test('installer restarts only after policy and agent validation both succeed', (
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.equal(readFileSync(result.restartMarker, 'utf8'), 'restart requested\n')
 })
+
+
+test('installer collates the managed installer and lockfile before deterministic production dependency install', () => {
+  const root = temporaryDirectory()
+  const appHome = resolve(root, 'app')
+  const binDir = resolve(root, 'bin')
+  const npmRecord = resolve(root, 'npm-record.txt')
+  const sourceNodeModules = fileURLToPath(new URL('../node_modules', import.meta.url))
+  const nodeWrapper = resolve(binDir, 'node-wrapper')
+  const npmWrapper = resolve(binDir, 'npm-wrapper')
+  mkdirSync(appHome, { recursive: true })
+  mkdirSync(binDir)
+  writeFileSync(nodeWrapper, `#!/bin/bash\nif [[ "$1" == */agent-client.mjs && "$2" == --validate ]]; then exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
+  writeFileSync(npmWrapper, `#!/bin/bash\nset -e\ntest -f skill-install-manager.mjs\ntest -f package-lock.json\ngrep -q '"yauzl"' package-lock.json\nprintf '%s\\n%s\\n' "$PWD" "$*" > ${JSON.stringify(npmRecord)}\ncp -a ${JSON.stringify(sourceNodeModules)} node_modules\n`)
+  chmodSync(nodeWrapper, 0o755)
+  chmodSync(npmWrapper, 0o755)
+  const result = spawnSync('bash', [installerScript], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
+      CODEX_WS_AGENT_INSTALL_TEST_COLLATE: '1',
+      CODEX_WS_AGENT_TEST_APP_HOME: appHome,
+      CODEX_WS_AGENT_TEST_NODE_BIN: nodeWrapper,
+      CODEX_WS_AGENT_TEST_NPM_BIN: npmWrapper,
+      START_CODEX_WS_AGENT: 'n'
+    }
+  })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  for (const file of ['agent-client.mjs', 'skill-install-manager.mjs', 'workspace-manager.mjs', 'package.json', 'package-lock.json']) {
+    assert.equal(existsSync(resolve(appHome, file)), true, file)
+  }
+  assert.equal(readFileSync(npmRecord, 'utf8'), `${appHome}\nci --omit=dev --ignore-scripts --no-audit --no-fund\n`)
+})

@@ -24,11 +24,11 @@ import {
   watchFile,
   writeFileSync
 } from 'node:fs'
-import { basename, dirname, extname, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
-import { SkillInstallManager, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
+import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -57,6 +57,7 @@ export const MESSAGE_TYPES = Object.freeze({
   WORK_PROGRESS: 'work.progress',
   WORK_HEARTBEAT: 'work.heartbeat',
   WORK_RESULT: 'work.result',
+  WORK_RESULT_RECEIPT: WORK_RESULT_RECEIPT_TYPE,
   HELP_REQUEST: 'help.request',
   ARTIFACT_PUBLISH: 'artifact.publish',
   TASK_EVENT: 'task.event'
@@ -71,6 +72,7 @@ const MESSAGE_ID_REQUIRED_TYPES = new Set([
   MESSAGE_TYPES.WORK_PROGRESS,
   MESSAGE_TYPES.WORK_HEARTBEAT,
   MESSAGE_TYPES.WORK_RESULT,
+  MESSAGE_TYPES.WORK_RESULT_RECEIPT,
   MESSAGE_TYPES.HELP_REQUEST,
   MESSAGE_TYPES.ARTIFACT_PUBLISH,
   MESSAGE_TYPES.TASK_EVENT
@@ -1481,6 +1483,32 @@ export class DurableDedupeLedger {
     return entry
   }
 
+  markReconciledCompleted(commandId, outcome) {
+    const existing = this.getEntry(commandId)
+    if (!existing) throw new Error(`dedupe ledger entry missing for ${commandId}`)
+    if (existing.status === ACK_STATUS.SUCCEEDED) return existing
+    if ([ACK_STATUS.FAILED, ACK_STATUS.REJECTED].includes(existing.status)) {
+      throw new Error(`cannot reconcile committed command from terminal ledger status ${existing.status}`)
+    }
+    if (![ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, LEDGER_STATUS.RECOVERY_REQUIRED].includes(existing.status)) {
+      throw new Error(`cannot reconcile committed command from ledger status ${existing.status}`)
+    }
+    const entry = {
+      ...existing,
+      status: ACK_STATUS.SUCCEEDED,
+      completedAt: this.now(),
+      recoveryRequiredAt: null,
+      rejectReason: null,
+      outcome: {
+        status: 'completed',
+        exitCode: outcome?.exitCode ?? 0,
+        errorMessage: outcome?.errorMessage || ''
+      }
+    }
+    this._writeEntry(commandId, entry)
+    return entry
+  }
+
   markRejected(commandId, reason) {
     const existing = this.getEntry(commandId)
     if (!existing) return null
@@ -2042,12 +2070,18 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = P
 
 
 export class AgentMessageProcessor {
-  constructor({ profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onReject = () => {}, sendChatBusy = () => {}, ledger = null, ackOutbox = null, sendFn = null }) {
+  constructor({
+    profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
+    recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
+    ledger = null, ackOutbox = null, sendFn = null
+  }) {
     this.profile = profile
     this.inbox = inbox
     this.runCommand = runCommand
     this.runChat = runChat
     this.onTaskEvent = onTaskEvent
+    this.onWorkResultReceipt = onWorkResultReceipt
+    this.recoverCommandOutcome = recoverCommandOutcome
     this.onReject = onReject
     this.sendChatBusy = sendChatBusy
     this.ledger = ledger
@@ -2132,6 +2166,37 @@ export class AgentMessageProcessor {
           'COMMAND_STATE_CONFLICT',
           `Multiple durable inbox records exist for commandId ${commandId}; manual reconciliation is required`
         )
+      }
+
+      const reconciledItem = records[0] || null
+      const committedOutcome = reconciledItem && reconciledItem.record.state !== 'completed'
+        ? this.recoverCommandOutcome(reconciledItem.normalized)
+        : null
+      if (committedOutcome) {
+        const fingerprint = CommandFingerprint.compute(reconciledItem.normalized)
+        let reconciledEntry = entry
+        if (!reconciledEntry) {
+          const check = this.ledger.checkOrRecord(
+            commandId,
+            fingerprint,
+            { ...this._commandMeta(reconciledItem.normalized), expiresAt: null }
+          )
+          if (check.action !== 'accept') throw new Error(`failed to reconstruct committed ledger for ${commandId}`)
+          this.ledger.recordQueueSequence(commandId, reconciledItem.record.queueSequence)
+          reconciledEntry = check.entry
+        }
+        if (reconciledEntry.fingerprint !== fingerprint) {
+          throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Committed installer evidence conflicts with ledger fingerprint for ${commandId}`)
+        }
+        const completed = this.inbox.markCompleted(reconciledItem, committedOutcome)
+        const terminal = this.ledger.markReconciledCompleted(commandId, committedOutcome)
+        this._emitAck(ACK_STATUS.SUCCEEDED, {
+          ...this._commandMeta(reconciledItem.normalized),
+          commandId,
+          outcome: terminal.outcome
+        })
+        this.inbox.settleCompletedFile(reconciledItem.path, reconciledItem.fileName, completed)
+        continue
       }
 
       if (!entry && records.length) {
@@ -2453,6 +2518,14 @@ export class AgentMessageProcessor {
       case MESSAGE_TYPES.TASK_EVENT:
         await this.onTaskEvent(message)
         return { kind: 'task-event' }
+      case MESSAGE_TYPES.WORK_RESULT_RECEIPT:
+        try {
+          return { kind: 'work-result-receipt', receipt: await this.onWorkResultReceipt(message) }
+        } catch (error) {
+          const protocolError = new AgentProtocolError('WORK_RESULT_RECEIPT_INVALID', error.message)
+          this.onReject(protocolError, message.rawPayload)
+          return { kind: 'rejected', error: protocolError }
+        }
       default:
         return { kind: 'ignored', messageType: message.messageType }
     }
@@ -2549,6 +2622,29 @@ export class AgentMessageProcessor {
         outcome = await this.runCommand(validated.normalized, validated.record)
       } catch (error) {
         outcome = { status: 'failed', errorMessage: error.message }
+      }
+      if (outcome?.status === 'recovery_required') {
+        const reason = outcome.errorMessage || 'COMMITTED_OUTCOME_RECONCILIATION_REQUIRED'
+        try {
+          const recovered = this.inbox.markRecoveryRequired(item, reason)
+          const fingerprint = CommandFingerprint.compute(validated.normalized)
+          const marked = this.ledger?.markRecoveryRequired(
+            validated.normalized.commandId,
+            fingerprint,
+            this._commandMeta(validated.normalized),
+            reason
+          )
+          if (marked?.conflict) throw new Error(`recovery fingerprint conflict for ${validated.normalized.commandId}`)
+          this._failClosed(new AgentProtocolError('COMMAND_COMMITTED_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
+        } catch (error) {
+          this._failClosed(new AgentProtocolError(
+            'COMMAND_COMPLETION_PERSIST_ERROR',
+            `Committed command requires reconciliation and could not persist non-terminal recovery state: ${error.message}`
+          ), item.record.rawPayload)
+        } finally {
+          this.commandActive = false
+        }
+        return
       }
       const durableOutcome = {
         status: outcome?.status === 'failed' ? 'failed' : 'completed',
@@ -3518,14 +3614,46 @@ export const runManagedCommand = ({ profile, message, skillInstallManager, works
     : runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
 )
 
-const ensureProfiles = (profiles, defaultProfileId, workspacePolicies = new Map(), exitOnError = true) => {
+const canonicalizeConfiguredPath = configuredPath => {
+  let existingPrefix = resolve(configuredPath)
+  const missingSegments = []
+  while (!existsSync(existingPrefix)) {
+    const parent = dirname(existingPrefix)
+    if (parent === existingPrefix) break
+    missingSegments.unshift(basename(existingPrefix))
+    existingPrefix = parent
+  }
+  const canonicalPrefix = existsSync(existingPrefix) ? realpathSync(existingPrefix) : existingPrefix
+  return resolve(canonicalPrefix, ...missingSegments)
+}
+
+export const ensureProfiles = (profiles, defaultProfileId, workspacePolicies = new Map(), exitOnError = true) => {
   const profileIds = new Set()
   const agentIds = new Set()
+  const codexHomes = []
   for (const profile of profiles) {
     if (profileIds.has(profile.profileId)) configError(`duplicate CODEX_PROFILES profileId: ${profile.profileId}`, exitOnError)
     if (agentIds.has(profile.agentId)) configError(`duplicate CODEX_PROFILES agentId: ${profile.agentId}`, exitOnError)
     profileIds.add(profile.profileId)
     agentIds.add(profile.agentId)
+    if (profiles.length > 1 && (!profile.codexHome || !String(profile.codexHome).trim())) {
+      configError(`codexHome must be explicit and isolated for profile ${profile.profileId}`, exitOnError)
+    }
+    if (profile.codexHome && String(profile.codexHome).trim()) {
+      const canonicalHome = canonicalizeConfiguredPath(profile.codexHome)
+      for (const existing of codexHomes) {
+        const leftToRight = relative(existing.path, canonicalHome)
+        const rightToLeft = relative(canonicalHome, existing.path)
+        const overlaps = leftToRight === ''
+          || (leftToRight !== '..' && !leftToRight.startsWith(`..${sep}`) && !isAbsolute(leftToRight))
+          || (rightToLeft !== '..' && !rightToLeft.startsWith(`..${sep}`) && !isAbsolute(rightToLeft))
+        if (overlaps) {
+          configError(`codexHome paths must not be equal or overlap: ${existing.profileId}=${existing.path}, ${profile.profileId}=${canonicalHome}`, exitOnError)
+        }
+      }
+      codexHomes.push({ profileId: profile.profileId, path: canonicalHome })
+      profile.codexHome = canonicalHome
+    }
     const resolvedCodexBin = resolveExecutable(profile.codexBin)
     if (!resolvedCodexBin) configError(`codex binary not found or not executable for profile ${profile.profileId}: ${profile.codexBin}`, exitOnError)
     profile.codexBin = resolvedCodexBin
@@ -3664,6 +3792,8 @@ const createProfileState = profile => {
       taskEvents.set(key, { ...message, observedAt: Date.now() })
       console.log(`task event observed | profile=${profile.profileId} | event=${message.eventType || ''} | taskId=${message.taskId || ''}`)
     },
+    onWorkResultReceipt: message => skillInstallManager.acknowledgeResultReceipt(message),
+    recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message),
     onReject: (error, raw) => {
       console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
       sendProtocol(MESSAGE_TYPES.PROTOCOL_ERROR, {
@@ -3755,7 +3885,7 @@ const connectProfile = profile => {
     state.reconnectStartedAt = 0
     registerAgent(profile)
     sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-    const resultReplayed = state.skillInstallManager.replayResults()
+    const resultReplayed = state.skillInstallManager.replayResults(undefined, { replayToken: `connection:${randomUUID()}` })
     if (resultReplayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${resultReplayed}`)
     const replayed = state.processor.replayAcks()
     if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)

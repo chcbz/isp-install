@@ -12,12 +12,11 @@ import {
   realpathSync,
   renameSync,
   rmSync,
-  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import yauzl from 'yauzl'
 
 export const SKILL_INSTALL_FAILURE = Object.freeze({
@@ -33,6 +32,8 @@ export const SKILL_INSTALL_FAILURE = Object.freeze({
 })
 
 const RESULT_TYPE = 'SKILL_INSTALL_RESULT'
+export const WORK_RESULT_RECEIPT_TYPE = 'work.result.receipt'
+const RESULT_RECEIPT_STATUS = 'ACCEPTED'
 const COMMAND_TYPE = 'SKILL_INSTALL'
 const DOWNLOAD_PREFIX = '/internal/agent/skill-installations/'
 const MARKER_NAME = '.cyf-installation.json'
@@ -40,6 +41,8 @@ const DEFAULT_MAX_PACKAGE_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_EXTRACTED_BYTES = 64 * 1024 * 1024
 const DEFAULT_MAX_ENTRY_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_ENTRIES = 256
+const DEFAULT_MAX_REPLAY_BATCH = 32
+const DEFAULT_UNOWNED_LOCK_STALE_MS = 30_000
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const SAFE_SKILL_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/
 const SAFE_SKILL_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
@@ -47,6 +50,46 @@ const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+const readBootId = () => {
+  try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() } catch { return '' }
+}
+
+const readProcessStartToken = pid => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return ''
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const closing = stat.lastIndexOf(')')
+    if (closing < 0) return ''
+    const fields = stat.slice(closing + 2).trim().split(/\s+/)
+    return fields[19] || ''
+  } catch {
+    return ''
+  }
+}
+
+const currentProcessIdentity = () => {
+  const processStartToken = readProcessStartToken(process.pid)
+  const bootId = readBootId()
+  if (!processStartToken || !bootId) {
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'cannot establish PID/start identity for installer lock ownership')
+  }
+  return { pid: process.pid, processStartToken, bootId }
+}
+
+const lockOwnerIsAlive = owner => (
+  isObject(owner)
+  && Number.isSafeInteger(owner.pid)
+  && owner.pid > 0
+  && typeof owner.processStartToken === 'string'
+  && owner.processStartToken.length > 0
+  && typeof owner.bootId === 'string'
+  && owner.bootId.length > 0
+  && readBootId() === owner.bootId
+  && readProcessStartToken(owner.pid) === owner.processStartToken
+)
+
+const collisionKey = path => path.normalize('NFC').toUpperCase().toLowerCase().normalize('NFC')
 
 export class SkillInstallError extends Error {
   constructor(code, message, options = {}) {
@@ -219,13 +262,23 @@ export const validateSkillInstallCommand = (message, profile, maxPackageBytes = 
   return Object.freeze(command)
 }
 
-const buildDownloadUrl = (wsUrl, downloadPath) => {
+const isExplicitLoopbackHost = hostname => {
+  const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase()
+  if (host === 'localhost' || host === '::1') return true
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  return Boolean(match && match.slice(1).every(part => Number(part) <= 255) && Number(match[1]) === 127)
+}
+
+export const buildSkillDownloadUrl = (wsUrl, downloadPath) => {
   let endpoint
   try { endpoint = new URL(wsUrl) } catch {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'configured WS_URL is not a valid URL')
   }
   if (!['ws:', 'wss:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'configured WS_URL cannot define a trusted API origin')
+  }
+  if (endpoint.protocol === 'ws:' && !isExplicitLoopbackHost(endpoint.hostname)) {
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'API-key package download requires TLS except for explicit loopback development endpoints')
   }
   endpoint.protocol = endpoint.protocol === 'wss:' ? 'https:' : 'http:'
   endpoint.pathname = '/'
@@ -384,10 +437,12 @@ const parseSkillIdentity = text => {
 }
 
 const validateNoFilePrefixConflict = entries => {
-  const files = [...entries.entries()].filter(([, kind]) => kind === 'file').map(([path]) => path)
-  for (const path of files) {
-    for (const other of files) {
-      if (path !== other && other.startsWith(`${path}/`)) {
+  const paths = [...entries.entries()]
+  for (const [path, kind] of paths) {
+    if (kind !== 'file') continue
+    const portablePath = collisionKey(path)
+    for (const [other] of paths) {
+      if (path !== other && collisionKey(other).startsWith(`${portablePath}/`)) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive file paths are not prefix-safe')
       }
     }
@@ -402,6 +457,7 @@ const extractArchive = async (buffer, stagingPath, command, limits) => {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, `package is not a valid ZIP archive: ${error.message}`)
   }
   const entries = new Map()
+  const portableEntries = new Map()
   let entryCount = 0
   let extractedBytes = 0
   let skillManifestBytes = null
@@ -433,6 +489,16 @@ const extractArchive = async (buffer, stagingPath, command, limits) => {
           if (entries.has(normalized)) {
             throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, `duplicate archive entry: ${normalized}`)
           }
+          const segments = normalized.split('/')
+          for (let depth = 1; depth <= segments.length; depth += 1) {
+            const portablePath = segments.slice(0, depth).join('/')
+            const portableKey = collisionKey(portablePath)
+            const portableConflict = portableEntries.get(portableKey)
+            if (portableConflict && portableConflict !== portablePath) {
+              throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive paths collide after Unicode normalization or case folding')
+            }
+            portableEntries.set(portableKey, portablePath)
+          }
           const type = archiveType(entry)
           if (type === 0o120000) {
             throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'symbolic links are not allowed in skill archives')
@@ -443,6 +509,7 @@ const extractArchive = async (buffer, stagingPath, command, limits) => {
           if (directory) {
             if (type === 0o100000) throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive directory has regular-file metadata')
             entries.set(normalized, 'directory')
+            validateNoFilePrefixConflict(entries)
             createDirectoryTree(stagingPath, normalized)
             zipFile.readEntry()
             return
@@ -563,7 +630,11 @@ export class SkillInstallManager {
     sendResultFn = null,
     now = () => Date.now(),
     createId = () => randomUUID(),
-    runtimeInstanceId = ''
+    runtimeInstanceId = '',
+    processIdentityFn = currentProcessIdentity,
+    lockOwnerAliveFn = lockOwnerIsAlive,
+    unownedLockStaleMs = DEFAULT_UNOWNED_LOCK_STALE_MS,
+    maxReplayBatch = DEFAULT_MAX_REPLAY_BATCH
   }) {
     if (!profile?.agentId || !profile?.profileId) throw new Error('profileId and agentId are required for skill installation')
     this.profile = profile
@@ -580,23 +651,33 @@ export class SkillInstallManager {
     this.now = now
     this.createId = createId
     this.runtimeInstanceId = runtimeInstanceId
+    this.processIdentityFn = processIdentityFn
+    this.lockOwnerAliveFn = lockOwnerAliveFn
+    this.unownedLockStaleMs = unownedLockStaleMs
+    this.maxReplayBatch = maxReplayBatch
     this.stagingDir = resolve(this.stateRoot, 'staging')
     this.registryDir = resolve(this.stateRoot, 'installed-registry')
     this.resultsPendingDir = resolve(this.stateRoot, 'work-results', 'pending')
+    this.resultsAcknowledgedDir = resolve(this.stateRoot, 'work-results', 'acknowledged')
     this.resultsSentDir = resolve(this.stateRoot, 'work-results', 'sent')
     this.resultsQuarantineDir = resolve(this.stateRoot, 'work-results', 'quarantine')
+    this.staleLocksDir = resolve(this.stateRoot, 'stale-locks')
     this.lockPath = resolve(this.stateRoot, 'installer.lock')
     this.lockOwnerPath = resolve(this.lockPath, 'owner.json')
+    this.lockOwner = null
     this.healthError = null
   }
 
   initialize() {
     for (const directory of [
       this.stateRoot, this.stagingDir, this.registryDir,
-      this.resultsPendingDir, this.resultsSentDir, this.resultsQuarantineDir
+      this.resultsPendingDir, this.resultsAcknowledgedDir, this.resultsSentDir,
+      this.resultsQuarantineDir, this.staleLocksDir
     ]) ensurePrivateDirectory(directory)
-    this._scanResultRecords()
-    this._withLockSync('initialize', () => this._recoverRegistry())
+    this._withLockSync('initialize', () => {
+      this._scanResultRecords()
+      this._recoverRegistry()
+    })
     return { healthy: !this.healthError, errorCode: this.healthError?.code || '' }
   }
 
@@ -621,8 +702,23 @@ export class SkillInstallManager {
     if (expectedInstallationId && record.installationId !== expectedInstallationId) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry identity mismatch')
     }
-    if (record.agentId !== this.profile.agentId || record.command.installationId !== record.installationId) {
+    if (record.agentId !== this.profile.agentId || record.profileId !== this.profile.profileId
+        || record.command.installationId !== record.installationId) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry profile mismatch')
+    }
+    const skillsRoot = verifyControlledCodexHome(this.profile.codexHome)
+    const expectedTargetPath = resolve(skillsRoot, record.command.skillKey)
+    if (record.targetPath !== expectedTargetPath || dirname(record.stagingPath) !== this.stagingDir
+        || !basename(record.stagingPath).startsWith(`${record.installationId}-`)) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry path binding is invalid')
+    }
+    if (record.commandFingerprint !== record.command.fingerprint
+        || record.resultEnvelope.messageType !== 'work.result'
+        || record.resultEnvelope.resultType !== RESULT_TYPE
+        || record.resultEnvelope.status !== 'SUCCEEDED'
+        || record.resultEnvelope.commandId !== record.command.commandId
+        || record.resultEnvelope.installationId !== record.installationId) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry command/result binding is invalid')
     }
     return record
   }
@@ -650,28 +746,95 @@ export class SkillInstallManager {
   }
 
   _validateResultRecord(record, expectedRecordId = '') {
-    if (!isObject(record) || record.formatVersion !== 1 || typeof record.recordId !== 'string'
+    if (!isObject(record) || ![1, 2].includes(record.formatVersion) || typeof record.recordId !== 'string'
         || !isObject(record.envelope) || record.envelope.messageType !== 'work.result'
         || record.envelope.resultType !== RESULT_TYPE || record.envelope.sourceAgentId !== this.profile.agentId) {
       throw new Error('invalid skill work.result outbox record')
     }
     if (expectedRecordId && record.recordId !== expectedRecordId) throw new Error('skill result record/file mismatch')
+    if (record.profileId !== this.profile.profileId || record.agentId !== this.profile.agentId) {
+      throw new Error('skill result record profile mismatch')
+    }
+    if (record.sendAttempts !== undefined && (!Number.isSafeInteger(record.sendAttempts) || record.sendAttempts < 0)) {
+      throw new Error('invalid skill result sendAttempts')
+    }
     return record
   }
 
+  _sameResultRecord(left, right) {
+    return left.recordId === right.recordId && JSON.stringify(left.envelope) === JSON.stringify(right.envelope)
+  }
+
+  _validateAcknowledgedResultRecord(record, expectedRecordId = '') {
+    const validated = this._validateResultRecord(record, expectedRecordId)
+    if (!Number.isSafeInteger(validated.acknowledgedAt) || !isObject(validated.receipt)) {
+      throw new Error('acknowledged skill result requires durable application receipt evidence')
+    }
+    const receipt = this._receiptFields(validated.receipt)
+    if (!this._receiptMatchesEnvelope(receipt, validated.envelope)) {
+      throw new Error('acknowledged skill result receipt does not match its envelope')
+    }
+    return validated
+  }
+
+  _quarantineResult(sourcePath, recordId, error) {
+    const targetPath = resolve(this.resultsQuarantineDir, `${recordId}-${this.createId()}.json`)
+    durableRename(sourcePath, targetPath, 0o600)
+    atomicWriteText(`${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
+    this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'skill work.result outbox requires reconciliation')
+  }
+
   _scanResultRecords() {
-    for (const directory of [this.resultsPendingDir, this.resultsSentDir]) {
+    for (const directory of [this.resultsPendingDir, this.resultsAcknowledgedDir]) {
       for (const fileName of readdirSync(directory).filter(name => name.endsWith('.json'))) {
         const sourcePath = resolve(directory, fileName)
         try {
-          this._validateResultRecord(readJson(sourcePath), fileName.slice(0, -5))
+          const validator = directory === this.resultsAcknowledgedDir
+            ? this._validateAcknowledgedResultRecord.bind(this)
+            : this._validateResultRecord.bind(this)
+          validator(readJson(sourcePath), fileName.slice(0, -5))
           chmodSync(sourcePath, 0o600)
         } catch (error) {
-          const targetPath = resolve(this.resultsQuarantineDir, `${fileName.slice(0, -5)}-${this.createId()}.json`)
-          durableRename(sourcePath, targetPath, 0o600)
-          atomicWriteText(`${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
-          this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'skill work.result outbox requires reconciliation')
+          this._quarantineResult(sourcePath, fileName.slice(0, -5), error)
         }
+      }
+    }
+    for (const fileName of readdirSync(this.resultsPendingDir).filter(name => name.endsWith('.json'))) {
+      const recordId = fileName.slice(0, -5)
+      const pendingPath = resolve(this.resultsPendingDir, fileName)
+      const acknowledgedPath = this._resultPath(this.resultsAcknowledgedDir, recordId)
+      if (!existsSync(pendingPath) || !existsSync(acknowledgedPath)) continue
+      try {
+        const pending = this._validateResultRecord(readJson(pendingPath), recordId)
+        const acknowledged = this._validateAcknowledgedResultRecord(readJson(acknowledgedPath), recordId)
+        if (!this._sameResultRecord(pending, acknowledged)) {
+          throw new Error('pending result conflicts with acknowledged receipt evidence')
+        }
+        durableUnlink(pendingPath)
+      } catch (error) {
+        if (existsSync(pendingPath)) this._quarantineResult(pendingPath, recordId, error)
+      }
+    }
+    for (const fileName of readdirSync(this.resultsSentDir).filter(name => name.endsWith('.json'))) {
+      const sourcePath = resolve(this.resultsSentDir, fileName)
+      const recordId = fileName.slice(0, -5)
+      try {
+        const legacy = this._validateResultRecord(readJson(sourcePath), recordId)
+        const pendingPath = this._resultPath(this.resultsPendingDir, recordId)
+        const acknowledgedPath = this._resultPath(this.resultsAcknowledgedDir, recordId)
+        if (existsSync(acknowledgedPath)) {
+          const acknowledged = this._validateAcknowledgedResultRecord(readJson(acknowledgedPath), recordId)
+          if (!this._sameResultRecord(legacy, acknowledged)) throw new Error('legacy-sent result conflicts with acknowledged result')
+          durableUnlink(sourcePath)
+        } else if (existsSync(pendingPath)) {
+          const pending = this._validateResultRecord(readJson(pendingPath), recordId)
+          if (!this._sameResultRecord(legacy, pending)) throw new Error('legacy-sent result conflicts with pending result')
+          durableUnlink(sourcePath)
+        } else {
+          durableRename(sourcePath, pendingPath, 0o600)
+        }
+      } catch (error) {
+        if (existsSync(sourcePath)) this._quarantineResult(sourcePath, recordId, error)
       }
     }
     if (readdirSync(this.resultsQuarantineDir).some(name => name.endsWith('.json'))) {
@@ -681,7 +844,7 @@ export class SkillInstallManager {
 
   _ensureResultRecord(recordId, envelope) {
     const pending = this._resultPath(this.resultsPendingDir, recordId)
-    const sent = this._resultPath(this.resultsSentDir, recordId)
+    const acknowledged = this._resultPath(this.resultsAcknowledgedDir, recordId)
     if (existsSync(pending)) {
       const record = this._validateResultRecord(readJson(pending), recordId)
       if (JSON.stringify(record.envelope) !== JSON.stringify(envelope)) {
@@ -689,73 +852,179 @@ export class SkillInstallManager {
       }
       return { recordId, state: 'pending' }
     }
-    if (existsSync(sent)) {
-      const record = this._validateResultRecord(readJson(sent), recordId)
+    if (existsSync(acknowledged)) {
+      const record = this._validateAcknowledgedResultRecord(readJson(acknowledged), recordId)
       if (JSON.stringify(record.envelope) !== JSON.stringify(envelope)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'sent work.result record conflicts with registry evidence')
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'acknowledged work.result record conflicts with registry evidence')
       }
-      return { recordId, state: 'sent' }
+      return { recordId, state: 'acknowledged' }
     }
     atomicWriteJson(pending, {
-      formatVersion: 1,
+      formatVersion: 2,
       recordId,
       profileId: this.profile.profileId,
       agentId: this.profile.agentId,
       createdAt: this.now(),
+      sendAttempts: 0,
+      lastSentAt: null,
+      lastReplayToken: '',
       envelope
     })
     return { recordId, state: 'pending' }
   }
 
+  _reconcilePreparedRecord(record, cause = null) {
+    const current = this._readRegistry(record.installationId)
+    if (!current || current.commandFingerprint !== record.commandFingerprint) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared activation cannot be reconciled with its durable registry')
+    }
+    const targetExists = existsSync(current.targetPath)
+    const stagingExists = existsSync(current.stagingPath)
+    if (current.state === 'ACTIVE') {
+      if (!targetExists || stagingExists
+          || !validateMarker(current.targetPath, current.command, current.commandFingerprint)) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'active installed-skill registry does not match CODEX_HOME')
+      }
+    } else if (targetExists) {
+      if (stagingExists || !validateMarker(current.targetPath, current.command, current.commandFingerprint)) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared installation has conflicting activation state')
+      }
+    } else if (stagingExists) {
+      const stagingStatus = lstatSync(current.stagingPath)
+      if (!stagingStatus.isDirectory() || stagingStatus.isSymbolicLink()
+          || !validateMarker(current.stagingPath, current.command, current.commandFingerprint)) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared staging does not match its durable registry')
+      }
+      if (existsSync(current.targetPath)) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'activation target appeared during prepared recovery')
+      }
+      durableRename(current.stagingPath, current.targetPath)
+    } else {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared installation lost both staging and activation target')
+    }
+    const active = current.state === 'ACTIVE'
+      ? current
+      : { ...current, state: 'ACTIVE', activatedAt: current.activatedAt || this.now() }
+    if (current.state !== 'ACTIVE') this._writeRegistry(active)
+    this._ensureResultRecord(active.resultRecordId, active.resultEnvelope)
+    return {
+      status: 'completed',
+      exitCode: 0,
+      errorMessage: cause ? `prepared activation reconciled after: ${cause.message}` : '',
+      resultEnvelope: active.resultEnvelope,
+      idempotent: false,
+      activationCommitted: true
+    }
+  }
+
   _recoverRegistry() {
-    for (const record of this._listRegistry()) {
-      const targetExists = existsSync(record.targetPath)
-      const stagingExists = existsSync(record.stagingPath)
-      if (record.state === 'ACTIVE') {
-        if (!targetExists || !validateMarker(record.targetPath, record.command, record.commandFingerprint)) {
-          this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'active installed-skill registry does not match CODEX_HOME')
-          throw this.healthError
-        }
-        this._ensureResultRecord(record.resultRecordId, record.resultEnvelope)
-        continue
+    for (const record of this._listRegistry()) this._reconcilePreparedRecord(record)
+  }
+
+  _readLockOwnerEvidence() {
+    if (!existsSync(this.lockOwnerPath)) return null
+    try {
+      const owner = readJson(this.lockOwnerPath)
+      return isObject(owner) ? owner : null
+    } catch {
+      return null
+    }
+  }
+
+  _readLockOwner() {
+    const owner = this._readLockOwnerEvidence()
+    if (!owner || owner.formatVersion !== 2 || typeof owner.ownerToken !== 'string'
+        || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+        || typeof owner.processStartToken !== 'string' || !owner.processStartToken
+        || typeof owner.bootId !== 'string' || !owner.bootId) return null
+    return owner
+  }
+
+  _reclaimStaleLock(operation) {
+    if (!existsSync(this.lockPath)) return false
+    const evidence = this._readLockOwnerEvidence()
+    const owner = this._readLockOwner()
+    if (owner && this.lockOwnerAliveFn(owner)) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'another live process owns the profile-local installer lock')
+    }
+    if (!owner && evidence?.formatVersion === 1 && Number.isSafeInteger(evidence.pid) && evidence.pid > 0
+        && readProcessStartToken(evidence.pid)) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'a live legacy process may own the profile-local installer lock')
+    }
+    if (!owner && !(evidence?.formatVersion === 1 && Number.isSafeInteger(evidence.pid)
+        && evidence.pid > 0 && !readProcessStartToken(evidence.pid))) {
+      const age = Math.max(0, this.now() - statSync(this.lockPath).mtimeMs)
+      if (age < this.unownedLockStaleMs) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installer lock ownership is incomplete and not yet stale')
       }
-      if (targetExists) {
-        if (stagingExists || !validateMarker(record.targetPath, record.command, record.commandFingerprint)) {
-          this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared installation has conflicting activation state')
-          throw this.healthError
-        }
-        const active = { ...record, state: 'ACTIVE', activatedAt: record.activatedAt || this.now() }
-        this._writeRegistry(active)
-        this._ensureResultRecord(active.resultRecordId, active.resultEnvelope)
-      }
+    }
+    const stalePath = resolve(this.staleLocksDir, `installer-${this.now()}-${this.createId()}`)
+    try {
+      durableRename(this.lockPath, stalePath)
+      atomicWriteJson(resolve(stalePath, 'reclaimed.json'), {
+        formatVersion: 1,
+        reclaimedAt: this.now(),
+        reclaimedByRuntimeInstanceId: this.runtimeInstanceId,
+        operation,
+        previousOwner: evidence
+      })
+      return true
+    } catch (error) {
+      if (!existsSync(this.lockPath)) return true
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to reclaim stale installer lock: ${error.message}`)
     }
   }
 
   _acquireLock(operation) {
-    try {
-      mkdirSync(this.lockPath, { mode: 0o700 })
-      chmodSync(this.lockPath, 0o700)
-      fsyncDirectory(this.stateRoot)
-      atomicWriteJson(this.lockOwnerPath, {
-        formatVersion: 1,
-        pid: process.pid,
-        operation,
-        runtimeInstanceId: this.runtimeInstanceId,
-        acquiredAt: this.now()
-      })
-    } catch (error) {
-      if (error?.code === 'EEXIST') {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'another skill installation owns the profile-local installer lock')
-      }
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to acquire installer lock: ${error.message}`)
+    const identity = this.processIdentityFn()
+    const owner = {
+      formatVersion: 2,
+      ownerToken: this.createId(),
+      pid: identity.pid,
+      processStartToken: identity.processStartToken,
+      bootId: identity.bootId,
+      operation,
+      runtimeInstanceId: this.runtimeInstanceId,
+      acquiredAt: this.now()
     }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (existsSync(this.lockPath)) {
+        this._reclaimStaleLock(operation)
+        continue
+      }
+      const candidatePath = resolve(this.stateRoot, `.installer-lock-${owner.ownerToken}-${attempt}`)
+      try {
+        mkdirSync(candidatePath, { mode: 0o700 })
+        chmodSync(candidatePath, 0o700)
+        atomicWriteJson(resolve(candidatePath, 'owner.json'), owner)
+        renameSync(candidatePath, this.lockPath)
+        fsyncDirectory(this.stateRoot)
+        this.lockOwner = owner
+        return
+      } catch (error) {
+        try { if (existsSync(candidatePath)) rmSync(candidatePath, { recursive: true, force: true }) } catch {}
+        if (existsSync(this.lockPath) && ['EEXIST', 'ENOTEMPTY', 'EISDIR'].includes(error?.code)) continue
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to acquire installer lock: ${error.message}`)
+      }
+    }
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installer lock ownership changed repeatedly during acquisition')
   }
 
   _releaseLock() {
+    const expected = this.lockOwner
     try {
-      if (existsSync(this.lockOwnerPath)) durableUnlink(this.lockOwnerPath)
-      rmdirSync(this.lockPath)
+      const observed = this._readLockOwner()
+      if (!expected || !observed || observed.ownerToken !== expected.ownerToken
+          || observed.pid !== expected.pid || observed.processStartToken !== expected.processStartToken
+          || observed.bootId !== expected.bootId) {
+        throw new Error('installer lock ownership fence mismatch')
+      }
+      const releasedPath = resolve(this.stateRoot, `.installer-lock-released-${expected.ownerToken}`)
+      renameSync(this.lockPath, releasedPath)
       fsyncDirectory(this.stateRoot)
+      rmSync(releasedPath, { recursive: true, force: true })
+      fsyncDirectory(this.stateRoot)
+      this.lockOwner = null
     } catch (error) {
       this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to release installer lock: ${error.message}`)
       throw this.healthError
@@ -781,7 +1050,7 @@ export class SkillInstallManager {
   async _download(command) {
     if (!this.apiKey) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'managed Agent API credential is unavailable')
     if (typeof this.fetchFn !== 'function') throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'fetch implementation is unavailable')
-    const endpoint = buildDownloadUrl(this.wsUrl, command.downloadPath)
+    const endpoint = buildSkillDownloadUrl(this.wsUrl, command.downloadPath)
     let response
     try {
       response = await this.fetchFn(endpoint, {
@@ -864,8 +1133,29 @@ export class SkillInstallManager {
     return envelope
   }
 
+  _reconcileActivatedRecord(prepared, cause = null) {
+    try {
+      return this._withLockSync(`reconcile-activation:${prepared.installationId}`, () => (
+        this._reconcilePreparedRecord(prepared, cause)
+      ))
+    } catch (error) {
+      this.healthError = error instanceof SkillInstallError
+        ? error
+        : new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, error.message)
+      return {
+        status: 'recovery_required',
+        exitCode: null,
+        errorMessage: `prepared activation requires startup reconciliation: ${cause?.message || error.message}`,
+        failureCode: this.healthError.code,
+        resultEnvelope: prepared.resultEnvelope,
+        activationCommitted: existsSync(prepared.targetPath) && !existsSync(prepared.stagingPath)
+      }
+    }
+  }
+
   async execute(message) {
     let command
+    let preparedRecord = null
     try {
       command = validateSkillInstallCommand(message, this.profile, this.maxPackageBytes)
       if (!this.enabled) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DISABLED, 'managed skill installation is disabled')
@@ -875,7 +1165,6 @@ export class SkillInstallManager {
         const targetPath = resolve(skillsRoot, command.skillKey)
         const existing = this._assertNoRegistryConflict(command, targetPath)
         if (existing) {
-          this.replayResults()
           return { status: 'completed', exitCode: 0, errorMessage: '', resultEnvelope: existing.resultEnvelope, idempotent: true }
         }
         const packageBytes = await this._download(command)
@@ -930,35 +1219,47 @@ export class SkillInstallManager {
             resultRecordId,
             resultEnvelope
           }
+          preparedRecord = prepared
           this._writeRegistry(prepared)
           if (existsSync(targetPath)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'skill target appeared during activation')
           durableRename(stagingPath, targetPath)
           const active = { ...prepared, state: 'ACTIVE', activatedAt: this.now() }
           this._writeRegistry(active)
-          try {
-            this._ensureResultRecord(resultRecordId, resultEnvelope)
-          } catch (error) {
-            throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `activation committed but work.result persistence failed: ${error.message}`, { activationCommitted: true })
-          }
-          this.replayResults()
-          return { status: 'completed', exitCode: 0, errorMessage: '', resultEnvelope, idempotent: false }
+          this._ensureResultRecord(resultRecordId, resultEnvelope)
+          return { status: 'completed', exitCode: 0, errorMessage: '', resultEnvelope, idempotent: false, activationCommitted: true }
         } catch (error) {
-          if (existsSync(stagingPath)) rmSync(stagingPath, { recursive: true, force: true })
+          if (!preparedRecord && existsSync(stagingPath)) rmSync(stagingPath, { recursive: true, force: true })
           throw error
         }
       })
+      this.replayResults(this.sendResultFn, { replayToken: `command:${command.commandId}:${this.now()}` })
       return result
     } catch (rawError) {
+      if (preparedRecord) {
+        const reconciled = this._reconcileActivatedRecord(preparedRecord, rawError)
+        if (reconciled.status === 'completed') {
+          this.replayResults(this.sendResultFn, { replayToken: `command:${command.commandId}:${this.now()}` })
+        }
+        return reconciled
+      }
       const error = rawError instanceof SkillInstallError
         ? rawError
         : new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, rawError.message || 'skill installation failed')
       let resultEnvelope = null
-      if (!error.activationCommitted) {
-        try {
-          resultEnvelope = this._persistFailureResult(command || {}, error)
-          this.replayResults()
-        } catch (resultError) {
-          this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to persist skill failure result: ${resultError.message}`)
+      try {
+        resultEnvelope = this._withLockSync(`persist-failure:${command?.commandId || 'invalid'}`, () => (
+          this._persistFailureResult(command || {}, error)
+        ))
+        this.replayResults(this.sendResultFn, { replayToken: `failure:${command?.commandId || 'invalid'}:${this.now()}` })
+      } catch (resultError) {
+        this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to persist skill failure result: ${resultError.message}`)
+        return {
+          status: 'recovery_required',
+          exitCode: null,
+          errorMessage: this.healthError.message,
+          failureCode: this.healthError.code,
+          resultEnvelope: null,
+          activationCommitted: false
         }
       }
       return {
@@ -971,26 +1272,148 @@ export class SkillInstallManager {
     }
   }
 
-  replayResults(sendFn = this.sendResultFn) {
-    if (this.healthError || typeof sendFn !== 'function') return 0
+  reconcileCommandOutcome(message) {
+    if (message?.commandType !== COMMAND_TYPE) return null
+    return this._withLockSync(`reconcile-command:${message.installationId || ''}`, () => {
+      const command = validateSkillInstallCommand(message, this.profile, this.maxPackageBytes)
+      const record = this._readRegistry(command.installationId)
+      if (!record || record.commandFingerprint !== command.fingerprint || record.state !== 'ACTIVE'
+          || !validateMarker(record.targetPath, command, command.fingerprint)) return null
+      this._ensureResultRecord(record.resultRecordId, record.resultEnvelope)
+      return { status: 'completed', exitCode: 0, errorMessage: '', activationCommitted: true }
+    })
+  }
+
+  _replayResultsLocked(sendFn, options = {}) {
+    const limit = Number.isSafeInteger(options.limit) && options.limit > 0
+      ? Math.min(options.limit, this.maxReplayBatch)
+      : this.maxReplayBatch
+    const replayToken = String(options.replayToken || '')
     let replayed = 0
     for (const fileName of readdirSync(this.resultsPendingDir).filter(name => name.endsWith('.json')).sort()) {
+      if (replayed >= limit) break
       const sourcePath = resolve(this.resultsPendingDir, fileName)
       let record
       try { record = this._validateResultRecord(readJson(sourcePath), fileName.slice(0, -5)) } catch (error) {
-        const targetPath = resolve(this.resultsQuarantineDir, `${fileName.slice(0, -5)}-${this.createId()}.json`)
-        durableRename(sourcePath, targetPath, 0o600)
-        atomicWriteText(`${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
-        this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'skill work.result outbox requires reconciliation')
+        this._quarantineResult(sourcePath, fileName.slice(0, -5), error)
         break
       }
+      if (replayToken && record.lastReplayToken === replayToken) continue
       let sent = false
       try { sent = sendFn(record.envelope) === true } catch { break }
       if (!sent) break
-      durableRename(sourcePath, this._resultPath(this.resultsSentDir, record.recordId), 0o600)
+      try {
+        atomicWriteJson(sourcePath, {
+          ...record,
+          formatVersion: 2,
+          sendAttempts: Number(record.sendAttempts || 0) + 1,
+          lastSentAt: this.now(),
+          lastReplayToken: replayToken
+        })
+      } catch (error) {
+        this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to persist work.result send attempt: ${error.message}`)
+        break
+      }
       replayed += 1
     }
     return replayed
+  }
+
+  replayResults(sendFn = this.sendResultFn, options = {}) {
+    if (this.healthError || typeof sendFn !== 'function') return 0
+    try {
+      return this._withLockSync('replay-work-results', () => this._replayResultsLocked(sendFn, options))
+    } catch (error) {
+      if (error?.code === SKILL_INSTALL_FAILURE.IO_FAILED) this.healthError = error
+      return 0
+    }
+  }
+
+  _receiptFields(message) {
+    const receipt = {
+      messageType: exactField(message, 'messageType'),
+      messageId: exactField(message, 'messageId'),
+      correlationId: exactField(message, 'correlationId'),
+      resultType: exactField(message, 'resultType'),
+      receiptStatus: exactField(message, 'receiptStatus'),
+      commandId: exactField(message, 'commandId'),
+      attempt: exactField(message, 'attempt'),
+      fencingToken: exactField(message, 'fencingToken'),
+      deliveryEpoch: exactField(message, 'deliveryEpoch'),
+      installationId: exactField(message, 'installationId'),
+      targetAgentId: exactField(message, 'targetAgentId')
+    }
+    if (receipt.messageType !== WORK_RESULT_RECEIPT_TYPE || receipt.resultType !== RESULT_TYPE
+        || receipt.receiptStatus !== RESULT_RECEIPT_STATUS) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'work.result receipt type/status is invalid')
+    }
+    requireSafeId(receipt.messageId, 'messageId')
+    requireSafeId(receipt.correlationId, 'correlationId')
+    requireSafeId(receipt.commandId, 'commandId')
+    requireSafeId(receipt.installationId, 'installationId')
+    if (!Number.isSafeInteger(receipt.attempt) || receipt.attempt <= 0
+        || requirePositiveDecimal(receipt.fencingToken, 'fencingToken') !== receipt.fencingToken
+        || requirePositiveDecimal(receipt.deliveryEpoch, 'deliveryEpoch') !== receipt.deliveryEpoch
+        || receipt.targetAgentId !== this.profile.agentId) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'work.result receipt correlation fields are invalid')
+    }
+    return receipt
+  }
+
+  _receiptMatchesEnvelope(receipt, envelope) {
+    return receipt.correlationId === envelope.messageId
+      && receipt.commandId === envelope.commandId
+      && receipt.attempt === envelope.attempt
+      && receipt.fencingToken === envelope.fencingToken
+      && receipt.deliveryEpoch === envelope.deliveryEpoch
+      && receipt.installationId === envelope.installationId
+      && receipt.targetAgentId === envelope.targetAgentId
+  }
+
+  acknowledgeResultReceipt(message) {
+    const receipt = this._receiptFields(message)
+    return this._withLockSync(`work-result-receipt:${receipt.correlationId}`, () => (
+      this._acknowledgeResultReceiptLocked(receipt)
+    ))
+  }
+
+  _acknowledgeResultReceiptLocked(receipt) {
+    for (const fileName of readdirSync(this.resultsAcknowledgedDir).filter(name => name.endsWith('.json')).sort()) {
+      const path = resolve(this.resultsAcknowledgedDir, fileName)
+      const record = this._validateAcknowledgedResultRecord(readJson(path), fileName.slice(0, -5))
+      if (record.envelope.messageId !== receipt.correlationId) continue
+      if (!this._receiptMatchesEnvelope(receipt, record.envelope)) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'work.result receipt conflicts with acknowledged result')
+      }
+      return { status: 'acknowledged', idempotent: true, recordId: record.recordId }
+    }
+    for (const fileName of readdirSync(this.resultsPendingDir).filter(name => name.endsWith('.json')).sort()) {
+      const sourcePath = resolve(this.resultsPendingDir, fileName)
+      const record = this._validateResultRecord(readJson(sourcePath), fileName.slice(0, -5))
+      if (record.envelope.messageId !== receipt.correlationId) continue
+      if (!this._receiptMatchesEnvelope(receipt, record.envelope)) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'work.result receipt conflicts with pending result')
+      }
+      const acknowledged = {
+        ...record,
+        formatVersion: 2,
+        acknowledgedAt: this.now(),
+        receipt: { ...receipt }
+      }
+      const targetPath = this._resultPath(this.resultsAcknowledgedDir, record.recordId)
+      atomicWriteJson(targetPath, acknowledged)
+      try {
+        durableUnlink(sourcePath)
+      } catch (error) {
+        this.healthError = new SkillInstallError(
+          SKILL_INSTALL_FAILURE.IO_FAILED,
+          `work.result receipt was persisted but pending retirement requires startup reconciliation: ${error.message}`
+        )
+        throw this.healthError
+      }
+      return { status: 'acknowledged', idempotent: false, recordId: record.recordId }
+    }
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'work.result receipt has no matching durable pending result')
   }
 
   getInstallation(installationId) {
@@ -1003,11 +1426,16 @@ export class SkillInstallManager {
     ))
   }
 
-  sentResults() {
-    return readdirSync(this.resultsSentDir).filter(name => name.endsWith('.json')).sort().map(fileName => (
-      this._validateResultRecord(readJson(resolve(this.resultsSentDir, fileName)), fileName.slice(0, -5))
+  acknowledgedResults() {
+    return readdirSync(this.resultsAcknowledgedDir).filter(name => name.endsWith('.json')).sort().map(fileName => (
+      this._validateAcknowledgedResultRecord(readJson(resolve(this.resultsAcknowledgedDir, fileName)), fileName.slice(0, -5))
     ))
   }
+
+  sentResults() {
+    return this.acknowledgedResults()
+  }
+
 }
 
 export const defaultSkillInstallStateRoot = (commandInboxDir, profile) => resolve(
