@@ -28,6 +28,7 @@ import { basename, dirname, extname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
+import { SkillInstallManager, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -356,6 +357,13 @@ const parseNonNegativeMs = (value, fallback) => {
   const parsed = Number(value ?? fallback)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
 }
+
+const parsePositiveInteger = (value, fallback) => {
+  const parsed = Number(value ?? fallback)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+const parseEnabledFlag = value => String(value || '').trim().toLowerCase() === 'true'
 
 const hasFlag = flag => process.argv.slice(2).includes(flag)
 
@@ -1084,6 +1092,19 @@ const FINGERPRINT_SEMANTIC_ENVELOPE_FIELDS = Object.freeze([
 const FINGERPRINT_COMPAT_BUSINESS_FIELDS = Object.freeze([
   'prompt', 'content', 'instruction', 'description', 'title', 'currentTaskTitle'
 ])
+const SKILL_INSTALL_FINGERPRINT_FIELDS = Object.freeze([
+  ['dispatchAttempt', 'attempt'],
+  ['fencingToken', 'fencingToken'],
+  ['deliveryEpoch', 'deliveryEpoch'],
+  ['orderId', 'orderId'],
+  ['installationId', 'installationId'],
+  ['productVersionId', 'productVersionId'],
+  ['skillKey', 'skillKey'],
+  ['skillVersion', 'skillVersion'],
+  ['packageSize', 'packageSize'],
+  ['packageDigest', 'packageDigest'],
+  ['downloadPath', 'downloadPath']
+])
 const FINGERPRINT_PAYLOAD_ROOT_CONTROL_FIELDS = new Set([
   ...FINGERPRINT_TRANSPORT_FIELDS,
   ...FINGERPRINT_SEMANTIC_ENVELOPE_FIELDS
@@ -1126,13 +1147,19 @@ const buildFingerprintSource = normalized => {
   for (const field of FINGERPRINT_COMPAT_BUSINESS_FIELDS) {
     if (hasOwn(normalized || {}, field) && normalized[field] !== undefined) businessPayload[field] = normalized[field]
   }
-  return {
+  const source = {
     commandType: String(normalized?.commandType || ''),
     targetAgentId: String(normalized?.targetAgentId || ''),
     taskId: String(normalized?.taskId || ''),
     workItemId: String(normalized?.workItemId || ''),
     businessPayload: canonicalizeFingerprintValue(businessPayload)
   }
+  if (normalized?.commandType === 'SKILL_INSTALL') {
+    source.skillInstall = Object.fromEntries(SKILL_INSTALL_FINGERPRINT_FIELDS.map(([fingerprintField, messageField]) => (
+      [fingerprintField, normalized?.[messageField]]
+    )))
+  }
+  return source
 }
 
 export class CommandFingerprint {
@@ -2706,9 +2733,17 @@ const saveCodexSessionMap = () => {
   }
 }
 
+const removeApiKeyQuery = parsed => {
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (key.toLowerCase() === 'api_key') parsed.searchParams.delete(key)
+  }
+  return parsed
+}
+
+export const sanitizeWebSocketEndpoint = url => removeApiKeyQuery(new URL(url)).toString()
+
 export const buildWebSocketUrl = (url, apiKey, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
-  const parsed = new URL(url)
-  parsed.searchParams.set('api_key', profile?.apiKey || apiKey)
+  const parsed = removeApiKeyQuery(new URL(url))
   if (profile?.agentId) {
     parsed.searchParams.set('agent_id', profile.agentId)
     parsed.searchParams.set('agentId', profile.agentId)
@@ -2716,6 +2751,12 @@ export const buildWebSocketUrl = (url, apiKey, profile, runtimeInstanceId = PROC
   parsed.searchParams.set('runtime_instance_id', runtimeInstanceId)
   parsed.searchParams.set('runtimeInstanceId', runtimeInstanceId)
   return parsed.toString()
+}
+
+export const buildWebSocketOptions = (apiKey, profile) => {
+  const selectedApiKey = profile?.apiKey || apiKey
+  if (!selectedApiKey) throw new Error('WebSocket API key is required')
+  return { headers: { 'X-API-Key': selectedApiKey } }
 }
 
 export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => ({
@@ -3114,7 +3155,7 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => ({
 export const buildAgentRegistrationPayload = profile => ({
   name: profile.agentName,
   personaName: profile.personaName,
-  endpoint: config?.wsUrl || '',
+  endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
   abilities: resolveProfileAbilities(profile)
 })
 
@@ -3470,6 +3511,13 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   child.on('error', error => { void finish(null, error) })
 })
 
+
+export const runManagedCommand = ({ profile, message, skillInstallManager, workspaceManager, runCodexFn = runCodex }) => (
+  message.commandType === 'SKILL_INSTALL'
+    ? skillInstallManager.execute(message)
+    : runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
+)
+
 const ensureProfiles = (profiles, defaultProfileId, workspacePolicies = new Map(), exitOnError = true) => {
   const profileIds = new Set()
   const agentIds = new Set()
@@ -3566,10 +3614,23 @@ const createProfileState = profile => {
     rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile)),
     profile
   })
+  const sendAckFn = envelope => sendRaw(envelope, profile)
+  const skillInstallManager = new SkillInstallManager({
+    profile,
+    stateRoot: defaultSkillInstallStateRoot(config.commandInboxDir, profile),
+    wsUrl: config.wsUrl,
+    apiKey: config.apiKey,
+    enabled: config.skillInstallEnabled,
+    maxPackageBytes: config.skillInstallMaxBytes,
+    maxExtractedBytes: config.skillInstallMaxExtractedBytes,
+    fetchFn: globalThis.fetch,
+    sendResultFn: envelope => sendRaw(envelope, profile),
+    runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+  })
   ledger.initialize()
   ackOutbox.initialize()
+  skillInstallManager.initialize()
 
-  const sendAckFn = envelope => sendRaw(envelope, profile)
 
   const taskEvents = new Map()
   const state = {
@@ -3584,15 +3645,18 @@ const createProfileState = profile => {
     inbox,
     ledger,
     ackOutbox,
+    skillInstallManager,
     workspaceManager,
     processor: null
   }
   state.processor = new AgentMessageProcessor({
     profile,
     inbox,
-    runCommand: message => runCodex(profile, message, 'command', {
-      workspaceManager,
-      requireWorkspace: true
+    runCommand: message => runManagedCommand({
+      profile,
+      message,
+      skillInstallManager,
+      workspaceManager
     }),
     runChat: message => runCodex(profile, message, 'chat'),
     onTaskEvent: message => {
@@ -3681,13 +3745,18 @@ const connectProfile = profile => {
     try { state.ws.close() } catch {}
   }
   let closeFired = false
-  state.ws = new WebSocketClient(buildWebSocketUrl(config.wsUrl, config.apiKey, profile))
+  state.ws = new WebSocketClient(
+    buildWebSocketUrl(config.wsUrl, config.apiKey, profile),
+    buildWebSocketOptions(config.apiKey, profile)
+  )
   state.ws.addEventListener('open', () => {
     clearReconnectState(state)
     state.reconnectAttempt = 0
     state.reconnectStartedAt = 0
     registerAgent(profile)
     sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
+    const resultReplayed = state.skillInstallManager.replayResults()
+    if (resultReplayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${resultReplayed}`)
     const replayed = state.processor.replayAcks()
     if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
     state.processor.resume()
@@ -3811,7 +3880,6 @@ const shutdown = (exitCode = 0, reason = '') => {
 }
 
 export const loadWebSocketClient = async () => {
-  if (typeof globalThis.WebSocket === 'function') return globalThis.WebSocket
   const module = await import('ws')
   const implementation = module.WebSocket || module.default
   if (typeof implementation !== 'function') throw new Error('No WebSocket implementation is available')
@@ -3831,7 +3899,10 @@ export const main = async () => {
     reconnectMaxMs: parseNonNegativeMs(process.env.RECONNECT_MAX_MS, 30 * 60 * 1000),
     profileReloadMs: parseNonNegativeMs(process.env.CODEX_PROFILE_RELOAD_MS, 5000),
     commandInboxDir: resolve(process.env.COMMAND_INBOX_DIR || '/home/isp/apps/codex-ws-agent/data/inbox'),
-    commandInboxSuccessPolicy: process.env.COMMAND_INBOX_SUCCESS_POLICY || 'archive'
+    commandInboxSuccessPolicy: process.env.COMMAND_INBOX_SUCCESS_POLICY || 'archive',
+    skillInstallEnabled: parseEnabledFlag(process.env.AGENT_SKILL_INSTALL_ENABLED),
+    skillInstallMaxBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_BYTES, 16 * 1024 * 1024),
+    skillInstallMaxExtractedBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_EXTRACTED_BYTES, 64 * 1024 * 1024)
   }
   if (!config.apiKey && !config.profiles.every(profile => profile.apiKey)) {
     configError('OPENCLAW_API_KEY is required unless every profile defines apiKey')

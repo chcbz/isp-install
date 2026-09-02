@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { createServer } from 'node:http'
 import { chmodSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -21,13 +22,16 @@ import {
   buildAgentPresencePayload,
   buildAgentRegistrationPayload,
   buildProtocolEnvelope,
+  buildWebSocketOptions,
   buildWebSocketUrl,
   discoverCodexSkills,
   discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
+  loadWebSocketClient,
   normalizeInboundMessage,
   resolveProfileAbilities,
-  runCodex
+  runCodex,
+  sanitizeWebSocketEndpoint
 } from '../agent-client.mjs'
 
 const temporaryDirectories = []
@@ -362,10 +366,24 @@ test('legacy execution types, missing messageType, and ambiguous envelopes fail 
   )
 })
 
-test('runtimeInstanceId is process-scoped and reused by URL and v1 envelopes', () => {
+test('runtimeInstanceId is process-scoped while WebSocket API keys use headers', () => {
   const url = new URL(buildWebSocketUrl('wss://example.test/ws', 'secret', profile))
   assert.equal(url.searchParams.get('runtimeInstanceId'), PROCESS_RUNTIME_INSTANCE_ID)
   assert.equal(url.searchParams.get('runtime_instance_id'), PROCESS_RUNTIME_INSTANCE_ID)
+  assert.equal(url.searchParams.has('api_key'), false)
+  const legacy = new URL(buildWebSocketUrl('wss://example.test/ws?api_key=legacy&API_KEY=legacy2&keep=1', 'secret', profile))
+  assert.equal([...legacy.searchParams.keys()].some(key => key.toLowerCase() === 'api_key'), false)
+  assert.equal(legacy.searchParams.get('keep'), '1')
+  const sanitized = new URL(sanitizeWebSocketEndpoint('wss://example.test/ws?api_key=legacy&keep=1'))
+  assert.equal(sanitized.searchParams.has('api_key'), false)
+  assert.equal(sanitized.searchParams.get('keep'), '1')
+  assert.deepEqual(buildWebSocketOptions('fallback-secret', profile), {
+    headers: { 'X-API-Key': 'fallback-secret' }
+  })
+  assert.deepEqual(buildWebSocketOptions('fallback-secret', { ...profile, apiKey: 'profile-secret' }), {
+    headers: { 'X-API-Key': 'profile-secret' }
+  })
+  assert.throws(() => buildWebSocketOptions('', { ...profile, apiKey: '' }), /required/)
 
   const register = buildProtocolEnvelope(MESSAGE_TYPES.AGENT_REGISTER, {}, profile)
   const presence = buildProtocolEnvelope(MESSAGE_TYPES.AGENT_PRESENCE, {}, profile)
@@ -612,6 +630,31 @@ test('installing Codex skills does not change scheduling abilities', () => {
   mkdirSync(resolve(codexHome, 'skills', 'new-client-skill'), { recursive: true })
   writeFileSync(resolve(codexHome, 'skills', 'new-client-skill', 'SKILL.md'), '---\nname: new-client-skill\n---\n')
   assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, [])
+})
+
+test('real ws upgrade sends X-API-Key header and no query credential', async () => {
+  const observed = await new Promise((resolvePromise, rejectPromise) => {
+    const server = createServer()
+    server.on('upgrade', (request, socket) => {
+      const result = { url: request.url, apiKey: request.headers['x-api-key'] }
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      server.close(() => resolvePromise(result))
+    })
+    server.listen(0, '127.0.0.1', async () => {
+      try {
+        const implementation = await loadWebSocketClient()
+        const address = server.address()
+        const target = buildWebSocketUrl(`ws://127.0.0.1:${address.port}/ws?api_key=legacy`, 'secret', profile)
+        const client = new implementation(target, buildWebSocketOptions('secret', profile))
+        client.on('error', () => {})
+      } catch (error) {
+        server.close(() => rejectPromise(error))
+      }
+    })
+  })
+  assert.equal(observed.apiKey, 'secret')
+  assert.equal(new URL(observed.url, 'ws://127.0.0.1').searchParams.has('api_key'), false)
 })
 
 test('fsync and rename failures fail closed before command execution', async () => {
@@ -983,6 +1026,67 @@ test('same commandId with different payload causes fingerprint conflict and REJE
   assert.notEqual(conflicts[0].conflictingFingerprint, terminalBeforeConflict.fingerprint)
   assert.equal(conflicts[0].existingStatus, ACK_STATUS.SUCCEEDED)
   assert.equal(conflicts[0].ackRejectedEmitted, true)
+})
+
+test('SKILL_INSTALL commandId reuse with changed fence or digest is rejected before execution', async () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex'))
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ledger.initialize()
+  ackOutbox.initialize()
+
+  const installCommand = {
+    schemaVersion: 1,
+    messageType: MESSAGE_TYPES.COMMAND_DISPATCH,
+    messageId: 'message-skill-install',
+    requestId: 'message-skill-install',
+    commandId: 'command-skill-install',
+    commandType: 'SKILL_INSTALL',
+    attempt: 1,
+    fencingToken: '1',
+    deliveryEpoch: '1',
+    targetAgentId: profile.agentId,
+    orderId: 'so_1',
+    installationId: 'si_1',
+    productVersionId: 'spv_1',
+    skillKey: 'repo-test',
+    skillVersion: '1.0.0',
+    packageSize: '123',
+    packageDigest: `sha256:${'1'.repeat(64)}`,
+    downloadPath: '/internal/agent/skill-installations/si_1/package'
+  }
+  let runs = 0
+  const rejected = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox: createInbox(rootDir),
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => {
+      if (envelope.ackStatus === ACK_STATUS.REJECTED) rejected.push(envelope)
+      return true
+    }
+  })
+  processor.start()
+
+  await processor.handle(installCommand)
+  await processor.waitForIdle()
+  for (const conflict of [
+    { ...installCommand, messageId: 'message-skill-fence', requestId: 'message-skill-fence', fencingToken: '2' },
+    { ...installCommand, messageId: 'message-skill-digest', requestId: 'message-skill-digest', packageDigest: `sha256:${'2'.repeat(64)}` }
+  ]) {
+    const result = await processor.handle(conflict)
+    assert.equal(result.kind, 'rejected')
+    assert.equal(result.error.code, 'COMMAND_FINGERPRINT_CONFLICT')
+  }
+
+  assert.equal(runs, 1)
+  assert.equal(rejected.length, 2)
+  assert.equal(ledger.getEntry(installCommand.commandId).status, ACK_STATUS.SUCCEEDED)
+  assert.equal(ledger.getConflicts(installCommand.commandId).length, 2)
 })
 
 test('completed commandId re-delivery replays terminal ACK only', async () => {

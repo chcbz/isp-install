@@ -24,9 +24,9 @@ The helper script `/home/isp/bin/codex_ws_agent.sh` now delegates to `systemd` a
 
 Required:
 
-- Node.js 20 or newer. Node 20 loads the declared `ws` dependency; newer runtimes may use their built-in WebSocket implementation.
-- `OPENCLAW_API_KEY`: API key accepted by `/ws/agent/channel`.
-- `WS_URL`: WebSocket endpoint. Default public endpoint is `wss://api.chaoyoufan.cn/ws/agent/channel`.
+- Node.js 20 or newer. The client always uses the declared `ws` dependency so authenticated upgrade headers behave consistently.
+- `OPENCLAW_API_KEY`: API key accepted by `/ws/agent/channel`. It is sent only as the `X-API-Key` WebSocket upgrade header and same-origin package-download header; it is never appended to a URL.
+- `WS_URL`: WebSocket endpoint. Default public endpoint is `wss://api.chaoyoufan.cn/ws/agent/channel`. Any legacy `api_key` query parameter is removed before connection and registration.
 
 ## Multiple Codex CLI Profiles
 
@@ -244,6 +244,42 @@ Operator commands use the installed helper and never accept paths, repositories,
 
 The service account needs `0700` create/fsync permissions below the workspace root, Git ref/worktree administrative permissions in the trusted repository, and credentials/network access to fetch the policy-pinned remote during archive. Prefer a dedicated bare repository or mirror so no Agent ever writes a shared main checkout. Capacity monitoring is mandatory because archived quarantine directories are retained permanently by this version.
 
+## Development-preview Skill Installation
+
+The dedicated `command.dispatch` / `SKILL_INSTALL` path is **off by default** and is separate from Codex execution and coding-worktree management. Enable it only with a matching preview API deployment:
+
+```bash
+AGENT_SKILL_INSTALL_ENABLED=false
+AGENT_SKILL_INSTALL_MAX_BYTES=16777216
+AGENT_SKILL_INSTALL_MAX_EXTRACTED_BYTES=67108864
+```
+
+When enabled, the installer requires the frozen command fields and an exact target Agent. It downloads only the installation-scoped relative path `/internal/agent/skill-installations/<installationId>/package` from the `WS_URL` origin, disables redirects, and authenticates with the existing `X-API-Key` credential. Credential values and package bytes are not logged.
+
+Installation safety and durability rules:
+
+- The declared size, configured raw/expanded limits, and canonical lowercase SHA-256 digest are checked before activation.
+- ZIP extraction rejects traversal, absolute/backslash paths, symlinks, special or encrypted entries, duplicates, file-prefix conflicts, the reserved `.cyf-installation.json` namespace, oversized entry sets, a missing root `SKILL.md`, and `SKILL.md` name/version mismatch.
+- Staging and the installer lock are profile-local below `COMMAND_INBOX_DIR`; activation is one rename into `<CODEX_HOME>/skills/<skillKey>` and never overwrites an existing target.
+- A durable installed registry keyed by `installationId` binds command attempt/fence/epoch, product version, skill identity, and package digest. Exact replay is idempotent; conflicting reuse fails closed.
+- `work.result` / `SKILL_INSTALL_RESULT` is durably queued before the command can receive terminal `SUCCEEDED`. Pending identical result envelopes replay after reconnect or restart. Existing ACK order remains `RECEIVED -> STARTED -> SUCCEEDED|FAILED`.
+
+Stable installer failure codes are:
+
+```text
+SKILL_INSTALL_DISABLED
+SKILL_INSTALL_COMMAND_INVALID
+SKILL_DOWNLOAD_FORBIDDEN
+SKILL_PACKAGE_TOO_LARGE
+SKILL_PACKAGE_DIGEST_MISMATCH
+SKILL_ARCHIVE_INVALID
+SKILL_IDENTITY_MISMATCH
+SKILL_INSTALL_CONFLICT
+SKILL_INSTALL_IO_FAILED
+```
+
+This V0 preview does not provide publisher-signature verification, binding proof-of-possession, mTLS download sessions, isolation attestation, capability leases, or production-grade refund reconciliation. It installs verified bytes into the selected profile's skill directory but does not advertise installed skill names as scheduling abilities.
+
 ## Protocol v1 Message Handling
 
 The client is fail-closed and uses the canonical `messageType` as the semantic discriminator:
@@ -365,7 +401,7 @@ npm test
 OPENCLAW_API_KEY=test CODEX_BIN=/bin/true CODEX_WORKDIR=/tmp node agent-client.mjs --validate
 ```
 
-The test suite uses only Node built-ins (`node:test`). A07 tests create temporary local Git repositories/worktrees and do not touch production paths. The production installer copies the runtime files, not the repository-only test directory.
+The test suite uses `node:test` with the declared runtime dependencies. A07 tests create temporary local Git repositories/worktrees; skill-install tests use in-memory ZIP fixtures and stubbed downloads, and neither touches production paths. The production installer copies the runtime files, not the repository-only test directory.
 
 ## Upgrade and Rollback
 
