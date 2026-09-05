@@ -1417,7 +1417,7 @@ export class SkillInstallManager {
         if (error?.code === 'ENOENT') return false
         throw error
       }
-      if (current.st_dev.toString() !== inspected.identity.dev || current.ino.toString() !== inspected.identity.ino) return false
+      if (current.dev.toString() !== inspected.identity.dev || current.ino.toString() !== inspected.identity.ino) return false
       const age = Math.max(0, this.now() - Number(current.mtimeMs))
       if (age < this.unownedLockStaleMs) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installer lock ownership is incomplete and not yet stale')
