@@ -541,6 +541,8 @@ const loadRuntimeConfig = (options = {}) => {
   }
 }
 
+let managedHostModule = null
+let managedHostChannel = null
 let config = null
 let defaultProfile = null
 let shuttingDown = false
@@ -3824,18 +3826,21 @@ const createProfileState = profile => {
     ackOutbox,
     skillInstallManager,
     workspaceManager,
-    processor: null
+    processor: null,
+    managedRegistered: false,
+    managedEngine: null
   }
   state.processor = new AgentMessageProcessor({
     profile,
     inbox,
-    runCommand: message => runManagedCommand({
-      profile,
-      message,
-      skillInstallManager,
-      workspaceManager
-    }),
-    runChat: message => runCodex(profile, message, 'chat'),
+    runCommand: message => {
+      if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
+      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager })
+    },
+    runChat: message => {
+      if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
+      return runCodex(profile, message, 'chat')
+    },
     onTaskEvent: message => {
       const key = message.workItemId || message.taskId || message.messageId
       taskEvents.set(key, { ...message, observedAt: Date.now() })
@@ -3884,7 +3889,13 @@ const handleMessage = async (profile, raw) => {
     return
   }
   if (isLegacyInboundControlFrame(parsed)) {
-    if (parsed.type === 'connected') {
+    if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
+      const state = getProfileState(profile)
+      if (state?.managedEngine?.ready && !state.managedRegistered) {
+        state.managedRegistered = true
+        resumeRegisteredProfile(profile, state)
+      }
+    } else if (parsed.type === 'connected') {
       registerAgent(profile)
       sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
     } else if (parsed.type === 'ping') {
@@ -3892,6 +3903,7 @@ const handleMessage = async (profile, raw) => {
     }
     return
   }
+  if (profile.managedGeneration && !getProfileState(profile)?.managedRegistered) return
   await getProfileState(profile)?.processor?.handle(raw.toString())
 }
 
@@ -3902,6 +3914,12 @@ const doReconnect = profile => {
   if (!state.reconnectStartedAt) state.reconnectStartedAt = now
   const elapsed = now - state.reconnectStartedAt
   if (elapsed >= config.reconnectMaxMs) {
+    if (profile.managedGeneration) {
+      state.managedRegistered = false
+      state.processor.pause()
+      console.warn(`managed reconnect deferred | profile=${profile.profileId}`)
+      return // Rent reconciliation may retry; never restart unrelated legacy profiles.
+    }
     shutdown(1, `reconnect timeout for profile ${profile.profileId}`)
     return
   }
@@ -3933,6 +3951,25 @@ export const startBoundedSkillResultReplay = ({
   return () => { cancelled = true }
 }
 
+const resumeRegisteredProfile = (profile, state) => {
+  clearInterval(state.heartbeatTimer)
+  state.resultReplayCancel?.()
+  const replaySocket = state.ws
+  const replayToken = `connection:${randomUUID()}`
+  state.resultReplayCancel = startBoundedSkillResultReplay({
+    manager: state.skillInstallManager,
+    replayToken,
+    isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN,
+    onBatch: replayed => {
+      if (replayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${replayed}`)
+    }
+  })
+  const replayed = state.processor.replayAcks()
+  if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
+  state.processor.resume()
+  state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
+}
+
 const connectProfile = profile => {
   const state = getProfileState(profile)
   if (!state) return
@@ -3942,34 +3979,25 @@ const connectProfile = profile => {
     try { state.ws.close() } catch {}
   }
   let closeFired = false
+  state.managedRegistered = false
   state.ws = new WebSocketClient(
     buildWebSocketUrl(config.wsUrl, config.apiKey, profile),
     buildWebSocketOptions(config.apiKey, profile)
   )
-  state.ws.addEventListener('open', () => {
+  const socket = state.ws
+  socket.addEventListener('open', () => {
+    if (state.ws !== socket) return
     clearReconnectState(state)
     state.reconnectAttempt = 0
     state.reconnectStartedAt = 0
     registerAgent(profile)
     sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-    state.resultReplayCancel?.()
-    const replaySocket = state.ws
-    const replayToken = `connection:${randomUUID()}`
-    state.resultReplayCancel = startBoundedSkillResultReplay({
-      manager: state.skillInstallManager,
-      replayToken,
-      isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN,
-      onBatch: replayed => {
-        if (replayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${replayed}`)
-      }
-    })
-    const replayed = state.processor.replayAcks()
-    if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
-    state.processor.resume()
-    state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
+    if (!profile.managedGeneration) resumeRegisteredProfile(profile, state)
   })
-  state.ws.addEventListener('message', event => { void handleMessage(profile, event.data) })
-  state.ws.addEventListener('close', () => {
+  socket.addEventListener('message', event => { if (state.ws === socket) void handleMessage(profile, event.data) })
+  socket.addEventListener('close', () => {
+    if (state.ws !== socket) return
+    state.managedRegistered = false
     closeFired = true
     state.resultReplayCancel?.()
     state.resultReplayCancel = null
@@ -3977,10 +4005,11 @@ const connectProfile = profile => {
     state.processor.pause()
     if (!shuttingDown) doReconnect(profile)
   })
-  state.ws.addEventListener('error', error => {
+  socket.addEventListener('error', error => {
+    if (state.ws !== socket) return
     console.error(`websocket error | profile=${profile.profileId}:`, error.message || error)
     setTimeout(() => {
-      if (!closeFired && !shuttingDown && !state.reconnectScheduled) {
+      if (state.ws === socket && !closeFired && !shuttingDown && !state.reconnectScheduled) {
         try { state.ws?.close() } catch {}
         doReconnect(profile)
       }
@@ -4009,6 +4038,7 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
 
 const applyProfileConfig = (nextProfiles, nextDefaultProfileId, reason = 'config reload') => {
   const previousProfiles = config.profiles
+  if (managedHostModule) nextProfiles = managedHostModule.preserveManagedProfiles(previousProfiles, nextProfiles)
   const previousByAgentId = new Map(previousProfiles.map(profile => [profile.agentId, profile]))
   const nextByAgentId = new Map(nextProfiles.map(profile => [profile.agentId, profile]))
   for (const previousProfile of previousProfiles) {
@@ -4036,7 +4066,7 @@ const applyProfileConfig = (nextProfiles, nextDefaultProfileId, reason = 'config
     profileStates.set(nextProfile.agentId, createProfileState(nextProfile))
     connectProfile(nextProfile)
   }
-  lastProfileSignature = profileSignature(config.profiles, config.defaultProfileId)
+  lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
 }
 
 const reloadProfiles = (reason = 'config reload') => {
@@ -4056,7 +4086,7 @@ const reloadProfiles = (reason = 'config reload') => {
 }
 
 const startProfileWatcher = () => {
-  lastProfileSignature = profileSignature(config.profiles, config.defaultProfileId)
+  lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
   if (config.profileReloadMs <= 0) return
   const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
   if (profilesFile) {
@@ -4074,6 +4104,7 @@ const shutdown = (exitCode = 0, reason = '') => {
   shutdownStarted = true
   shuttingDown = true
   if (reason) console.warn(`shutting down codex-ws-agent | reason=${reason}`)
+  managedHostChannel?.close()
   terminateAllRuns()
   if (profileReloadTimer) clearInterval(profileReloadTimer)
   const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
@@ -4140,6 +4171,54 @@ export const main = async () => {
   process.on('SIGTERM', () => shutdown(0, 'SIGTERM'))
   for (const profile of config.profiles) connectProfile(profile)
   startProfileWatcher()
+  // Inert unless explicitly configured at release. Never entered by --validate.
+  if (process.env.AGENT_MANAGED_HOST_ENABLED === 'true') {
+    try {
+      managedHostModule = await import('./managed-host.mjs')
+      const { ManagedHost, startManagedHostSocket } = managedHostModule
+      const required = name => {
+        const value = process.env[name]
+        if (!value || value !== value.trim()) throw new Error(`Missing managed host release setting ${name}`)
+        return value
+      }
+      const root = required('AGENT_MANAGED_HOST_ROOT')
+      const workspacePolicyId = required('AGENT_MANAGED_HOST_WORKSPACE_POLICY_ID')
+      if (!config.workspacePolicies.has(workspacePolicyId)) throw new Error('Managed hosting requires an existing trusted workspace policy')
+      if (config.profiles.some(profile => profile.codexHome &&
+          (resolve(profile.codexHome) === root || resolve(profile.codexHome).startsWith(`${root}/`) || root.startsWith(`${resolve(profile.codexHome)}/`)))) {
+        throw new Error('Managed data root overlaps existing profiles')
+      }
+      const host = new ManagedHost({ root, workspacePolicyId, templateHome: required('AGENT_MANAGED_HOST_TEMPLATE_HOME'),
+        codexBin: required('AGENT_MANAGED_HOST_CODEX_BIN'), runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+        tenantId: required('AGENT_MANAGED_HOST_TENANT_ID'), clientId: required('AGENT_MANAGED_HOST_CLIENT_ID'),
+        ownerJiacn: required('AGENT_MANAGED_HOST_OWNER_JIACN'),
+        conflicts: (agentId, generation) => config.profiles.some(profile => profile.agentId === agentId && profile.managedGeneration !== generation),
+        profileState: agentId => {
+          const state = profileStates.get(agentId)
+          return state ? { registered: state.managedRegistered && state.ws?.readyState === WebSocketClient.OPEN,
+            generation: state.profile.managedGeneration, runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
+        },
+        attachProfile: async (profile, engine) => {
+          let state = profileStates.get(profile.agentId)
+          if (state && state.profile.managedGeneration !== profile.managedGeneration) throw new Error('Managed profile collision')
+          if (!state) {
+            state = createProfileState(profile)
+            profileStates.set(profile.agentId, state)
+            config.profiles.push(profile)
+            state.managedEngine = engine
+            connectProfile(profile)
+          } else {
+            state.managedEngine = engine
+            if (state.ws?.readyState !== WebSocketClient.OPEN && !state.reconnectScheduled) connectProfile(profile)
+          }
+          // Registration normally arrives on a later poll; never manufacture synchronous online proof.
+        }
+      })
+      managedHostChannel = await startManagedHostSocket({ socketPath: required('AGENT_MANAGED_HOST_SOCKET'), host })
+    } catch (error) {
+      console.warn(`managed hosting channel unavailable; legacy profiles unchanged (${error.code || error.name || 'configuration error'})`)
+    }
+  }
 }
 
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url
