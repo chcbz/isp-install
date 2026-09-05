@@ -1332,15 +1332,32 @@ test('installer restarts only after policy and agent validation both succeed', (
 })
 
 
-test('installer collates the managed installer and lockfile before deterministic production dependency install', () => {
-  const root = temporaryDirectory()
+const prepareExistingInstallerRuntime = root => {
   const appHome = resolve(root, 'app')
+  const oldRelease = resolve(appHome, 'releases', 'old-release')
+  mkdirSync(resolve(appHome, 'data', 'inbox'), { recursive: true })
+  mkdirSync(resolve(appHome, 'logs'), { recursive: true })
+  mkdirSync(oldRelease, { recursive: true })
+  writeFileSync(resolve(oldRelease, 'agent-client.mjs'), 'old-release\n')
+  symlinkSync('releases/old-release', resolve(appHome, 'current'))
+  writeFileSync(resolve(appHome, 'agent-client.mjs'), 'legacy-flat-runtime\n')
+  writeFileSync(resolve(appHome, '.env'), 'OPENCLAW_API_KEY=preserved-secret\n', { mode: 0o644 })
+  writeFileSync(resolve(appHome, 'codex-profiles.conf'), '[agent.default]\napiKey=preserved-profile-secret\n', { mode: 0o644 })
+  writeFileSync(resolve(appHome, 'codex-session-map.json'), '{"session":"preserved"}\n', { mode: 0o644 })
+  writeFileSync(resolve(appHome, 'data', 'state.txt'), 'preserved-data\n')
+  writeFileSync(resolve(appHome, 'logs', 'runtime.log'), 'preserved-log\n')
+  return { appHome, oldRelease }
+}
+
+const installerCollationFixture = ({ failPhase = '', configureAppHome = () => {} } = {}) => {
+  const root = temporaryDirectory()
+  const { appHome } = prepareExistingInstallerRuntime(root)
+  configureAppHome({ root, appHome })
   const binDir = resolve(root, 'bin')
   const npmRecord = resolve(root, 'npm-record.txt')
   const sourceNodeModules = fileURLToPath(new URL('../node_modules', import.meta.url))
   const nodeWrapper = resolve(binDir, 'node-wrapper')
   const npmWrapper = resolve(binDir, 'npm-wrapper')
-  mkdirSync(appHome, { recursive: true })
   mkdirSync(binDir)
   writeFileSync(nodeWrapper, `#!/bin/bash\nif [[ "$1" == */agent-client.mjs && "$2" == --validate ]]; then exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
   writeFileSync(npmWrapper, `#!/bin/bash\nset -e\ntest -f skill-install-manager.mjs\ntest -f package-lock.json\ngrep -q '"yauzl"' package-lock.json\nprintf '%s\\n%s\\n' "$PWD" "$*" > ${JSON.stringify(npmRecord)}\ncp -a ${JSON.stringify(sourceNodeModules)} node_modules\n`)
@@ -1352,15 +1369,76 @@ test('installer collates the managed installer and lockfile before deterministic
       ...process.env,
       CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
       CODEX_WS_AGENT_INSTALL_TEST_COLLATE: '1',
+      CODEX_WS_AGENT_TEST_FAIL_PHASE: failPhase,
+      CODEX_WS_AGENT_TEST_RELEASE_ID: 'candidate-release',
       CODEX_WS_AGENT_TEST_APP_HOME: appHome,
       CODEX_WS_AGENT_TEST_NODE_BIN: nodeWrapper,
       CODEX_WS_AGENT_TEST_NPM_BIN: npmWrapper,
       START_CODEX_WS_AGENT: 'n'
     }
   })
+  return { root, appHome, npmRecord, result }
+}
+
+test('installer stages dependencies/source, validates, preserves secrets/state, and atomically switches current', () => {
+  const fixture = installerCollationFixture()
+  const { appHome, npmRecord, result } = fixture
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/candidate-release')
+  const release = resolve(appHome, 'releases', 'candidate-release')
   for (const file of ['agent-client.mjs', 'skill-install-manager.mjs', 'workspace-manager.mjs', 'package.json', 'package-lock.json']) {
-    assert.equal(existsSync(resolve(appHome, file)), true, file)
+    assert.equal(existsSync(resolve(release, file)), true, file)
   }
-  assert.equal(readFileSync(npmRecord, 'utf8'), `${appHome}\nci --omit=dev --ignore-scripts --no-audit --no-fund\n`)
+  assert.equal(readlinkSync(resolve(appHome, 'agent-client.mjs')), 'current/agent-client.mjs')
+  assert.equal(readlinkSync(resolve(appHome, 'workspace-manager.mjs')), 'current/workspace-manager.mjs')
+  assert.equal(readFileSync(npmRecord, 'utf8'), `${resolve(appHome, 'releases', '.stage-candidate-release')}\nci --omit=dev --ignore-scripts --no-audit --no-fund\n`)
+  assert.equal(statSync(resolve(appHome, '.env')).mode & 0o777, 0o600)
+  assert.equal(statSync(resolve(appHome, 'codex-profiles.conf')).mode & 0o777, 0o600)
+  assert.equal(statSync(resolve(appHome, 'codex-session-map.json')).mode & 0o777, 0o600)
+  assert.equal(statSync(resolve(appHome, 'data')).mode & 0o777, 0o700)
+  assert.equal(statSync(resolve(appHome, 'data', 'inbox')).mode & 0o777, 0o700)
+  assert.equal(statSync(resolve(appHome, 'logs')).mode & 0o777, 0o750)
+  assert.equal(readFileSync(resolve(appHome, '.env'), 'utf8'), 'OPENCLAW_API_KEY=preserved-secret\n')
+  assert.equal(readFileSync(resolve(appHome, 'codex-profiles.conf'), 'utf8'), '[agent.default]\napiKey=preserved-profile-secret\n')
+  assert.equal(readFileSync(resolve(appHome, 'codex-session-map.json'), 'utf8'), '{"session":"preserved"}\n')
+  assert.equal(readFileSync(resolve(appHome, 'data', 'state.txt'), 'utf8'), 'preserved-data\n')
+  assert.equal(readFileSync(resolve(appHome, 'logs', 'runtime.log'), 'utf8'), 'preserved-log\n')
+})
+
+test('installer rejects symlinked persistent secrets before staging and does not touch the referent', () => {
+  let externalEnv = ''
+  const { appHome, result } = installerCollationFixture({
+    configureAppHome({ root, appHome: configuredHome }) {
+      externalEnv = resolve(root, 'outside-env')
+      writeFileSync(externalEnv, 'EXTERNAL_SECRET=unchanged\n', { mode: 0o644 })
+      unlinkSync(resolve(configuredHome, '.env'))
+      symlinkSync(externalEnv, resolve(configuredHome, '.env'))
+    }
+  })
+  assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/old-release')
+  assert.equal(readFileSync(externalEnv, 'utf8'), 'EXTERNAL_SECRET=unchanged\n')
+  assert.equal(statSync(externalEnv).mode & 0o777, 0o644)
+  assert.equal(existsSync(resolve(appHome, 'releases', 'candidate-release')), false)
+  assert.equal(existsSync(resolve(appHome, 'releases', '.stage-candidate-release')), false)
+})
+
+test('copy, npm, or validation failure rolls back before cutover and cannot mix the live runtime', async t => {
+  for (const phase of ['copy', 'npm', 'validation']) {
+    await t.test(phase, () => {
+      const { appHome, result } = installerCollationFixture({ failPhase: phase })
+      assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
+      assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/old-release')
+      assert.equal(readFileSync(resolve(appHome, 'agent-client.mjs'), 'utf8'), 'legacy-flat-runtime\n')
+      assert.equal(existsSync(resolve(appHome, 'releases', 'candidate-release')), false)
+      assert.equal(existsSync(resolve(appHome, 'releases', '.stage-candidate-release')), false)
+      assert.equal(readFileSync(resolve(appHome, '.env'), 'utf8'), 'OPENCLAW_API_KEY=preserved-secret\n')
+      assert.equal(readFileSync(resolve(appHome, 'codex-profiles.conf'), 'utf8'), '[agent.default]\napiKey=preserved-profile-secret\n')
+      assert.equal(readFileSync(resolve(appHome, 'codex-session-map.json'), 'utf8'), '{"session":"preserved"}\n')
+      assert.equal(readFileSync(resolve(appHome, 'data', 'state.txt'), 'utf8'), 'preserved-data\n')
+      assert.equal(readFileSync(resolve(appHome, 'logs', 'runtime.log'), 'utf8'), 'preserved-log\n')
+      assert.equal(statSync(resolve(appHome, '.env')).mode & 0o777, 0o600)
+      assert.equal(statSync(resolve(appHome, 'codex-profiles.conf')).mode & 0o777, 0o600)
+    })
+  }
 })

@@ -1483,30 +1483,44 @@ export class DurableDedupeLedger {
     return entry
   }
 
-  markReconciledCompleted(commandId, outcome) {
+  markReconciledOutcome(commandId, outcome, authority = '') {
     const existing = this.getEntry(commandId)
     if (!existing) throw new Error(`dedupe ledger entry missing for ${commandId}`)
-    if (existing.status === ACK_STATUS.SUCCEEDED) return existing
-    if ([ACK_STATUS.FAILED, ACK_STATUS.REJECTED].includes(existing.status)) {
-      throw new Error(`cannot reconcile committed command from terminal ledger status ${existing.status}`)
+    const desiredStatus = outcome?.status === 'failed' ? ACK_STATUS.FAILED : ACK_STATUS.SUCCEEDED
+    const desiredOutcome = {
+      status: desiredStatus === ACK_STATUS.FAILED ? 'failed' : 'completed',
+      exitCode: outcome?.exitCode ?? (desiredStatus === ACK_STATUS.SUCCEEDED ? 0 : null),
+      errorMessage: outcome?.errorMessage || ''
     }
-    if (![ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, LEDGER_STATUS.RECOVERY_REQUIRED].includes(existing.status)) {
-      throw new Error(`cannot reconcile committed command from ledger status ${existing.status}`)
+    if (existing.status === desiredStatus) return existing
+    const existingTerminal = TERMINAL_LEDGER_STATUSES.has(existing.status)
+    if (existingTerminal && authority !== 'SKILL_INSTALL_DURABLE_RESULT') {
+      throw new Error(`cannot reconcile authoritative command from terminal ledger status ${existing.status}`)
+    }
+    if (!existingTerminal
+        && ![ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, LEDGER_STATUS.RECOVERY_REQUIRED].includes(existing.status)) {
+      throw new Error(`cannot reconcile command from ledger status ${existing.status}`)
+    }
+    const history = Array.isArray(existing.reconciledTerminalHistory) ? [...existing.reconciledTerminalHistory] : []
+    if (existingTerminal) {
+      history.push({ status: existing.status, outcome: existing.outcome || null, reconciledAt: this.now(), authority })
     }
     const entry = {
       ...existing,
-      status: ACK_STATUS.SUCCEEDED,
+      status: desiredStatus,
       completedAt: this.now(),
       recoveryRequiredAt: null,
       rejectReason: null,
-      outcome: {
-        status: 'completed',
-        exitCode: outcome?.exitCode ?? 0,
-        errorMessage: outcome?.errorMessage || ''
-      }
+      outcome: desiredOutcome,
+      reconciliationAuthority: authority || null,
+      reconciledTerminalHistory: history
     }
     this._writeEntry(commandId, entry)
     return entry
+  }
+
+  markReconciledCompleted(commandId, outcome) {
+    return this.markReconciledOutcome(commandId, { ...outcome, status: 'completed' })
   }
 
   markRejected(commandId, reason) {
@@ -1613,6 +1627,7 @@ export class AckOutbox {
     this.sleepSync = sleepSync
     this.acksDir = resolve(this.rootDir, 'acks')
     this.quarantineDir = resolve(this.rootDir, 'acks-quarantine')
+    this.supersededDir = resolve(this.rootDir, 'acks-superseded')
     this.sequencePath = resolve(this.rootDir, 'ack-sequence.json')
     this.highWaterDir = resolve(this.rootDir, 'ack-sequence-high-water')
     this.highWaterInitializedPath = resolve(this.highWaterDir, 'initialized.json')
@@ -1624,6 +1639,7 @@ export class AckOutbox {
   initialize() {
     ensureSecureDirectory(this.fs, this.acksDir)
     ensureSecureDirectory(this.fs, this.quarantineDir)
+    ensureSecureDirectory(this.fs, this.supersededDir)
     ensureSecureDirectory(this.fs, this.highWaterDir)
     this.corruptions = []
     for (const fileName of this.fs.readdirSync(this.quarantineDir)) {
@@ -2039,6 +2055,26 @@ export class AckOutbox {
     return this.withPendingEnvelopesLocked('replay-scan', pending => pending)
   }
 
+  supersedeContradictoryTerminal(commandId, authoritativeStatus, reason = '') {
+    if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(authoritativeStatus)) {
+      throw new Error(`unsupported authoritative terminal ACK status: ${authoritativeStatus}`)
+    }
+    return this.withPendingEnvelopesLocked('terminal-reconcile', pending => {
+      let superseded = 0
+      for (const item of pending) {
+        if (item.envelope.commandId !== commandId
+            || ![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(item.envelope.ackStatus)
+            || item.envelope.ackStatus === authoritativeStatus) continue
+        const sourcePath = resolve(this.acksDir, item.fileName)
+        const targetPath = resolve(this.supersededDir, item.fileName)
+        durableRename(this.fs, sourcePath, targetPath)
+        atomicWriteText(this.fs, `${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${reason || 'authoritative terminal reconciliation'}\n`)
+        superseded += 1
+      }
+      return superseded
+    })
+  }
+
   withPendingEnvelopesLocked(operation, callback) {
     this._assertHealthy()
     return this._withSequenceLock(operation, () => {
@@ -2189,8 +2225,17 @@ export class AgentMessageProcessor {
           throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Committed installer evidence conflicts with ledger fingerprint for ${commandId}`)
         }
         const completed = this.inbox.markCompleted(reconciledItem, committedOutcome)
-        const terminal = this.ledger.markReconciledCompleted(commandId, committedOutcome)
-        this._emitAck(ACK_STATUS.SUCCEEDED, {
+        const terminal = this.ledger.markReconciledOutcome(
+          commandId,
+          committedOutcome,
+          committedOutcome.authoritative ? 'SKILL_INSTALL_DURABLE_RESULT' : ''
+        )
+        this.ackOutbox?.supersedeContradictoryTerminal(
+          commandId,
+          terminal.status,
+          'superseded by authoritative durable SKILL_INSTALL result reconciliation'
+        )
+        this._emitAck(terminal.status, {
           ...this._commandMeta(reconciledItem.normalized),
           commandId,
           outcome: terminal.outcome
@@ -2872,9 +2917,12 @@ export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInst
 const getProfileById = profileId => config?.profiles.find(profile => profile.profileId === profileId || profile.agentId === profileId)
 const getProfileState = profile => profileStates.get(profile.agentId)
 
+const MAX_WS_BUFFERED_BYTES = 1024 * 1024
+
 const sendRaw = (event, profile = defaultProfile) => {
   const state = getProfileState(profile)
   if (!state?.ws || state.ws.readyState !== WebSocketClient.OPEN) return false
+  if (Number(state.ws.bufferedAmount || 0) > MAX_WS_BUFFERED_BYTES) return false
   state.ws.send(JSON.stringify(event))
   return true
 }
@@ -3745,7 +3793,7 @@ const createProfileState = profile => {
   const sendAckFn = envelope => sendRaw(envelope, profile)
   const skillInstallManager = new SkillInstallManager({
     profile,
-    stateRoot: defaultSkillInstallStateRoot(config.commandInboxDir, profile),
+    stateRoot: defaultSkillInstallStateRoot(config.commandInboxDir, profile, config.wsUrl),
     wsUrl: config.wsUrl,
     apiKey: config.apiKey,
     enabled: config.skillInstallEnabled,
@@ -3769,6 +3817,7 @@ const createProfileState = profile => {
     reconnectAttempt: 0,
     reconnectStartedAt: 0,
     reconnectScheduled: false,
+    resultReplayCancel: null,
     taskEvents,
     inbox,
     ledger,
@@ -3866,6 +3915,24 @@ const doReconnect = profile => {
   }, delay)
 }
 
+export const startBoundedSkillResultReplay = ({
+  manager,
+  replayToken,
+  isStable = () => true,
+  schedule = callback => setImmediate(callback),
+  onBatch = () => {}
+}) => {
+  let cancelled = false
+  const run = () => {
+    if (cancelled || !isStable()) return
+    const replayed = manager.replayResults(undefined, { replayToken })
+    onBatch(replayed)
+    if (!cancelled && isStable() && replayed >= manager.maxReplayBatch) schedule(run)
+  }
+  schedule(run)
+  return () => { cancelled = true }
+}
+
 const connectProfile = profile => {
   const state = getProfileState(profile)
   if (!state) return
@@ -3885,8 +3952,17 @@ const connectProfile = profile => {
     state.reconnectStartedAt = 0
     registerAgent(profile)
     sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-    const resultReplayed = state.skillInstallManager.replayResults(undefined, { replayToken: `connection:${randomUUID()}` })
-    if (resultReplayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${resultReplayed}`)
+    state.resultReplayCancel?.()
+    const replaySocket = state.ws
+    const replayToken = `connection:${randomUUID()}`
+    state.resultReplayCancel = startBoundedSkillResultReplay({
+      manager: state.skillInstallManager,
+      replayToken,
+      isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN,
+      onBatch: replayed => {
+        if (replayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${replayed}`)
+      }
+    })
     const replayed = state.processor.replayAcks()
     if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
     state.processor.resume()
@@ -3895,6 +3971,8 @@ const connectProfile = profile => {
   state.ws.addEventListener('message', event => { void handleMessage(profile, event.data) })
   state.ws.addEventListener('close', () => {
     closeFired = true
+    state.resultReplayCancel?.()
+    state.resultReplayCancel = null
     clearInterval(state.heartbeatTimer)
     state.processor.pause()
     if (!shuttingDown) doReconnect(profile)
@@ -3914,6 +3992,8 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
   const state = getProfileState(profile)
   if (!state) return
   state.processor.pause()
+  state.resultReplayCancel?.()
+  state.resultReplayCancel = null
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
   sendStatus(profile, 'offline', { errorMessage: reason })
@@ -4001,6 +4081,8 @@ const shutdown = (exitCode = 0, reason = '') => {
   for (const profile of config.profiles) {
     const state = getProfileState(profile)
     state?.processor.pause()
+    state?.resultReplayCancel?.()
+    if (state) state.resultReplayCancel = null
     clearReconnectState(state)
     clearInterval(state?.heartbeatTimer)
     sendStatus(profile, 'offline')

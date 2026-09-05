@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
   closeSync,
@@ -42,6 +43,7 @@ const DEFAULT_MAX_EXTRACTED_BYTES = 64 * 1024 * 1024
 const DEFAULT_MAX_ENTRY_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_ENTRIES = 256
 const DEFAULT_MAX_REPLAY_BATCH = 32
+const STATE_SCOPE_FILE = 'scope.json'
 const DEFAULT_UNOWNED_LOCK_STALE_MS = 30_000
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const SAFE_SKILL_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -90,6 +92,239 @@ const lockOwnerIsAlive = owner => (
 )
 
 const collisionKey = path => path.normalize('NFC').toUpperCase().toLowerCase().normalize('NFC')
+
+const canonicalApiOrigin = wsUrl => {
+  let endpoint
+  try { endpoint = new URL(wsUrl) } catch {
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'configured WS_URL is not a valid URL')
+  }
+  if (!['ws:', 'wss:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'configured WS_URL cannot define a trusted API origin')
+  }
+  endpoint.protocol = endpoint.protocol === 'wss:' ? 'https:' : 'http:'
+  endpoint.pathname = '/'
+  endpoint.search = ''
+  endpoint.hash = ''
+  return endpoint.origin
+}
+
+const durableScope = (profile, wsUrl) => {
+  const apiOrigin = canonicalApiOrigin(wsUrl)
+  const payload = {
+    schemaVersion: 1,
+    profileId: String(profile.profileId),
+    agentId: String(profile.agentId),
+    apiOrigin
+  }
+  return Object.freeze({
+    ...payload,
+    digest: `sha256:${sha256Hex(Buffer.from(`CYF_SKILL_INSTALL_SCOPE_V1\0${JSON.stringify(payload)}`))}`
+  })
+}
+
+const pathIdentity = path => {
+  const status = lstatSync(path, { bigint: true })
+  return Object.freeze({
+    path: realpathSync(path),
+    dev: status.dev.toString(),
+    ino: status.ino.toString(),
+    kind: status.isDirectory() ? 'directory' : status.isFile() ? 'file' : status.isSymbolicLink() ? 'symlink' : 'other'
+  })
+}
+
+const samePathIdentity = (left, right) => Boolean(left && right
+  && left.path === right.path && left.dev === right.dev && left.ino === right.ino && left.kind === right.kind)
+
+const LINUX_ATOMIC_HELPER = String.raw`
+import ctypes, errno, hashlib, json, os, stat, sys
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = getattr(libc, 'renameat2', None)
+if renameat2 is None:
+    print(json.dumps({'ok': False, 'code': 'UNSUPPORTED', 'message': 'renameat2 unavailable'}))
+    sys.exit(3)
+renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+renameat2.restype = ctypes.c_int
+RENAME_NOREPLACE = 1
+RENAME_EXCHANGE = 2
+O_DIRECTORY = getattr(os, 'O_DIRECTORY', 0)
+O_NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+
+def emit(ok, code='OK', message='', **extra):
+    print(json.dumps(dict(ok=ok, code=code, message=message, **extra), sort_keys=True))
+
+def call_rename(srcfd, src, dstfd, dst, flags):
+    if renameat2(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), flags) != 0:
+        value = ctypes.get_errno()
+        raise OSError(value, os.strerror(value))
+
+def open_parent(expected):
+    fd = os.open(expected['path'], os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    actual = os.fstat(fd)
+    if str(actual.st_dev) != expected['dev'] or str(actual.st_ino) != expected['ino']:
+        os.close(fd)
+        raise RuntimeError('parent inode changed')
+    if os.path.realpath('/proc/self/fd/%d' % fd) != expected['path']:
+        os.close(fd)
+        raise RuntimeError('parent realpath changed')
+    return fd
+
+def stat_at(fd, name):
+    return os.stat(name, dir_fd=fd, follow_symlinks=False)
+
+def matches(value, expected):
+    return str(value.st_dev) == expected['dev'] and str(value.st_ino) == expected['ino']
+
+def parent_still_current(fd, expected):
+    try:
+        current = os.stat(expected['path'], follow_symlinks=False)
+        opened = os.fstat(fd)
+        return current.st_dev == opened.st_dev and current.st_ino == opened.st_ino and os.path.realpath(expected['path']) == expected['path']
+    except OSError:
+        return False
+
+def owner_digest(fd, directory_name):
+    try:
+        owner_fd = os.open(directory_name + '/owner.json', os.O_RDONLY | O_NOFOLLOW, dir_fd=fd)
+    except FileNotFoundError:
+        return hashlib.sha256(b'').hexdigest()
+    try:
+        data = b''
+        while True:
+            chunk = os.read(owner_fd, 65536)
+            if not chunk: break
+            data += chunk
+            if len(data) > 1048576: raise RuntimeError('owner evidence too large')
+        return hashlib.sha256(data).hexdigest()
+    finally:
+        os.close(owner_fd)
+
+def rename_noreplace(payload):
+    src_parent = open_parent(payload['sourceParent'])
+    dst_parent = open_parent(payload['targetParent'])
+    try:
+        source = stat_at(src_parent, payload['sourceName'])
+        if not matches(source, payload['sourceIdentity']):
+            emit(False, 'SOURCE_CHANGED', 'source inode changed'); return
+        expected_owner = payload.get('sourceOwnerSha256')
+        if expected_owner is not None and owner_digest(src_parent, payload['sourceName']) != expected_owner:
+            emit(False, 'SOURCE_CHANGED', 'source owner generation changed'); return
+        try:
+            stat_at(dst_parent, payload['targetName'])
+            emit(False, 'TARGET_EXISTS', 'target already exists'); return
+        except FileNotFoundError:
+            pass
+        call_rename(src_parent, payload['sourceName'], dst_parent, payload['targetName'], RENAME_NOREPLACE)
+        moved = stat_at(dst_parent, payload['targetName'])
+        if not matches(moved, payload['sourceIdentity']):
+            emit(False, 'POSTCONDITION_FAILED', 'published inode mismatch'); return
+        if expected_owner is not None and owner_digest(dst_parent, payload['targetName']) != expected_owner:
+            emit(False, 'POSTCONDITION_FAILED', 'published owner generation mismatch'); return
+        if not parent_still_current(src_parent, payload['sourceParent']) or not parent_still_current(dst_parent, payload['targetParent']):
+            try:
+                call_rename(dst_parent, payload['targetName'], src_parent, payload['sourceName'], RENAME_NOREPLACE)
+                os.fsync(src_parent)
+                if src_parent != dst_parent: os.fsync(dst_parent)
+                emit(False, 'PARENT_CHANGED_ROLLED_BACK', 'parent changed during commit; publication rolled back')
+            except Exception as rollback:
+                emit(False, 'PARENT_CHANGED_ROLLBACK_FAILED', 'parent changed and rollback failed: %s' % rollback)
+            return
+        os.fsync(src_parent)
+        if src_parent != dst_parent: os.fsync(dst_parent)
+        emit(True)
+    except FileExistsError:
+        emit(False, 'TARGET_EXISTS', 'target already exists')
+    except Exception as error:
+        emit(False, 'IO_ERROR', str(error))
+    finally:
+        os.close(src_parent); os.close(dst_parent)
+
+def exchange_if_match(payload):
+    parent = open_parent(payload['parent'])
+    try:
+        active = stat_at(parent, payload['activeName'])
+        replacement = stat_at(parent, payload['replacementName'])
+        if not matches(active, payload['activeIdentity']):
+            emit(False, 'ACTIVE_CHANGED', 'active lock inode changed'); return
+        if not matches(replacement, payload['replacementIdentity']):
+            emit(False, 'REPLACEMENT_CHANGED', 'replacement lock inode changed'); return
+        if owner_digest(parent, payload['activeName']) != payload['activeOwnerSha256']:
+            emit(False, 'ACTIVE_CHANGED', 'active lock owner generation changed'); return
+        if owner_digest(parent, payload['replacementName']) != payload['replacementOwnerSha256']:
+            emit(False, 'REPLACEMENT_CHANGED', 'replacement lock owner generation changed'); return
+        call_rename(parent, payload['activeName'], parent, payload['replacementName'], RENAME_EXCHANGE)
+        moved_active = stat_at(parent, payload['activeName'])
+        moved_replacement = stat_at(parent, payload['replacementName'])
+        moved_active_digest = owner_digest(parent, payload['activeName'])
+        moved_replacement_digest = owner_digest(parent, payload['replacementName'])
+        if (not matches(moved_active, payload['replacementIdentity'])
+                or moved_active_digest != payload['replacementOwnerSha256']
+                or not matches(moved_replacement, payload['activeIdentity'])
+                or moved_replacement_digest != payload['activeOwnerSha256']
+                or not parent_still_current(parent, payload['parent'])):
+            try:
+                call_rename(parent, payload['activeName'], parent, payload['replacementName'], RENAME_EXCHANGE)
+                os.fsync(parent)
+                emit(False, 'ACTIVE_CHANGED_ROLLED_BACK', 'lock generation changed during exchange; exchange rolled back')
+            except Exception as rollback:
+                emit(False, 'ACTIVE_CHANGED_ROLLBACK_FAILED', 'lock generation changed and rollback failed: %s' % rollback)
+            return
+        os.fsync(parent)
+        emit(True)
+    except Exception as error:
+        emit(False, 'IO_ERROR', str(error))
+    finally:
+        os.close(parent)
+
+operation = sys.argv[1]
+payload = json.loads(sys.argv[2])
+if operation == 'rename-noreplace': rename_noreplace(payload)
+elif operation == 'exchange-if-match': exchange_if_match(payload)
+else: emit(False, 'INVALID_OPERATION', operation)
+`
+
+const runLinuxAtomicHelper = (operation, payload) => {
+  if (process.platform !== 'linux') {
+    return { ok: false, code: 'UNSUPPORTED', message: 'Linux renameat2 primitives are required' }
+  }
+  const result = spawnSync(process.env.CYF_PYTHON_BIN || 'python3', ['-c', LINUX_ATOMIC_HELPER, operation, JSON.stringify(payload)], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024
+  })
+  if (result.error) return { ok: false, code: 'UNSUPPORTED', message: result.error.message }
+  const line = String(result.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop() || ''
+  try {
+    const parsed = JSON.parse(line)
+    if (isObject(parsed) && typeof parsed.ok === 'boolean') return parsed
+  } catch {}
+  return { ok: false, code: 'HELPER_FAILED', message: String(result.stderr || line || `helper exited ${result.status}`) }
+}
+
+export const LINUX_ATOMIC_FS = Object.freeze({
+  renameNoReplace(sourcePath, targetPath, expected = {}) {
+    const sourceParent = expected.sourceParent || pathIdentity(dirname(sourcePath))
+    const targetParent = expected.targetParent || pathIdentity(dirname(targetPath))
+    const sourceIdentity = expected.sourceIdentity || pathIdentity(sourcePath)
+    return runLinuxAtomicHelper('rename-noreplace', {
+      sourceParent,
+      targetParent,
+      sourceIdentity,
+      sourceOwnerSha256: expected.sourceOwnerSha256,
+      sourceName: basename(sourcePath),
+      targetName: basename(targetPath)
+    })
+  },
+  exchangeIfMatch(activePath, replacementPath, expected) {
+    return runLinuxAtomicHelper('exchange-if-match', {
+      parent: expected.parent || pathIdentity(dirname(activePath)),
+      activeIdentity: expected.activeIdentity,
+      replacementIdentity: expected.replacementIdentity || pathIdentity(replacementPath),
+      activeOwnerSha256: expected.activeOwnerSha256,
+      replacementOwnerSha256: expected.replacementOwnerSha256,
+      activeName: basename(activePath),
+      replacementName: basename(replacementPath)
+    })
+  }
+})
 
 export class SkillInstallError extends Error {
   constructor(code, message, options = {}) {
@@ -258,6 +493,7 @@ export const validateSkillInstallCommand = (message, profile, maxPackageBytes = 
   if (typeof command.downloadPath !== 'string' || command.downloadPath !== exactDownloadPath) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'downloadPath must be the exact installation-scoped API path')
   }
+  command.scopeDigest = profile?.skillInstallScopeDigest || ''
   command.fingerprint = commandFingerprint(command)
   return Object.freeze(command)
 }
@@ -324,8 +560,8 @@ const readResponseBytes = async (response, expectedSize, maxPackageBytes) => {
 }
 
 const safeArchivePath = fileName => {
-  if (typeof fileName !== 'string' || !fileName || fileName.includes('\0') || fileName.includes('\\')) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive entry has an unsafe path')
+  if (typeof fileName !== 'string' || !fileName || /[\u0000-\u001f\u007f]/u.test(fileName) || fileName.includes('\\')) {
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive entry has an unsafe path or control character')
   }
   if (fileName.startsWith('/') || /^[A-Za-z]:/.test(fileName)) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive entry uses an absolute path')
@@ -335,6 +571,9 @@ const safeArchivePath = fileName => {
   const segments = trimmed.split('/')
   if (!trimmed || segments.some(segment => !segment || segment === '.' || segment === '..')) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive entry contains traversal or empty path segments')
+  }
+  if (segments.some(segment => /[. ]$/u.test(segment))) {
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive entry contains a trailing-dot or trailing-space portable alias')
   }
   const normalized = segments.join('/')
   if (normalized === MARKER_NAME || normalized.startsWith(`${MARKER_NAME}/`)) {
@@ -589,6 +828,7 @@ const validateMarker = (targetPath, command, fingerprint) => {
     && marker.skillKey === command.skillKey
     && marker.skillVersion === command.skillVersion
     && marker.commandFingerprint === fingerprint
+    && marker.scopeDigest === command.scopeDigest
 }
 
 export const buildSkillInstallResultEnvelope = ({ profile, command, status, failureCode = null, installedAt = null, messageId = randomUUID(), runtimeInstanceId }) => ({
@@ -634,12 +874,15 @@ export class SkillInstallManager {
     processIdentityFn = currentProcessIdentity,
     lockOwnerAliveFn = lockOwnerIsAlive,
     unownedLockStaleMs = DEFAULT_UNOWNED_LOCK_STALE_MS,
-    maxReplayBatch = DEFAULT_MAX_REPLAY_BATCH
+    maxReplayBatch = DEFAULT_MAX_REPLAY_BATCH,
+    atomicFs = LINUX_ATOMIC_FS
   }) {
     if (!profile?.agentId || !profile?.profileId) throw new Error('profileId and agentId are required for skill installation')
-    this.profile = profile
+    this.scope = durableScope(profile, wsUrl)
+    this.profile = { ...profile, skillInstallScopeDigest: this.scope.digest }
     this.stateRoot = resolve(stateRoot)
     this.wsUrl = wsUrl
+    this.scopePath = resolve(this.stateRoot, STATE_SCOPE_FILE)
     this.apiKey = profile.apiKey || apiKey || ''
     this.enabled = enabled === true
     this.maxPackageBytes = maxPackageBytes
@@ -655,16 +898,20 @@ export class SkillInstallManager {
     this.lockOwnerAliveFn = lockOwnerAliveFn
     this.unownedLockStaleMs = unownedLockStaleMs
     this.maxReplayBatch = maxReplayBatch
+    this.atomicFs = atomicFs
     this.stagingDir = resolve(this.stateRoot, 'staging')
     this.registryDir = resolve(this.stateRoot, 'installed-registry')
     this.resultsPendingDir = resolve(this.stateRoot, 'work-results', 'pending')
     this.resultsAcknowledgedDir = resolve(this.stateRoot, 'work-results', 'acknowledged')
     this.resultsSentDir = resolve(this.stateRoot, 'work-results', 'sent')
     this.resultsQuarantineDir = resolve(this.stateRoot, 'work-results', 'quarantine')
+    this.resultsSupersededDir = resolve(this.stateRoot, 'work-results', 'superseded')
+    this.installationsQuarantineDir = resolve(this.stateRoot, 'installations-quarantine')
     this.staleLocksDir = resolve(this.stateRoot, 'stale-locks')
     this.lockPath = resolve(this.stateRoot, 'installer.lock')
     this.lockOwnerPath = resolve(this.lockPath, 'owner.json')
     this.lockOwner = null
+    this.lockOwnerSha256 = ''
     this.healthError = null
   }
 
@@ -672,13 +919,50 @@ export class SkillInstallManager {
     for (const directory of [
       this.stateRoot, this.stagingDir, this.registryDir,
       this.resultsPendingDir, this.resultsAcknowledgedDir, this.resultsSentDir,
-      this.resultsQuarantineDir, this.staleLocksDir
+      this.resultsQuarantineDir, this.resultsSupersededDir,
+      this.installationsQuarantineDir, this.staleLocksDir
     ]) ensurePrivateDirectory(directory)
+    this._initializeScopeBinding()
     this._withLockSync('initialize', () => {
       this._scanResultRecords()
       this._recoverRegistry()
+      this._reconcileActiveFailureContradictions()
     })
     return { healthy: !this.healthError, errorCode: this.healthError?.code || '' }
+  }
+
+  _initializeScopeBinding() {
+    if (existsSync(this.scopePath)) {
+      const existing = readJson(this.scopePath)
+      if (!isObject(existing) || existing.schemaVersion !== 1 || existing.digest !== this.scope.digest
+          || existing.profileId !== this.scope.profileId || existing.agentId !== this.scope.agentId
+          || existing.apiOrigin !== this.scope.apiOrigin) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'skill installer durable state belongs to a different origin/profile scope')
+      }
+      chmodSync(this.scopePath, 0o600)
+      return
+    }
+    const durableEntries = [
+      this.registryDir, this.resultsPendingDir, this.resultsAcknowledgedDir, this.resultsSentDir
+    ].some(directory => readdirSync(directory).some(name => name.endsWith('.json')))
+    if (durableEntries) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'unscoped legacy skill installer state cannot be rebound automatically')
+    }
+    let descriptor
+    try {
+      descriptor = openSync(this.scopePath, 'wx', 0o600)
+      writeFileSync(descriptor, `${JSON.stringify(this.scope, null, 2)}\n`, 'utf8')
+      fsyncSync(descriptor)
+      closeSync(descriptor)
+      descriptor = undefined
+      fsyncDirectory(this.stateRoot)
+    } catch (error) {
+      if (descriptor !== undefined) {
+        try { closeSync(descriptor) } catch {}
+      }
+      if (error?.code === 'EEXIST') return this._initializeScopeBinding()
+      throw error
+    }
   }
 
   _registryPath(installationId) {
@@ -694,7 +978,7 @@ export class SkillInstallManager {
   }
 
   _validateRegistryRecord(record, expectedInstallationId = '') {
-    if (!isObject(record) || record.formatVersion !== 1 || !['PREPARED', 'ACTIVE'].includes(record.state)
+    if (!isObject(record) || record.formatVersion !== 2 || !['PREPARED', 'ACTIVE', 'QUARANTINED'].includes(record.state)
         || typeof record.installationId !== 'string' || typeof record.commandFingerprint !== 'string'
         || !isObject(record.command) || !isObject(record.resultEnvelope)) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry is corrupt')
@@ -703,14 +987,19 @@ export class SkillInstallManager {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry identity mismatch')
     }
     if (record.agentId !== this.profile.agentId || record.profileId !== this.profile.profileId
-        || record.command.installationId !== record.installationId) {
+        || record.scopeDigest !== this.scope.digest || record.command.installationId !== record.installationId) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry profile mismatch')
     }
     const skillsRoot = verifyControlledCodexHome(this.profile.codexHome)
     const expectedTargetPath = resolve(skillsRoot, record.command.skillKey)
     if (record.targetPath !== expectedTargetPath || dirname(record.stagingPath) !== this.stagingDir
-        || !basename(record.stagingPath).startsWith(`${record.installationId}-`)) {
+        || !basename(record.stagingPath).startsWith(`${record.installationId}-`)
+        || !isObject(record.skillsRootIdentity) || record.skillsRootIdentity.path !== skillsRoot) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry path binding is invalid')
+    }
+    if (record.state === 'QUARANTINED'
+        && (typeof record.quarantinedPath !== 'string' || dirname(record.quarantinedPath) !== this.installationsQuarantineDir)) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'quarantined installation path binding is invalid')
     }
     if (record.commandFingerprint !== record.command.fingerprint
         || record.resultEnvelope.messageType !== 'work.result'
@@ -746,14 +1035,15 @@ export class SkillInstallManager {
   }
 
   _validateResultRecord(record, expectedRecordId = '') {
-    if (!isObject(record) || ![1, 2].includes(record.formatVersion) || typeof record.recordId !== 'string'
+    if (!isObject(record) || record.formatVersion !== 3 || typeof record.recordId !== 'string'
         || !isObject(record.envelope) || record.envelope.messageType !== 'work.result'
         || record.envelope.resultType !== RESULT_TYPE || record.envelope.sourceAgentId !== this.profile.agentId) {
       throw new Error('invalid skill work.result outbox record')
     }
     if (expectedRecordId && record.recordId !== expectedRecordId) throw new Error('skill result record/file mismatch')
-    if (record.profileId !== this.profile.profileId || record.agentId !== this.profile.agentId) {
-      throw new Error('skill result record profile mismatch')
+    if (record.profileId !== this.profile.profileId || record.agentId !== this.profile.agentId
+        || record.scopeDigest !== this.scope.digest) {
+      throw new Error('skill result record origin/profile scope mismatch')
     }
     if (record.sendAttempts !== undefined && (!Number.isSafeInteger(record.sendAttempts) || record.sendAttempts < 0)) {
       throw new Error('invalid skill result sendAttempts')
@@ -860,10 +1150,11 @@ export class SkillInstallManager {
       return { recordId, state: 'acknowledged' }
     }
     atomicWriteJson(pending, {
-      formatVersion: 2,
+      formatVersion: 3,
       recordId,
       profileId: this.profile.profileId,
       agentId: this.profile.agentId,
+      scopeDigest: this.scope.digest,
       createdAt: this.now(),
       sendAttempts: 0,
       lastSentAt: null,
@@ -873,20 +1164,56 @@ export class SkillInstallManager {
     return { recordId, state: 'pending' }
   }
 
+  _publishPreparedRecord(record) {
+    let currentParent
+    let currentStaging
+    try {
+      currentParent = pathIdentity(dirname(record.targetPath))
+      currentStaging = pathIdentity(record.stagingPath)
+    } catch (error) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, `prepared publication identity is unavailable: ${error.message}`)
+    }
+    if (!samePathIdentity(currentParent, record.skillsRootIdentity)
+        || !samePathIdentity(currentStaging, record.stagingIdentity)) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared publication parent or staging inode changed')
+    }
+    const result = this.atomicFs.renameNoReplace(record.stagingPath, record.targetPath, {
+      sourceParent: pathIdentity(this.stagingDir),
+      targetParent: record.skillsRootIdentity,
+      sourceIdentity: record.stagingIdentity
+    })
+    if (!result.ok) throw this._atomicFailure(result, 'skill activation no-replace publication')
+    if (!validateMarker(record.targetPath, record.command, record.commandFingerprint)) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'published skill marker failed immediate commit validation')
+    }
+  }
+
   _reconcilePreparedRecord(record, cause = null) {
     const current = this._readRegistry(record.installationId)
     if (!current || current.commandFingerprint !== record.commandFingerprint) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared activation cannot be reconciled with its durable registry')
     }
+    if (current.state === 'QUARANTINED') {
+      return {
+        status: 'failed', exitCode: null,
+        errorMessage: current.quarantineReason || 'durable FAILED result is authoritative; installation was quarantined',
+        failureCode: current.authoritativeFailureCode || SKILL_INSTALL_FAILURE.CONFLICT,
+        resultEnvelope: current.authoritativeFailureEnvelope || null,
+        activationCommitted: false,
+        authoritative: true
+      }
+    }
     const targetExists = existsSync(current.targetPath)
     const stagingExists = existsSync(current.stagingPath)
     if (current.state === 'ACTIVE') {
       if (!targetExists || stagingExists
+          || !samePathIdentity(pathIdentity(dirname(current.targetPath)), current.skillsRootIdentity)
           || !validateMarker(current.targetPath, current.command, current.commandFingerprint)) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'active installed-skill registry does not match CODEX_HOME')
       }
     } else if (targetExists) {
-      if (stagingExists || !validateMarker(current.targetPath, current.command, current.commandFingerprint)) {
+      if (stagingExists || !samePathIdentity(pathIdentity(dirname(current.targetPath)), current.skillsRootIdentity)
+          || !validateMarker(current.targetPath, current.command, current.commandFingerprint)) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared installation has conflicting activation state')
       }
     } else if (stagingExists) {
@@ -895,10 +1222,7 @@ export class SkillInstallManager {
           || !validateMarker(current.stagingPath, current.command, current.commandFingerprint)) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared staging does not match its durable registry')
       }
-      if (existsSync(current.targetPath)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'activation target appeared during prepared recovery')
-      }
-      durableRename(current.stagingPath, current.targetPath)
+      this._publishPreparedRecord(current)
     } else {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared installation lost both staging and activation target')
     }
@@ -913,37 +1237,172 @@ export class SkillInstallManager {
       errorMessage: cause ? `prepared activation reconciled after: ${cause.message}` : '',
       resultEnvelope: active.resultEnvelope,
       idempotent: false,
-      activationCommitted: true
+      activationCommitted: true,
+      authoritative: true
     }
   }
 
   _recoverRegistry() {
-    for (const record of this._listRegistry()) this._reconcilePreparedRecord(record)
-  }
-
-  _readLockOwnerEvidence() {
-    if (!existsSync(this.lockOwnerPath)) return null
-    try {
-      const owner = readJson(this.lockOwnerPath)
-      return isObject(owner) ? owner : null
-    } catch {
-      return null
+    for (const record of this._listRegistry()) {
+      if (record.state !== 'QUARANTINED') this._reconcilePreparedRecord(record)
     }
   }
 
-  _readLockOwner() {
-    const owner = this._readLockOwnerEvidence()
-    if (!owner || owner.formatVersion !== 2 || typeof owner.ownerToken !== 'string'
-        || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
-        || typeof owner.processStartToken !== 'string' || !owner.processStartToken
-        || typeof owner.bootId !== 'string' || !owner.bootId) return null
-    return owner
+  _resultMatchesInstallation(resultRecord, registryRecord) {
+    const envelope = resultRecord.envelope
+    const command = registryRecord.command
+    return envelope.commandId === command.commandId
+      && envelope.attempt === command.attempt
+      && envelope.fencingToken === command.fencingToken
+      && envelope.deliveryEpoch === command.deliveryEpoch
+      && envelope.installationId === command.installationId
+      && envelope.targetAgentId === command.targetAgentId
+      && envelope.productVersionId === command.productVersionId
+      && envelope.packageDigest === command.packageDigest
+      && envelope.skillKey === command.skillKey
+      && envelope.skillVersion === command.skillVersion
   }
 
-  _reclaimStaleLock(operation) {
-    if (!existsSync(this.lockPath)) return false
-    const evidence = this._readLockOwnerEvidence()
-    const owner = this._readLockOwner()
+  _listResultFiles(directory, acknowledged = false) {
+    const records = []
+    for (const fileName of readdirSync(directory).filter(name => name.endsWith('.json')).sort()) {
+      const path = resolve(directory, fileName)
+      const record = acknowledged
+        ? this._validateAcknowledgedResultRecord(readJson(path), fileName.slice(0, -5))
+        : this._validateResultRecord(readJson(path), fileName.slice(0, -5))
+      records.push({ path, directory, acknowledged, record })
+    }
+    return records
+  }
+
+  _supersedeResult(item, reason, authoritativeRecordId) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const targetPath = resolve(this.resultsSupersededDir, `${item.record.recordId}-${this.createId()}.json`)
+      const result = this.atomicFs.renameNoReplace(item.path, targetPath, {
+        sourceParent: pathIdentity(item.directory),
+        targetParent: pathIdentity(this.resultsSupersededDir),
+        sourceIdentity: pathIdentity(item.path)
+      })
+      if (result.ok) {
+        atomicWriteText(`${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${reason}; authoritativeRecordId=${authoritativeRecordId}\n`)
+        return
+      }
+      if (result.code !== 'TARGET_EXISTS') throw this._atomicFailure(result, 'contradictory skill result supersession')
+    }
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'contradictory skill result supersession exhausted unique targets')
+  }
+
+  _quarantineActiveInstallation(record, failureItem) {
+    let quarantinedPath = ''
+    if (existsSync(record.targetPath)) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        quarantinedPath = resolve(this.installationsQuarantineDir, `${record.installationId}-${this.now()}-${this.createId()}`)
+        const result = this.atomicFs.renameNoReplace(record.targetPath, quarantinedPath, {
+          sourceParent: record.skillsRootIdentity,
+          targetParent: pathIdentity(this.installationsQuarantineDir),
+          sourceIdentity: pathIdentity(record.targetPath)
+        })
+        if (result.ok) break
+        quarantinedPath = ''
+        if (result.code !== 'TARGET_EXISTS') throw this._atomicFailure(result, 'contradictory active installation quarantine')
+      }
+      if (!quarantinedPath) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'active installation quarantine exhausted unique targets')
+      }
+    }
+    const failure = failureItem.record.envelope
+    const quarantined = {
+      ...record,
+      state: 'QUARANTINED',
+      quarantinedAt: this.now(),
+      quarantinedPath,
+      quarantineReason: 'DURABLE_FAILED_RESULT_AUTHORITATIVE: usable activation and refundable failure cannot coexist',
+      authoritativeFailureCode: failure.failureCode || SKILL_INSTALL_FAILURE.IO_FAILED,
+      authoritativeFailureRecordId: failureItem.record.recordId,
+      authoritativeFailureEnvelope: failure
+    }
+    this._writeRegistry(quarantined)
+    return quarantined
+  }
+
+  _reconcileActiveFailureContradictions() {
+    const pending = this._listResultFiles(this.resultsPendingDir, false)
+    const acknowledged = this._listResultFiles(this.resultsAcknowledgedDir, true)
+    const all = [...acknowledged, ...pending]
+    for (const registry of this._listRegistry()) {
+      if (registry.state !== 'ACTIVE') continue
+      const exact = all.filter(item => this._resultMatchesInstallation(item.record, registry))
+      const failures = exact.filter(item => item.record.envelope.status === 'FAILED')
+      if (!failures.length) continue
+      const authoritative = failures[0]
+      this._quarantineActiveInstallation(registry, authoritative)
+      for (const item of exact) {
+        if (item.path === authoritative.path) continue
+        this._supersedeResult(
+          item,
+          `superseded by authoritative durable FAILED result for installation ${registry.installationId}`,
+          authoritative.record.recordId
+        )
+      }
+    }
+  }
+
+  _validLockOwner(evidence) {
+    if (!isObject(evidence) || evidence.formatVersion !== 2 || typeof evidence.ownerToken !== 'string'
+        || !Number.isSafeInteger(evidence.pid) || evidence.pid <= 0
+        || typeof evidence.processStartToken !== 'string' || !evidence.processStartToken
+        || typeof evidence.bootId !== 'string' || !evidence.bootId) return null
+    return evidence
+  }
+
+  _inspectLockGeneration() {
+    if (!existsSync(this.lockPath)) return null
+    let identity
+    try { identity = pathIdentity(this.lockPath) } catch (error) {
+      if (error?.code === 'ENOENT') return null
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `installer lock identity cannot be read: ${error.message}`)
+    }
+    if (identity.kind !== 'directory') {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installer lock is not a directory')
+    }
+    let ownerBytes
+    try {
+      ownerBytes = readFileSync(this.lockOwnerPath)
+    } catch (error) {
+      if (error?.code === 'ENOENT') ownerBytes = Buffer.alloc(0)
+      else throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `installer lock owner evidence cannot be read: ${error.message}`)
+    }
+    let evidence = null
+    try { evidence = JSON.parse(ownerBytes.toString('utf8')) } catch {}
+    evidence = isObject(evidence) ? evidence : null
+    return {
+      identity,
+      evidence,
+      owner: this._validLockOwner(evidence),
+      ownerSha256: sha256Hex(ownerBytes)
+    }
+  }
+
+  _atomicFailure(result, action) {
+    const conflictCodes = new Set([
+      'TARGET_EXISTS', 'SOURCE_CHANGED', 'ACTIVE_CHANGED', 'REPLACEMENT_CHANGED',
+      'ACTIVE_CHANGED_ROLLED_BACK', 'PARENT_CHANGED_ROLLED_BACK'
+    ])
+    const code = conflictCodes.has(result?.code) ? SKILL_INSTALL_FAILURE.CONFLICT : SKILL_INSTALL_FAILURE.IO_FAILED
+    return new SkillInstallError(code, `${action} failed closed (${result?.code || 'UNKNOWN'}): ${result?.message || 'atomic helper failed'}`)
+  }
+
+  _createLockCandidate(owner, suffix) {
+    const candidatePath = resolve(this.stateRoot, `.installer-lock-${owner.ownerToken}-${suffix}`)
+    mkdirSync(candidatePath, { mode: 0o700 })
+    chmodSync(candidatePath, 0o700)
+    atomicWriteJson(resolve(candidatePath, 'owner.json'), owner)
+    fsyncDirectory(this.stateRoot)
+    return candidatePath
+  }
+
+  _assertReclaimableGeneration(inspected) {
+    const { owner, evidence } = inspected
     if (owner && this.lockOwnerAliveFn(owner)) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'another live process owns the profile-local installer lock')
     }
@@ -953,26 +1412,42 @@ export class SkillInstallManager {
     }
     if (!owner && !(evidence?.formatVersion === 1 && Number.isSafeInteger(evidence.pid)
         && evidence.pid > 0 && !readProcessStartToken(evidence.pid))) {
-      const age = Math.max(0, this.now() - statSync(this.lockPath).mtimeMs)
+      let current
+      try { current = lstatSync(this.lockPath, { bigint: true }) } catch (error) {
+        if (error?.code === 'ENOENT') return false
+        throw error
+      }
+      if (current.st_dev.toString() !== inspected.identity.dev || current.ino.toString() !== inspected.identity.ino) return false
+      const age = Math.max(0, this.now() - Number(current.mtimeMs))
       if (age < this.unownedLockStaleMs) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installer lock ownership is incomplete and not yet stale')
       }
     }
-    const stalePath = resolve(this.staleLocksDir, `installer-${this.now()}-${this.createId()}`)
-    try {
-      durableRename(this.lockPath, stalePath)
-      atomicWriteJson(resolve(stalePath, 'reclaimed.json'), {
-        formatVersion: 1,
-        reclaimedAt: this.now(),
-        reclaimedByRuntimeInstanceId: this.runtimeInstanceId,
-        operation,
-        previousOwner: evidence
+    return true
+  }
+
+  _archiveExchangedStaleLock(candidatePath, operation, previousOwner, previousOwnerSha256) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const stalePath = resolve(this.staleLocksDir, `installer-${this.now()}-${this.createId()}`)
+      const result = this.atomicFs.renameNoReplace(candidatePath, stalePath, {
+        sourceParent: pathIdentity(this.stateRoot),
+        targetParent: pathIdentity(this.staleLocksDir),
+        sourceIdentity: pathIdentity(candidatePath),
+        sourceOwnerSha256: previousOwnerSha256
       })
-      return true
-    } catch (error) {
-      if (!existsSync(this.lockPath)) return true
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to reclaim stale installer lock: ${error.message}`)
+      if (result.ok) {
+        atomicWriteJson(resolve(stalePath, 'reclaimed.json'), {
+          formatVersion: 2,
+          reclaimedAt: this.now(),
+          reclaimedByRuntimeInstanceId: this.runtimeInstanceId,
+          operation,
+          previousOwner
+        })
+        return stalePath
+      }
+      if (result.code !== 'TARGET_EXISTS') throw this._atomicFailure(result, 'stale installer lock archival')
     }
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'stale installer lock archival exhausted unique targets')
   }
 
   _acquireLock(operation) {
@@ -987,23 +1462,59 @@ export class SkillInstallManager {
       runtimeInstanceId: this.runtimeInstanceId,
       acquiredAt: this.now()
     }
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (existsSync(this.lockPath)) {
-        this._reclaimStaleLock(operation)
-        continue
-      }
-      const candidatePath = resolve(this.stateRoot, `.installer-lock-${owner.ownerToken}-${attempt}`)
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      let candidatePath = ''
       try {
-        mkdirSync(candidatePath, { mode: 0o700 })
-        chmodSync(candidatePath, 0o700)
-        atomicWriteJson(resolve(candidatePath, 'owner.json'), owner)
-        renameSync(candidatePath, this.lockPath)
-        fsyncDirectory(this.stateRoot)
+        const inspected = this._inspectLockGeneration()
+        if (!inspected) {
+          candidatePath = this._createLockCandidate(owner, attempt)
+          const candidateOwnerSha256 = sha256Hex(readFileSync(resolve(candidatePath, 'owner.json')))
+          const result = this.atomicFs.renameNoReplace(candidatePath, this.lockPath, {
+            sourceParent: pathIdentity(this.stateRoot),
+            targetParent: pathIdentity(this.stateRoot),
+            sourceIdentity: pathIdentity(candidatePath),
+            sourceOwnerSha256: candidateOwnerSha256
+          })
+          if (result.ok) {
+            this.lockOwner = owner
+            this.lockOwnerSha256 = candidateOwnerSha256
+            return
+          }
+          if (existsSync(candidatePath)) rmSync(candidatePath, { recursive: true, force: true })
+          candidatePath = ''
+          if (result.code === 'TARGET_EXISTS' || result.code === 'SOURCE_CHANGED') continue
+          throw this._atomicFailure(result, 'installer lock acquisition')
+        }
+
+        if (!this._assertReclaimableGeneration(inspected)) continue
+        candidatePath = this._createLockCandidate(owner, attempt)
+        const replacementOwnerSha256 = sha256Hex(readFileSync(resolve(candidatePath, 'owner.json')))
+        const exchange = this.atomicFs.exchangeIfMatch(this.lockPath, candidatePath, {
+          parent: pathIdentity(this.stateRoot),
+          activeIdentity: inspected.identity,
+          replacementIdentity: pathIdentity(candidatePath),
+          activeOwnerSha256: inspected.ownerSha256,
+          replacementOwnerSha256
+        })
+        if (!exchange.ok) {
+          if (existsSync(candidatePath)) rmSync(candidatePath, { recursive: true, force: true })
+          candidatePath = ''
+          if (['ACTIVE_CHANGED', 'ACTIVE_CHANGED_ROLLED_BACK', 'REPLACEMENT_CHANGED'].includes(exchange.code)) continue
+          throw this._atomicFailure(exchange, 'stale installer lock generation exchange')
+        }
+
         this.lockOwner = owner
+        this.lockOwnerSha256 = replacementOwnerSha256
+        this._archiveExchangedStaleLock(candidatePath, operation, inspected.evidence, inspected.ownerSha256)
         return
       } catch (error) {
-        try { if (existsSync(candidatePath)) rmSync(candidatePath, { recursive: true, force: true }) } catch {}
-        if (existsSync(this.lockPath) && ['EEXIST', 'ENOTEMPTY', 'EISDIR'].includes(error?.code)) continue
+        if (candidatePath && existsSync(candidatePath) && !this.lockOwner) {
+          try { rmSync(candidatePath, { recursive: true, force: true }) } catch {}
+        }
+        if (this.lockOwner) {
+          try { this._releaseLock() } catch {}
+        }
+        if (error instanceof SkillInstallError) throw error
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to acquire installer lock: ${error.message}`)
       }
     }
@@ -1013,20 +1524,32 @@ export class SkillInstallManager {
   _releaseLock() {
     const expected = this.lockOwner
     try {
-      const observed = this._readLockOwner()
-      if (!expected || !observed || observed.ownerToken !== expected.ownerToken
+      const inspected = this._inspectLockGeneration()
+      const observed = inspected?.owner
+      if (!expected || !observed || !inspected || !this.lockOwnerSha256
+          || inspected.ownerSha256 !== this.lockOwnerSha256
+          || observed.ownerToken !== expected.ownerToken
           || observed.pid !== expected.pid || observed.processStartToken !== expected.processStartToken
-          || observed.bootId !== expected.bootId) {
+          || observed.bootId !== expected.bootId || observed.operation !== expected.operation
+          || observed.runtimeInstanceId !== expected.runtimeInstanceId) {
         throw new Error('installer lock ownership fence mismatch')
       }
-      const releasedPath = resolve(this.stateRoot, `.installer-lock-released-${expected.ownerToken}`)
-      renameSync(this.lockPath, releasedPath)
-      fsyncDirectory(this.stateRoot)
+      const releasedPath = resolve(this.stateRoot, `.installer-lock-released-${expected.ownerToken}-${this.createId()}`)
+      const result = this.atomicFs.renameNoReplace(this.lockPath, releasedPath, {
+        sourceParent: pathIdentity(this.stateRoot),
+        targetParent: pathIdentity(this.stateRoot),
+        sourceIdentity: inspected.identity,
+        sourceOwnerSha256: this.lockOwnerSha256
+      })
+      if (!result.ok) throw this._atomicFailure(result, 'installer lock release')
       rmSync(releasedPath, { recursive: true, force: true })
       fsyncDirectory(this.stateRoot)
       this.lockOwner = null
+      this.lockOwnerSha256 = ''
     } catch (error) {
-      this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to release installer lock: ${error.message}`)
+      this.healthError = error instanceof SkillInstallError
+        ? error
+        : new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to release installer lock: ${error.message}`)
       throw this.healthError
     }
   }
@@ -1200,20 +1723,28 @@ export class SkillInstallManager {
             skillKey: command.skillKey,
             skillVersion: command.skillVersion,
             commandFingerprint: command.fingerprint,
+            scopeDigest: this.scope.digest,
             installedAt
           }
           atomicWriteJson(resolve(stagingPath, MARKER_NAME), marker, 0o644)
           fsyncDirectory(stagingPath)
+          const commitSkillsRoot = verifyControlledCodexHome(this.profile.codexHome)
+          if (commitSkillsRoot !== skillsRoot) {
+            throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'CODEX_HOME/skills parent changed before activation commit')
+          }
           const prepared = {
-            formatVersion: 1,
+            formatVersion: 2,
             state: 'PREPARED',
             profileId: this.profile.profileId,
             agentId: this.profile.agentId,
+            scopeDigest: this.scope.digest,
             installationId: command.installationId,
             commandFingerprint: command.fingerprint,
             command: { ...command },
             targetPath,
             stagingPath,
+            skillsRootIdentity: pathIdentity(commitSkillsRoot),
+            stagingIdentity: pathIdentity(stagingPath),
             preparedAt: this.now(),
             activatedAt: null,
             resultRecordId,
@@ -1221,8 +1752,7 @@ export class SkillInstallManager {
           }
           preparedRecord = prepared
           this._writeRegistry(prepared)
-          if (existsSync(targetPath)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'skill target appeared during activation')
-          durableRename(stagingPath, targetPath)
+          this._publishPreparedRecord(prepared)
           const active = { ...prepared, state: 'ACTIVE', activatedAt: this.now() }
           this._writeRegistry(active)
           this._ensureResultRecord(resultRecordId, resultEnvelope)
@@ -1277,10 +1807,11 @@ export class SkillInstallManager {
     return this._withLockSync(`reconcile-command:${message.installationId || ''}`, () => {
       const command = validateSkillInstallCommand(message, this.profile, this.maxPackageBytes)
       const record = this._readRegistry(command.installationId)
-      if (!record || record.commandFingerprint !== command.fingerprint || record.state !== 'ACTIVE'
-          || !validateMarker(record.targetPath, command, command.fingerprint)) return null
+      if (!record || record.commandFingerprint !== command.fingerprint) return null
+      if (record.state === 'QUARANTINED') return this._reconcilePreparedRecord(record)
+      if (record.state !== 'ACTIVE' || !validateMarker(record.targetPath, command, command.fingerprint)) return null
       this._ensureResultRecord(record.resultRecordId, record.resultEnvelope)
-      return { status: 'completed', exitCode: 0, errorMessage: '', activationCommitted: true }
+      return { status: 'completed', exitCode: 0, errorMessage: '', activationCommitted: true, authoritative: true }
     })
   }
 
@@ -1305,7 +1836,7 @@ export class SkillInstallManager {
       try {
         atomicWriteJson(sourcePath, {
           ...record,
-          formatVersion: 2,
+          formatVersion: 3,
           sendAttempts: Number(record.sendAttempts || 0) + 1,
           lastSentAt: this.now(),
           lastReplayToken: replayToken
@@ -1396,7 +1927,7 @@ export class SkillInstallManager {
       }
       const acknowledged = {
         ...record,
-        formatVersion: 2,
+        formatVersion: 3,
         acknowledgedAt: this.now(),
         receipt: { ...receipt }
       }
@@ -1438,8 +1969,8 @@ export class SkillInstallManager {
 
 }
 
-export const defaultSkillInstallStateRoot = (commandInboxDir, profile) => resolve(
-  commandInboxDir,
-  profileDirectory(profile),
-  'skill-install'
-)
+export const defaultSkillInstallStateRoot = (commandInboxDir, profile, wsUrl = '') => {
+  const apiOrigin = wsUrl ? canonicalApiOrigin(wsUrl) : ''
+  const scopeKey = sha256Hex(Buffer.from(`${String(profile.profileId || '')}\0${apiOrigin}`)).slice(0, 32)
+  return resolve(commandInboxDir, profileDirectory(profile), 'skill-install', scopeKey)
+}

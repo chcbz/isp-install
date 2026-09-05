@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { Readable } from 'node:stream'
@@ -15,11 +15,14 @@ import {
   MESSAGE_TYPES,
   PersistentCommandInbox,
   ensureProfiles,
-  runManagedCommand
+  runManagedCommand,
+  startBoundedSkillResultReplay
 } from '../agent-client.mjs'
 import {
+  LINUX_ATOMIC_FS,
   SKILL_INSTALL_FAILURE,
   WORK_RESULT_RECEIPT_TYPE,
+  SkillInstallError,
   SkillInstallManager,
   buildSkillDownloadUrl,
   defaultSkillInstallStateRoot
@@ -167,7 +170,59 @@ const receiptFor = (envelope, overrides = {}) => ({
   ...overrides
 })
 
-const managerForExistingState = ({ profile: selectedProfile, stateRoot, sendResultFn = () => false, ...options }) => new SkillInstallManager({
+const identity = path => {
+  const status = lstatSync(path, { bigint: true })
+  return {
+    path: resolve(path),
+    dev: status.dev.toString(),
+    ino: status.ino.toString(),
+    kind: status.isDirectory() ? 'directory' : status.isFile() ? 'file' : status.isSymbolicLink() ? 'symlink' : 'other'
+  }
+}
+
+const identityMatches = (left, right) => left && right
+  && left.path === right.path && left.dev === right.dev && left.ino === right.ino && left.kind === right.kind
+
+const ownerEvidenceDigest = directory => {
+  let bytes
+  try { bytes = readFileSync(resolve(directory, 'owner.json')) } catch (error) {
+    if (error?.code === 'ENOENT') bytes = Buffer.alloc(0)
+    else throw error
+  }
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+const testAtomicFs = {
+  renameNoReplace(sourcePath, targetPath, expected = {}) {
+    try {
+      if (expected.sourceParent && !identityMatches(identity(resolve(sourcePath, '..')), expected.sourceParent)) {
+        return { ok: false, code: 'PARENT_CHANGED_ROLLED_BACK', message: 'source parent changed' }
+      }
+      if (expected.targetParent && !identityMatches(identity(resolve(targetPath, '..')), expected.targetParent)) {
+        return { ok: false, code: 'PARENT_CHANGED_ROLLED_BACK', message: 'target parent changed' }
+      }
+      if (expected.sourceIdentity && !identityMatches(identity(sourcePath), expected.sourceIdentity)) {
+        return { ok: false, code: 'SOURCE_CHANGED', message: 'source changed' }
+      }
+      if (expected.sourceOwnerSha256 && ownerEvidenceDigest(sourcePath) !== expected.sourceOwnerSha256) {
+        return { ok: false, code: 'SOURCE_CHANGED', message: 'source owner generation changed' }
+      }
+      if (existsSync(targetPath)) return { ok: false, code: 'TARGET_EXISTS', message: 'target exists' }
+      renameSync(sourcePath, targetPath)
+      if (expected.sourceOwnerSha256 && ownerEvidenceDigest(targetPath) !== expected.sourceOwnerSha256) {
+        return { ok: false, code: 'POSTCONDITION_FAILED', message: 'target owner generation changed' }
+      }
+      return { ok: true, code: 'OK', message: '' }
+    } catch (error) {
+      return { ok: false, code: 'IO_ERROR', message: error.message }
+    }
+  },
+  exchangeIfMatch() {
+    return { ok: false, code: 'UNSUPPORTED', message: 'test helper does not emulate exchange' }
+  }
+}
+
+const managerForExistingState = ({ profile: selectedProfile, stateRoot, sendResultFn = () => false, atomicFs = testAtomicFs, ...options }) => new SkillInstallManager({
   profile: selectedProfile,
   stateRoot,
   wsUrl: 'wss://api.example.test/ws/agent/channel',
@@ -176,10 +231,11 @@ const managerForExistingState = ({ profile: selectedProfile, stateRoot, sendResu
   fetchFn: async () => { throw new Error('network must not be used during recovery') },
   sendResultFn,
   runtimeInstanceId: 'runtime-restart',
+  atomicFs,
   ...options
 })
 
-const managerRuntime = ({ enabled = true, packageBytes = validPackage(), sendResultFn = () => false, fetchFn, root = temporaryDirectory() } = {}) => {
+const managerRuntime = ({ enabled = true, packageBytes = validPackage(), sendResultFn = () => false, fetchFn, root = temporaryDirectory(), atomicFs = testAtomicFs } = {}) => {
   const codexHome = resolve(root, 'codex-home')
   mkdirSync(codexHome, { recursive: true })
   const selectedProfile = profile(codexHome)
@@ -193,6 +249,7 @@ const managerRuntime = ({ enabled = true, packageBytes = validPackage(), sendRes
     fetchFn: fetchFn || (async () => responseFor(packageBytes)),
     sendResultFn,
     runtimeInstanceId: 'runtime-test',
+    atomicFs,
     now: (() => { let value = 1788320000000; return () => value++ })()
   })
   manager.initialize()
@@ -287,6 +344,9 @@ test('malicious ZIP entries and skill identity mismatches fail closed', async t 
     ['traversal', zip([{ name: '../SKILL.md', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
     ['absolute', zip([{ name: '/SKILL.md', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
     ['backslash', zip([{ name: 'dir\\SKILL.md', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
+    ['control character', zip([{ name: 'docs/control\u0001.txt', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
+    ['trailing dot alias', zip([{ name: 'docs./file.txt', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
+    ['trailing space alias', zip([{ name: 'docs /file.txt', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
     ['reserved marker', zip([{ name: '.cyf-installation.json', data: '{}' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
     ['duplicate', zip([
       { name: 'SKILL.md', data: '---\nname: repo-test\nversion: 1.0.0\n---\n' },
@@ -607,6 +667,7 @@ test('installer lock rejects live owners and durably reclaims dead or stale inco
     profile: profile(deadHome), stateRoot: deadState,
     processIdentityFn: () => ({ pid: 77, processStartToken: 'new', bootId: 'boot' }),
     lockOwnerAliveFn: () => false,
+    atomicFs: LINUX_ATOMIC_FS,
     createId: (() => { let value = 0; return () => `id-${++value}` })()
   })
   assert.equal(dead.initialize().healthy, true)
@@ -625,10 +686,237 @@ test('installer lock rejects live owners and durably reclaims dead or stale inco
     unownedLockStaleMs: 10,
     processIdentityFn: () => ({ pid: 88, processStartToken: 'new', bootId: 'boot' }),
     lockOwnerAliveFn: () => false,
+    atomicFs: LINUX_ATOMIC_FS,
     createId: (() => { let value = 0; return () => `id-${++value}` })()
   })
   assert.equal(incomplete.initialize().healthy, true)
   assert.equal(readdirSync(resolve(incompleteState, 'stale-locks')).length, 1)
+})
+
+test('lock release binds the exact owner bytes and never removes a mutated generation', () => {
+  const runtime = managerRuntime()
+  let mutateOnRelease = false
+  runtime.manager.atomicFs = {
+    ...testAtomicFs,
+    renameNoReplace(sourcePath, targetPath, expected) {
+      if (mutateOnRelease && sourcePath === resolve(runtime.stateRoot, 'installer.lock')) {
+        writeFileSync(resolve(sourcePath, 'owner.json'), `${JSON.stringify({
+          formatVersion: 2,
+          ownerToken: 'foreign-owner',
+          pid: process.pid,
+          processStartToken: 'foreign-start',
+          bootId: 'foreign-boot'
+        })}\n`)
+      }
+      return testAtomicFs.renameNoReplace(sourcePath, targetPath, expected)
+    }
+  }
+
+  assert.throws(
+    () => runtime.manager._withLockSync('owner-generation-race', () => { mutateOnRelease = true }),
+    error => error.code === SKILL_INSTALL_FAILURE.CONFLICT
+  )
+  assert.equal(existsSync(resolve(runtime.stateRoot, 'installer.lock')), true)
+  assert.equal(JSON.parse(readFileSync(resolve(runtime.stateRoot, 'installer.lock', 'owner.json'), 'utf8')).ownerToken, 'foreign-owner')
+})
+
+test('concurrent stale reclaimers bind exchange to inspected owner generation and never move the winner', () => {
+  const seed = managerRuntime()
+  const stalePath = resolve(seed.stateRoot, 'installer.lock')
+  mkdirSync(stalePath)
+  writeFileSync(resolve(stalePath, 'owner.json'), `${JSON.stringify({
+    formatVersion: 2, ownerToken: 'stale-owner', pid: 1, processStartToken: 'stale', bootId: 'stale'
+  })}\n`)
+
+  const winner = managerForExistingState({
+    profile: seed.profile,
+    stateRoot: seed.stateRoot,
+    atomicFs: LINUX_ATOMIC_FS,
+    processIdentityFn: () => ({ pid: process.pid, processStartToken: 'winner-start', bootId: 'winner-boot' }),
+    lockOwnerAliveFn: owner => owner.operation === 'winner'
+  })
+  let winnerAcquired = false
+  const racingAtomicFs = {
+    renameNoReplace: (...args) => LINUX_ATOMIC_FS.renameNoReplace(...args),
+    exchangeIfMatch: (...args) => {
+      if (!winnerAcquired) {
+        winner._acquireLock('winner')
+        winnerAcquired = true
+      }
+      return LINUX_ATOMIC_FS.exchangeIfMatch(...args)
+    }
+  }
+  const loser = managerForExistingState({
+    profile: seed.profile,
+    stateRoot: seed.stateRoot,
+    atomicFs: racingAtomicFs,
+    processIdentityFn: () => ({ pid: process.pid, processStartToken: 'loser-start', bootId: 'loser-boot' }),
+    lockOwnerAliveFn: owner => owner.operation === 'winner'
+  })
+
+  assert.throws(() => loser._acquireLock('loser'), error => error.code === SKILL_INSTALL_FAILURE.CONFLICT)
+  const observed = JSON.parse(readFileSync(resolve(stalePath, 'owner.json'), 'utf8'))
+  assert.equal(observed.ownerToken, winner.lockOwner.ownerToken)
+  assert.equal(observed.operation, 'winner')
+  winner._releaseLock()
+})
+
+test('target and parent races fail closed without replacing foreign or replacement-parent content', async t => {
+  const bytes = validPackage()
+  await t.test('target appears at commit', async () => {
+    let injected = false
+    const racingAtomicFs = {
+      ...testAtomicFs,
+      renameNoReplace(sourcePath, targetPath, expected) {
+        if (!injected && targetPath.endsWith('/repo-test')) {
+          injected = true
+          mkdirSync(targetPath)
+          writeFileSync(resolve(targetPath, 'foreign.txt'), 'foreign-target')
+        }
+        return testAtomicFs.renameNoReplace(sourcePath, targetPath, expected)
+      }
+    }
+    const runtime = managerRuntime({ packageBytes: bytes, atomicFs: racingAtomicFs })
+    const result = await runtime.manager.execute(dispatch(bytes))
+    assert.equal(result.status, 'recovery_required')
+    assert.equal(readFileSync(resolve(runtime.codexHome, 'skills', 'repo-test', 'foreign.txt'), 'utf8'), 'foreign-target')
+    assert.equal(runtime.manager.pendingResults().length, 0)
+  })
+
+  await t.test('skills parent inode changes immediately before commit', async () => {
+    let injected = false
+    let displaced = ''
+    const racingAtomicFs = {
+      ...testAtomicFs,
+      renameNoReplace(sourcePath, targetPath, expected) {
+        if (!injected && targetPath.endsWith('/repo-test')) {
+          injected = true
+          const skills = resolve(targetPath, '..')
+          displaced = `${skills}-displaced`
+          renameSync(skills, displaced)
+          mkdirSync(skills)
+          writeFileSync(resolve(skills, 'replacement-parent.txt'), 'replacement-parent')
+        }
+        return testAtomicFs.renameNoReplace(sourcePath, targetPath, expected)
+      }
+    }
+    const runtime = managerRuntime({ packageBytes: bytes, atomicFs: racingAtomicFs })
+    const result = await runtime.manager.execute(dispatch(bytes))
+    assert.equal(result.status, 'recovery_required')
+    assert.equal(existsSync(resolve(runtime.codexHome, 'skills', 'repo-test')), false)
+    assert.equal(readFileSync(resolve(runtime.codexHome, 'skills', 'replacement-parent.txt'), 'utf8'), 'replacement-parent')
+    assert.equal(existsSync(resolve(displaced, 'repo-test')), false)
+  })
+})
+
+test('durable installer state is bound to canonical API origin and profile scope', async () => {
+  const first = managerRuntime({ sendResultFn: () => false })
+  assert.equal((await first.manager.execute(dispatch(first.packageBytes))).status, 'completed')
+  const foreignOrigin = managerForExistingState({
+    profile: first.profile,
+    stateRoot: first.stateRoot,
+    wsUrl: 'wss://other-origin.example.test/ws'
+  })
+  assert.throws(
+    () => foreignOrigin.initialize(),
+    error => error.code === SKILL_INSTALL_FAILURE.CONFLICT && /different origin\/profile scope/.test(error.message)
+  )
+  const foreignProfile = managerForExistingState({
+    profile: { ...first.profile, profileId: 'profile-b' },
+    stateRoot: first.stateRoot
+  })
+  assert.throws(
+    () => foreignProfile.initialize(),
+    error => error.code === SKILL_INSTALL_FAILURE.CONFLICT && /different origin\/profile scope/.test(error.message)
+  )
+})
+
+test('ACTIVE plus durable FAILED reconciles to quarantined failure and inbox terminal FAILED only', async () => {
+  const first = managerRuntime({ sendResultFn: () => false })
+  const message = dispatch(first.packageBytes)
+  assert.equal((await first.manager.execute(message)).status, 'completed')
+  const active = first.manager.getInstallation('si_1')
+  first.manager._withLockSync('inject-upgrade-failure', () => {
+    first.manager._persistFailureResult(active.command, new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'legacy contradictory failure'))
+  })
+
+  const restarted = managerForExistingState({ profile: first.profile, stateRoot: first.stateRoot })
+  assert.equal(restarted.initialize().healthy, true)
+  const quarantined = restarted.getInstallation('si_1')
+  assert.equal(quarantined.state, 'QUARANTINED')
+  assert.equal(existsSync(quarantined.targetPath), false)
+  assert.equal(existsSync(quarantined.quarantinedPath), true)
+  assert.deepEqual(restarted.pendingResults().map(item => item.envelope.status), ['FAILED'])
+  assert.equal(readdirSync(restarted.resultsSupersededDir).some(name => name.endsWith('.json')), true)
+  assert.equal(restarted.reconcileCommandOutcome(message).status, 'failed')
+
+  const inboxRoot = resolve(first.root, 'inbox-state')
+  const inbox = new PersistentCommandInbox({ rootDir: inboxRoot, profile: first.profile })
+  const profileRoot = resolve(inboxRoot, Buffer.from(first.profile.agentId).toString('hex'))
+  const ledger = new DurableDedupeLedger({ rootDir: profileRoot, profile: first.profile })
+  const ackOutbox = new AckOutbox({ rootDir: profileRoot, profile: first.profile })
+  inbox.initialize(); ledger.initialize(); ackOutbox.initialize()
+  const item = inbox.enqueue(message)
+  const fingerprint = CommandFingerprint.compute(item.normalized)
+  ledger.checkOrRecord(message.commandId, fingerprint, { messageId: message.messageId, commandType: message.commandType, targetAgentId: message.targetAgentId })
+  ledger.recordQueueSequence(message.commandId, item.record.queueSequence)
+  ledger.markStarted(message.commandId)
+  inbox.markRecoveryRequired(inbox.claimNext(), 'upgrade contradiction')
+
+  const wire = []
+  const processor = new AgentMessageProcessor({
+    profile: first.profile,
+    inbox,
+    runCommand: async () => { throw new Error('must not execute') },
+    runChat: async () => {},
+    recoverCommandOutcome: command => restarted.reconcileCommandOutcome(command),
+    ledger,
+    ackOutbox,
+    sendFn: envelope => { wire.push(envelope); return true }
+  })
+  const recovery = processor.start({ drain: false })
+  assert.equal(recovery.failClosedCode, '')
+  assert.equal(ledger.getEntry(message.commandId).status, ACK_STATUS.FAILED)
+  assert.equal(inbox.list('archive')[0].outcome.status, 'failed')
+  assert.deepEqual(wire.filter(item => [ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(item.ackStatus)).map(item => item.ackStatus), [ACK_STATUS.FAILED])
+})
+
+test('stable connection drains 33+ results in bounded batches and receipts retire only exact records', () => {
+  const runtime = managerRuntime({ sendResultFn: () => false })
+  runtime.manager._withLockSync('seed-33-results', () => {
+    for (let index = 0; index < 35; index += 1) {
+      runtime.manager._persistFailureResult({
+        ...dispatch(runtime.packageBytes),
+        messageId: `msg-${index}`,
+        commandId: `cmd-${index}`,
+        installationId: `si-${index}`,
+        downloadPath: `/internal/agent/skill-installations/si-${index}/package`,
+        scopeDigest: runtime.manager.scope.digest
+      }, new SkillInstallError(SKILL_INSTALL_FAILURE.DISABLED, 'disabled'))
+    }
+  })
+  const sent = []
+  runtime.manager.sendResultFn = envelope => { sent.push(envelope); return true }
+  const scheduled = []
+  const batches = []
+  const cancel = startBoundedSkillResultReplay({
+    manager: runtime.manager,
+    replayToken: 'stable-connection',
+    isStable: () => true,
+    schedule: callback => scheduled.push(callback),
+    onBatch: count => batches.push(count)
+  })
+  while (scheduled.length) scheduled.shift()()
+  cancel()
+
+  assert.deepEqual(batches, [32, 3])
+  assert.equal(sent.length, 35)
+  assert.equal(new Set(sent.map(item => item.messageId)).size, 35)
+  assert.equal(runtime.manager.pendingResults().length, 35)
+  const later = sent[34]
+  assert.equal(runtime.manager.acknowledgeResultReceipt(receiptFor(later)).status, 'acknowledged')
+  assert.equal(runtime.manager.pendingResults().length, 34)
+  assert.equal(runtime.manager.acknowledgedResults().length, 1)
 })
 
 test('durable PREPARED and activation-boundary persistence faults reconcile forward without false failure', async t => {
