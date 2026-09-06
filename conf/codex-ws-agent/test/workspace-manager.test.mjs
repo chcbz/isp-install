@@ -1274,12 +1274,21 @@ test('no-task command requires an explicit non-coding dedicated-workdir policy',
 const installerScript = fileURLToPath(new URL('../../../shell/codex_ws_agent_install.sh', import.meta.url))
 const policyChecker = fileURLToPath(new URL('../install-policy-check.mjs', import.meta.url))
 
-const runInstallerValidationGate = ({ policy, validateExit = 0, start = 'y' }) => {
+const runInstallerValidationGate = ({ policy, validateExit = 0, npmExit = 0, missingNpm = false, start = 'y' }) => {
   const appHome = resolve(temporaryDirectory(), 'app')
   mkdirSync(appHome)
   cpSync(policyChecker, resolve(appHome, 'install-policy-check.mjs'))
   if (policy !== undefined) writeFileSync(resolve(appHome, 'workspace-policies.json'), `${JSON.stringify(policy)}\n`)
-  writeFileSync(resolve(appHome, 'agent-client.mjs'), 'process.exit(Number(process.env.A07_VALIDATE_EXIT || 0))\n')
+  writeFileSync(resolve(appHome, 'agent-client.mjs'), `
+    import { writeFileSync } from 'node:fs'
+    writeFileSync('validate.marker', 'validated\\n')
+    process.exit(Number(process.env.A07_VALIDATE_EXIT || 0))
+  `)
+  const npmBin = resolve(appHome, 'npm-stub')
+  if (!missingNpm) {
+    writeFileSync(npmBin, '#!/bin/bash\npwd > npm.cwd\nprintf "%s\\n" "$@" > npm.args\nexit "${A07_NPM_EXIT:-0}"\n')
+    chmodSync(npmBin, 0o755)
+  }
   const restartMarker = resolve(appHome, 'restart.marker')
   const result = spawnSync('bash', [installerScript], {
     encoding: 'utf8',
@@ -1288,12 +1297,14 @@ const runInstallerValidationGate = ({ policy, validateExit = 0, start = 'y' }) =
       CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
       CODEX_WS_AGENT_TEST_APP_HOME: appHome,
       CODEX_WS_AGENT_TEST_NODE_BIN: process.execPath,
+      CODEX_WS_AGENT_TEST_NPM_BIN: npmBin,
+      A07_NPM_EXIT: String(npmExit),
       CODEX_WS_AGENT_TEST_RESTART_MARKER: restartMarker,
       A07_VALIDATE_EXIT: String(validateExit),
       START_CODEX_WS_AGENT: start
     }
   })
-  return { ...result, restartMarker }
+  return { ...result, appHome, restartMarker }
 }
 
 test('installer rejects legacy remote{name,url} policy schema and never restarts', () => {
@@ -1329,4 +1340,35 @@ test('installer restarts only after policy and agent validation both succeed', (
   })
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.equal(readFileSync(result.restartMarker, 'utf8'), 'restart requested\n')
+})
+
+
+test('installer copies locked dependencies and installs before validation without starting by default', () => {
+  const result = runInstallerValidationGate({ start: 'n' })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  for (const name of ['package.json', 'package-lock.json']) {
+    assert.equal(readFileSync(resolve(result.appHome, name), 'utf8'), readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'))
+  }
+  assert.equal(readFileSync(resolve(result.appHome, 'npm.cwd'), 'utf8').trim(), result.appHome)
+  assert.deepEqual(readFileSync(resolve(result.appHome, 'npm.args'), 'utf8').trim().split('\n'), [
+    'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'
+  ])
+  assert.equal(existsSync(resolve(result.appHome, 'validate.marker')), true)
+  assert.equal(existsSync(result.restartMarker), false)
+})
+
+test('installer stops before validation and restart if dependency installation fails', () => {
+  const result = runInstallerValidationGate({ npmExit: 7 })
+  assert.notEqual(result.status, 0)
+  assert.match(`${result.stdout}\n${result.stderr}`, /npm 依赖安装失败/)
+  assert.equal(existsSync(resolve(result.appHome, 'validate.marker')), false)
+  assert.equal(existsSync(result.restartMarker), false)
+})
+
+test('installer rejects missing npm before validation or restart', () => {
+  const result = runInstallerValidationGate({ missingNpm: true })
+  assert.notEqual(result.status, 0)
+  assert.match(`${result.stdout}\n${result.stderr}`, /未找到可执行 npm/)
+  assert.equal(existsSync(resolve(result.appHome, 'validate.marker')), false)
+  assert.equal(existsSync(result.restartMarker), false)
 })

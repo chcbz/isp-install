@@ -2706,9 +2706,17 @@ const saveCodexSessionMap = () => {
   }
 }
 
+const removeApiKeyQuery = parsed => {
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (key.toLowerCase() === 'api_key') parsed.searchParams.delete(key)
+  }
+  return parsed
+}
+
+export const sanitizeWebSocketEndpoint = url => removeApiKeyQuery(new URL(url)).toString()
+
 export const buildWebSocketUrl = (url, apiKey, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
-  const parsed = new URL(url)
-  parsed.searchParams.set('api_key', profile?.apiKey || apiKey)
+  const parsed = removeApiKeyQuery(new URL(url))
   if (profile?.agentId) {
     parsed.searchParams.set('agent_id', profile.agentId)
     parsed.searchParams.set('agentId', profile.agentId)
@@ -2716,6 +2724,12 @@ export const buildWebSocketUrl = (url, apiKey, profile, runtimeInstanceId = PROC
   parsed.searchParams.set('runtime_instance_id', runtimeInstanceId)
   parsed.searchParams.set('runtimeInstanceId', runtimeInstanceId)
   return parsed.toString()
+}
+
+export const buildWebSocketOptions = (apiKey, profile) => {
+  const selectedApiKey = profile?.apiKey || apiKey
+  if (!selectedApiKey) throw new Error('WebSocket API key is required')
+  return { headers: { 'X-API-Key': selectedApiKey } }
 }
 
 export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => ({
@@ -3114,7 +3128,7 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => ({
 export const buildAgentRegistrationPayload = profile => ({
   name: profile.agentName,
   personaName: profile.personaName,
-  endpoint: config?.wsUrl || '',
+  endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
   abilities: resolveProfileAbilities(profile)
 })
 
@@ -3681,7 +3695,10 @@ const connectProfile = profile => {
     try { state.ws.close() } catch {}
   }
   let closeFired = false
-  state.ws = new WebSocketClient(buildWebSocketUrl(config.wsUrl, config.apiKey, profile))
+  state.ws = new WebSocketClient(
+    buildWebSocketUrl(config.wsUrl, config.apiKey, profile),
+    buildWebSocketOptions(config.apiKey, profile)
+  )
   state.ws.addEventListener('open', () => {
     clearReconnectState(state)
     state.reconnectAttempt = 0
@@ -3811,7 +3828,6 @@ const shutdown = (exitCode = 0, reason = '') => {
 }
 
 export const loadWebSocketClient = async () => {
-  if (typeof globalThis.WebSocket === 'function') return globalThis.WebSocket
   const module = await import('ws')
   const implementation = module.WebSocket || module.default
   if (typeof implementation !== 'function') throw new Error('No WebSocket implementation is available')

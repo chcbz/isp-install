@@ -17,6 +17,27 @@ SERVICE_DST="/etc/systemd/system/$APP_NAME.service"
 BIN_SRC="$ROOT_DIR/bin/codex_ws_agent.sh"
 BIN_DST="${ISP_BIN:-/home/isp/bin}/codex_ws_agent.sh"
 
+find_npm_bin() {
+    if [ -x "$(dirname "$NODE_BIN")/npm" ]; then
+        echo "$(dirname "$NODE_BIN")/npm"
+    elif command -v npm >/dev/null 2>&1; then
+        command -v npm
+    fi
+}
+
+install_runtime_dependencies() {
+    if [ -z "$NPM_BIN" ] || [ ! -x "$NPM_BIN" ]; then
+        __red "未找到可执行 npm，请先安装与 Node.js 配套的 npm"
+        return 1
+    fi
+    install -m 0644 "$CONF_SRC/package.json" "$APP_HOME/package.json" || return 1
+    install -m 0644 "$CONF_SRC/package-lock.json" "$APP_HOME/package-lock.json" || return 1
+    if ! (cd "$APP_HOME" && PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" ci --omit=dev --ignore-scripts --no-audit --no-fund); then
+        __red "Agent npm 依赖安装失败；拒绝继续安装或重启。"
+        return 1
+    fi
+}
+
 validate_workspace_policy_schema() {
     local checker="$APP_HOME/install-policy-check.mjs"
     local policy="$APP_HOME/workspace-policies.json"
@@ -60,6 +81,8 @@ if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ]; then
         __red "测试模式未提供可执行 Node.js"
         exit 1
     fi
+    NPM_BIN="${CODEX_WS_AGENT_TEST_NPM_BIN:-$(find_npm_bin || true)}"
+    install_runtime_dependencies || exit 1
     run_validation_gate || exit 1
     if [ "${START_CODEX_WS_AGENT:-n}" = "y" ]; then
         restart_agent_service
@@ -119,6 +142,12 @@ if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 20 ]; then
     exit 1
 fi
 
+NPM_BIN="$(find_npm_bin || true)"
+if [ -z "$NPM_BIN" ]; then
+    __red "未找到 npm，请先执行: ./install.sh node"
+    exit 1
+fi
+
 echo ""
 echo "[1/6] 创建目录..."
 create_isp_dirs
@@ -130,7 +159,7 @@ echo "[2/6] 部署应用文件..."
 install -m 0644 "$CONF_SRC/agent-client.mjs" "$APP_HOME/agent-client.mjs"
 install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$APP_HOME/workspace-manager.mjs"
 install -m 0644 "$CONF_SRC/install-policy-check.mjs" "$APP_HOME/install-policy-check.mjs"
-install -m 0644 "$CONF_SRC/package.json" "$APP_HOME/package.json"
+install_runtime_dependencies
 install -m 0644 "$CONF_SRC/README.md" "$APP_HOME/README.md"
 install -m 0644 "$CONF_SRC/env.example" "$APP_HOME/.env.example"
 install -m 0640 "$CONF_SRC/workspace-policies.example.json" "$APP_HOME/workspace-policies.example.json"

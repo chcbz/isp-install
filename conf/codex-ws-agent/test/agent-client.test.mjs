@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { createServer } from 'node:http'
 import { chmodSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -22,6 +23,9 @@ import {
   buildAgentRegistrationPayload,
   buildProtocolEnvelope,
   buildWebSocketUrl,
+  buildWebSocketOptions,
+  loadWebSocketClient,
+  sanitizeWebSocketEndpoint,
   discoverCodexSkills,
   discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
@@ -362,10 +366,22 @@ test('legacy execution types, missing messageType, and ambiguous envelopes fail 
   )
 })
 
-test('runtimeInstanceId is process-scoped and reused by URL and v1 envelopes', () => {
+test('runtimeInstanceId is process-scoped while API keys use headers', () => {
   const url = new URL(buildWebSocketUrl('wss://example.test/ws', 'secret', profile))
   assert.equal(url.searchParams.get('runtimeInstanceId'), PROCESS_RUNTIME_INSTANCE_ID)
   assert.equal(url.searchParams.get('runtime_instance_id'), PROCESS_RUNTIME_INSTANCE_ID)
+  assert.equal(url.searchParams.has('api_key'), false)
+  const legacy = new URL(buildWebSocketUrl('wss://example.test/ws?api_key=legacy&API_KEY=legacy2&keep=1', 'secret', profile))
+  assert.equal([...legacy.searchParams.keys()].some(key => key.toLowerCase() === 'api_key'), false)
+  assert.equal(legacy.searchParams.get('keep'), '1')
+  assert.equal(new URL(sanitizeWebSocketEndpoint('wss://example.test/ws?api_key=legacy&keep=1')).searchParams.has('api_key'), false)
+  assert.deepEqual(buildWebSocketOptions('fallback-secret', profile), {
+    headers: { 'X-API-Key': 'fallback-secret' }
+  })
+  assert.deepEqual(buildWebSocketOptions('fallback-secret', { ...profile, apiKey: 'profile-secret' }), {
+    headers: { 'X-API-Key': 'profile-secret' }
+  })
+  assert.throws(() => buildWebSocketOptions('', { ...profile, apiKey: '' }), /required/)
 
   const register = buildProtocolEnvelope(MESSAGE_TYPES.AGENT_REGISTER, {}, profile)
   const presence = buildProtocolEnvelope(MESSAGE_TYPES.AGENT_PRESENCE, {}, profile)
@@ -375,6 +391,49 @@ test('runtimeInstanceId is process-scoped and reused by URL and v1 envelopes', (
   assert.equal(register.sourceAgentId, profile.agentId)
 })
 
+
+test('real ws upgrade sends X-API-Key header and no query credential', { timeout: 5000 }, async t => {
+  const observed = await new Promise((resolvePromise, rejectPromise) => {
+    const server = createServer()
+    t.after(() => server.close())
+    server.once('error', rejectPromise)
+    server.on('upgrade', (request, socket) => {
+      const result = { url: request.url, apiKey: request.headers['x-api-key'] }
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      server.close(() => resolvePromise(result))
+    })
+    server.listen(0, '127.0.0.1', async () => {
+      try {
+        const implementation = await loadWebSocketClient()
+        const address = server.address()
+        const target = buildWebSocketUrl(`ws://127.0.0.1:${address.port}/ws?api_key=legacy`, 'secret', profile)
+        const client = new implementation(target, buildWebSocketOptions('secret', profile))
+        t.after(() => client.terminate())
+        client.on('error', rejectPromise)
+      } catch (error) {
+        server.close(() => rejectPromise(error))
+      }
+    })
+  })
+  assert.equal(observed.apiKey, 'secret')
+  assert.equal(new URL(observed.url, 'ws://127.0.0.1').searchParams.has('api_key'), false)
+})
+
+test('WebSocket loader uses ws even when a built-in client is available', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket')
+  Object.defineProperty(globalThis, 'WebSocket', {
+    configurable: true,
+    value: class BuiltinWebSocket {}
+  })
+  try {
+    const { WebSocket } = await import('ws')
+    assert.equal(await loadWebSocketClient(), WebSocket)
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'WebSocket', descriptor)
+    else delete globalThis.WebSocket
+  }
+})
 
 test('runtime abilities only contain allowlisted Chinese business abilities', () => {
   const root = temporaryDirectory()

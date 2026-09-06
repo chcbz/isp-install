@@ -6,7 +6,7 @@ Connects a local Codex runner to the OpenClaw agent WebSocket channel.
 
 ```bash
 cd /home/isp/apps/codex-ws-agent
-npm ci --omit=dev
+npm ci --omit=dev --ignore-scripts
 cp -n .env.example .env
 vi .env
 /home/isp/bin/codex_ws_agent.sh start
@@ -24,9 +24,13 @@ The helper script `/home/isp/bin/codex_ws_agent.sh` now delegates to `systemd` a
 
 Required:
 
-- Node.js 20 or newer. Node 20 loads the declared `ws` dependency; newer runtimes may use their built-in WebSocket implementation.
+- Node.js 20 or newer with npm. All supported runtimes use the declared `ws` dependency to send authentication headers; the built-in WebSocket implementation is not used.
 - `OPENCLAW_API_KEY`: API key accepted by `/ws/agent/channel`.
 - `WS_URL`: WebSocket endpoint. Default public endpoint is `wss://api.chaoyoufan.cn/ws/agent/channel`.
+
+The installer copies both `package.json` and `package-lock.json`, then runs `npm ci --omit=dev --ignore-scripts --no-audit --no-fund` before configuration validation. Dependency installation failure aborts installation without requesting a service restart.
+
+WebSocket authentication uses the `X-API-Key` request header. Profile-level `apiKey` takes precedence over `OPENCLAW_API_KEY`. Legacy `api_key` query parameters (case-insensitive) are removed from connection URLs and registration endpoints. The server and any reverse proxy must accept/forward this header; query-string authentication is not used as a fallback.
 
 ## Multiple Codex CLI Profiles
 
@@ -361,11 +365,12 @@ From the versioned `isp-install` checkout:
 
 ```bash
 cd conf/codex-ws-agent
+npm ci --omit=dev --ignore-scripts
 npm test
 OPENCLAW_API_KEY=test CODEX_BIN=/bin/true CODEX_WORKDIR=/tmp node agent-client.mjs --validate
 ```
 
-The test suite uses only Node built-ins (`node:test`). A07 tests create temporary local Git repositories/worktrees and do not touch production paths. The production installer copies the runtime files, not the repository-only test directory.
+The test suite uses `node:test` and the declared `ws` dependency. Authentication tests use a loopback HTTP server and no external service; installer tests use a stub npm executable and never install into production paths. A07 tests create temporary local Git repositories/worktrees and do not touch production paths. The production installer copies the runtime files, not the repository-only test directory.
 
 ## Upgrade and Rollback
 
