@@ -117,8 +117,12 @@ const zip = entries => {
   return Buffer.concat([...localParts, centralDirectory, eocd])
 }
 
+const skillDocument = (skillKey = 'repo-test', version = '1.0.0') => (
+  `---\nname: ${skillKey}\ndescription: Run focused authorized repository tests.\nmetadata:\n  version: "${version}"\n---\n\n# ${skillKey}\n`
+)
+
 const validPackage = (skillKey = 'repo-test', version = '1.0.0') => zip([
-  { name: 'SKILL.md', data: `---\nname: ${skillKey}\nversion: ${version}\n---\n\n# ${skillKey}\n` },
+  { name: 'SKILL.md', data: skillDocument(skillKey, version) },
   { name: 'scripts/run.sh', data: '#!/bin/sh\necho safe\n', mode: 0o100755 }
 ])
 
@@ -349,11 +353,11 @@ test('malicious ZIP entries and skill identity mismatches fail closed', async t 
     ['trailing space alias', zip([{ name: 'docs /file.txt', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
     ['reserved marker', zip([{ name: '.cyf-installation.json', data: '{}' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
     ['duplicate', zip([
-      { name: 'SKILL.md', data: '---\nname: repo-test\nversion: 1.0.0\n---\n' },
+      { name: 'SKILL.md', data: skillDocument() },
       { name: 'SKILL.md', data: 'duplicate' }
     ]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
     ['symlink', zip([
-      { name: 'SKILL.md', data: '---\nname: repo-test\nversion: 1.0.0\n---\n' },
+      { name: 'SKILL.md', data: skillDocument() },
       { name: 'escape', data: '../outside', mode: 0o120777 }
     ]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
     ['missing manifest', zip([{ name: 'README.md', data: 'missing skill identity' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
@@ -365,6 +369,115 @@ test('malicious ZIP entries and skill identity mismatches fail closed', async t 
       const result = await runtime.manager.execute(dispatch(bytes))
       assert.equal(result.failureCode, expectedCode)
       assert.equal(runtime.manager.getInstallation('si_1'), null)
+    })
+  }
+})
+
+test('metadata.version frontmatter accepts the bounded string mapping format', async t => {
+  const cases = [
+    ['plain version', 'name: repo-test\ndescription: Run authorized tests.\nmetadata:\n  version: 1.0.0'],
+    ['quoted strings and comments', "name: 'repo-test' # exact key\ndescription: \"Run: authorized tests.\"\nmetadata: # string metadata\n  version: '1.0.0' # exact version"],
+    ['additional supported fields', "name: repo-test\ndescription: 'Run buyer''s authorized tests.'\nlicense: MIT\nallowed-tools: Bash\nmetadata:\n  short-description: Run focused tests.\n  version: \"1.0.0\""],
+    ['metadata first with CRLF', 'metadata:\r\n  version: "1.0.0"\r\nname: repo-test\r\ndescription: Run authorized tests.']
+  ]
+  for (const [name, header] of cases) {
+    await t.test(name, async () => {
+      const bytes = zip([{ name: 'SKILL.md', data: `---\n${header}\n---\n# Fixture\n` }])
+      const runtime = managerRuntime({ packageBytes: bytes })
+      const result = await runtime.manager.execute(dispatch(bytes))
+      assert.equal(result.status, 'completed', result.errorMessage)
+      assert.equal(runtime.manager.getInstallation('si_1').state, 'ACTIVE')
+      assert.equal(result.resultEnvelope.skillVersion, '1.0.0')
+    })
+  }
+})
+
+test('metadata.version frontmatter rejects missing, duplicate, conflicting, or unsupported identities', async t => {
+  const header = 'name: repo-test\ndescription: Run authorized tests.\nmetadata:\n  version: "1.0.0"'
+  const cases = [
+    ['missing description', header.replace('description: Run authorized tests.\n', '')],
+    ['empty description', header.replace('Run authorized tests.', '""')],
+    ['whitespace description', header.replace('Run authorized tests.', "'   '")],
+    ['non-string description', header.replace('Run authorized tests.', 'true')],
+    ['missing name', header.replace('name: repo-test\n', '')],
+    ['missing metadata version', 'name: repo-test\ndescription: Run tests.\nmetadata:\n  label: fixture'],
+    ['legacy top-level version', 'name: repo-test\ndescription: Run tests.\nversion: "1.0.0"'],
+    ['top-level version even when matching', `${header}\nversion: "1.0.0"`],
+    ['conflicting top-level version', `${header}\nversion: "2.0.0"`],
+    ['same duplicate name', `name: repo-test\n${header}`],
+    ['conflicting duplicate name', `name: other-skill\n${header}`],
+    ['duplicate description', `description: Different description.\n${header}`],
+    ['same duplicate metadata version', `${header}\n  version: "1.0.0"`],
+    ['conflicting duplicate metadata version', `${header}\n  version: "2.0.0"`],
+    ['duplicate metadata mapping', `${header}\nmetadata:\n  version: "1.0.0"`],
+    ['version identity mismatch', header.replace('1.0.0', '2.0.0')],
+    ['name identity mismatch', header.replace('repo-test', 'other-skill')],
+    ['numeric metadata version', header.replace('"1.0.0"', '1')],
+    ['nested version is not metadata.version', header.replace('  version:', '  nested:\n    version:')],
+    ['wrong version indentation', header.replace('  version:', ' version:')],
+    ['version after unrelated top-level field', header.replace('metadata:', 'metadata:\nlicense: MIT')],
+    ['tagged name', header.replace('name: repo-test', 'name: !!str repo-test')],
+    ['alias version', header.replace('"1.0.0"', '*version')],
+    ['anchor metadata', header.replace('metadata:', 'metadata: &identity')],
+    ['merge key', `${header}\n  <<: *identity`],
+    ['flow mapping is outside preview subset', header.replace('metadata:\n  version: "1.0.0"', 'metadata: {version: "1.0.0"}')],
+    ['quoted duplicate key cannot bypass detection', `${header}\n"name": repo-test`],
+    ['folded scalar is outside preview subset', header.replace('description: Run authorized tests.', 'description: >\n  Run authorized tests.')],
+    ['control character', header.replace('Run authorized tests.', 'Run\tauthorized tests.')],
+    ['unknown top-level property', `${header}\nunsupported: value`],
+    ['unterminated quote', header.replace('"1.0.0"', '"1.0.0')],
+    ['trailing scalar content', header.replace('"1.0.0"', '"1.0.0" extra')]
+  ]
+  for (const [name, invalidHeader] of cases) {
+    await t.test(name, async () => {
+      const bytes = zip([{ name: 'SKILL.md', data: `---\n${invalidHeader}\n---\n# Fixture\n` }])
+      const runtime = managerRuntime({ packageBytes: bytes })
+      const result = await runtime.manager.execute(dispatch(bytes))
+      assert.equal(result.status, 'failed')
+      assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.IDENTITY_MISMATCH)
+      assert.equal(runtime.manager.getInstallation('si_1'), null)
+      assert.equal(existsSync(resolve(runtime.codexHome, 'skills', 'repo-test')), false)
+      assert.deepEqual(readdirSync(runtime.manager.stagingDir), [])
+      assert.deepEqual(runtime.manager.pendingResults().map(item => item.envelope.status), ['FAILED'])
+    })
+  }
+})
+
+test('six exact W08 metadata.version ZIP packages install with digest and marker identity preserved', async t => {
+  // Immutable source fixture, not regenerated ZIPs or a dependency on another worktree.
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/w08-metadata-version-packages.json', import.meta.url), 'utf8'))
+  assert.equal(fixture.sourceCommit, '6619aae27fd8a31c9ea1dec429a738236ea8a252')
+  assert.equal(fixture.sourceTree, '0b869eb0acf78068a97790785f50228da06431ff')
+  assert.deepEqual(fixture.packages.map(item => item.skillKey).sort(), [
+    'code-editor', 'code-reviewer', 'deploy-runner', 'repo-inspector', 'repo-test', 'web-builder'
+  ])
+  for (const item of fixture.packages) {
+    await t.test(item.skillKey, async () => {
+      const bytes = Buffer.from(item.packageBase64, 'base64')
+      assert.equal(bytes.toString('base64'), item.packageBase64)
+      assert.equal(String(bytes.length), item.packageSize)
+      assert.equal(digest(bytes), item.packageDigest)
+      const runtime = managerRuntime({ packageBytes: bytes })
+      const message = dispatch(bytes, { skillKey: item.skillKey, skillVersion: item.skillVersion })
+      const result = await runManagedCommand({
+        profile: runtime.profile,
+        message,
+        skillInstallManager: runtime.manager,
+        workspaceManager: { forbidden: true },
+        runCodexFn: async () => { throw new Error('package installation must not execute a skill or Codex') }
+      })
+      assert.equal(result.status, 'completed', result.errorMessage)
+      const target = resolve(runtime.codexHome, 'skills', item.skillKey)
+      assert.equal(digest(readFileSync(resolve(target, 'SKILL.md'))), `sha256:${item.skillMdSha256}`)
+      const marker = JSON.parse(readFileSync(resolve(target, '.cyf-installation.json'), 'utf8'))
+      assert.equal(marker.skillKey, item.skillKey)
+      assert.equal(marker.skillVersion, item.skillVersion)
+      assert.equal(marker.packageDigest, item.packageDigest)
+      assert.equal(runtime.manager.getInstallation('si_1').state, 'ACTIVE')
+      assert.equal(runtime.manager.pendingResults()[0].envelope.status, 'SUCCEEDED')
+      const restarted = managerForExistingState({ profile: runtime.profile, stateRoot: runtime.stateRoot })
+      assert.equal(restarted.initialize().healthy, true)
+      assert.equal((await restarted.execute(message)).idempotent, true)
     })
   }
 })
@@ -588,26 +701,26 @@ test('credentialed package URLs require TLS except exact loopback development or
 test('archive rejects Unicode normalization and case-folded path collisions', async t => {
   const cases = [
     ['ASCII case', zip([
-      { name: 'SKILL.md', data: '---\nname: repo-test\nversion: 1.0.0\n---\n' },
+      { name: 'SKILL.md', data: skillDocument() },
       { name: 'skill.md', data: 'collision' }
     ])],
     ['Unicode normalization', zip([
-      { name: 'SKILL.md', data: '---\nname: repo-test\nversion: 1.0.0\n---\n' },
+      { name: 'SKILL.md', data: skillDocument() },
       { name: 'docs/é.txt', data: 'nfc' },
       { name: 'docs/e\u0301.txt', data: 'nfd' }
     ])],
     ['Unicode case folding', zip([
-      { name: 'SKILL.md', data: '---\nname: repo-test\nversion: 1.0.0\n---\n' },
+      { name: 'SKILL.md', data: skillDocument() },
       { name: 'docs/Σ.txt', data: 'sigma' },
       { name: 'docs/ς.txt', data: 'final sigma' }
     ])],
     ['case-folded ancestor', zip([
-      { name: 'SKILL.md', data: '---\nname: repo-test\nversion: 1.0.0\n---\n' },
+      { name: 'SKILL.md', data: skillDocument() },
       { name: 'Docs/a.txt', data: 'upper' },
       { name: 'docs/b.txt', data: 'lower' }
     ])],
     ['case-folded prefix', zip([
-      { name: 'SKILL.md', data: '---\nname: repo-test\nversion: 1.0.0\n---\n' },
+      { name: 'SKILL.md', data: skillDocument() },
       { name: 'Bin', data: 'file' },
       { name: 'bin/run.sh', data: 'nested' }
     ])]

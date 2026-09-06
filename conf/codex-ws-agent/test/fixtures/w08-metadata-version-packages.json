@@ -1,0 +1,60 @@
+{
+  "sourceCommit": "6619aae27fd8a31c9ea1dec429a738236ea8a252",
+  "sourceTree": "0b869eb0acf78068a97790785f50228da06431ff",
+  "packages": [
+    {
+      "skillKey": "code-editor",
+      "skillVersion": "1.0.0",
+      "sourcePath": "economy/jia-economy-service/src/main/resources/skill-packages/code-editor-1.0.0.zip",
+      "packageSize": "688",
+      "packageDigest": "sha256:25f80edca5ac1f88c7007712bba92a8d82a61e679c07ed08f5b57e19dd100b39",
+      "skillMdSha256": "c841f8ad20015befcea2ed0b08d01197de032836330a3ce9981eab60f2ac57a0",
+      "packageBase64": "UEsDBBQAAAgAAAAAIQAlA6VrPgIAAD4CAAAIAAAAU0tJTEwubWQtLS0KbmFtZTogY29kZS1lZGl0b3IKZGVzY3JpcHRpb246ICJJbXBsZW1lbnQgc2NvcGVkIHJlcG9zaXRvcnkgY2hhbmdlcyBhbmQgZm9jdXNlZCB0ZXN0cyB3aGlsZSBwcmVzZXJ2aW5nIHRoZSBzdXBwbGllZCBjb250cmFjdCBhbmQgY29tcGF0aWJpbGl0eS4iCm1ldGFkYXRhOgogIHZlcnNpb246ICIxLjAuMCIKLS0tCgojIENvZGUgRWRpdG9yCgpJbXBsZW1lbnQgYSBzY29wZWQgcmVwb3NpdG9yeSBjaGFuZ2Ugd2hpbGUgcHJlc2VydmluZyB0aGUgc3VwcGxpZWQgY29udHJhY3QgYW5kIHN1cnJvdW5kaW5nIGNvbXBhdGliaWxpdHkuCgojIyBCb3VuZGFyaWVzCgotIEVkaXQgb25seSBhdXRob3JpemVkIHBhdGhzIGFuZCBrZWVwIGNoYW5nZXMgbWluaW1hbCBhbmQgcmV2aWV3YWJsZS4KLSBBZGQgZm9jdXNlZCB0ZXN0cyB3aGVuIHRoZSBjb250cmFjdCByZXF1aXJlcyBvYnNlcnZhYmxlIGNvdmVyYWdlLgotIERvIG5vdCByZWRlc2lnbiB0cmFuc2FjdGlvbnMsIGFjY2VzcyBjb250cm9sLCBtaWdyYXRpb25zLCBvciBkZXBsb3ltZW50IGJlaGF2aW9yIHdpdGhvdXQgZXhwbGljaXQgYXV0aG9yaXphdGlvbi4KUEsBAhQDFAAACAAAAAAhACUDpWs+AgAAPgIAAAgAAAAAAAAAAAAAAKSBAAAAAFNLSUxMLm1kUEsFBgAAAAABAAEANgAAAGQCAAAAAA=="
+    },
+    {
+      "skillKey": "code-reviewer",
+      "skillVersion": "1.0.0",
+      "sourcePath": "economy/jia-economy-service/src/main/resources/skill-packages/code-reviewer-1.0.0.zip",
+      "packageSize": "687",
+      "packageDigest": "sha256:aa0efdf4a561bf0ccfed96a7a5f48c096c9321ba563e7f89e9a1b968d9c79eb1",
+      "skillMdSha256": "2acbe103617a3de8cea486119c528d0e1ed9a1cd92020247faeb7cfb91b59679",
+      "packageBase64": "UEsDBBQAAAgAAAAAIQD7unzZPQIAAD0CAAAIAAAAU0tJTEwubWQtLS0KbmFtZTogY29kZS1yZXZpZXdlcgpkZXNjcmlwdGlvbjogIlJldmlldyBhIGJvdW5kZWQgY29kZSBjaGFuZ2UgZm9yIGNvcnJlY3RuZXNzLCBjb21wYXRpYmlsaXR5LCBhbmQgY29udHJhY3QgYWRoZXJlbmNlIHdpdGhvdXQgZWRpdGluZyBzb3VyY2UuIgptZXRhZGF0YToKICB2ZXJzaW9uOiAiMS4wLjAiCi0tLQoKIyBDb2RlIFJldmlld2VyCgpSZXZpZXcgYSBib3VuZGVkIGNoYW5nZSBmb3IgY29ycmVjdG5lc3MsIGNvbXBhdGliaWxpdHksIGFuZCBleHBsaWNpdCBjb250cmFjdCBhZGhlcmVuY2UuCgojIyBCb3VuZGFyaWVzCgotIEluc3BlY3QgdGhlIHJlcXVlc3RlZCBkaWZmIGFuZCBpdHMgZGlyZWN0bHkgYWZmZWN0ZWQgY2FsbCBwYXRocy4KLSBSZXBvcnQgY29uY3JldGUgZmluZGluZ3Mgd2l0aCBzZXZlcml0eSwgcGF0aCwgYW5kIHJhdGlvbmFsZTsgZGlzdGluZ3Vpc2ggbm9uLWJsb2NraW5nIHN1Z2dlc3Rpb25zLgotIERvIG5vdCBlZGl0IHNvdXJjZSwgYXBwcm92ZSBkZXBsb3ltZW50LCBvciBpbnZlbnQgcHJvZHVjdCByZXF1aXJlbWVudHMgb3V0c2lkZSB0aGUgZnJvemVuIGNvbnRyYWN0LgpQSwECFAMUAAAIAAAAACEA+7p82T0CAAA9AgAACAAAAAAAAAAAAAAApIEAAAAAU0tJTEwubWRQSwUGAAAAAAEAAQA2AAAAYwIAAAAA"
+    },
+    {
+      "skillKey": "deploy-runner",
+      "skillVersion": "1.0.0",
+      "sourcePath": "economy/jia-economy-service/src/main/resources/skill-packages/deploy-runner-1.0.0.zip",
+      "packageSize": "715",
+      "packageDigest": "sha256:fde2e6c59228972aee0a8b3823f9316feed0084bda7d53454c276710c68f73e9",
+      "skillMdSha256": "889ed8ae4830b2a588611a4e7379e5fe4ae42fdf900ffb8de0005bc418052820",
+      "packageBase64": "UEsDBBQAAAgAAAAAIQDz5v3qWQIAAFkCAAAIAAAAU0tJTEwubWQtLS0KbmFtZTogZGVwbG95LXJ1bm5lcgpkZXNjcmlwdGlvbjogIkV4ZWN1dGUgYW4gZXhwbGljaXRseSBhdXRob3JpemVkIGRlcGxveW1lbnQgcnVuYm9vayBzdGVwIGZvciBhIGNvbmZpcm1lZCB0YXJnZXQgYW5kIHJlcG9ydCBhdWRpdGFibGUgZXZpZGVuY2UuIgptZXRhZGF0YToKICB2ZXJzaW9uOiAiMS4wLjAiCi0tLQoKIyBEZXBsb3kgUnVubmVyCgpQcmVwYXJlIGFuZCBleGVjdXRlIGFuIGV4cGxpY2l0bHkgYXV0aG9yaXplZCBkZXBsb3ltZW50IHJ1bmJvb2sgc3RlcCB3aXRoIGF1ZGl0YWJsZSBldmlkZW5jZS4KCiMjIEJvdW5kYXJpZXMKCi0gUmVxdWlyZSBleHBsaWNpdCBkZXBsb3ltZW50IGF1dGhvcml0eSBhbmQgY29uZmlybSB0aGUgdGFyZ2V0IGVudmlyb25tZW50IGJlZm9yZSBtdXRhdGlvbi4KLSBTdG9wIG9uIGFuIHVuZXhwZWN0ZWQgcHJlZmxpZ2h0IG9yIGRlcGxveW1lbnQgZmFpbHVyZSBhbmQgcmVwb3J0IHRoZSBibG9ja2luZyBldmlkZW5jZS4KLSBEbyBub3QgZGVwbG95IGJ5IGRlZmF1bHQsIGFsdGVyIHByb2R1Y3Rpb24gY3JlZGVudGlhbHMsIG9yIGV4cGFuZCB0aGUgYXV0aG9yaXplZCB0YXJnZXQgb3Igcm9sbG91dCBzY29wZS4KUEsBAhQDFAAACAAAAAAhAPPm/epZAgAAWQIAAAgAAAAAAAAAAAAAAKSBAAAAAFNLSUxMLm1kUEsFBgAAAAABAAEANgAAAH8CAAAAAA=="
+    },
+    {
+      "skillKey": "repo-inspector",
+      "skillVersion": "1.0.0",
+      "sourcePath": "economy/jia-economy-service/src/main/resources/skill-packages/repo-inspector-1.0.0.zip",
+      "packageSize": "687",
+      "packageDigest": "sha256:4cd173b1fd6606fbfa9d416a4858c914440552d9ac188d398d31a4454f79a4ed",
+      "skillMdSha256": "d23a68ea8eb6c9f8d681ab9b73869adc1fcddec8e64affd8760a2143eac75977",
+      "packageBase64": "UEsDBBQAAAgAAAAAIQCN8eaYPQIAAD0CAAAIAAAAU0tJTEwubWQtLS0KbmFtZTogcmVwby1pbnNwZWN0b3IKZGVzY3JpcHRpb246ICJJbnNwZWN0IHJlcG9zaXRvcnkgc3RydWN0dXJlLCBkZXBlbmRlbmNpZXMsIGFuZCBpbXBsZW1lbnRhdGlvbiBmYWN0cyBmb3IgcmVhZC1vbmx5IHJlcG9zaXRvcnkgZXhwbG9yYXRpb24uIgptZXRhZGF0YToKICB2ZXJzaW9uOiAiMS4wLjAiCi0tLQoKIyBSZXBvc2l0b3J5IEluc3BlY3RvcgoKSW5zcGVjdCBhIHJlcG9zaXRvcnkgYW5kIHJlcG9ydCBpdHMgc3RydWN0dXJlLCBkZXBlbmRlbmNpZXMsIGFuZCByZWxldmFudCBpbXBsZW1lbnRhdGlvbiBmYWN0cy4KCiMjIEJvdW5kYXJpZXMKCi0gUHJlZmVyIHRhcmdldGVkIGluc3BlY3Rpb24gYW5kIGNsZWFybHkgc2VwYXJhdGUgb2JzZXJ2ZWQgZmFjdHMgZnJvbSBpbmZlcmVuY2VzLgotIERvIG5vdCBtb2RpZnkgcmVwb3NpdG9yeSBmaWxlcywgZXhlY3V0ZSBkZXBsb3ltZW50cywgb3IgY2xhaW0gdGhhdCB1bnZlcmlmaWVkIGNvbW1hbmRzIHJhbi4KLSBSZXR1cm4gY29uY2lzZSBwYXRocyBhbmQgZXZpZGVuY2UgdXNlZnVsIGZvciBhIGZvbGxvdy11cCBpbXBsZW1lbnRhdGlvbiB0YXNrLgpQSwECFAMUAAAIAAAAACEAjfHmmD0CAAA9AgAACAAAAAAAAAAAAAAApIEAAAAAU0tJTEwubWRQSwUGAAAAAAEAAQA2AAAAYwIAAAAA"
+    },
+    {
+      "skillKey": "repo-test",
+      "skillVersion": "1.0.0",
+      "sourcePath": "economy/jia-economy-service/src/main/resources/skill-packages/repo-test-1.0.0.zip",
+      "packageSize": "660",
+      "packageDigest": "sha256:5448a1d231272617085cc6be255d14296ea10c8087d436a0e182a9a4eadb501a",
+      "skillMdSha256": "c99dd44e8cf2f8034a8cb8128b50147736c167412d87816de238d127f315f71d",
+      "packageBase64": "UEsDBBQAAAgAAAAAIQBfB4XDIgIAACICAAAIAAAAU0tJTEwubWQtLS0KbmFtZTogcmVwby10ZXN0CmRlc2NyaXB0aW9uOiAiU2VsZWN0IGFuZCBydW4gZm9jdXNlZCwgYXV0aG9yaXplZCByZXBvc2l0b3J5IHRlc3RzIGFuZCByZXBvcnQgdmVyaWZpY2F0aW9uIGV2aWRlbmNlIHdpdGhvdXQgZWRpdGluZyBzb3VyY2UuIgptZXRhZGF0YToKICB2ZXJzaW9uOiAiMS4wLjAiCi0tLQoKIyBSZXBvc2l0b3J5IFRlc3QKClNlbGVjdCBhbmQgcnVuIHRoZSBuYXJyb3dlc3QgYXV0aG9yaXplZCB2ZXJpZmljYXRpb24gZm9yIGEgYm91bmRlZCByZXBvc2l0b3J5IGNoYW5nZSwgdGhlbiByZXBvcnQgZXZpZGVuY2UuCgojIyBCb3VuZGFyaWVzCgotIFByZWZlciBmb2N1c2VkIHNlbGVjdG9ycyBhbmQgYXR0cmlidXRlIGFueSBmYWlsdXJlIGJlZm9yZSByZXRyeWluZy4KLSBQcmVzZXJ2ZSB0ZXN0IGV2aWRlbmNlLCBjb21tYW5kIG91dGNvbWVzLCBhbmQga25vd24gZW52aXJvbm1lbnQgbGltaXRzLgotIERvIG5vdCBtb2RpZnkgc291cmNlLCBieXBhc3MgZmVhdHVyZSBnYXRlcywgb3IgdHJlYXQgYW4gdW5ydW4gdGVzdCBhcyBwYXNzaW5nLgpQSwECFAMUAAAIAAAAACEAXweFwyICAAAiAgAACAAAAAAAAAAAAAAApIEAAAAAU0tJTEwubWRQSwUGAAAAAAEAAQA2AAAASAIAAAAA"
+    },
+    {
+      "skillKey": "web-builder",
+      "skillVersion": "1.0.0",
+      "sourcePath": "economy/jia-economy-service/src/main/resources/skill-packages/web-builder-1.0.0.zip",
+      "packageSize": "714",
+      "packageDigest": "sha256:b655e9d7c4214d517feaf819e094b4627103f1b9ed15c5e6d73ce81386db6e63",
+      "skillMdSha256": "3f46651b896d39654118b47fe61bed127702dca3ee89d6584c6b0b8cec4909d6",
+      "packageBase64": "UEsDBBQAAAgAAAAAIQDxIrrFWAIAAFgCAAAIAAAAU0tJTEwubWQtLS0KbmFtZTogd2ViLWJ1aWxkZXIKZGVzY3JpcHRpb246ICJJbXBsZW1lbnQgYm91bmRlZCB3ZWIgZmVhdHVyZXMgdXNpbmcgZXhpc3RpbmcgY29tcG9uZW50cywgc3RhdGUgZmxvd3MsIEFQSSBjb250cmFjdHMsIGFuZCBmZWF0dXJlIGdhdGVzLiIKbWV0YWRhdGE6CiAgdmVyc2lvbjogIjEuMC4wIgotLS0KCiMgV2ViIEJ1aWxkZXIKCkltcGxlbWVudCBhIGJvdW5kZWQgd2ViIGV4cGVyaWVuY2UgdXNpbmcgdGhlIGV4aXN0aW5nIGFwcGxpY2F0aW9uIHN0cnVjdHVyZSwgc3RhdGUgZmxvd3MsIGFuZCBmZWF0dXJlIGdhdGVzLgoKIyMgQm91bmRhcmllcwoKLSBQcmVzZXJ2ZSBleGlzdGluZyBBUEkgY29udHJhY3RzIGFuZCBrZWVwIHByZXZpZXctb25seSBiZWhhdmlvciBkaXNhYmxlZCB1bmxlc3MgZXhwbGljaXRseSBlbmFibGVkLgotIFVzZSB0aGUgZXN0YWJsaXNoZWQgY29tcG9uZW50IGFuZCBzdGF0ZSBjb252ZW50aW9ucyByYXRoZXIgdGhhbiBjcmVhdGluZyBhIHBhcmFsbGVsIGRhdGEgZmxvdy4KLSBEbyBub3QgY2hhbmdlIGJhY2tlbmQgYXV0aG9yaXphdGlvbiwgZGVwbG95IGFzc2V0cywgb3IgYnlwYXNzIGNvbXBhdGliaWxpdHkgY2hlY2tzLgpQSwECFAMUAAAIAAAAACEA8SK6xVgCAABYAgAACAAAAAAAAAAAAAAApIEAAAAAU0tJTEwubWRQSwUGAAAAAAEAAQA2AAAAfgIAAAAA"
+    }
+  ]
+}

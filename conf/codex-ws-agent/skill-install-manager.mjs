@@ -652,27 +652,70 @@ const writeExtractedFile = (root, relativePath, bytes, mode) => {
   fsyncDirectory(dirname(targetPath))
 }
 
+// Preview frontmatter is a deliberately restricted YAML subset: block mappings,
+// unquoted keys and single-line string scalars. Never ignore unsupported syntax
+// or resolve tags/aliases; an ambiguous identity must not reach activation.
+const skillFrontmatterString = raw => {
+  if (typeof raw !== 'string') return null
+  const value = raw.trim()
+  if (!value) return null
+  let parsed
+  if (value.startsWith('"')) {
+    // JSON string escapes are a safe subset of YAML double-quoted strings.
+    const match = /^("(?:[^"\\]|\\.)*")(?: +#.*)?$/.exec(value)
+    if (!match) return null
+    try { parsed = JSON.parse(match[1]) } catch { return null }
+  } else if (value.startsWith("'")) {
+    const match = /^'((?:[^']|'')*)'(?: +#.*)?$/.exec(value)
+    if (!match) return null
+    parsed = match[1].replace(/''/g, "'")
+  } else {
+    parsed = value.replace(/ +#.*$/, '').trimEnd()
+    if (/^[\[\]{}&*!|>'"%@`#?:,-]/u.test(parsed) || /:($|\s)/u.test(parsed)
+        || /^(?:null|true|false|yes|no|on|off|~|[-+]?(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9_]+)(?:[eE][-+]?[0-9]+)?|0[xob][0-9a-f_]+|[-+]?\.(?:inf|nan))$/iu.test(parsed)) return null
+  }
+  return typeof parsed === 'string' && parsed.trim() && !/[\u0000-\u001f\u007f]/u.test(parsed) ? parsed : null
+}
+
 const parseSkillIdentity = text => {
-  if (!text.startsWith('---')) return null
   const lines = text.split(/\r?\n/)
-  if (lines[0].trim() !== '---') return null
-  const identity = {}
+  if (lines[0] !== '---') return null
+  const fields = new Map()
+  const metadata = new Map()
+  const allowedFields = new Set(['name', 'description', 'license', 'allowed-tools', 'metadata'])
+  let inMetadata = false
   let closed = false
   for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index]
-    if (line.trim() === '---') {
+    if (line === '---') {
       closed = true
       break
     }
-    const match = /^(name|version):\s*(.+?)\s*$/.exec(line)
-    if (!match) continue
-    let value = match[2]
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1)
+    if (/[\u0000-\u001f\u007f]/u.test(line)) return null
+    if (!line.trim() || /^ *#/u.test(line)) continue
+    const match = /^( {2})?([A-Za-z][A-Za-z0-9-]*):(?: +(.*))?$/u.exec(line)
+    if (!match) return null
+    const [, indent, key, raw = ''] = match
+    if (indent) {
+      if (!inMetadata || metadata.has(key)) return null
+      const value = skillFrontmatterString(raw)
+      if (value === null) return null
+      metadata.set(key, value)
+    } else {
+      if (!allowedFields.has(key) || fields.has(key)) return null
+      inMetadata = key === 'metadata'
+      if (inMetadata) {
+        if (raw.trim() && !raw.trim().startsWith('#')) return null
+        fields.set(key, metadata)
+      } else {
+        const value = skillFrontmatterString(raw)
+        if (value === null) return null
+        fields.set(key, value)
+      }
     }
-    identity[match[1]] = value
   }
-  return closed ? identity : null
+  if (!closed || !fields.has('name') || !fields.has('description') || !metadata.has('version')) return null
+  return { name: fields.get('name'), description: fields.get('description'), version: metadata.get('version') }
 }
 
 const validateNoFilePrefixConflict = entries => {

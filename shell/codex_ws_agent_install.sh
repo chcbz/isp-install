@@ -157,6 +157,7 @@ stage_application_files() {
         return 1
     fi
     install -m 0644 "$CONF_SRC/skill-install-manager.mjs" "$stage/skill-install-manager.mjs"
+    install -m 0644 "$CONF_SRC/managed-host.mjs" "$stage/managed-host.mjs"
     install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$stage/workspace-manager.mjs"
     install -m 0644 "$CONF_SRC/install-policy-check.mjs" "$stage/install-policy-check.mjs"
     install -m 0644 "$CONF_SRC/package.json" "$stage/package.json"

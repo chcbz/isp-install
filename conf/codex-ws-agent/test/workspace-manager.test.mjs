@@ -1360,7 +1360,7 @@ const installerCollationFixture = ({ failPhase = '', configureAppHome = () => {}
   const npmWrapper = resolve(binDir, 'npm-wrapper')
   mkdirSync(binDir)
   writeFileSync(nodeWrapper, `#!/bin/bash\nif [[ "$1" == */agent-client.mjs && "$2" == --validate ]]; then exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
-  writeFileSync(npmWrapper, `#!/bin/bash\nset -e\ntest -f skill-install-manager.mjs\ntest -f package-lock.json\ngrep -q '"yauzl"' package-lock.json\nprintf '%s\\n%s\\n' "$PWD" "$*" > ${JSON.stringify(npmRecord)}\ncp -a ${JSON.stringify(sourceNodeModules)} node_modules\n`)
+  writeFileSync(npmWrapper, `#!/bin/bash\nset -e\ntest -f skill-install-manager.mjs\ntest -f managed-host.mjs\ntest -f package-lock.json\ngrep -q '"yauzl"' package-lock.json\nprintf '%s\\n%s\\n' "$PWD" "$*" > ${JSON.stringify(npmRecord)}\ncp -a ${JSON.stringify(sourceNodeModules)} node_modules\n`)
   chmodSync(nodeWrapper, 0o755)
   chmodSync(npmWrapper, 0o755)
   const result = spawnSync('bash', [installerScript], {
@@ -1386,8 +1386,9 @@ test('installer stages dependencies/source, validates, preserves secrets/state, 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/candidate-release')
   const release = resolve(appHome, 'releases', 'candidate-release')
-  for (const file of ['agent-client.mjs', 'skill-install-manager.mjs', 'workspace-manager.mjs', 'package.json', 'package-lock.json']) {
+  for (const file of ['agent-client.mjs', 'skill-install-manager.mjs', 'managed-host.mjs', 'workspace-manager.mjs', 'package.json', 'package-lock.json']) {
     assert.equal(existsSync(resolve(release, file)), true, file)
+    assert.deepEqual(readFileSync(resolve(release, file)), readFileSync(new URL(`../${file}`, import.meta.url)), file)
   }
   assert.equal(readlinkSync(resolve(appHome, 'agent-client.mjs')), 'current/agent-client.mjs')
   assert.equal(readlinkSync(resolve(appHome, 'workspace-manager.mjs')), 'current/workspace-manager.mjs')
@@ -1411,6 +1412,9 @@ test('installer rejects symlinked persistent secrets before staging and does not
     configureAppHome({ root, appHome: configuredHome }) {
       externalEnv = resolve(root, 'outside-env')
       writeFileSync(externalEnv, 'EXTERNAL_SECRET=unchanged\n', { mode: 0o644 })
+      // Creation mode is masked by the verifier's umask 077; establish the precondition explicitly.
+      chmodSync(externalEnv, 0o644)
+      assert.equal(statSync(externalEnv).mode & 0o777, 0o644)
       unlinkSync(resolve(configuredHome, '.env'))
       symlinkSync(externalEnv, resolve(configuredHome, '.env'))
     }
