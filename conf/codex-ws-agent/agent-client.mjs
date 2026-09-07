@@ -24,10 +24,11 @@ import {
   watchFile,
   writeFileSync
 } from 'node:fs'
-import { basename, dirname, extname, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
+import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -56,6 +57,7 @@ export const MESSAGE_TYPES = Object.freeze({
   WORK_PROGRESS: 'work.progress',
   WORK_HEARTBEAT: 'work.heartbeat',
   WORK_RESULT: 'work.result',
+  WORK_RESULT_RECEIPT: WORK_RESULT_RECEIPT_TYPE,
   HELP_REQUEST: 'help.request',
   ARTIFACT_PUBLISH: 'artifact.publish',
   TASK_EVENT: 'task.event'
@@ -70,6 +72,7 @@ const MESSAGE_ID_REQUIRED_TYPES = new Set([
   MESSAGE_TYPES.WORK_PROGRESS,
   MESSAGE_TYPES.WORK_HEARTBEAT,
   MESSAGE_TYPES.WORK_RESULT,
+  MESSAGE_TYPES.WORK_RESULT_RECEIPT,
   MESSAGE_TYPES.HELP_REQUEST,
   MESSAGE_TYPES.ARTIFACT_PUBLISH,
   MESSAGE_TYPES.TASK_EVENT
@@ -357,6 +360,13 @@ const parseNonNegativeMs = (value, fallback) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
 }
 
+const parsePositiveInteger = (value, fallback) => {
+  const parsed = Number(value ?? fallback)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+const parseEnabledFlag = value => String(value || '').trim().toLowerCase() === 'true'
+
 const hasFlag = flag => process.argv.slice(2).includes(flag)
 
 const canExecute = targetPath => {
@@ -531,6 +541,8 @@ const loadRuntimeConfig = (options = {}) => {
   }
 }
 
+let managedHostModule = null
+let managedHostChannel = null
 let config = null
 let defaultProfile = null
 let shuttingDown = false
@@ -1084,6 +1096,19 @@ const FINGERPRINT_SEMANTIC_ENVELOPE_FIELDS = Object.freeze([
 const FINGERPRINT_COMPAT_BUSINESS_FIELDS = Object.freeze([
   'prompt', 'content', 'instruction', 'description', 'title', 'currentTaskTitle'
 ])
+const SKILL_INSTALL_FINGERPRINT_FIELDS = Object.freeze([
+  ['dispatchAttempt', 'attempt'],
+  ['fencingToken', 'fencingToken'],
+  ['deliveryEpoch', 'deliveryEpoch'],
+  ['orderId', 'orderId'],
+  ['installationId', 'installationId'],
+  ['productVersionId', 'productVersionId'],
+  ['skillKey', 'skillKey'],
+  ['skillVersion', 'skillVersion'],
+  ['packageSize', 'packageSize'],
+  ['packageDigest', 'packageDigest'],
+  ['downloadPath', 'downloadPath']
+])
 const FINGERPRINT_PAYLOAD_ROOT_CONTROL_FIELDS = new Set([
   ...FINGERPRINT_TRANSPORT_FIELDS,
   ...FINGERPRINT_SEMANTIC_ENVELOPE_FIELDS
@@ -1126,13 +1151,19 @@ const buildFingerprintSource = normalized => {
   for (const field of FINGERPRINT_COMPAT_BUSINESS_FIELDS) {
     if (hasOwn(normalized || {}, field) && normalized[field] !== undefined) businessPayload[field] = normalized[field]
   }
-  return {
+  const source = {
     commandType: String(normalized?.commandType || ''),
     targetAgentId: String(normalized?.targetAgentId || ''),
     taskId: String(normalized?.taskId || ''),
     workItemId: String(normalized?.workItemId || ''),
     businessPayload: canonicalizeFingerprintValue(businessPayload)
   }
+  if (normalized?.commandType === 'SKILL_INSTALL') {
+    source.skillInstall = Object.fromEntries(SKILL_INSTALL_FINGERPRINT_FIELDS.map(([fingerprintField, messageField]) => (
+      [fingerprintField, normalized?.[messageField]]
+    )))
+  }
+  return source
 }
 
 export class CommandFingerprint {
@@ -1454,6 +1485,46 @@ export class DurableDedupeLedger {
     return entry
   }
 
+  markReconciledOutcome(commandId, outcome, authority = '') {
+    const existing = this.getEntry(commandId)
+    if (!existing) throw new Error(`dedupe ledger entry missing for ${commandId}`)
+    const desiredStatus = outcome?.status === 'failed' ? ACK_STATUS.FAILED : ACK_STATUS.SUCCEEDED
+    const desiredOutcome = {
+      status: desiredStatus === ACK_STATUS.FAILED ? 'failed' : 'completed',
+      exitCode: outcome?.exitCode ?? (desiredStatus === ACK_STATUS.SUCCEEDED ? 0 : null),
+      errorMessage: outcome?.errorMessage || ''
+    }
+    if (existing.status === desiredStatus) return existing
+    const existingTerminal = TERMINAL_LEDGER_STATUSES.has(existing.status)
+    if (existingTerminal && authority !== 'SKILL_INSTALL_DURABLE_RESULT') {
+      throw new Error(`cannot reconcile authoritative command from terminal ledger status ${existing.status}`)
+    }
+    if (!existingTerminal
+        && ![ACK_STATUS.RECEIVED, ACK_STATUS.STARTED, LEDGER_STATUS.RECOVERY_REQUIRED].includes(existing.status)) {
+      throw new Error(`cannot reconcile command from ledger status ${existing.status}`)
+    }
+    const history = Array.isArray(existing.reconciledTerminalHistory) ? [...existing.reconciledTerminalHistory] : []
+    if (existingTerminal) {
+      history.push({ status: existing.status, outcome: existing.outcome || null, reconciledAt: this.now(), authority })
+    }
+    const entry = {
+      ...existing,
+      status: desiredStatus,
+      completedAt: this.now(),
+      recoveryRequiredAt: null,
+      rejectReason: null,
+      outcome: desiredOutcome,
+      reconciliationAuthority: authority || null,
+      reconciledTerminalHistory: history
+    }
+    this._writeEntry(commandId, entry)
+    return entry
+  }
+
+  markReconciledCompleted(commandId, outcome) {
+    return this.markReconciledOutcome(commandId, { ...outcome, status: 'completed' })
+  }
+
   markRejected(commandId, reason) {
     const existing = this.getEntry(commandId)
     if (!existing) return null
@@ -1558,6 +1629,7 @@ export class AckOutbox {
     this.sleepSync = sleepSync
     this.acksDir = resolve(this.rootDir, 'acks')
     this.quarantineDir = resolve(this.rootDir, 'acks-quarantine')
+    this.supersededDir = resolve(this.rootDir, 'acks-superseded')
     this.sequencePath = resolve(this.rootDir, 'ack-sequence.json')
     this.highWaterDir = resolve(this.rootDir, 'ack-sequence-high-water')
     this.highWaterInitializedPath = resolve(this.highWaterDir, 'initialized.json')
@@ -1569,6 +1641,7 @@ export class AckOutbox {
   initialize() {
     ensureSecureDirectory(this.fs, this.acksDir)
     ensureSecureDirectory(this.fs, this.quarantineDir)
+    ensureSecureDirectory(this.fs, this.supersededDir)
     ensureSecureDirectory(this.fs, this.highWaterDir)
     this.corruptions = []
     for (const fileName of this.fs.readdirSync(this.quarantineDir)) {
@@ -1984,6 +2057,26 @@ export class AckOutbox {
     return this.withPendingEnvelopesLocked('replay-scan', pending => pending)
   }
 
+  supersedeContradictoryTerminal(commandId, authoritativeStatus, reason = '') {
+    if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(authoritativeStatus)) {
+      throw new Error(`unsupported authoritative terminal ACK status: ${authoritativeStatus}`)
+    }
+    return this.withPendingEnvelopesLocked('terminal-reconcile', pending => {
+      let superseded = 0
+      for (const item of pending) {
+        if (item.envelope.commandId !== commandId
+            || ![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(item.envelope.ackStatus)
+            || item.envelope.ackStatus === authoritativeStatus) continue
+        const sourcePath = resolve(this.acksDir, item.fileName)
+        const targetPath = resolve(this.supersededDir, item.fileName)
+        durableRename(this.fs, sourcePath, targetPath)
+        atomicWriteText(this.fs, `${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${reason || 'authoritative terminal reconciliation'}\n`)
+        superseded += 1
+      }
+      return superseded
+    })
+  }
+
   withPendingEnvelopesLocked(operation, callback) {
     this._assertHealthy()
     return this._withSequenceLock(operation, () => {
@@ -2015,12 +2108,18 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = P
 
 
 export class AgentMessageProcessor {
-  constructor({ profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onReject = () => {}, sendChatBusy = () => {}, ledger = null, ackOutbox = null, sendFn = null }) {
+  constructor({
+    profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
+    recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
+    ledger = null, ackOutbox = null, sendFn = null
+  }) {
     this.profile = profile
     this.inbox = inbox
     this.runCommand = runCommand
     this.runChat = runChat
     this.onTaskEvent = onTaskEvent
+    this.onWorkResultReceipt = onWorkResultReceipt
+    this.recoverCommandOutcome = recoverCommandOutcome
     this.onReject = onReject
     this.sendChatBusy = sendChatBusy
     this.ledger = ledger
@@ -2105,6 +2204,46 @@ export class AgentMessageProcessor {
           'COMMAND_STATE_CONFLICT',
           `Multiple durable inbox records exist for commandId ${commandId}; manual reconciliation is required`
         )
+      }
+
+      const reconciledItem = records[0] || null
+      const committedOutcome = reconciledItem && reconciledItem.record.state !== 'completed'
+        ? this.recoverCommandOutcome(reconciledItem.normalized)
+        : null
+      if (committedOutcome) {
+        const fingerprint = CommandFingerprint.compute(reconciledItem.normalized)
+        let reconciledEntry = entry
+        if (!reconciledEntry) {
+          const check = this.ledger.checkOrRecord(
+            commandId,
+            fingerprint,
+            { ...this._commandMeta(reconciledItem.normalized), expiresAt: null }
+          )
+          if (check.action !== 'accept') throw new Error(`failed to reconstruct committed ledger for ${commandId}`)
+          this.ledger.recordQueueSequence(commandId, reconciledItem.record.queueSequence)
+          reconciledEntry = check.entry
+        }
+        if (reconciledEntry.fingerprint !== fingerprint) {
+          throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Committed installer evidence conflicts with ledger fingerprint for ${commandId}`)
+        }
+        const completed = this.inbox.markCompleted(reconciledItem, committedOutcome)
+        const terminal = this.ledger.markReconciledOutcome(
+          commandId,
+          committedOutcome,
+          committedOutcome.authoritative ? 'SKILL_INSTALL_DURABLE_RESULT' : ''
+        )
+        this.ackOutbox?.supersedeContradictoryTerminal(
+          commandId,
+          terminal.status,
+          'superseded by authoritative durable SKILL_INSTALL result reconciliation'
+        )
+        this._emitAck(terminal.status, {
+          ...this._commandMeta(reconciledItem.normalized),
+          commandId,
+          outcome: terminal.outcome
+        })
+        this.inbox.settleCompletedFile(reconciledItem.path, reconciledItem.fileName, completed)
+        continue
       }
 
       if (!entry && records.length) {
@@ -2426,6 +2565,14 @@ export class AgentMessageProcessor {
       case MESSAGE_TYPES.TASK_EVENT:
         await this.onTaskEvent(message)
         return { kind: 'task-event' }
+      case MESSAGE_TYPES.WORK_RESULT_RECEIPT:
+        try {
+          return { kind: 'work-result-receipt', receipt: await this.onWorkResultReceipt(message) }
+        } catch (error) {
+          const protocolError = new AgentProtocolError('WORK_RESULT_RECEIPT_INVALID', error.message)
+          this.onReject(protocolError, message.rawPayload)
+          return { kind: 'rejected', error: protocolError }
+        }
       default:
         return { kind: 'ignored', messageType: message.messageType }
     }
@@ -2522,6 +2669,29 @@ export class AgentMessageProcessor {
         outcome = await this.runCommand(validated.normalized, validated.record)
       } catch (error) {
         outcome = { status: 'failed', errorMessage: error.message }
+      }
+      if (outcome?.status === 'recovery_required') {
+        const reason = outcome.errorMessage || 'COMMITTED_OUTCOME_RECONCILIATION_REQUIRED'
+        try {
+          const recovered = this.inbox.markRecoveryRequired(item, reason)
+          const fingerprint = CommandFingerprint.compute(validated.normalized)
+          const marked = this.ledger?.markRecoveryRequired(
+            validated.normalized.commandId,
+            fingerprint,
+            this._commandMeta(validated.normalized),
+            reason
+          )
+          if (marked?.conflict) throw new Error(`recovery fingerprint conflict for ${validated.normalized.commandId}`)
+          this._failClosed(new AgentProtocolError('COMMAND_COMMITTED_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
+        } catch (error) {
+          this._failClosed(new AgentProtocolError(
+            'COMMAND_COMPLETION_PERSIST_ERROR',
+            `Committed command requires reconciliation and could not persist non-terminal recovery state: ${error.message}`
+          ), item.record.rawPayload)
+        } finally {
+          this.commandActive = false
+        }
+        return
       }
       const durableOutcome = {
         status: outcome?.status === 'failed' ? 'failed' : 'completed',
@@ -2749,9 +2919,12 @@ export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInst
 const getProfileById = profileId => config?.profiles.find(profile => profile.profileId === profileId || profile.agentId === profileId)
 const getProfileState = profile => profileStates.get(profile.agentId)
 
+const MAX_WS_BUFFERED_BYTES = 1024 * 1024
+
 const sendRaw = (event, profile = defaultProfile) => {
   const state = getProfileState(profile)
   if (!state?.ws || state.ws.readyState !== WebSocketClient.OPEN) return false
+  if (Number(state.ws.bufferedAmount || 0) > MAX_WS_BUFFERED_BYTES) return false
   state.ws.send(JSON.stringify(event))
   return true
 }
@@ -3484,14 +3657,53 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   child.on('error', error => { void finish(null, error) })
 })
 
-const ensureProfiles = (profiles, defaultProfileId, workspacePolicies = new Map(), exitOnError = true) => {
+
+export const runManagedCommand = ({ profile, message, skillInstallManager, workspaceManager, runCodexFn = runCodex }) => (
+  message.commandType === 'SKILL_INSTALL'
+    ? skillInstallManager.execute(message)
+    : runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
+)
+
+const canonicalizeConfiguredPath = configuredPath => {
+  let existingPrefix = resolve(configuredPath)
+  const missingSegments = []
+  while (!existsSync(existingPrefix)) {
+    const parent = dirname(existingPrefix)
+    if (parent === existingPrefix) break
+    missingSegments.unshift(basename(existingPrefix))
+    existingPrefix = parent
+  }
+  const canonicalPrefix = existsSync(existingPrefix) ? realpathSync(existingPrefix) : existingPrefix
+  return resolve(canonicalPrefix, ...missingSegments)
+}
+
+export const ensureProfiles = (profiles, defaultProfileId, workspacePolicies = new Map(), exitOnError = true) => {
   const profileIds = new Set()
   const agentIds = new Set()
+  const codexHomes = []
   for (const profile of profiles) {
     if (profileIds.has(profile.profileId)) configError(`duplicate CODEX_PROFILES profileId: ${profile.profileId}`, exitOnError)
     if (agentIds.has(profile.agentId)) configError(`duplicate CODEX_PROFILES agentId: ${profile.agentId}`, exitOnError)
     profileIds.add(profile.profileId)
     agentIds.add(profile.agentId)
+    if (profiles.length > 1 && (!profile.codexHome || !String(profile.codexHome).trim())) {
+      configError(`codexHome must be explicit and isolated for profile ${profile.profileId}`, exitOnError)
+    }
+    if (profile.codexHome && String(profile.codexHome).trim()) {
+      const canonicalHome = canonicalizeConfiguredPath(profile.codexHome)
+      for (const existing of codexHomes) {
+        const leftToRight = relative(existing.path, canonicalHome)
+        const rightToLeft = relative(canonicalHome, existing.path)
+        const overlaps = leftToRight === ''
+          || (leftToRight !== '..' && !leftToRight.startsWith(`..${sep}`) && !isAbsolute(leftToRight))
+          || (rightToLeft !== '..' && !rightToLeft.startsWith(`..${sep}`) && !isAbsolute(rightToLeft))
+        if (overlaps) {
+          configError(`codexHome paths must not be equal or overlap: ${existing.profileId}=${existing.path}, ${profile.profileId}=${canonicalHome}`, exitOnError)
+        }
+      }
+      codexHomes.push({ profileId: profile.profileId, path: canonicalHome })
+      profile.codexHome = canonicalHome
+    }
     const resolvedCodexBin = resolveExecutable(profile.codexBin)
     if (!resolvedCodexBin) configError(`codex binary not found or not executable for profile ${profile.profileId}: ${profile.codexBin}`, exitOnError)
     profile.codexBin = resolvedCodexBin
@@ -3580,10 +3792,23 @@ const createProfileState = profile => {
     rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile)),
     profile
   })
+  const sendAckFn = envelope => sendRaw(envelope, profile)
+  const skillInstallManager = new SkillInstallManager({
+    profile,
+    stateRoot: defaultSkillInstallStateRoot(config.commandInboxDir, profile, config.wsUrl),
+    wsUrl: config.wsUrl,
+    apiKey: config.apiKey,
+    enabled: config.skillInstallEnabled,
+    maxPackageBytes: config.skillInstallMaxBytes,
+    maxExtractedBytes: config.skillInstallMaxExtractedBytes,
+    fetchFn: globalThis.fetch,
+    sendResultFn: envelope => sendRaw(envelope, profile),
+    runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+  })
   ledger.initialize()
   ackOutbox.initialize()
+  skillInstallManager.initialize()
 
-  const sendAckFn = envelope => sendRaw(envelope, profile)
 
   const taskEvents = new Map()
   const state = {
@@ -3594,26 +3819,35 @@ const createProfileState = profile => {
     reconnectAttempt: 0,
     reconnectStartedAt: 0,
     reconnectScheduled: false,
+    resultReplayCancel: null,
     taskEvents,
     inbox,
     ledger,
     ackOutbox,
+    skillInstallManager,
     workspaceManager,
-    processor: null
+    processor: null,
+    managedRegistered: false,
+    managedEngine: null
   }
   state.processor = new AgentMessageProcessor({
     profile,
     inbox,
-    runCommand: message => runCodex(profile, message, 'command', {
-      workspaceManager,
-      requireWorkspace: true
-    }),
-    runChat: message => runCodex(profile, message, 'chat'),
+    runCommand: message => {
+      if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
+      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager })
+    },
+    runChat: message => {
+      if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
+      return runCodex(profile, message, 'chat')
+    },
     onTaskEvent: message => {
       const key = message.workItemId || message.taskId || message.messageId
       taskEvents.set(key, { ...message, observedAt: Date.now() })
       console.log(`task event observed | profile=${profile.profileId} | event=${message.eventType || ''} | taskId=${message.taskId || ''}`)
     },
+    onWorkResultReceipt: message => skillInstallManager.acknowledgeResultReceipt(message),
+    recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message),
     onReject: (error, raw) => {
       console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
       sendProtocol(MESSAGE_TYPES.PROTOCOL_ERROR, {
@@ -3655,7 +3889,13 @@ const handleMessage = async (profile, raw) => {
     return
   }
   if (isLegacyInboundControlFrame(parsed)) {
-    if (parsed.type === 'connected') {
+    if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
+      const state = getProfileState(profile)
+      if (state?.managedEngine?.ready && !state.managedRegistered) {
+        state.managedRegistered = true
+        resumeRegisteredProfile(profile, state)
+      }
+    } else if (parsed.type === 'connected') {
       registerAgent(profile)
       sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
     } else if (parsed.type === 'ping') {
@@ -3663,6 +3903,7 @@ const handleMessage = async (profile, raw) => {
     }
     return
   }
+  if (profile.managedGeneration && !getProfileState(profile)?.managedRegistered) return
   await getProfileState(profile)?.processor?.handle(raw.toString())
 }
 
@@ -3673,6 +3914,12 @@ const doReconnect = profile => {
   if (!state.reconnectStartedAt) state.reconnectStartedAt = now
   const elapsed = now - state.reconnectStartedAt
   if (elapsed >= config.reconnectMaxMs) {
+    if (profile.managedGeneration) {
+      state.managedRegistered = false
+      state.processor.pause()
+      console.warn(`managed reconnect deferred | profile=${profile.profileId}`)
+      return // Rent reconciliation may retry; never restart unrelated legacy profiles.
+    }
     shutdown(1, `reconnect timeout for profile ${profile.profileId}`)
     return
   }
@@ -3686,6 +3933,43 @@ const doReconnect = profile => {
   }, delay)
 }
 
+export const startBoundedSkillResultReplay = ({
+  manager,
+  replayToken,
+  isStable = () => true,
+  schedule = callback => setImmediate(callback),
+  onBatch = () => {}
+}) => {
+  let cancelled = false
+  const run = () => {
+    if (cancelled || !isStable()) return
+    const replayed = manager.replayResults(undefined, { replayToken })
+    onBatch(replayed)
+    if (!cancelled && isStable() && replayed >= manager.maxReplayBatch) schedule(run)
+  }
+  schedule(run)
+  return () => { cancelled = true }
+}
+
+const resumeRegisteredProfile = (profile, state) => {
+  clearInterval(state.heartbeatTimer)
+  state.resultReplayCancel?.()
+  const replaySocket = state.ws
+  const replayToken = `connection:${randomUUID()}`
+  state.resultReplayCancel = startBoundedSkillResultReplay({
+    manager: state.skillInstallManager,
+    replayToken,
+    isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN,
+    onBatch: replayed => {
+      if (replayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${replayed}`)
+    }
+  })
+  const replayed = state.processor.replayAcks()
+  if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
+  state.processor.resume()
+  state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
+}
+
 const connectProfile = profile => {
   const state = getProfileState(profile)
   if (!state) return
@@ -3695,32 +3979,37 @@ const connectProfile = profile => {
     try { state.ws.close() } catch {}
   }
   let closeFired = false
+  state.managedRegistered = false
   state.ws = new WebSocketClient(
     buildWebSocketUrl(config.wsUrl, config.apiKey, profile),
     buildWebSocketOptions(config.apiKey, profile)
   )
-  state.ws.addEventListener('open', () => {
+  const socket = state.ws
+  socket.addEventListener('open', () => {
+    if (state.ws !== socket) return
     clearReconnectState(state)
     state.reconnectAttempt = 0
     state.reconnectStartedAt = 0
     registerAgent(profile)
     sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-    const replayed = state.processor.replayAcks()
-    if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
-    state.processor.resume()
-    state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
+    if (!profile.managedGeneration) resumeRegisteredProfile(profile, state)
   })
-  state.ws.addEventListener('message', event => { void handleMessage(profile, event.data) })
-  state.ws.addEventListener('close', () => {
+  socket.addEventListener('message', event => { if (state.ws === socket) void handleMessage(profile, event.data) })
+  socket.addEventListener('close', () => {
+    if (state.ws !== socket) return
+    state.managedRegistered = false
     closeFired = true
+    state.resultReplayCancel?.()
+    state.resultReplayCancel = null
     clearInterval(state.heartbeatTimer)
     state.processor.pause()
     if (!shuttingDown) doReconnect(profile)
   })
-  state.ws.addEventListener('error', error => {
+  socket.addEventListener('error', error => {
+    if (state.ws !== socket) return
     console.error(`websocket error | profile=${profile.profileId}:`, error.message || error)
     setTimeout(() => {
-      if (!closeFired && !shuttingDown && !state.reconnectScheduled) {
+      if (state.ws === socket && !closeFired && !shuttingDown && !state.reconnectScheduled) {
         try { state.ws?.close() } catch {}
         doReconnect(profile)
       }
@@ -3732,6 +4021,8 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
   const state = getProfileState(profile)
   if (!state) return
   state.processor.pause()
+  state.resultReplayCancel?.()
+  state.resultReplayCancel = null
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
   sendStatus(profile, 'offline', { errorMessage: reason })
@@ -3747,6 +4038,7 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
 
 const applyProfileConfig = (nextProfiles, nextDefaultProfileId, reason = 'config reload') => {
   const previousProfiles = config.profiles
+  if (managedHostModule) nextProfiles = managedHostModule.preserveManagedProfiles(previousProfiles, nextProfiles)
   const previousByAgentId = new Map(previousProfiles.map(profile => [profile.agentId, profile]))
   const nextByAgentId = new Map(nextProfiles.map(profile => [profile.agentId, profile]))
   for (const previousProfile of previousProfiles) {
@@ -3774,7 +4066,7 @@ const applyProfileConfig = (nextProfiles, nextDefaultProfileId, reason = 'config
     profileStates.set(nextProfile.agentId, createProfileState(nextProfile))
     connectProfile(nextProfile)
   }
-  lastProfileSignature = profileSignature(config.profiles, config.defaultProfileId)
+  lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
 }
 
 const reloadProfiles = (reason = 'config reload') => {
@@ -3794,7 +4086,7 @@ const reloadProfiles = (reason = 'config reload') => {
 }
 
 const startProfileWatcher = () => {
-  lastProfileSignature = profileSignature(config.profiles, config.defaultProfileId)
+  lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
   if (config.profileReloadMs <= 0) return
   const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
   if (profilesFile) {
@@ -3812,6 +4104,7 @@ const shutdown = (exitCode = 0, reason = '') => {
   shutdownStarted = true
   shuttingDown = true
   if (reason) console.warn(`shutting down codex-ws-agent | reason=${reason}`)
+  managedHostChannel?.close()
   terminateAllRuns()
   if (profileReloadTimer) clearInterval(profileReloadTimer)
   const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
@@ -3819,6 +4112,8 @@ const shutdown = (exitCode = 0, reason = '') => {
   for (const profile of config.profiles) {
     const state = getProfileState(profile)
     state?.processor.pause()
+    state?.resultReplayCancel?.()
+    if (state) state.resultReplayCancel = null
     clearReconnectState(state)
     clearInterval(state?.heartbeatTimer)
     sendStatus(profile, 'offline')
@@ -3847,7 +4142,10 @@ export const main = async () => {
     reconnectMaxMs: parseNonNegativeMs(process.env.RECONNECT_MAX_MS, 30 * 60 * 1000),
     profileReloadMs: parseNonNegativeMs(process.env.CODEX_PROFILE_RELOAD_MS, 5000),
     commandInboxDir: resolve(process.env.COMMAND_INBOX_DIR || '/home/isp/apps/codex-ws-agent/data/inbox'),
-    commandInboxSuccessPolicy: process.env.COMMAND_INBOX_SUCCESS_POLICY || 'archive'
+    commandInboxSuccessPolicy: process.env.COMMAND_INBOX_SUCCESS_POLICY || 'archive',
+    skillInstallEnabled: parseEnabledFlag(process.env.AGENT_SKILL_INSTALL_ENABLED),
+    skillInstallMaxBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_BYTES, 16 * 1024 * 1024),
+    skillInstallMaxExtractedBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_EXTRACTED_BYTES, 64 * 1024 * 1024)
   }
   if (!config.apiKey && !config.profiles.every(profile => profile.apiKey)) {
     configError('OPENCLAW_API_KEY is required unless every profile defines apiKey')
@@ -3873,6 +4171,54 @@ export const main = async () => {
   process.on('SIGTERM', () => shutdown(0, 'SIGTERM'))
   for (const profile of config.profiles) connectProfile(profile)
   startProfileWatcher()
+  // Inert unless explicitly configured at release. Never entered by --validate.
+  if (process.env.AGENT_MANAGED_HOST_ENABLED === 'true') {
+    try {
+      managedHostModule = await import('./managed-host.mjs')
+      const { ManagedHost, startManagedHostSocket } = managedHostModule
+      const required = name => {
+        const value = process.env[name]
+        if (!value || value !== value.trim()) throw new Error(`Missing managed host release setting ${name}`)
+        return value
+      }
+      const root = required('AGENT_MANAGED_HOST_ROOT')
+      const workspacePolicyId = required('AGENT_MANAGED_HOST_WORKSPACE_POLICY_ID')
+      if (!config.workspacePolicies.has(workspacePolicyId)) throw new Error('Managed hosting requires an existing trusted workspace policy')
+      if (config.profiles.some(profile => profile.codexHome &&
+          (resolve(profile.codexHome) === root || resolve(profile.codexHome).startsWith(`${root}/`) || root.startsWith(`${resolve(profile.codexHome)}/`)))) {
+        throw new Error('Managed data root overlaps existing profiles')
+      }
+      const host = new ManagedHost({ root, workspacePolicyId, templateHome: required('AGENT_MANAGED_HOST_TEMPLATE_HOME'),
+        codexBin: required('AGENT_MANAGED_HOST_CODEX_BIN'), runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+        tenantId: required('AGENT_MANAGED_HOST_TENANT_ID'), clientId: required('AGENT_MANAGED_HOST_CLIENT_ID'),
+        ownerJiacn: required('AGENT_MANAGED_HOST_OWNER_JIACN'),
+        conflicts: (agentId, generation) => config.profiles.some(profile => profile.agentId === agentId && profile.managedGeneration !== generation),
+        profileState: agentId => {
+          const state = profileStates.get(agentId)
+          return state ? { registered: state.managedRegistered && state.ws?.readyState === WebSocketClient.OPEN,
+            generation: state.profile.managedGeneration, runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
+        },
+        attachProfile: async (profile, engine) => {
+          let state = profileStates.get(profile.agentId)
+          if (state && state.profile.managedGeneration !== profile.managedGeneration) throw new Error('Managed profile collision')
+          if (!state) {
+            state = createProfileState(profile)
+            profileStates.set(profile.agentId, state)
+            config.profiles.push(profile)
+            state.managedEngine = engine
+            connectProfile(profile)
+          } else {
+            state.managedEngine = engine
+            if (state.ws?.readyState !== WebSocketClient.OPEN && !state.reconnectScheduled) connectProfile(profile)
+          }
+          // Registration normally arrives on a later poll; never manufacture synchronous online proof.
+        }
+      })
+      managedHostChannel = await startManagedHostSocket({ socketPath: required('AGENT_MANAGED_HOST_SOCKET'), host })
+    } catch (error) {
+      console.warn(`managed hosting channel unavailable; legacy profiles unchanged (${error.code || error.name || 'configuration error'})`)
+    }
+  }
 }
 
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url
