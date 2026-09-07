@@ -4221,7 +4221,16 @@ export const main = async () => {
   }
 }
 
-const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+const canonicalMainModuleUrl = entry => {
+  if (!entry) return ''
+  try {
+    return pathToFileURL(realpathSync(resolve(entry))).href
+  } catch {
+    return ''
+  }
+}
+
+const isMain = canonicalMainModuleUrl(process.argv[1]) === import.meta.url
 if (isMain) {
   main().catch(error => {
     console.error(error.message || error)

@@ -2399,6 +2399,25 @@ test('all 5 ACK status constants are defined', () => {
   assert.equal(ACK_STATUS.REJECTED, 'REJECTED')
 })
 
+test('symlinked standalone entry executes validation instead of exiting as a no-op', () => {
+  const root = temporaryDirectory()
+  const linkedEntry = resolve(root, 'agent-client.mjs')
+  symlinkSync(resolve(import.meta.dirname, '..', 'agent-client.mjs'), linkedEntry)
+  const output = execFileSync(process.execPath, [linkedEntry, '--validate'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      OPENCLAW_API_KEY: 'test',
+      CODEX_PROFILES_FILE: '',
+      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate-link', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
+      DEFAULT_CODEX_PROFILE: 'validate-link',
+      CODEX_PROFILE_RELOAD_MS: '0'
+    }
+  })
+  assert.match(output, /configuration valid/)
+})
+
 test('standalone --validate still works with a06 additions', () => {
   const output = execFileSync(process.execPath, ['agent-client.mjs', '--validate'], {
     cwd: resolve(import.meta.dirname, '..'),
