@@ -29,6 +29,7 @@ import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
+import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -3309,9 +3310,17 @@ const sendStatus = (profile, status, extra = {}) => sendProtocol(
   MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, extra), profile
 )
 
-const registerAgent = profile => sendProtocol(
-  MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(profile), profile
-)
+const registerAgent = profile => {
+  const state = getProfileState(profile)
+  const envelope = buildProtocolEnvelope(
+    MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(profile), profile
+  )
+  return sendRegistrationWithAckObservation({
+    observer: state.registration,
+    envelope,
+    send: event => sendRaw(event, profile)
+  })
+}
 
 const resolvePrompt = message => {
   if (message.prompt) return String(message.prompt)
@@ -3827,6 +3836,11 @@ const createProfileState = profile => {
     skillInstallManager,
     workspaceManager,
     processor: null,
+    registration: new RegistrationAckObserver({
+      agentId: profile.agentId,
+      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+      timeoutMs: config.registrationAckTimeoutMs
+    }),
     managedRegistered: false,
     managedEngine: null
   }
@@ -3888,10 +3902,13 @@ const handleMessage = async (profile, raw) => {
     getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object'), parsed)
     return
   }
+  const state = getProfileState(profile)
+  const registrationOutcome = state?.registration.observe(parsed)
   if (isLegacyInboundControlFrame(parsed)) {
-    if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
-      const state = getProfileState(profile)
-      if (state?.managedEngine?.ready && !state.managedRegistered) {
+    if (parsed.type === 'agent_registered') {
+      if (registrationOutcome === 'registered' && profile.managedGeneration &&
+          managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID) &&
+          state?.managedEngine?.ready && !state.managedRegistered) {
         state.managedRegistered = true
         resumeRegisteredProfile(profile, state)
       }
@@ -3975,6 +3992,7 @@ const connectProfile = profile => {
   if (!state) return
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
+  state.registration.disconnect()
   if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
     try { state.ws.close() } catch {}
   }
@@ -3998,6 +4016,7 @@ const connectProfile = profile => {
   socket.addEventListener('close', () => {
     if (state.ws !== socket) return
     state.managedRegistered = false
+    state.registration.disconnect()
     closeFired = true
     state.resultReplayCancel?.()
     state.resultReplayCancel = null
@@ -4025,6 +4044,7 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
   state.resultReplayCancel = null
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
+  state.registration.disconnect()
   sendStatus(profile, 'offline', { errorMessage: reason })
   try { state.ws?.close() } catch {}
   const child = currentRuns.get(profile.agentId)
@@ -4116,6 +4136,7 @@ const shutdown = (exitCode = 0, reason = '') => {
     if (state) state.resultReplayCancel = null
     clearReconnectState(state)
     clearInterval(state?.heartbeatTimer)
+    state?.registration.disconnect()
     sendStatus(profile, 'offline')
     try { state?.ws?.close() } catch {}
   }
@@ -4139,6 +4160,7 @@ export const main = async () => {
     defaultProfileId: runtimeConfig.defaultProfileId,
     workspacePolicies: runtimeConfig.workspacePolicies,
     heartbeatMs: parseNonNegativeMs(process.env.HEARTBEAT_MS, 30000),
+    registrationAckTimeoutMs: parseNonNegativeMs(process.env.REGISTRATION_ACK_TIMEOUT_MS, 10000),
     reconnectMaxMs: parseNonNegativeMs(process.env.RECONNECT_MAX_MS, 30 * 60 * 1000),
     profileReloadMs: parseNonNegativeMs(process.env.CODEX_PROFILE_RELOAD_MS, 5000),
     commandInboxDir: resolve(process.env.COMMAND_INBOX_DIR || '/home/isp/apps/codex-ws-agent/data/inbox'),
