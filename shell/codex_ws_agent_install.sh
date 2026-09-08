@@ -152,6 +152,7 @@ stage_application_files() {
     local stage="$1"
     install -d -m 0755 "$stage"
     install -m 0644 "$CONF_SRC/agent-client.mjs" "$stage/agent-client.mjs"
+    install -m 0644 "$CONF_SRC/registration-ack.mjs" "$stage/registration-ack.mjs"
     if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ] && [ "${CODEX_WS_AGENT_TEST_FAIL_PHASE:-}" = "copy" ]; then
         __red "测试注入：候选 release 源文件复制失败。"
         return 1
