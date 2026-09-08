@@ -3902,13 +3902,11 @@ const handleMessage = async (profile, raw) => {
     getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object'), parsed)
     return
   }
-  const state = getProfileState(profile)
-  const registrationOutcome = state?.registration.observe(parsed)
+  getProfileState(profile)?.registration.observe(parsed)
   if (isLegacyInboundControlFrame(parsed)) {
-    if (parsed.type === 'agent_registered') {
-      if (registrationOutcome === 'registered' && profile.managedGeneration &&
-          managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID) &&
-          state?.managedEngine?.ready && !state.managedRegistered) {
+    if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
+      const state = getProfileState(profile)
+      if (state?.managedEngine?.ready && !state.managedRegistered) {
         state.managedRegistered = true
         resumeRegisteredProfile(profile, state)
       }

@@ -115,7 +115,7 @@ test('invalid acknowledgement identity, status, or token never marks registered'
   }
 })
 
-test('matching server rejection records only a redacted stage and safe code', () => {
+test('matching server rejection records only a redacted stage', () => {
   const f = fixture()
   const { envelope } = send(f)
   const rawServerMessage = `denied ${secret.apiKey} ${secret.agentId} ${secret.payload}`
@@ -124,13 +124,13 @@ test('matching server rejection records only a redacted stage and safe code', ()
     messageType: 'protocol.error',
     messageId: envelope.messageId,
     runtimeInstanceId,
-    code: `BAD CODE ${secret.apiKey}`,
+    code: `SECRET_KEY_${secret.apiKey}`,
     message: rawServerMessage,
     token: secret.token
   }), 'rejected')
   assert.deepEqual(f.observer.snapshot(), { stage: 'rejected', registered: false })
   assert.equal(f.timerCount(), 0)
-  assert.equal(f.logs.at(-1), 'registration stage=rejected | code=SERVER_REJECTED')
+  assert.equal(f.logs.at(-1), 'registration stage=rejected')
   const output = f.logs.join('\n')
   for (const value of Object.values(secret)) assert.equal(output.includes(value), false)
   assert.equal(output.includes(rawServerMessage), false)
@@ -149,6 +149,14 @@ test('ACK timeout and send failure remain unregistered with explicit stages', ()
   assert.deepEqual(failed.observer.snapshot(), { stage: 'send_failed', registered: false })
   assert.equal(failed.timerCount(), 0)
   assert.equal(failed.logs.at(-1), 'registration stage=send_failed')
+})
+
+test('late valid ACK after observation timeout stays observationally expired', () => {
+  const f = fixture()
+  const { envelope } = send(f)
+  f.fireTimers()
+  assert.equal(f.observer.observe(ack(envelope)), null)
+  assert.deepEqual(f.observer.snapshot(), { stage: 'ack_timeout', registered: false })
 })
 
 test('disconnect cancels pending timeout and a new registration rejects stale ACKs', () => {
@@ -170,8 +178,9 @@ test('agent runtime wires send, inbound control, timeout, and disconnect to the 
   assert.match(source, /import \{ RegistrationAckObserver, sendRegistrationWithAckObservation \} from '\.\/registration-ack\.mjs'/)
   assert.match(source, /const envelope = buildProtocolEnvelope\(\s*MESSAGE_TYPES\.AGENT_REGISTER,/)
   assert.match(source, /sendRegistrationWithAckObservation\(\{\s*observer: state\.registration,\s*envelope,/)
-  assert.match(source, /const registrationOutcome = state\?\.registration\.observe\(parsed\)/)
-  assert.match(source, /registrationOutcome === 'registered'.*managedHostModule\?\.managedRegistration/s)
+  assert.match(source, /getProfileState\(profile\)\?\.registration\.observe\(parsed\)/)
+  assert.match(source, /if \(profile\.managedGeneration && managedHostModule\?\.managedRegistration\(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID\)\)/)
+  assert.doesNotMatch(source, /registrationOutcome/)
   assert.match(source, /registrationAckTimeoutMs: parseNonNegativeMs\(process\.env\.REGISTRATION_ACK_TIMEOUT_MS, 10000\)/)
   assert.ok((source.match(/registration\.disconnect\(\)/g) || []).length >= 3)
 })

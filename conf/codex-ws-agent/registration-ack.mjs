@@ -5,9 +5,6 @@ const framePayload = frame => isObject(frame?.data) ? frame.data : frame
 const traceMatches = (payload, messageId, runtimeInstanceId) =>
   exactValue(payload?.messageId, messageId, 128) &&
   exactValue(payload?.runtimeInstanceId, runtimeInstanceId, 128)
-const safeCode = code => typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)
-  ? code
-  : 'SERVER_REJECTED'
 const validToken = token => typeof token === 'string' && Buffer.byteLength(token) > 0 &&
   Buffer.byteLength(token) <= 512 && token.trim() === token && !/[\x00-\x1f\x7f]/u.test(token)
 
@@ -30,9 +27,8 @@ export class RegistrationAckObserver {
 
   snapshot() { return { stage: this.stage, registered: this.registered } }
 
-  log(level, stage, code = '') {
-    const suffix = code ? ` | code=${code}` : ''
-    this.logger?.[level]?.(`registration stage=${stage}${suffix}`)
+  log(level, stage) {
+    this.logger?.[level]?.(`registration stage=${stage}`)
   }
 
   clearTimer() {
@@ -78,7 +74,7 @@ export class RegistrationAckObserver {
     this.clearTimer()
     this.stage = 'rejected'
     this.messageId = null
-    this.log('warn', this.stage, safeCode(payload.code))
+    this.log('warn', this.stage)
     return 'rejected'
   }
 
