@@ -557,8 +557,7 @@ let shutdownStarted = false
 let profileReloadTimer = null
 let profileReloadInFlight = false
 let lastProfileSignature = ''
-let codexSessionMapPath = ''
-let codexSessionMap = {}
+let codexSessionStore = null
 const currentRuns = new Map()
 const profileStates = new Map()
 let WebSocketClient = globalThis.WebSocket || null
@@ -2864,22 +2863,55 @@ export class AgentMessageProcessor {
 }
 
 
-const loadCodexSessionMap = () => {
-  try {
-    if (!codexSessionMapPath || !existsSync(codexSessionMapPath)) return {}
-    const parsed = JSON.parse(readFileSync(codexSessionMapPath, 'utf8'))
-    return isObject(parsed) ? parsed : {}
-  } catch (error) {
-    console.warn(`failed to load codex session map | path=${codexSessionMapPath} | ${error.message}`)
-    return {}
-  }
+const codexSessionMapKey = (profile, message) => {
+  const agentId = profile?.agentId
+  const conversationId = message?.conversationId
+  if (typeof agentId !== 'string' || !agentId || typeof conversationId !== 'string' || !conversationId.trim()) return ''
+  return `${agentId}:${conversationId}`
 }
 
-const saveCodexSessionMap = () => {
-  try {
-    atomicWriteJson(DEFAULT_FS_OPERATIONS, codexSessionMapPath, codexSessionMap)
-  } catch (error) {
-    console.warn(`failed to save codex session map | path=${codexSessionMapPath} | ${error.message}`)
+export const createCodexSessionStore = (filePath = '', options = {}) => {
+  const fs = { ...DEFAULT_FS_OPERATIONS, ...(options.fs || {}) }
+  const resolvedPath = filePath ? resolve(filePath) : ''
+  let entries = Object.create(null)
+  if (resolvedPath) {
+    try {
+      if (fs.existsSync(resolvedPath)) {
+        const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'))
+        if (isObject(parsed)) {
+          for (const [key, value] of Object.entries(parsed)) {
+            if (typeof value === 'string' && value.trim()) entries[key] = value.trim()
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`failed to load codex session map | path=${resolvedPath} | ${error.message}`)
+    }
+  }
+  return {
+    get(profile, message) {
+      const key = codexSessionMapKey(profile, message)
+      return key && typeof entries[key] === 'string' ? entries[key] : ''
+    },
+    remember(profile, message, sessionId) {
+      const key = codexSessionMapKey(profile, message)
+      const value = String(sessionId || '').trim()
+      if (!key || !value || entries[key] === value) return false
+      const nextEntries = { ...entries, [key]: value }
+      if (resolvedPath) {
+        try {
+          atomicWriteJson(fs, resolvedPath, nextEntries)
+        } catch (error) {
+          console.warn(`failed to save codex session map | path=${resolvedPath} | ${error.message}`)
+          return false
+        }
+      }
+      entries = Object.assign(Object.create(null), nextEntries)
+      return true
+    },
+    snapshot() {
+      return { ...entries }
+    }
   }
 }
 
@@ -3391,6 +3423,8 @@ const extractCodexAgentText = event => {
 
 const extractCodexSessionId = event => {
   if (!isObject(event)) return ''
+  if (event.type === 'thread.started' && typeof event.thread_id === 'string') return event.thread_id
+  if (event.type === 'thread.started' && typeof event.threadId === 'string') return event.threadId
   if (typeof event.session_id === 'string') return event.session_id
   if (typeof event.sessionId === 'string') return event.sessionId
   if (event.type === 'session_meta' && typeof event.payload?.id === 'string') return event.payload.id
@@ -3417,44 +3451,42 @@ const readCodexSessionMeta = filePath => {
     const firstLine = readFileSync(filePath, 'utf8').split(/\r?\n/, 1)[0]
     if (!firstLine) return null
     const event = JSON.parse(firstLine)
-    if (event?.type !== 'session_meta' || !event.payload?.id) return null
+    if (event?.type !== 'session_meta') return null
+    const ids = [...new Set([event.payload?.id, event.payload?.session_id]
+      .filter(value => typeof value === 'string' && value.trim())
+      .map(value => value.trim()))]
+    if (!ids.length) return null
     const stats = statSync(filePath)
-    return { id: String(event.payload.id), path: filePath, mtimeMs: stats.mtimeMs }
+    return { id: ids[0], ids, path: filePath, mtimeMs: stats.mtimeMs }
   } catch { return null }
 }
 
-const findLatestCodexSession = (profile, sinceMs = 0) => {
-  if (!profile.codexHome) return null
-  return findCodexSessionFiles(resolve(profile.codexHome, 'sessions'))
-    .map(readCodexSessionMeta)
-    .filter(meta => meta && meta.mtimeMs >= sinceMs)
-    .sort((left, right) => right.mtimeMs - left.mtimeMs)[0] || null
+const findCodexSessionById = (profile, sessionId) => {
+  const expectedId = String(sessionId || '').trim()
+  if (!profile?.codexHome || !expectedId) return null
+  for (const filePath of findCodexSessionFiles(resolve(profile.codexHome, 'sessions'))) {
+    const meta = readCodexSessionMeta(filePath)
+    if (meta?.ids?.includes(expectedId)) return meta
+  }
+  return null
 }
 
-const hasCodexSession = profile => {
-  if (!profile.codexHome) return false
-  const indexPath = resolve(profile.codexHome, 'session_index.jsonl')
-  try {
-    if (existsSync(indexPath) && readFileSync(indexPath, 'utf8').trim()) return true
-    return Boolean(findLatestCodexSession(profile))
-  } catch { return false }
+export class CodexSessionError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'CodexSessionError'
+    this.code = code
+  }
 }
 
-const codexSessionMapKey = (profile, message) => message?.conversationId ? `${profile.agentId}:${message.conversationId}` : ''
-const getMappedCodexSessionId = (profile, message) => {
-  const value = codexSessionMap[codexSessionMapKey(profile, message)]
-  return typeof value === 'string' ? value.trim() : ''
-}
-const rememberCodexSession = (profile, message, sessionId) => {
-  const key = codexSessionMapKey(profile, message)
-  const value = String(sessionId || '').trim()
-  if (!key || !value || codexSessionMap[key] === value) return
-  codexSessionMap[key] = value
-  saveCodexSessionMap()
-}
-
-export const buildCodexArgs = (profile, message, prompt, codexWorkdir = profile.codexWorkdir, forceNewSession = false) => {
-  const mappedSessionId = getMappedCodexSessionId(profile, message)
+export const buildCodexArgs = (
+  profile,
+  message,
+  prompt,
+  codexWorkdir = profile.codexWorkdir,
+  forceNewSession = false,
+  sessionStore = codexSessionStore
+) => {
   // Parent exec options must precede `resume`: the resume subcommand has no --sandbox/--cd.
   const executionArgs = [
     '--ask-for-approval', profile.codexApproval,
@@ -3464,12 +3496,17 @@ export const buildCodexArgs = (profile, message, prompt, codexWorkdir = profile.
     '--json', '--skip-git-repo-check',
     ...(profile.codexModel ? ['--model', profile.codexModel] : [])
   ]
-  if (!forceNewSession && profile.codexSessionMode === 'resume' && (mappedSessionId || hasCodexSession(profile))) {
-    return [
-      ...executionArgs, 'resume', ...outputArgs,
-      ...(mappedSessionId ? [mappedSessionId] : ['--last', '--all']),
-      prompt
-    ]
+  if (!forceNewSession && profile.codexSessionMode === 'resume') {
+    const mappedSessionId = sessionStore?.get(profile, message) || ''
+    if (mappedSessionId) {
+      if (!findCodexSessionById(profile, mappedSessionId)) {
+        throw new CodexSessionError(
+          'CODEX_SESSION_NOT_FOUND',
+          `Mapped Codex session ${mappedSessionId} for ${profile.agentId}:${message.conversationId} is not present in this profile's Home`
+        )
+      }
+      return [...executionArgs, 'resume', ...outputArgs, mappedSessionId, prompt]
+    }
   }
   return [...executionArgs, ...outputArgs, prompt]
 }
@@ -3533,10 +3570,29 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     return
   }
 
+  const sessionStore = overrides.sessionStore || codexSessionStore
+  let args
+  try {
+    args = buildCodexArgs(profile, message, prompt, codexWorkdir, Boolean(workspace), sessionStore)
+  } catch (error) {
+    const leaseError = releaseWorkspaceLease()
+    const code = error.code || 'CODEX_SESSION_ERROR'
+    const errorMessage = leaseError
+      ? `${code}: ${error.message}; WORKSPACE_LOCK_ERROR: ${leaseError.message}`
+      : `${code}: ${error.message}`
+    if (mode === 'chat') sendChatFinal(profile, message, `无法继续会话：${errorMessage}`, { status: 'failed' }, sendProtocolFn)
+    else {
+      const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
+      sendLegacyFn('task.report', payload, profile)
+      sendLegacyFn('codex.result', payload, profile)
+    }
+    resolveRun({ status: 'failed', errorMessage, sessionErrorCode: code, ...(leaseError ? { workspaceErrorCode: 'WORKSPACE_LOCK_ERROR' } : {}) })
+    return
+  }
+
   if (mode === 'command') sendStatusFn(profile, 'busy', { taskId, title })
   if (mode === 'chat') sendChatDelta(profile, message, '收到，正在整理回复。\n\n', { phase: 'intro' }, sendProtocolFn)
 
-  const args = buildCodexArgs(profile, message, prompt, codexWorkdir, Boolean(workspace))
   const startedAt = Date.now()
   let child
   try {
@@ -3568,6 +3624,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   let streamedAgentReply = ''
   let jsonLineBuffer = ''
   let runSessionId = ''
+  let sessionRemembered = false
   let streamQueue = Promise.resolve()
   let settled = false
   const timeout = profile.codexTimeoutMs > 0
@@ -3602,7 +3659,9 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     const sessionId = extractCodexSessionId(event)
     if (sessionId) {
       runSessionId = sessionId
-      rememberCodexSession(profile, message, sessionId)
+      if (findCodexSessionById(profile, sessionId)) {
+        sessionRemembered = Boolean(sessionStore?.remember(profile, message, sessionId)) || sessionStore?.get(profile, message) === sessionId
+      }
     }
     const agentText = extractCodexAgentText(event)
     if (!agentText) return
@@ -3633,9 +3692,8 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     clearTimeout(timeout)
     if (jsonLineBuffer.trim()) handleJsonLine(jsonLineBuffer)
     currentRuns.delete(profile.agentId)
-    if (!runSessionId) {
-      const latestSession = findLatestCodexSession(profile, startedAt - 5000)
-      if (latestSession?.id) rememberCodexSession(profile, message, latestSession.id)
+    if (runSessionId && !sessionRemembered && findCodexSessionById(profile, runSessionId)) {
+      sessionStore?.remember(profile, message, runSessionId)
     }
     const leaseError = releaseWorkspaceLease()
     const effectiveError = spawnError || leaseError
@@ -3708,7 +3766,7 @@ export const buildConfigurationReport = runtimeConfig => ({
     if (profile.skills?.length) warnings.push('LEGACY_SKILLS_IGNORED: this field does not install or enable skills')
     if (profile.codexSandbox === 'danger-full-access') warnings.push('UNRESTRICTED_SANDBOX: model-generated commands are not filesystem-sandboxed')
     if (profile.codexModel) warnings.push('MODEL_OVERRIDE: Agent --model overrides the model in Codex Home')
-    if (profile.codexSessionMode === 'resume') warnings.push('SESSION_FALLBACK: an unmapped conversation may resume the latest session in this Home')
+    if (profile.codexSessionMode === 'resume') warnings.push('SESSION_MAPPING_STRICT: only an exact conversation mapping can resume a session in this profile Home')
     return {
       profileId: profile.profileId,
       agentId: profile.agentId,
@@ -4251,8 +4309,9 @@ export const main = async () => {
   }
   ensureProfiles(config.profiles, config.defaultProfileId, config.workspacePolicies)
   defaultProfile = getProfileById(config.defaultProfileId) || config.profiles[0]
-  codexSessionMapPath = resolve(process.env.CODEX_SESSION_MAP_FILE || resolve(process.cwd(), 'codex-session-map.json'))
-  codexSessionMap = loadCodexSessionMap()
+  codexSessionStore = createCodexSessionStore(
+    process.env.CODEX_SESSION_MAP_FILE || resolve(process.cwd(), 'codex-session-map.json')
+  )
 
   if (hasFlag('--validate')) {
     for (const profile of buildConfigurationReport(runtimeConfig).profiles) {

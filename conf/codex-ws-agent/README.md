@@ -158,9 +158,27 @@ metadata, not a persona prompt. `abilities` and `skills` remain intentionally ex
 
 Profile-file hot reload is enabled by default at 5000ms; `.env` changes need a controlled process
 restart. Configuration changes can disconnect profiles or interrupt active work; schedule a maintenance
-window rather than assuming hot reload is disruption-free. Session fallback still uses the latest
-Home session when a conversation mapping is missing; strict conversation isolation is a separate,
-explicit migration rather than an implicit behavior change in this patch.
+window rather than assuming hot reload is disruption-free.
+
+### Conversation-bound Codex sessions
+
+For chat profiles with `codexSessionMode=resume`, the Agent resumes only the session ID stored under the
+exact `agentId:conversationId` key and only after confirming that session exists under that profile's
+`codexHome/sessions`. An unmapped conversation, a missing/blank `conversationId`, or Home history by
+itself starts a new `codex exec`. The Agent never uses `resume --last` or `--all`. If a key is mapped but
+the mapped session is missing from that profile's Home, the chat fails explicitly with
+`CODEX_SESSION_NOT_FOUND` instead of selecting or creating unrelated state.
+
+The current Codex JSON event `{ "type": "thread.started", "thread_id": "..." }` is captured for the
+running chat and persisted to `CODEX_SESSION_MAP_FILE` (default `codex-session-map.json`) with private
+file permissions. Session files that merely appear or become newest are not associated without a
+session ID emitted by that run. `codexSessionMode=new` and managed workspace commands forced to a new
+session keep their existing behavior. This mechanism does not delete Codex history.
+
+Compatibility boundary: existing map entries are preserved byte-for-byte until a new mapping is
+captured. If legacy `--last` behavior previously mapped multiple conversations to the same session,
+this change does not split, rewrite, delete, or claim to repair that already mixed context; it prevents
+new unmapped conversation IDs from inheriting the latest Home session.
 
 JSON is still supported:
 

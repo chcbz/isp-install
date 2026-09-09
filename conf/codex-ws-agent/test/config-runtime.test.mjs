@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
-import { buildCodexArgs, runCodex } from '../agent-client.mjs'
+import { buildCodexArgs, createCodexSessionStore, runCodex } from '../agent-client.mjs'
 
 const entrypoint = resolve(import.meta.dirname, '..', 'agent-client.mjs')
 const fixture = t => {
@@ -29,16 +29,59 @@ const runCli = (root, profiles, args, extraEnv = {}) => spawnSync(process.execPa
   env: { ...cleanEnv(), CODEX_PROFILES: JSON.stringify(profiles), DEFAULT_CODEX_PROFILE: 'audit', ...extraEnv }
 })
 
+const writeSession = (selectedProfile, sessionId, fileName = sessionId) => {
+  const directory = resolve(selectedProfile.codexHome, 'sessions', '2026', '09', '10')
+  mkdirSync(directory, { recursive: true })
+  const filePath = resolve(directory, `rollout-${fileName}.jsonl`)
+  writeFileSync(filePath, `${JSON.stringify({
+    type: 'session_meta',
+    payload: { id: sessionId, session_id: sessionId }
+  })}
+`)
+  return filePath
+}
+
+const sessionStoreFor = (root, entries = {}) => {
+  mkdirSync(root, { recursive: true })
+  const filePath = resolve(root, 'codex-session-map.json')
+  if (Object.keys(entries).length) writeFileSync(filePath, `${JSON.stringify(entries)}
+`)
+  return { filePath, store: createCodexSessionStore(filePath) }
+}
+
+const successfulChild = onStart => {
+  const child = new EventEmitter()
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  child.kill = () => {}
+  queueMicrotask(() => {
+    onStart?.(child)
+    child.stdout.end()
+    child.stderr.end()
+    child.emit('close', 0)
+  })
+  return child
+}
+
 for (const sandbox of ['read-only', 'workspace-write', 'danger-full-access']) {
-  test(`new and resumed sessions explicitly preserve ${sandbox}, workdir, model and approval`, t => {
+  test(`new and exactly mapped resumed sessions explicitly preserve ${sandbox}, workdir, model and approval`, t => {
     const root = fixture(t)
-    const profile = { ...profileFor(root), codexSandbox: sandbox }
-    mkdirSync(profile.codexHome)
-    const fresh = buildCodexArgs(profile, {}, 'test prompt')
-    assert.equal(fresh.includes('resume'), false)
-    writeFileSync(resolve(profile.codexHome, 'session_index.jsonl'), '{"id":"prior-session"}\n')
-    const resumed = buildCodexArgs(profile, {}, 'test prompt')
+    const selectedProfile = { ...profileFor(root), codexSandbox: sandbox }
+    const conversation = { conversationId: 'conversation-1' }
+    const sessionId = `session-${sandbox}`
+    mkdirSync(selectedProfile.codexHome)
+    writeSession(selectedProfile, 'unrelated-history')
+
+    const fresh = buildCodexArgs(selectedProfile, conversation, 'test prompt')
+    assert.equal(fresh.includes('resume'), false, 'Home history alone must not resume')
+
+    writeSession(selectedProfile, sessionId)
+    const { store } = sessionStoreFor(root, { [`${selectedProfile.agentId}:${conversation.conversationId}`]: sessionId })
+    const resumed = buildCodexArgs(selectedProfile, conversation, 'test prompt', root, false, store)
     assert.ok(resumed.includes('resume'))
+    assert.ok(resumed.includes(sessionId))
+    assert.equal(resumed.includes('--last'), false)
+    assert.equal(resumed.includes('--all'), false)
     for (const args of [fresh, resumed]) {
       assert.equal(args[args.indexOf('--sandbox') + 1], sandbox)
       assert.equal(args[args.indexOf('--cd') + 1], root)
@@ -49,9 +92,140 @@ for (const sandbox of ['read-only', 'workspace-write', 'danger-full-access']) {
     }
     assert.ok(resumed.indexOf('--sandbox') < resumed.indexOf('resume'))
     assert.ok(resumed.indexOf('--cd') < resumed.indexOf('resume'))
-    assert.equal(buildCodexArgs(profile, {}, 'test prompt', root, true).includes('resume'), false)
+    assert.equal(buildCodexArgs(selectedProfile, conversation, 'test prompt', root, true, store).includes('resume'), false)
   })
 }
+
+test('resume mode starts new for an unmapped conversation even when Home has history', t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  writeSession(selectedProfile, 'unrelated-session')
+  const { store } = sessionStoreFor(root)
+  const args = buildCodexArgs(selectedProfile, { conversationId: 'new-conversation' }, 'hello', root, false, store)
+  assert.equal(args.includes('resume'), false)
+  assert.equal(args.includes('--last'), false)
+  assert.equal(args.includes('--all'), false)
+})
+
+test('resume mode without a conversationId never resumes unrelated Home history', t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  writeSession(selectedProfile, 'unrelated-session')
+  const { store } = sessionStoreFor(root)
+  assert.equal(buildCodexArgs(selectedProfile, {}, 'hello', root, false, store).includes('resume'), false)
+  assert.equal(buildCodexArgs(selectedProfile, { conversationId: '   ' }, 'hello', root, false, store).includes('resume'), false)
+})
+
+test('mapped session missing from the selected profile Home fails explicitly without spawning Codex', async t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  mkdirSync(selectedProfile.codexHome)
+  const conversation = { conversationId: 'conversation-missing', content: 'hello' }
+  const { store } = sessionStoreFor(root, { [`${selectedProfile.agentId}:${conversation.conversationId}`]: 'missing-session' })
+  assert.throws(
+    () => buildCodexArgs(selectedProfile, conversation, 'hello', root, false, store),
+    error => error.code === 'CODEX_SESSION_NOT_FOUND'
+  )
+
+  let spawnCount = 0
+  const sent = []
+  const result = await runCodex(selectedProfile, conversation, 'chat', {
+    sessionStore: store,
+    spawnFn: () => { spawnCount += 1 },
+    sendProtocolFn: (type, payload) => { sent.push({ type, payload }); return true }
+  })
+  assert.equal(spawnCount, 0)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.sessionErrorCode, 'CODEX_SESSION_NOT_FOUND')
+  assert.match(result.errorMessage, /missing-session/)
+  assert.equal(sent.at(-1).payload.status, 'failed')
+})
+
+test('conversation mappings are isolated by exact agent identity and selected profile Home', t => {
+  const root = fixture(t)
+  const agentA = profileFor(resolve(root, 'a'))
+  const agentB = { ...profileFor(resolve(root, 'b')), profileId: 'audit-b', agentId: 'audit-agent-b' }
+  const conversation = { conversationId: 'shared-conversation' }
+  writeSession(agentA, 'agent-a-session')
+  writeSession(agentB, 'agent-b-unrelated-history')
+  const { store } = sessionStoreFor(root, { [`${agentA.agentId}:${conversation.conversationId}`]: 'agent-a-session' })
+
+  assert.ok(buildCodexArgs(agentA, conversation, 'hello', agentA.codexWorkdir, false, store).includes('agent-a-session'))
+  assert.equal(buildCodexArgs(agentB, conversation, 'hello', agentB.codexWorkdir, false, store).includes('resume'), false)
+
+  const { store: wrongHomeStore } = sessionStoreFor(resolve(root, 'wrong-home-map'), {
+    [`${agentB.agentId}:${conversation.conversationId}`]: 'agent-a-session'
+  })
+  assert.throws(
+    () => buildCodexArgs(agentB, conversation, 'hello', agentB.codexWorkdir, false, wrongHomeStore),
+    error => error.code === 'CODEX_SESSION_NOT_FOUND'
+  )
+})
+
+test('configured new mode and forceNew commands ignore even valid conversation mappings', t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const conversation = { conversationId: 'conversation-1' }
+  writeSession(selectedProfile, 'mapped-session')
+  const { store } = sessionStoreFor(root, { [`${selectedProfile.agentId}:${conversation.conversationId}`]: 'mapped-session' })
+
+  assert.equal(buildCodexArgs({ ...selectedProfile, codexSessionMode: 'new' }, conversation, 'hello', root, false, store).includes('resume'), false)
+  assert.equal(buildCodexArgs(selectedProfile, conversation, 'hello', root, true, store).includes('resume'), false)
+})
+
+test('thread.started thread_id is captured and atomically persisted for the exact conversation', async t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const conversation = { conversationId: 'conversation-capture', content: 'hello' }
+  const sessionId = 'thread-from-current-run'
+  const { filePath, store } = sessionStoreFor(root)
+  let invocation
+
+  const result = await runCodex(selectedProfile, conversation, 'chat', {
+    sessionStore: store,
+    spawnFn: (binary, args) => {
+      invocation = { binary, args }
+      return successfulChild(child => {
+        writeSession(selectedProfile, sessionId)
+        child.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: sessionId })}
+`)
+        child.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } })}
+`)
+      })
+    },
+    sendProtocolFn: () => true
+  })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(invocation.args.includes('resume'), false)
+  assert.deepEqual(JSON.parse(readFileSync(filePath, 'utf8')), {
+    [`${selectedProfile.agentId}:${conversation.conversationId}`]: sessionId
+  })
+  assert.equal(statSync(filePath).mode & 0o777, 0o600)
+  assert.ok(buildCodexArgs(selectedProfile, conversation, 'again', root, false, store).includes(sessionId))
+})
+
+test('session files without a current-run session event are never broadly associated to a conversation', async t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const conversation = { conversationId: 'conversation-no-event', content: 'hello' }
+  writeSession(selectedProfile, 'old-unrelated-session')
+  const { store } = sessionStoreFor(root)
+
+  const result = await runCodex(selectedProfile, conversation, 'chat', {
+    sessionStore: store,
+    spawnFn: () => successfulChild(child => {
+      writeSession(selectedProfile, 'concurrent-unrelated-session')
+      child.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } })}
+`)
+    }),
+    sendProtocolFn: () => true
+  })
+
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(store.snapshot(), {})
+  assert.equal(buildCodexArgs(selectedProfile, conversation, 'again', root, false, store).includes('resume'), false)
+})
 
 test('empty codexModel leaves model selection to Codex Home', t => {
   const profile = { ...profileFor(fixture(t)), codexModel: '' }
