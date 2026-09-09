@@ -1,0 +1,21 @@
+# EXAMPLE ONLY. Replace placeholders before copying into an Agent's isolated CODEX_HOME.
+# Never put real API keys here; authenticate separately with that CODEX_HOME.
+model = "replace-with-model-id"
+model_provider = "gateway"
+model_reasoning_effort = "medium"
+
+# Consistent, conservative defaults for direct CLI use. Agent CLI flags take precedence.
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+# Do not also set a conflicting default_permissions profile.
+# Top-level writable_roots and preferred_auth_method are NOT valid in audited CLI 0.153.4.
+
+[model_providers.gateway]
+name = "Model gateway"
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+# Add narrowly scoped [projects."/absolute/project/path"] trust entries only after review.
+# Optional custom model catalog: use a stable, readable shared location, not /root/.codex/.tmp.
+# Configure model_catalog_json at the TOP LEVEL if your provider requires a custom catalog.

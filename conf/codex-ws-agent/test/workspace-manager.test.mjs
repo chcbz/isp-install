@@ -1392,6 +1392,10 @@ test('installer stages dependencies/source, validates, preserves secrets/state, 
   }
   assert.equal(readlinkSync(resolve(appHome, 'agent-client.mjs')), 'current/agent-client.mjs')
   assert.equal(readlinkSync(resolve(appHome, 'workspace-manager.mjs')), 'current/workspace-manager.mjs')
+  for (const file of ['README.md', '.env.example', 'codex-home.example.toml']) {
+    assert.equal(readlinkSync(resolve(appHome, file)), `current/${file}`)
+    assert.deepEqual(readFileSync(resolve(appHome, file)), readFileSync(resolve(release, file)))
+  }
   assert.equal(readFileSync(npmRecord, 'utf8'), `${resolve(appHome, 'releases', '.stage-candidate-release')}\nci --omit=dev --ignore-scripts --no-audit --no-fund\n`)
   assert.equal(statSync(resolve(appHome, '.env')).mode & 0o777, 0o600)
   assert.equal(statSync(resolve(appHome, 'codex-profiles.conf')).mode & 0o777, 0o600)

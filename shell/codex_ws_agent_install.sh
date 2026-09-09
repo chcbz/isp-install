@@ -165,6 +165,7 @@ stage_application_files() {
     install -m 0644 "$CONF_SRC/package-lock.json" "$stage/package-lock.json"
     install -m 0644 "$CONF_SRC/README.md" "$stage/README.md"
     install -m 0644 "$CONF_SRC/env.example" "$stage/.env.example"
+    install -m 0644 "$CONF_SRC/codex-home.example.toml" "$stage/codex-home.example.toml"
     install -m 0640 "$CONF_SRC/workspace-policies.example.json" "$stage/workspace-policies.example.json"
 }
 
@@ -198,7 +199,8 @@ atomic_switch_release() {
 install_compatibility_entrypoints() {
     local entry
     local next_link
-    for entry in workspace-manager.mjs agent-client.mjs; do
+    # Only static entrypoints/templates: never link persistent .env, profiles, auth, or state.
+    for entry in workspace-manager.mjs agent-client.mjs README.md .env.example codex-home.example.toml; do
         next_link="$APP_HOME/.${entry}.next-$$"
         ln -s "current/$entry" "$next_link"
         mv -Tf "$next_link" "$APP_HOME/$entry"

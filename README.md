@@ -178,7 +178,8 @@ conf/
 │   └── settings.xml
 ├── codex-ws-agent/
 │   ├── env.example
-│   └── codex-profiles.conf
+│   ├── codex-profiles.conf
+│   └── codex-home.example.toml
 ├── xray/
 │   └── config.json.template
 └── ...
@@ -269,3 +270,11 @@ vpn
 ## 许可证
 
 本项目仅供学习和参考使用。
+
+## Codex Agent 配置诊断与优化
+
+新版 Agent 支持只读、脱敏的 `--inspect-config`，展示 profile 执行参数、实际调度能力和命令工作区缺失提示。
+它不读取模型认证文件、不初始化工作区，也不证明模型 API 已可用。
+`codex-home.example.toml` 中的模型和服务地址必须替换；认证通过各 Home 的登录流程单独配置，勿提交密钥。
+具体配置分工、权限修复风险、工作区迁移、验证与回滚见
+[配置优化方案](docs/codex-ws-agent-config-optimization.md)。

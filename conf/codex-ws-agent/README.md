@@ -52,7 +52,8 @@ Each profile can define:
 - `codexSandbox`
 - `codexApproval`
 - `codexSessionMode`
-- `codexTimeoutMs`
+- `codexTimeoutMs` (0 disables the timeout; otherwise an integer from 1 to 2147483647)
+- `codexModel` (explicit CLI model override; otherwise `CODEX_MODEL` fallback or Codex Home)
 - `abilities` (legacy profile metadata; not reported as runtime scheduling abilities)
 - `skills` (legacy profile metadata; installed/tool skill names are not reported as scheduling abilities)
 - `workspacePolicyId`
@@ -75,7 +76,7 @@ Example `codex-profiles.conf`:
 [default]
 codexBin=/usr/local/bin/codex
 codexWorkdir=/home/isp
-codexSandbox=danger-full-access
+codexSandbox=workspace-write
 codexApproval=never
 codexSessionMode=resume
 codexTimeoutMs=900000
@@ -125,6 +126,41 @@ You can run the validation manually:
 cd /home/isp/apps/codex-ws-agent
 node agent-client.mjs --validate
 ```
+
+### Inspect configuration without starting an Agent
+
+```bash
+cd /home/isp/apps/codex-ws-agent
+node agent-client.mjs --inspect-config
+```
+
+This prints a field-allowlisted JSON report with profile execution settings, the selected default,
+WebSocket credential **source** (never its value), discovered scheduling abilities, and command-policy
+warnings. It does not connect to the server, start Codex, read `auth.json`, initialize worktrees, or
+change files. It can run without WebSocket credentials or the `ws` dependency. Malformed execution
+settings produce structured `errors` and exit status 1. This is **not** Codex's fully merged effective
+configuration: it does not parse Home/project TOML or prove provider authentication/model availability.
+A configured workspace policy is reported as unverified until `--validate` succeeds; a missing policy
+blocks ordinary commands but does not disable chat. `--validate` may initialize policy directories and
+run local Git checks, so it is not a read-only substitute for inspection.
+
+New and resumed sessions now both pass `--cd` and `--sandbox` as parent `exec` options, before `resume`.
+`--model`, approval, and JSON output remain explicit in both paths. This corrects the former resume
+permission drift, **but deploying it with an existing `danger-full-access` profile can expand resumed
+session permissions**: review the intended sandbox before updating the live runner. New installation
+examples use `workspace-write`; the installer does not rewrite existing profiles.
+
+`codex-home.example.toml` is a non-secret starting point, not an automatically applied migration.
+Replace the model and gateway placeholders before use. Do not mix `default_permissions=":workspace"`
+with an intentionally different `sandbox_mode`; do not rely on top-level `writable_roots` or
+`preferred_auth_method` (unrecognized by the locally audited CLI 0.153.4). `personaName` is display
+metadata, not a persona prompt. `abilities` and `skills` remain intentionally excluded from scheduling.
+
+Profile-file hot reload is enabled by default at 5000ms; `.env` changes need a controlled process
+restart. Configuration changes can disconnect profiles or interrupt active work; schedule a maintenance
+window rather than assuming hot reload is disruption-free. Session fallback still uses the latest
+Home session when a conversation mapping is missing; strict conversation isolation is a separate,
+explicit migration rather than an implicit behavior change in this patch.
 
 JSON is still supported:
 

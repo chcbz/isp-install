@@ -449,6 +449,11 @@ const parseStringList = value => (Array.isArray(value) ? value : String(value ||
   .map(item => String(item).trim())
   .filter(Boolean)
 
+const parseCodexTimeoutMs = (value, fallback = 900000) => {
+  const selected = value === undefined || value === null || value === '' ? fallback : value
+  return typeof selected === 'number' || typeof selected === 'string' ? Number(selected) : NaN
+}
+
 const normalizeProfile = (profile, fallback = {}, index = 0) => {
   const agentId = profile.agentId || fallback.agentId || `local-codex-${index + 1}`
   const status = String(profile.status || fallback.status || '').trim().toLowerCase()
@@ -464,7 +469,7 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     codexSandbox: profile.codexSandbox || fallback.codexSandbox || 'workspace-write',
     codexApproval: profile.codexApproval || fallback.codexApproval || 'never',
     codexSessionMode: profile.codexSessionMode || fallback.codexSessionMode || 'new',
-    codexTimeoutMs: parseNonNegativeMs(profile.codexTimeoutMs, fallback.codexTimeoutMs || 900000),
+    codexTimeoutMs: parseCodexTimeoutMs(profile.codexTimeoutMs, fallback.codexTimeoutMs ?? 900000),
     codexModel: profile.codexModel || fallback.codexModel || '',
     abilities: parseStringList(profile.abilities ?? fallback.abilities),
     skills: parseStringList(profile.skills ?? fallback.skills),
@@ -492,7 +497,8 @@ const legacyProfile = () => normalizeProfile({
   codexSandbox: process.env.CODEX_SANDBOX || 'workspace-write',
   codexApproval: process.env.CODEX_APPROVAL || 'never',
   codexSessionMode: process.env.CODEX_SESSION_MODE || 'new',
-  codexTimeoutMs: parseNonNegativeMs(process.env.CODEX_TIMEOUT_MS, 900000),
+  codexTimeoutMs: parseCodexTimeoutMs(process.env.CODEX_TIMEOUT_MS),
+  codexModel: process.env.CODEX_MODEL || '',
   workspacePolicyId: process.env.CODEX_WORKSPACE_POLICY_ID || '',
   workspaceRole: process.env.CODEX_WORKSPACE_ROLE || 'coder',
   workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
@@ -3447,24 +3453,25 @@ const rememberCodexSession = (profile, message, sessionId) => {
   saveCodexSessionMap()
 }
 
-const buildCodexArgs = (profile, message, prompt, codexWorkdir = profile.codexWorkdir, forceNewSession = false) => {
+export const buildCodexArgs = (profile, message, prompt, codexWorkdir = profile.codexWorkdir, forceNewSession = false) => {
   const mappedSessionId = getMappedCodexSessionId(profile, message)
+  // Parent exec options must precede `resume`: the resume subcommand has no --sandbox/--cd.
+  const executionArgs = [
+    '--ask-for-approval', profile.codexApproval,
+    'exec', '--cd', codexWorkdir, '--sandbox', profile.codexSandbox
+  ]
+  const outputArgs = [
+    '--json', '--skip-git-repo-check',
+    ...(profile.codexModel ? ['--model', profile.codexModel] : [])
+  ]
   if (!forceNewSession && profile.codexSessionMode === 'resume' && (mappedSessionId || hasCodexSession(profile))) {
     return [
-      '--ask-for-approval', profile.codexApproval,
-      'exec', 'resume', '--json', '--skip-git-repo-check',
-      ...(profile.codexModel ? ['--model', profile.codexModel] : []),
+      ...executionArgs, 'resume', ...outputArgs,
       ...(mappedSessionId ? [mappedSessionId] : ['--last', '--all']),
       prompt
     ]
   }
-  return [
-    '--ask-for-approval', profile.codexApproval,
-    'exec', '--json', '--cd', codexWorkdir,
-    '--sandbox', profile.codexSandbox, '--skip-git-repo-check',
-    ...(profile.codexModel ? ['--model', profile.codexModel] : []),
-    prompt
-  ]
+  return [...executionArgs, ...outputArgs, prompt]
 }
 
 export const runCodex = (profile, message, mode = 'command', overrides = {}) => new Promise(resolveRun => {
@@ -3563,7 +3570,9 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   let runSessionId = ''
   let streamQueue = Promise.resolve()
   let settled = false
-  const timeout = setTimeout(() => child.kill('SIGTERM'), profile.codexTimeoutMs)
+  const timeout = profile.codexTimeoutMs > 0
+    ? setTimeout(() => child.kill('SIGTERM'), profile.codexTimeoutMs)
+    : null
 
   const streamAgentReplyText = async (content, extra = {}) => {
     if (mode !== 'chat' || !content) return
@@ -3666,6 +3675,63 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   child.on('error', error => { void finish(null, error) })
 })
 
+const profileConfigurationErrors = profile => {
+  const errors = []
+  if (!['read-only', 'workspace-write', 'danger-full-access'].includes(profile.codexSandbox)) {
+    errors.push('codexSandbox must be read-only, workspace-write, or danger-full-access')
+  }
+  // Keep older CLI approval values for compatibility; the installed CLI remains authoritative.
+  if (!['never', 'on-request', 'untrusted', 'on-failure'].includes(profile.codexApproval)) {
+    errors.push('codexApproval must be never, on-request, untrusted, or on-failure')
+  }
+  if (!['new', 'resume'].includes(profile.codexSessionMode)) {
+    errors.push('codexSessionMode must be new or resume')
+  }
+  if (!Number.isSafeInteger(profile.codexTimeoutMs) || profile.codexTimeoutMs < 0 || profile.codexTimeoutMs > 2147483647) {
+    errors.push('codexTimeoutMs must be an integer from 0 to 2147483647 (0 disables the timeout)')
+  }
+  return errors
+}
+
+// This is an Agent configuration report, not Codex's fully merged config.toml.
+// Use an explicit field allowlist: never serialize profiles or authentication objects wholesale.
+export const buildConfigurationReport = runtimeConfig => ({
+  schemaVersion: 1,
+  scope: 'agent-profile-config; Codex Home configuration and credentials are not read',
+  defaultProfileId: runtimeConfig.defaultProfileId,
+  workspacePolicyCount: runtimeConfig.workspacePolicies.size,
+  profiles: runtimeConfig.profiles.map(profile => {
+    const policyConfigured = Boolean(profile.workspacePolicyId && runtimeConfig.workspacePolicies.has(profile.workspacePolicyId))
+    const warnings = []
+    if (!policyConfigured) warnings.push('WORKSPACE_POLICY_REQUIRED: ordinary command.dispatch is blocked; chat uses a separate path')
+    if (profile.abilities?.length) warnings.push('LEGACY_ABILITIES_IGNORED: scheduling abilities are discovered from codexWorkdir, not this field')
+    if (profile.skills?.length) warnings.push('LEGACY_SKILLS_IGNORED: this field does not install or enable skills')
+    if (profile.codexSandbox === 'danger-full-access') warnings.push('UNRESTRICTED_SANDBOX: model-generated commands are not filesystem-sandboxed')
+    if (profile.codexModel) warnings.push('MODEL_OVERRIDE: Agent --model overrides the model in Codex Home')
+    if (profile.codexSessionMode === 'resume') warnings.push('SESSION_FALLBACK: an unmapped conversation may resume the latest session in this Home')
+    return {
+      profileId: profile.profileId,
+      agentId: profile.agentId,
+      isSelectedDefault: profile.profileId === runtimeConfig.defaultProfileId,
+      codexBin: profile.codexBin,
+      codexHome: profile.codexHome,
+      codexWorkdir: profile.codexWorkdir,
+      codexSandbox: profile.codexSandbox,
+      codexApproval: profile.codexApproval,
+      codexSessionMode: profile.codexSessionMode,
+      codexTimeoutMs: profile.codexTimeoutMs,
+      codexModel: profile.codexModel || null,
+      modelSource: profile.codexModel ? 'agent --model' : 'Codex configuration/default',
+      websocketAuthSource: profile.apiKey ? 'profile.apiKey' : (process.env.OPENCLAW_API_KEY ? 'OPENCLAW_API_KEY' : 'missing'),
+      workspacePolicyId: profile.workspacePolicyId || null,
+      commandReadiness: policyConfigured ? 'policy-configured; requires --validate' : 'blocked-no-workspace-policy',
+      schedulingAbilities: resolveProfileAbilities(profile),
+      errors: profileConfigurationErrors(profile),
+      warnings
+    }
+  })
+})
+
 
 export const runManagedCommand = ({ profile, message, skillInstallManager, workspaceManager, runCodexFn = runCodex }) => (
   message.commandType === 'SKILL_INSTALL'
@@ -3695,6 +3761,9 @@ export const ensureProfiles = (profiles, defaultProfileId, workspacePolicies = n
     if (agentIds.has(profile.agentId)) configError(`duplicate CODEX_PROFILES agentId: ${profile.agentId}`, exitOnError)
     profileIds.add(profile.profileId)
     agentIds.add(profile.agentId)
+    for (const error of profileConfigurationErrors(profile)) {
+      configError(`${error} for profile ${profile.profileId}`, exitOnError)
+    }
     if (profiles.length > 1 && (!profile.codexHome || !String(profile.codexHome).trim())) {
       configError(`codexHome must be explicit and isolated for profile ${profile.profileId}`, exitOnError)
     }
@@ -4149,8 +4218,15 @@ export const loadWebSocketClient = async () => {
 }
 
 export const main = async () => {
-  WebSocketClient = await loadWebSocketClient()
   const runtimeConfig = loadRuntimeConfig()
+  if (hasFlag('--inspect-config')) {
+    // Do not initialize worktrees, read auth.json/session state, or open a WebSocket.
+    const report = buildConfigurationReport(runtimeConfig)
+    console.log(JSON.stringify(report, null, 2))
+    if (report.profiles.some(profile => profile.errors.length)) process.exitCode = 1
+    return
+  }
+  WebSocketClient = await loadWebSocketClient()
   config = {
     wsUrl: process.env.WS_URL || 'wss://api.chaoyoufan.cn/ws/agent/channel',
     apiKey: process.env.OPENCLAW_API_KEY || '',
@@ -4179,6 +4255,9 @@ export const main = async () => {
   codexSessionMap = loadCodexSessionMap()
 
   if (hasFlag('--validate')) {
+    for (const profile of buildConfigurationReport(runtimeConfig).profiles) {
+      for (const warning of profile.warnings) console.warn(`configuration warning | profile=${profile.profileId} | ${warning}`)
+    }
     for (const policy of config.workspacePolicies.values()) {
       new GitWorkspaceManager({ policy, agentId: 'validation-agent', role: 'validator' }).initialize()
     }
