@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -171,6 +171,177 @@ test('configured new mode and forceNew commands ignore even valid conversation m
 
   assert.equal(buildCodexArgs({ ...selectedProfile, codexSessionMode: 'new' }, conversation, 'hello', root, false, store).includes('resume'), false)
   assert.equal(buildCodexArgs(selectedProfile, conversation, 'hello', root, true, store).includes('resume'), false)
+})
+
+test('force-new managed command with a chat conversationId does not create a session mapping', async t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const conversation = {
+    conversationId: 'shared-chat-conversation', content: 'run command',
+    taskId: 'task-command-create', commandId: 'command-create'
+  }
+  const commandSessionId = 'force-new-command-session'
+  const { filePath, store } = sessionStoreFor(root)
+  let released = false
+
+  const result = await runCodex(selectedProfile, conversation, 'command', {
+    requireWorkspace: true,
+    sessionStore: store,
+    workspaceManager: {
+      acquireCommandWorkspace: () => ({
+        workspace: { workspacePath: root },
+        release: () => { released = true }
+      })
+    },
+    spawnFn: () => successfulChild(child => {
+      writeSession(selectedProfile, commandSessionId)
+      child.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: commandSessionId })}
+`)
+    }),
+    sendLegacyFn: () => true,
+    sendStatusFn: () => true
+  })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(released, true)
+  assert.deepEqual(store.snapshot(), {})
+  assert.equal(existsSync(filePath), false)
+})
+
+test('force-new managed command with the same chat conversationId does not overwrite its mapping', async t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const conversation = {
+    conversationId: 'shared-chat-conversation', content: 'run command',
+    taskId: 'task-command-replace', commandId: 'command-replace'
+  }
+  const chatSessionId = 'existing-chat-session'
+  const commandSessionId = 'force-new-command-session'
+  writeSession(selectedProfile, chatSessionId)
+  const expected = { [`${selectedProfile.agentId}:${conversation.conversationId}`]: chatSessionId }
+  const { filePath, store } = sessionStoreFor(root, expected)
+
+  const result = await runCodex(selectedProfile, conversation, 'command', {
+    requireWorkspace: true,
+    sessionStore: store,
+    workspaceManager: {
+      acquireCommandWorkspace: () => ({
+        workspace: { workspacePath: root },
+        release: () => {}
+      })
+    },
+    spawnFn: (binary, args) => {
+      assert.equal(args.includes('resume'), false)
+      return successfulChild(child => {
+        writeSession(selectedProfile, commandSessionId)
+        child.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: commandSessionId })}
+`)
+      })
+    },
+    sendLegacyFn: () => true,
+    sendStatusFn: () => true
+  })
+
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(store.snapshot(), expected)
+  assert.deepEqual(JSON.parse(readFileSync(filePath, 'utf8')), expected)
+})
+
+test('chat configured for new sessions does not persist its current thread', async t => {
+  const root = fixture(t)
+  const selectedProfile = { ...profileFor(root), codexSessionMode: 'new' }
+  const conversation = { conversationId: 'always-new-chat', content: 'hello' }
+  const sessionId = 'new-mode-thread'
+  const { filePath, store } = sessionStoreFor(root)
+
+  const result = await runCodex(selectedProfile, conversation, 'chat', {
+    sessionStore: store,
+    spawnFn: () => successfulChild(child => {
+      writeSession(selectedProfile, sessionId)
+      child.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: sessionId })}
+`)
+    }),
+    sendProtocolFn: () => true
+  })
+
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(store.snapshot(), {})
+  assert.equal(existsSync(filePath), false)
+})
+
+test('post-rename session-map failure reconciles committed disk state before later writes', t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const filePath = resolve(root, 'codex-session-map.json')
+  const warnings = []
+  let failTargetChmod = true
+  const store = createCodexSessionStore(filePath, {
+    fs: {
+      chmodSync: (path, mode) => {
+        if (path === filePath && failTargetChmod) {
+          failTargetChmod = false
+          throw new Error('injected post-rename chmod failure')
+        }
+        return chmodSync(path, mode)
+      }
+    },
+    warn: warning => warnings.push(warning)
+  })
+  const firstConversation = { conversationId: 'conversation-after-rename' }
+  const secondConversation = { conversationId: 'conversation-after-reconcile' }
+  const firstKey = `${selectedProfile.agentId}:${firstConversation.conversationId}`
+  const secondKey = `${selectedProfile.agentId}:${secondConversation.conversationId}`
+
+  assert.equal(store.remember(selectedProfile, firstConversation, 'session-after-rename'), true)
+  assert.deepEqual(store.snapshot(), { [firstKey]: 'session-after-rename' })
+  assert.deepEqual(JSON.parse(readFileSync(filePath, 'utf8')), { [firstKey]: 'session-after-rename' })
+  assert.match(warnings.at(-1), /committed snapshot reconciled/)
+
+  assert.equal(store.remember(selectedProfile, secondConversation, 'session-after-reconcile'), true)
+  const expected = {
+    [firstKey]: 'session-after-rename',
+    [secondKey]: 'session-after-reconcile'
+  }
+  assert.deepEqual(store.snapshot(), expected)
+  assert.deepEqual(JSON.parse(readFileSync(filePath, 'utf8')), expected)
+})
+
+test('pre-rename session-map failure blocks later stale-memory writes', t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const existingConversation = { conversationId: 'existing-conversation' }
+  const existing = { [`${selectedProfile.agentId}:${existingConversation.conversationId}`]: 'existing-session' }
+  const filePath = resolve(root, 'codex-session-map.json')
+  writeFileSync(filePath, `${JSON.stringify(existing)}
+`)
+  const warnings = []
+  let renameAttempts = 0
+  let failRename = true
+  const store = createCodexSessionStore(filePath, {
+    fs: {
+      renameSync: (sourcePath, targetPath) => {
+        renameAttempts += 1
+        if (failRename) {
+          failRename = false
+          throw new Error(`injected pre-rename failure for ${targetPath}`)
+        }
+        return renameSync(sourcePath, targetPath)
+      }
+    },
+    warn: warning => warnings.push(warning)
+  })
+
+  assert.equal(store.remember(selectedProfile, { conversationId: 'failed-conversation' }, 'failed-session'), false)
+  assert.equal(renameAttempts, 1)
+  assert.deepEqual(store.snapshot(), existing)
+  assert.deepEqual(JSON.parse(readFileSync(filePath, 'utf8')), existing)
+  assert.match(warnings.at(-1), /further writes disabled/)
+
+  assert.equal(store.remember(selectedProfile, { conversationId: 'blocked-conversation' }, 'blocked-session'), false)
+  assert.equal(renameAttempts, 1)
+  assert.deepEqual(store.snapshot(), existing)
+  assert.deepEqual(JSON.parse(readFileSync(filePath, 'utf8')), existing)
+  assert.match(warnings.at(-1), /writes remain disabled/)
 })
 
 test('thread.started thread_id is captured and atomically persisted for the exact conversation', async t => {

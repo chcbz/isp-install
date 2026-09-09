@@ -169,11 +169,12 @@ itself starts a new `codex exec`. The Agent never uses `resume --last` or `--all
 the mapped session is missing from that profile's Home, the chat fails explicitly with
 `CODEX_SESSION_NOT_FOUND` instead of selecting or creating unrelated state.
 
-The current Codex JSON event `{ "type": "thread.started", "thread_id": "..." }` is captured for the
-running chat and persisted to `CODEX_SESSION_MAP_FILE` (default `codex-session-map.json`) with private
-file permissions. Session files that merely appear or become newest are not associated without a
-session ID emitted by that run. `codexSessionMode=new` and managed workspace commands forced to a new
-session keep their existing behavior. This mechanism does not delete Codex history.
+Only an eligible resume-mode chat captures the current Codex JSON event
+`{ "type": "thread.started", "thread_id": "..." }` and persists it to `CODEX_SESSION_MAP_FILE`
+(default `codex-session-map.json`) with private file permissions. Session files that merely appear or
+become newest are not associated without a session ID emitted by that run. `codexSessionMode=new` chats
+and managed workspace commands forced to a new session never create or replace a chat mapping, even if
+they carry the same `conversationId`. This mechanism does not delete Codex history.
 
 Compatibility boundary: existing map entries are preserved byte-for-byte until a new mapping is
 captured. If legacy `--last` behavior previously mapped multiple conversations to the same session,

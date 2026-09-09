@@ -2870,10 +2870,28 @@ const codexSessionMapKey = (profile, message) => {
   return `${agentId}:${conversationId}`
 }
 
+const normalizedCodexSessionEntries = value => {
+  if (!isObject(value)) return null
+  const normalized = Object.create(null)
+  for (const [key, sessionId] of Object.entries(value)) {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) return null
+    normalized[key] = sessionId.trim()
+  }
+  return normalized
+}
+
+const sameCodexSessionEntries = (left, right) => {
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  return leftKeys.length === rightKeys.length && leftKeys.every(key => left[key] === right[key])
+}
+
 export const createCodexSessionStore = (filePath = '', options = {}) => {
   const fs = { ...DEFAULT_FS_OPERATIONS, ...(options.fs || {}) }
+  const warn = typeof options.warn === 'function' ? options.warn : console.warn
   const resolvedPath = filePath ? resolve(filePath) : ''
   let entries = Object.create(null)
+  let writeBlocked = false
   if (resolvedPath) {
     try {
       if (fs.existsSync(resolvedPath)) {
@@ -2885,7 +2903,7 @@ export const createCodexSessionStore = (filePath = '', options = {}) => {
         }
       }
     } catch (error) {
-      console.warn(`failed to load codex session map | path=${resolvedPath} | ${error.message}`)
+      warn(`failed to load codex session map | path=${resolvedPath} | ${error.message}`)
     }
   }
   return {
@@ -2897,12 +2915,29 @@ export const createCodexSessionStore = (filePath = '', options = {}) => {
       const key = codexSessionMapKey(profile, message)
       const value = String(sessionId || '').trim()
       if (!key || !value || entries[key] === value) return false
+      if (writeBlocked) {
+        warn(`codex session map writes remain disabled after an uncommitted persistence failure | path=${resolvedPath}`)
+        return false
+      }
       const nextEntries = { ...entries, [key]: value }
       if (resolvedPath) {
         try {
           atomicWriteJson(fs, resolvedPath, nextEntries)
         } catch (error) {
-          console.warn(`failed to save codex session map | path=${resolvedPath} | ${error.message}`)
+          let committedEntries = null
+          try {
+            if (fs.existsSync(resolvedPath)) {
+              const diskEntries = normalizedCodexSessionEntries(JSON.parse(fs.readFileSync(resolvedPath, 'utf8')))
+              if (diskEntries && sameCodexSessionEntries(diskEntries, nextEntries)) committedEntries = diskEntries
+            }
+          } catch {}
+          if (committedEntries) {
+            entries = committedEntries
+            warn(`codex session map write reported a post-rename failure; committed snapshot reconciled | path=${resolvedPath} | ${error.message}`)
+            return true
+          }
+          writeBlocked = true
+          warn(`failed to save codex session map; further writes disabled to prevent stale-memory overwrite | path=${resolvedPath} | ${error.message}`)
           return false
         }
       }
@@ -3623,6 +3658,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   let agentReplyText = ''
   let streamedAgentReply = ''
   let jsonLineBuffer = ''
+  const sessionCaptureEligible = mode === 'chat' && profile.codexSessionMode === 'resume'
   let runSessionId = ''
   let sessionRemembered = false
   let streamQueue = Promise.resolve()
@@ -3657,7 +3693,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
       return
     }
     const sessionId = extractCodexSessionId(event)
-    if (sessionId) {
+    if (sessionCaptureEligible && sessionId) {
       runSessionId = sessionId
       if (findCodexSessionById(profile, sessionId)) {
         sessionRemembered = Boolean(sessionStore?.remember(profile, message, sessionId)) || sessionStore?.get(profile, message) === sessionId
@@ -3692,7 +3728,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     clearTimeout(timeout)
     if (jsonLineBuffer.trim()) handleJsonLine(jsonLineBuffer)
     currentRuns.delete(profile.agentId)
-    if (runSessionId && !sessionRemembered && findCodexSessionById(profile, runSessionId)) {
+    if (sessionCaptureEligible && runSessionId && !sessionRemembered && findCodexSessionById(profile, runSessionId)) {
       sessionStore?.remember(profile, message, runSessionId)
     }
     const leaseError = releaseWorkspaceLease()
