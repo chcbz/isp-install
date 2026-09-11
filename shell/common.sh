@@ -261,7 +261,7 @@ create_isp_dirs() {
         fi
     done
 
-    install -d -o "$ISP_USER" -g "$ISP_GROUP" -m 0775 \
+    install -d -o "$ISP_USER" -g "$ISP_GROUP" -m 0755 \
         "$ISP_HOME" "$ISP_APPS" "$ISP_PKGS" "$ISP_BIN" "$ISP_HOSTS" "$ISP_CONFIG"
     install -d -o "$ISP_USER" -g "$ISP_GROUP" -m 0777 "$ISP_LOGS"
 
