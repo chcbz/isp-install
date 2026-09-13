@@ -199,26 +199,58 @@ export const readBearerTokenFile = path => {
   return token
 }
 
-const responseBytes = async response => {
-  if (!response || typeof response.arrayBuffer !== 'function') {
-    throw failure(WORK_ITEM_LEASE_FAILURE.RESPONSE_INVALID, 'lease API response body is unavailable')
+const awaitWithSignal = async (operation, signal) => {
+  if (!signal) return operation
+  if (signal.aborted) {
+    Promise.resolve(operation).catch(() => {})
+    throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'runtime authentication was invalidated')
   }
-  const declared = response.headers?.get?.('content-length')
+  let onAbort
+  const aborted = new Promise((_, reject) => {
+    onAbort = () => reject(failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'runtime authentication was invalidated'))
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try { return await Promise.race([operation, aborted]) }
+  finally { signal.removeEventListener('abort', onAbort) }
+}
+
+const cancelResponse = response => {
+  try { void response?.body?.cancel?.().catch(() => {}) } catch {}
+}
+
+const responseBytes = async (response, signal) => {
+  const declared = response?.headers?.get?.('content-length')
   if (declared && (!/^(0|[1-9][0-9]*)$/.test(declared) || Number(declared) > MAX_RESPONSE_BYTES)) {
+    cancelResponse(response)
     throw failure(WORK_ITEM_LEASE_FAILURE.RESPONSE_INVALID, 'lease API response exceeds the bounded response size')
   }
-  const bytes = Buffer.from(await response.arrayBuffer())
-  if (!bytes.length || bytes.length > MAX_RESPONSE_BYTES) {
+  let bytes
+  if (response?.body?.getReader) {
+    const reader = response.body.getReader()
+    const chunks = []
+    let size = 0
+    const abort = () => { try { void reader.cancel().catch(() => {}) } catch {} }
+    signal?.addEventListener('abort', abort, { once: true })
+    try {
+      while (true) {
+        const { value, done } = await awaitWithSignal(reader.read(), signal)
+        if (done) break
+        if (!(value instanceof Uint8Array) || (size += value.byteLength) > MAX_RESPONSE_BYTES) {
+          throw failure(WORK_ITEM_LEASE_FAILURE.RESPONSE_INVALID, 'lease API response exceeds the bounded response size')
+        }
+        chunks.push(Buffer.from(value))
+      }
+      bytes = Buffer.concat(chunks, size)
+    } catch (error) { abort(); throw error }
+    finally { signal?.removeEventListener('abort', abort); reader.releaseLock() }
+  } else if (declared && typeof response?.arrayBuffer === 'function') {
+    // Compatibility with existing bounded offline transports, not an unbounded chunked fallback.
+    bytes = Buffer.from(await awaitWithSignal(response.arrayBuffer(), signal))
+  } else throw failure(WORK_ITEM_LEASE_FAILURE.RESPONSE_INVALID, 'lease API response body is unavailable')
+  if (!bytes.length || bytes.length > MAX_RESPONSE_BYTES || (declared && Number(declared) !== bytes.length)) {
     throw failure(WORK_ITEM_LEASE_FAILURE.RESPONSE_INVALID, 'lease API response is empty or oversized')
   }
   return bytes
-}
-
-const parseErrorCode = bytes => {
-  try {
-    const body = JSON.parse(bytes.toString('utf8'))
-    return typeof body?.code === 'string' ? body.code : ''
-  } catch { return '' }
 }
 
 const validateLeaseResponse = (body, binding, previous = null) => {
@@ -248,9 +280,10 @@ const validateLeaseResponse = (body, binding, previous = null) => {
 }
 
 export class CommandBoundLeaseApi {
-  constructor({ wsUrl, tokenProvider, fetchFn = globalThis.fetch }) {
+  constructor({ wsUrl, tokenProvider, runtimeCredentialProvider = null, fetchFn = globalThis.fetch }) {
     this.origin = canonicalApiOrigin(wsUrl)
     this.tokenProvider = tokenProvider
+    this.runtimeCredentialProvider = runtimeCredentialProvider
     this.fetchFn = fetchFn
   }
 
@@ -259,15 +292,25 @@ export class CommandBoundLeaseApi {
   async heartbeat(binding, leaseDurationMillis) { return this.#request(binding, 'heartbeat', leaseDurationMillis) }
 
   async #request(binding, operation, leaseDurationMillis = null) {
-    if (typeof this.fetchFn !== 'function' || typeof this.tokenProvider !== 'function') {
+    if (typeof this.fetchFn !== 'function' || (!this.runtimeCredentialProvider && typeof this.tokenProvider !== 'function')) {
       throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'authenticated lease transport is unavailable')
     }
     let token
-    try { token = await this.tokenProvider() } catch (error) {
+    let runtime
+    try {
+      runtime = this.runtimeCredentialProvider?.()
+      token = this.runtimeCredentialProvider ? runtime?.token : await this.tokenProvider()
+    } catch (error) {
       if (error instanceof WorkItemLeaseError) throw error
       throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'authenticated lease credential is unavailable', error)
     }
-    if (typeof token !== 'string' || !JWT_COMPACT.test(token) || token.length > 8192) {
+    if (this.runtimeCredentialProvider && (!runtime || runtime.signal?.aborted
+        || runtime.scheme !== 'native-runtime-v1' || !/^[0-9a-f]{32}$/.test(token)
+        || runtime.agentId !== binding.targetAgentId || runtime.runtimeInstanceId !== binding.runtimeInstanceId
+        || runtime.tenantId !== binding.tenantId || runtime.clientId !== binding.clientId)) {
+      throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'runtime authentication is unavailable')
+    }
+    if (!runtime && (typeof token !== 'string' || !JWT_COMPACT.test(token) || token.length > 8192)) {
       throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'authenticated lease credential is unavailable')
     }
     const suffix = operation === 'read' ? 'lease' : `lease/${operation}`
@@ -281,32 +324,44 @@ export class CommandBoundLeaseApi {
     }
     let response
     try {
-      response = await this.fetchFn(endpoint, {
+      response = await awaitWithSignal(this.fetchFn(endpoint, {
         method: 'POST', redirect: 'error',
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+        headers: {
+          ...(runtime ? { Authorization: `AgentRuntime ${token}`, 'X-Agent-Id': runtime.agentId,
+            'X-Agent-Runtime-Id': runtime.runtimeInstanceId } : { Authorization: `Bearer ${token}` }),
+          Accept: 'application/json', 'Content-Type': 'application/json'
+        },
+        ...(runtime ? { signal: runtime.signal, cache: 'no-store', credentials: 'omit' } : {}),
         body: JSON.stringify(body)
-      })
+      }), runtime?.signal)
     } catch (error) {
       throw failure(WORK_ITEM_LEASE_FAILURE.UNAVAILABLE, 'command-bound lease API transport failed without retry', error)
     }
-    const bytes = await responseBytes(response)
-    const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
-    if (!contentType.startsWith('application/json')) {
-      throw failure(WORK_ITEM_LEASE_FAILURE.RESPONSE_INVALID, 'lease API response content type is not JSON')
+    if ([401, 403].includes(response.status)) {
+      cancelResponse(response)
+      runtime?.invalidate()
+      throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'command-bound lease authentication was rejected')
     }
-    if (response.redirected === true || (response.url && response.url !== endpoint.toString())) {
+    if (response.redirected === true || (response.url && response.url !== endpoint.toString())
+        || (response.status >= 300 && response.status < 400)) {
+      cancelResponse(response)
       throw failure(WORK_ITEM_LEASE_FAILURE.UNAVAILABLE, 'command-bound lease API redirect or origin change was rejected')
     }
     if (response.status !== 200) {
-      const serverCode = parseErrorCode(bytes)
-      if ([401, 403].includes(response.status)) {
-        throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'command-bound lease authentication was rejected')
-      }
+      cancelResponse(response)
       if (response.status === 404 || response.status === 409) {
-        throw failure(WORK_ITEM_LEASE_FAILURE.STALE,
-          `command-bound lease was rejected as stale or unavailable${serverCode ? ` (${serverCode})` : ''}`)
+        throw failure(WORK_ITEM_LEASE_FAILURE.STALE, 'command-bound lease was rejected as stale or unavailable')
       }
       throw failure(WORK_ITEM_LEASE_FAILURE.UNAVAILABLE, 'command-bound lease API is unavailable without retry')
+    }
+    const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
+    if (!/^application\/json(?:\s*;|$)/.test(contentType)) {
+      cancelResponse(response)
+      throw failure(WORK_ITEM_LEASE_FAILURE.RESPONSE_INVALID, 'lease API response content type is not JSON')
+    }
+    const bytes = await responseBytes(response, runtime?.signal)
+    if (runtime && (runtime.signal.aborted || this.runtimeCredentialProvider() !== runtime)) {
+      throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'runtime authentication is unavailable')
     }
     let parsed
     try { parsed = JSON.parse(bytes.toString('utf8')) } catch {
@@ -320,13 +375,14 @@ export class ReassignmentWorkItemLease {
   constructor({
     profile, runtimeInstanceId, tenantId = '', clientId = '', subjectAgentId = '',
     bearerTokenFile = '', leaseDurationMillis = 0, wsUrl,
-    fetchFn = globalThis.fetch, tokenProvider = null,
+    fetchFn = globalThis.fetch, tokenProvider = null, runtimeCredentialProvider = null,
     bindingResolver = resolveReassignmentCommandBinding,
     schedule = (callback, delay) => setTimeout(callback, delay), cancel = handle => clearTimeout(handle),
     now = () => Date.now()
   }) {
     this.profile = profile
     this.runtimeInstanceId = runtimeInstanceId
+    this.runtimeCredentialProvider = runtimeCredentialProvider
     this.tenantId = tenantId
     this.clientId = clientId
     this.subjectAgentId = subjectAgentId
@@ -336,7 +392,8 @@ export class ReassignmentWorkItemLease {
     this.cancel = cancel
     this.now = now
     const provider = tokenProvider || (bearerTokenFile ? () => readBearerTokenFile(bearerTokenFile) : null)
-    this.api = new CommandBoundLeaseApi({ wsUrl, tokenProvider: provider, fetchFn })
+    if (runtimeCredentialProvider && provider) throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'ambiguous authentication configuration')
+    this.api = new CommandBoundLeaseApi({ wsUrl, tokenProvider: provider, runtimeCredentialProvider, fetchFn })
     this.configured = Boolean(provider && exact(tenantId) && exact(clientId)
       && exact(subjectAgentId, CANONICAL_AGENT_ID) && subjectAgentId === profile?.agentId
       && exact(runtimeInstanceId) && Number.isSafeInteger(this.leaseDurationMillis)
@@ -346,18 +403,26 @@ export class ReassignmentWorkItemLease {
   preflight(message) {
     if (!isReassignmentWorkItemCommand(message)) return null
     requireReassignmentMarkers(message)
-    if (!this.configured) {
+    const runtime = this.runtimeCredentialProvider?.()
+    const runtimeConfigured = runtime && runtime.scheme === 'native-runtime-v1'
+      && !runtime.signal?.aborted && runtime.runtimeInstanceId === this.runtimeInstanceId
+      && runtime.agentId === this.profile.agentId && exact(runtime.agentId, CANONICAL_AGENT_ID)
+      && exact(runtime.tenantId) && exact(runtime.clientId)
+      && this.leaseDurationMillis > 0 && this.leaseDurationMillis <= MAX_LEASE_DURATION_MS
+    if (this.runtimeCredentialProvider ? !runtimeConfigured : !this.configured) {
       throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE,
-        'reassignment execution is unavailable: no trusted target-scoped JWT lease configuration')
+        'reassignment execution is unavailable: no authenticated target runtime or private JWT configuration')
     }
     if (!exact(message.commandId) || !exact(message.taskId) || !exact(message.workItemId)
         || !exact(message.targetAgentId, CANONICAL_AGENT_ID)) {
       throw failure(WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID, 'reassignment command identity is invalid')
     }
-    if (message.targetAgentId !== this.profile.agentId || message.targetAgentId !== this.subjectAgentId) {
+    if (message.targetAgentId !== this.profile.agentId || message.targetAgentId !== (runtime?.agentId || this.subjectAgentId)) {
+      runtime?.invalidate()
       throw failure(WORK_ITEM_LEASE_FAILURE.TARGET_MISMATCH, 'reassignment command target is not this authenticated Agent')
     }
-    if (message.tenantId !== this.tenantId || message.clientId !== this.clientId) {
+    if (message.tenantId !== (runtime?.tenantId || this.tenantId) || message.clientId !== (runtime?.clientId || this.clientId)) {
+      runtime?.invalidate()
       throw failure(WORK_ITEM_LEASE_FAILURE.SCOPE_MISMATCH, 'reassignment command tenant/client differs from authenticated configuration')
     }
     const source = sourceCommandId(message)
@@ -386,7 +451,8 @@ export class ReassignmentWorkItemLease {
       workItemId: message.workItemId,
       targetAgentId: message.targetAgentId,
       expectedWorkItemVersion: version,
-      runtimeInstanceId: this.runtimeInstanceId
+      runtimeInstanceId: this.runtimeInstanceId,
+      ...(runtime ? { tenantId: runtime.tenantId, clientId: runtime.clientId } : {})
     })
   }
 
@@ -394,6 +460,7 @@ export class ReassignmentWorkItemLease {
     const binding = this.preflight(message)
     if (!binding) return run({ signal: undefined })
     const abort = new AbortController()
+    const runtime = this.runtimeCredentialProvider?.()
     let heartbeatTimer = null
     let expiryTimer = null
     let heartbeatPromise = null
@@ -453,16 +520,23 @@ export class ReassignmentWorkItemLease {
       })()
       return heartbeatPromise.finally(() => { heartbeatPromise = null })
     }
+    const onRuntimeAbort = () => failLease(failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE,
+      'runtime authentication was invalidated'))
+    if (runtime?.signal.aborted) onRuntimeAbort()
+    else runtime?.signal.addEventListener('abort', onRuntimeAbort, { once: true })
     try {
+      if (heartbeatFailure) throw heartbeatFailure
       const read = validateLeaseResponse(await this.api.read(binding), binding)
       if (read.status !== 'claimed' || read.workItemVersion !== binding.expectedWorkItemVersion) {
         throw failure(WORK_ITEM_LEASE_FAILURE.STALE, 'command-bound lease is not the expected fresh claimed version')
       }
+      if (heartbeatFailure) throw heartbeatFailure
       const startBinding = { ...binding, expectedWorkItemVersion: read.workItemVersion }
       const started = validateLeaseResponse(await this.api.start(startBinding), binding, read)
       if (started.status !== 'running' || started.workItemVersion !== read.workItemVersion + 1) {
         throw failure(WORK_ITEM_LEASE_FAILURE.STALE, 'lease start did not produce the exact next running version')
       }
+      if (heartbeatFailure) throw heartbeatFailure
       current = started
       await heartbeat()
       if (heartbeatFailure) throw heartbeatFailure
@@ -478,6 +552,7 @@ export class ReassignmentWorkItemLease {
         ? error : failure(WORK_ITEM_LEASE_FAILURE.UNAVAILABLE, 'command-bound lease execution is unavailable without retry', error)
       return { status: 'recovery_required', errorMessage: `${known.code}: ${known.message}` }
     } finally {
+      runtime?.signal.removeEventListener('abort', onRuntimeAbort)
       stopped = true
       stopTimers()
     }

@@ -497,6 +497,7 @@ export class TaskContextPackHttpAdapter {
     wsUrl,
     bearerTokenFile = '',
     tokenProvider = null,
+    runtimeCredentialProvider = null,
     fetchFn = globalThis.fetch,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     setTimeoutFn = setTimeout,
@@ -504,12 +505,14 @@ export class TaskContextPackHttpAdapter {
   }) {
     this.origin = canonicalApiOrigin(wsUrl)
     if (tokenProvider !== null && bearerTokenFile) throw failure(TASK_CONTEXT_PACK_FAILURE.REQUEST_INVALID)
+    if (runtimeCredentialProvider && (tokenProvider || bearerTokenFile)) throw failure(TASK_CONTEXT_PACK_FAILURE.REQUEST_INVALID)
+    this.runtimeCredentialProvider = runtimeCredentialProvider
     this.tokenProvider = tokenProvider || (bearerTokenFile ? () => readBearerTokenFile(bearerTokenFile) : null)
     this.fetchFn = fetchFn
     this.timeoutMs = timeoutMs
     this.setTimeoutFn = setTimeoutFn
     this.clearTimeoutFn = clearTimeoutFn
-    if (typeof this.tokenProvider !== 'function' || typeof this.fetchFn !== 'function'
+    if ((typeof this.tokenProvider !== 'function' && typeof this.runtimeCredentialProvider !== 'function') || typeof this.fetchFn !== 'function'
         || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS
         || typeof setTimeoutFn !== 'function' || typeof clearTimeoutFn !== 'function') {
       throw failure(TASK_CONTEXT_PACK_FAILURE.AUTH_UNAVAILABLE)
@@ -524,14 +527,27 @@ export class TaskContextPackHttpAdapter {
     if (signal?.aborted) throw failure(TASK_CONTEXT_PACK_FAILURE.ABORTED)
 
     let token
-    try { token = await this.tokenProvider() } catch {
+    let runtime
+    try {
+      runtime = this.runtimeCredentialProvider?.()
+      token = this.runtimeCredentialProvider ? runtime?.token : await this.tokenProvider()
+    } catch {
       throw failure(TASK_CONTEXT_PACK_FAILURE.AUTH_UNAVAILABLE)
     }
     if (signal?.aborted) throw failure(TASK_CONTEXT_PACK_FAILURE.ABORTED)
-    const jwtScope = decodeJwtScope(token)
+    if (this.runtimeCredentialProvider && (!runtime || runtime.scheme !== 'native-runtime-v1'
+        || !/^[0-9a-f]{32}$/.test(token) || !(runtime.signal instanceof AbortSignal)
+        || runtime.signal.aborted || runtime.contextPackEnabled !== true)) {
+      throw failure(TASK_CONTEXT_PACK_FAILURE.AUTH_UNAVAILABLE)
+    }
+    if (runtime) signal = signal ? AbortSignal.any([signal, runtime.signal]) : runtime.signal
+    const jwtScope = runtime
+      ? { tenantId: runtime.tenantId, clientId: runtime.clientId, actorAgentId: runtime.agentId }
+      : decodeJwtScope(token)
     if (signal?.aborted) throw failure(TASK_CONTEXT_PACK_FAILURE.ABORTED)
     if (jwtScope.tenantId !== request.tenantId || jwtScope.clientId !== request.clientId
         || jwtScope.actorAgentId !== request.actorAgentId) {
+      runtime?.invalidate()
       throw failure(TASK_CONTEXT_PACK_FAILURE.SCOPE_MISMATCH)
     }
 
@@ -560,10 +576,18 @@ export class TaskContextPackHttpAdapter {
         redirect: 'error',
         cache: 'no-store',
         credentials: 'omit',
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        headers: runtime
+          ? { Authorization: `AgentRuntime ${token}`, 'X-Agent-Id': runtime.agentId,
+            'X-Agent-Runtime-Id': runtime.runtimeInstanceId, Accept: 'application/json' }
+          : { Authorization: `Bearer ${token}`, Accept: 'application/json' },
         signal: controller.signal
       })
-      requireResponseEnvelope(response, endpoint)
+      if (runtime && [401, 403].includes(response?.status)) {
+        cancelBody(response)
+        runtime.invalidate()
+        throw failure(TASK_CONTEXT_PACK_FAILURE.AUTH_UNAVAILABLE)
+      }
+      try { requireResponseEnvelope(response, endpoint) } catch (error) { cancelBody(response); throw error }
       if (response.status !== 200) mapHttpFailure(response)
       const bytes = await readBoundedBody(response, controller.signal)
       let parsed
@@ -575,6 +599,9 @@ export class TaskContextPackHttpAdapter {
         if (error instanceof TaskContextPackError) throw error
         invalidResponse()
       }
+      if (runtime && (runtime.signal.aborted || this.runtimeCredentialProvider() !== runtime)) {
+        throw failure(TASK_CONTEXT_PACK_FAILURE.ABORTED)
+      }
       return deepFreeze(validatePack(parsed, jwtScope, request.taskId, request.expectedVersion))
     })()
     operation.catch(() => {})
@@ -583,6 +610,7 @@ export class TaskContextPackHttpAdapter {
     } catch (error) {
       if (timedOut) throw failure(TASK_CONTEXT_PACK_FAILURE.TIMEOUT)
       if (callerAborted) throw failure(TASK_CONTEXT_PACK_FAILURE.ABORTED)
+      if (runtime && error?.code === TASK_CONTEXT_PACK_FAILURE.SCOPE_MISMATCH) runtime.invalidate()
       if (error instanceof TaskContextPackError) throw error
       throw failure(TASK_CONTEXT_PACK_FAILURE.UNAVAILABLE)
     } finally {

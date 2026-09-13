@@ -542,3 +542,21 @@ test('profile task context-pack configuration is parsed without exposing the JWT
   assert.equal(result.stdout.includes('/protected/audit-agent.jwt'), false)
   assert.equal(result.stdout.includes('ws-key-secret'), false)
 })
+
+
+test('profile native runtime F01 mode is explicit, defaults auto and rejects unsupported enable contracts offline', t => {
+  const root = fixture(t)
+  for (const mode of [undefined, 'required', 'invalid']) {
+    const result = runCli(root, [{ ...profileFor(root), taskContextPackMode: mode }], ['--inspect-config'])
+    const report = JSON.parse(result.stdout).profiles[0]
+    assert.equal(report.taskContextPackMode, mode || 'auto')
+    if (mode === 'invalid') {
+      assert.notEqual(result.status, 0)
+      assert.ok(report.errors.includes('taskContextPackMode must be auto or required'))
+    } else {
+      assert.equal(result.status, 0)
+      assert.match(report.taskContextPackReadiness, /runtime-registration-negotiated/)
+      assert.match(report.reassignmentLeaseReadiness, /runtime-registration-required/)
+    }
+  }
+})
