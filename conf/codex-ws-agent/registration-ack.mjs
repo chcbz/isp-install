@@ -5,6 +5,9 @@ const framePayload = frame => isObject(frame?.data) ? frame.data : frame
 const traceMatches = (payload, messageId, runtimeInstanceId) =>
   exactValue(payload?.messageId, messageId, 128) &&
   exactValue(payload?.runtimeInstanceId, runtimeInstanceId, 128)
+// Wire syntax is not registry authority: the server authenticates an ACTIVE canonical
+// identity and binding. Accept its exact configured ID, including LEGACY_CANONICAL.
+const AGENT_ID_WIRE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const validToken = token => typeof token === 'string' && Buffer.byteLength(token) > 0 &&
   Buffer.byteLength(token) <= 512 && token.trim() === token && !/[\x00-\x1f\x7f]/u.test(token)
 
@@ -27,7 +30,7 @@ export class RegistrationAckObserver {
     const fields = ['scheme', 'tenantId', 'clientId', 'agentId', 'runtimeInstanceId', 'contextPackEnabled']
     if (!isObject(auth) || Object.keys(auth).length !== fields.length || fields.some(key => !(key in auth))
         || auth.scheme !== 'native-runtime-v1' || auth.agentId !== this.agentId
-        || auth.runtimeInstanceId !== this.runtimeInstanceId || !/^agt_[0-9a-f]{32}$/.test(auth.agentId)
+        || auth.runtimeInstanceId !== this.runtimeInstanceId || !AGENT_ID_WIRE.test(auth.agentId)
         || !exactValue(auth.tenantId, auth.tenantId, 50) || !auth.tenantId
         || !exactValue(auth.clientId, auth.clientId, 50) || !auth.clientId
         || typeof auth.contextPackEnabled !== 'boolean' || !/^[0-9a-f]{32}$/.test(payload.token)) return false

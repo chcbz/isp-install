@@ -30,7 +30,7 @@ Required:
 
 The installer stages both `package.json` and `package-lock.json`, then runs `npm ci --omit=dev --ignore-scripts --no-audit --no-fund` before candidate validation and atomic activation. Dependency installation failure aborts installation without requesting a service restart.
 
-Release `1.1.0-m4.20260913` includes `release-manifest.json`. The installer verifies every staged runtime/template byte and mode before dependency installation, derives a deterministic release directory from the version plus manifest digest, and can be pinned with `CODEX_WS_AGENT_EXPECTED_MANIFEST_SHA256`. `START_CODEX_WS_AGENT=n` prepares and activates files without restarting the client; switching runtime still requires a separately authorized restart.
+Release `1.1.0-m4.20260913.1` includes `release-manifest.json`. The installer verifies every staged runtime/template byte and mode before dependency installation, derives a deterministic release directory from the version plus manifest digest, and can be pinned with `CODEX_WS_AGENT_EXPECTED_MANIFEST_SHA256`. `START_CODEX_WS_AGENT=n` prepares and activates files without restarting the client; switching runtime still requires a separately authorized restart.
 
 ## Multiple Codex CLI Profiles
 
@@ -504,3 +504,7 @@ Rollback to the pre-A05 client does not understand the durable inbox, ledger, AC
 - On shutdown, the agent sends `offline` and terminates active Codex children. Any unsettled `processing/` record becomes fail-closed `recovery-required/` on the next process and is not automatically retried.
 - Pending commands wait until the profile WebSocket reconnects before executing; recovery-required commands remain paused until explicit reconciliation.
 - Runtime logs are available from `journalctl -u codex-ws-agent`.
+
+### Legacy canonical runtime compatibility
+
+The native-runtime-v1 receipt and E05 work-item lease accept the exact configured Agent ID, including an ACTIVE server-registered LEGACY_CANONICAL identity. IDs remain bounded wire values; no client-side alias resolution, ID rewriting or synthetic opaque ID is performed. Canonical classification and tenant/client/binding authority remain server decisions. Request/runtime correlation, command target and scope matching, token invalidation and lease-result fences are unchanged. An old server without a runtime receipt does not negotiate these capabilities.

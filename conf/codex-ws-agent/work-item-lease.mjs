@@ -7,7 +7,9 @@ const REASSIGNMENT_BINDING_VERSION = 'e05-reassignment-v1'
 const MAX_RESPONSE_BYTES = 32 * 1024
 const MAX_LEASE_DURATION_MS = 900_000
 const SAFE_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
-const CANONICAL_AGENT_ID = /^agt_[0-9a-f]{32}$/
+// Prefixes do not establish canonical authority. The server validates the registry;
+// locally bind the bounded wire ID byte-exactly to the authenticated profile/receipt.
+const AGENT_ID_WIRE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const REASSIGNMENT_ID = /^rsn_[0-9a-f]{64}$/
 const HALL_COMMAND_ID = /^cmd_hall_action_[0-9a-f]{64}$/
 const POSITIVE_DECIMAL = /^(0|[1-9][0-9]*)$/
@@ -395,7 +397,7 @@ export class ReassignmentWorkItemLease {
     if (runtimeCredentialProvider && provider) throw failure(WORK_ITEM_LEASE_FAILURE.AUTH_UNAVAILABLE, 'ambiguous authentication configuration')
     this.api = new CommandBoundLeaseApi({ wsUrl, tokenProvider: provider, runtimeCredentialProvider, fetchFn })
     this.configured = Boolean(provider && exact(tenantId) && exact(clientId)
-      && exact(subjectAgentId, CANONICAL_AGENT_ID) && subjectAgentId === profile?.agentId
+      && exact(subjectAgentId, AGENT_ID_WIRE) && subjectAgentId === profile?.agentId
       && exact(runtimeInstanceId) && Number.isSafeInteger(this.leaseDurationMillis)
       && this.leaseDurationMillis > 0 && this.leaseDurationMillis <= MAX_LEASE_DURATION_MS)
   }
@@ -406,7 +408,7 @@ export class ReassignmentWorkItemLease {
     const runtime = this.runtimeCredentialProvider?.()
     const runtimeConfigured = runtime && runtime.scheme === 'native-runtime-v1'
       && !runtime.signal?.aborted && runtime.runtimeInstanceId === this.runtimeInstanceId
-      && runtime.agentId === this.profile.agentId && exact(runtime.agentId, CANONICAL_AGENT_ID)
+      && runtime.agentId === this.profile.agentId && exact(runtime.agentId, AGENT_ID_WIRE)
       && exact(runtime.tenantId) && exact(runtime.clientId)
       && this.leaseDurationMillis > 0 && this.leaseDurationMillis <= MAX_LEASE_DURATION_MS
     if (this.runtimeCredentialProvider ? !runtimeConfigured : !this.configured) {
@@ -414,7 +416,7 @@ export class ReassignmentWorkItemLease {
         'reassignment execution is unavailable: no authenticated target runtime or private JWT configuration')
     }
     if (!exact(message.commandId) || !exact(message.taskId) || !exact(message.workItemId)
-        || !exact(message.targetAgentId, CANONICAL_AGENT_ID)) {
+        || !exact(message.targetAgentId, AGENT_ID_WIRE)) {
       throw failure(WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID, 'reassignment command identity is invalid')
     }
     if (message.targetAgentId !== this.profile.agentId || message.targetAgentId !== (runtime?.agentId || this.subjectAgentId)) {

@@ -461,3 +461,19 @@ test('configured Codex timeout remains recovery-required and emits no false FAIL
   assert.match(result.errorMessage, /CODEX_TIMEOUT_UNCONFIRMED/)
   assert.deepEqual(legacy, [])
 })
+
+
+test('private JWT lane binds a legacy canonical target byte-exactly without inventing an opaque ID', () => {
+  const legacy = 'jyt-fixture-client-wuyong'
+  const lease = coordinator({ profile: { ...profile, agentId: legacy }, subjectAgentId: legacy,
+    fetchFn: async () => assert.fail('preflight only') })
+  assert.equal(lease.preflight(command({ targetAgentId: legacy })).targetAgentId, legacy)
+  for (const wrong of ['jyt-fixture-client-lujunyi', AGENT]) {
+    assert.throws(() => lease.preflight(command({ targetAgentId: wrong })),
+      error => error.code === WORK_ITEM_LEASE_FAILURE.TARGET_MISMATCH)
+  }
+  for (const wrong of ['../jyt-fixture', 'jyt/fixture', 'jyt fixture', 'x'.repeat(101)]) {
+    assert.throws(() => lease.preflight(command({ targetAgentId: wrong })),
+      error => error.code === WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID)
+  }
+})

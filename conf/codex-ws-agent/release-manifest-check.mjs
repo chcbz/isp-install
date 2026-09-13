@@ -3,7 +3,7 @@ import { lstatSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const RELEASE_VERSION = /^1\.1\.0-m4\.20260913$/
+const RELEASE_VERSION = /^1\.1\.0-m4\.20260913\.1$/
 const SHA256 = /^[0-9a-f]{64}$/
 const SAFE_NAME = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*|\.[A-Za-z0-9][A-Za-z0-9._-]*)$/
 const EXPECTED_FILES = Object.freeze([

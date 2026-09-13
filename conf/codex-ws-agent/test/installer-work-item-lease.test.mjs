@@ -115,7 +115,7 @@ test('installer derives the production release directory from package version an
   const fixture = makeFixture({ expectedManifestSha256: digest, testReleaseId: null })
   try {
     assert.equal(fixture.result.status, 0, `${fixture.result.stdout}\n${fixture.result.stderr}`)
-    const releaseId = `1.1.0-m4.20260913-${digest.slice(0, 12)}`
+    const releaseId = `1.1.0-m4.20260913.1-${digest.slice(0, 12)}`
     assert.equal(readlinkSync(resolve(fixture.appHome, 'current')), `releases/${releaseId}`)
     assert.deepEqual(readFileSync(resolve(fixture.appHome, 'releases', releaseId, 'release-manifest.json')),
       readFileSync(releaseManifest))

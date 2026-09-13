@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "releaseVersion": "1.1.0-m4.20260913",
+  "releaseVersion": "1.1.0-m4.20260913.1",
   "files": [
     {
       "source": "agent-client.mjs",
@@ -12,7 +12,7 @@
       "source": "work-item-lease.mjs",
       "target": "work-item-lease.mjs",
       "mode": "0644",
-      "sha256": "3684272aa6efa3dfb4715cf7c19541e17d126c7113e8b688a07f45c76dc84872"
+      "sha256": "9798b2789cf37483ee33ce3cc3c53dff5456a6c89e918b19d81cf7a9e746f967"
     },
     {
       "source": "task-context-pack.mjs",
@@ -24,7 +24,7 @@
       "source": "registration-ack.mjs",
       "target": "registration-ack.mjs",
       "mode": "0644",
-      "sha256": "c626e7cde2b0ebe6b32d95156d1adc927b75103248fefbdd3c29e2a1f6de06fa"
+      "sha256": "4392637ad5d50d0ade30b73c734c797c3422586471183eb1823480746b0d59e8"
     },
     {
       "source": "skill-install-manager.mjs",
@@ -54,25 +54,25 @@
       "source": "release-manifest-check.mjs",
       "target": "release-manifest-check.mjs",
       "mode": "0644",
-      "sha256": "6b5a41cdac1bef5c5bc54fe9aacccfb5f99798ec02a34b5221dd55cbceaebb36"
+      "sha256": "7235d4d2c679549576da880dc789dea8df14477c5fb00f639ec659d0b245f426"
     },
     {
       "source": "package.json",
       "target": "package.json",
       "mode": "0644",
-      "sha256": "97fbc9a8dc7c89db4756dc74de72cc2335e7d13f0829a353333b8c91fea7cb18"
+      "sha256": "3330386b9dc13365ef00306e1677c2661d4a62495d9f237a6a1997999d536a06"
     },
     {
       "source": "package-lock.json",
       "target": "package-lock.json",
       "mode": "0644",
-      "sha256": "7f8aa8db4c47e42ea785e9fdf6ef58bdeb67ced802c0b97089b71b1df700e817"
+      "sha256": "ee95c8cd71e1229b15aa4f9dc0a6236dad011599eb78b904b7eed52dcb26c2b6"
     },
     {
       "source": "README.md",
       "target": "README.md",
       "mode": "0644",
-      "sha256": "7c6ab4dba30340d1ef9a713b56183d8e90c0417d559932eb7de3c561b671be55"
+      "sha256": "1d9fce856899f238875f46e022297fba20bad4ef5cd8a819f0514ce8e95acb34"
     },
     {
       "source": "env.example",

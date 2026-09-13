@@ -2,13 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 import { RegistrationAckObserver } from '../registration-ack.mjs'
-import { createProfileTaskAccess, normalizeInboundMessage, runManagedCommand, runCodex } from '../agent-client.mjs'
+import { ACK_STATUS, AckOutbox, AgentMessageProcessor, DurableDedupeLedger, PersistentCommandInbox,
+  createProfileTaskAccess, normalizeInboundMessage, runManagedCommand, runCodex } from '../agent-client.mjs'
 import { computeTaskContextPackDigest } from '../task-context-pack.mjs'
 
 // Exact server wire shapes; no JWT issuer, network, process, secret file or paid provider.
 const A = 'agt_' + 'a'.repeat(32), B = 'agt_' + 'b'.repeat(32)
+const LEGACY = 'jyt-fixture-client-wuyong'
 const TOKEN = '1'.repeat(32), TOKEN2 = '2'.repeat(32)
 const FIXTURE_NOW = Date.now()
 const R = 'runtime-a', PREVIOUS = 'cmd_hall_action_' + 'a'.repeat(64)
@@ -56,8 +60,8 @@ const fixture = ({ ack = receipt(), prof = profile(), fetchFn = async url => res
   return { ...access, registration, execute }
 }
 
-test('actual registration -> profile access -> F01 dispatch uses runtime token and server scope for two agents', async () => {
-  for (const [agent, suffix, token] of [[A, 'a', TOKEN], [B, 'b', TOKEN2]]) {
+test('actual registration -> profile access -> F01 dispatch uses runtime token and server scope for opaque and legacy canonical agents', async () => {
+  for (const [agent, suffix, token] of [[A, 'a', TOKEN], [B, 'b', TOKEN2], [LEGACY, 'legacy', TOKEN]]) {
     const auth = { ...receipt().runtimeAuth, agentId: agent, tenantId: 'tenant-' + suffix,
       clientId: 'client-' + suffix, runtimeInstanceId: 'runtime-' + suffix }
     let requests = 0, runs = 0
@@ -317,4 +321,145 @@ test('live handler registration readiness is observer-gated and installer retain
   assert.match(source, /taskContextPack, runtimeCredentialProvider\s*\n?\s*\}/)
   const installer = readFileSync(new URL('../../../shell/codex_ws_agent_install.sh', import.meta.url), 'utf8')
   assert.match(installer, /task-context-pack\.mjs/); assert.match(installer, /registration-ack\.mjs/)
+})
+
+
+// These fixtures model authenticated server receipts; registry authority is tested by the API suite.
+test('legacy canonical receipt runs F01 and the complete E05 lease/start/heartbeat path without ID rewriting', async () => {
+  const calls = []
+  const ack = receipt({ agentId: LEGACY, runtimeAuth: { ...receipt().runtimeAuth, agentId: LEGACY } })
+  const f = fixture({ ack, prof: profile({ agentId: LEGACY }), fetchFn: async (url, options) => {
+    calls.push(url.pathname)
+    assert.equal(options.headers.Authorization, 'AgentRuntime ' + TOKEN)
+    assert.equal(options.headers['X-Agent-Id'], LEGACY)
+    assert.equal(options.headers['X-Agent-Runtime-Id'], R)
+    if (url.pathname.endsWith('context-pack')) return response(url, pack({ actorAgentId: LEGACY }))
+    assert.equal(url.searchParams.get('actorAgentId'), LEGACY)
+    const body = JSON.parse(options.body)
+    assert.equal(body.commandId, COMMAND)
+    const version = url.pathname.endsWith('/start') ? 6 : url.pathname.endsWith('/heartbeat') ? 7 : 5
+    assert.equal(body.expectedWorkItemVersion, version === 5 ? 5 : version - 1)
+    return response(url, { ...leaseBody(version), agentId: LEGACY })
+  } })
+  let executed = 0
+  const result = await f.execute({ ...reassignedCommand(), targetAgentId: LEGACY }, async (_p, _m, _mode, options) => {
+    executed++
+    assert.equal(options.taskContextPack.provenance.actorAgentId, LEGACY)
+    assert.equal(options.abortSignal.aborted, false)
+    return { status: 'completed' }
+  })
+  assert.equal(result.status, 'completed', result.errorMessage)
+  assert.equal(result.taskContextPackStatus, 'retrieved')
+  assert.equal(executed, 1)
+  assert.deepEqual(calls.map(path => path.split('/').at(-1)), ['context-pack', 'lease', 'start', 'heartbeat'])
+  f.registration.disconnect()
+})
+
+test('legacy receipt still requires exact request, configured identity, runtime, fixed fields and bounded ID syntax', () => {
+  const valid = receipt({ agentId: LEGACY, runtimeAuth: { ...receipt().runtimeAuth, agentId: LEGACY } })
+  for (const changes of [{ messageId: 'wrong' }, { agentId: LEGACY.toUpperCase() }, { runtimeInstanceId: 'stale' }]) {
+    const o = observer(LEGACY); o.begin('reg-a')
+    assert.equal(o.observe({ ...valid, ...changes }), null)
+    assert.equal(o.runtimeCredential(), null)
+    o.disconnect()
+  }
+  for (const change of [{ agentId: A }, { runtimeInstanceId: 'stale' }, { canonicalType: 'LEGACY_CANONICAL' }]) {
+    const o = observer(LEGACY); o.begin('reg-a')
+    assert.equal(o.observe({ ...valid, runtimeAuth: { ...valid.runtimeAuth, ...change } }), 'rejected')
+    assert.equal(o.runtimeCredential(), null)
+  }
+  for (const invalid of ['../jyt-fixture', 'jyt/fixture', 'jyt%2ffixture', 'jyt?fixture', 'jyt#fixture',
+    'jyt fixture', 'jyt\nfixture', 'jyt-\u007ffixture', 'jyt-典籍', 'x'.repeat(101)]) {
+    const o = observer(invalid); o.begin('reg-a')
+    assert.notEqual(o.observe(receipt({ agentId: invalid, runtimeAuth: { ...valid.runtimeAuth, agentId: invalid } })), 'registered')
+    assert.equal(o.runtimeCredential(), null)
+    o.disconnect()
+  }
+})
+
+test('legacy canonical commands cannot cross actor or scope and invalidated receipts cannot execute', async () => {
+  const ack = receipt({ agentId: LEGACY, runtimeAuth: { ...receipt().runtimeAuth, agentId: LEGACY, contextPackEnabled: false } })
+  for (const wrong of [{ tenantId: 'tenant-other' }, { clientId: 'client-other' }, { targetAgentId: A },
+    { targetAgentId: 'jyt-fixture-client-lujunyi' }]) {
+    const f = fixture({ ack, prof: profile({ agentId: LEGACY }), fetchFn: async () => assert.fail('no HTTP') })
+    const previous = f.registration.runtimeCredential()
+    const result = await f.execute({ ...reassignedCommand(), targetAgentId: LEGACY, ...wrong }, async () => assert.fail('no execution'))
+    assert.equal(result.failureCode, 'TASK_CONTEXT_PACK_SCOPE_MISMATCH')
+    assert.equal(previous.signal.aborted, true)
+    assert.equal(f.registration.runtimeCredential(), null)
+  }
+  const f = fixture({ ack, prof: profile({ agentId: LEGACY }), fetchFn: async () => assert.fail('no HTTP') })
+  const previous = f.registration.runtimeCredential()
+  f.registration.disconnect()
+  assert.equal(previous.signal.aborted, true)
+  const result = await f.execute({ ...reassignedCommand(), targetAgentId: LEGACY }, async () => assert.fail('no execution'))
+  assert.equal(result.failureCode, 'TASK_CONTEXT_PACK_AUTH_UNAVAILABLE')
+})
+
+test('legacy E05 rejects a lease reply for another Agent and server revocation without accepting a terminal result', async () => {
+  for (const revoked of [true, false]) {
+    let calls = 0
+    const ack = receipt({ agentId: LEGACY, runtimeAuth: { ...receipt().runtimeAuth, agentId: LEGACY, contextPackEnabled: false } })
+    const f = fixture({ ack, prof: profile({ agentId: LEGACY }), fetchFn: async url => {
+      calls++
+      return revoked ? new Response('denied', { status: 401 }) : response(url, leaseBody(5))
+    } })
+    const result = await f.execute({ ...reassignedCommand(), targetAgentId: LEGACY }, async () => assert.fail('no execution'))
+    assert.equal(result.status, 'recovery_required')
+    assert.equal(calls, 1)
+    if (revoked) assert.equal(f.registration.runtimeCredential(), null)
+    f.registration.disconnect()
+  }
+})
+
+
+test('legacy F01/E05 execution durably records terminal ACK and replays after reconnect without duplicate execution', async t => {
+  const root = mkdtempSync(resolve(tmpdir(), 'cyf-native-legacy-ack-'))
+  const prof = profile({ agentId: LEGACY })
+  const storage = resolve(root, Buffer.from(LEGACY).toString('hex'))
+  const ack = receipt({ agentId: LEGACY, runtimeAuth: { ...receipt().runtimeAuth, agentId: LEGACY } })
+  let calls = 0, executions = 0
+  const f = fixture({ ack, prof, fetchFn: async (url, options) => {
+    calls++
+    assert.equal(options.headers['X-Agent-Id'], LEGACY)
+    if (url.pathname.endsWith('context-pack')) return response(url, pack({ actorAgentId: LEGACY }))
+    const version = url.pathname.endsWith('/start') ? 6 : url.pathname.endsWith('/heartbeat') ? 7 : 5
+    return response(url, { ...leaseBody(version), agentId: LEGACY })
+  } })
+  const processors = []
+  t.after(() => { processors.forEach(p => p.stop()); f.registration.disconnect(); rmSync(root, { recursive: true, force: true }) })
+  const ledger = new DurableDedupeLedger({ rootDir: storage, profile: prof })
+  const outbox = new AckOutbox({ rootDir: storage, profile: prof })
+  ledger.initialize(); outbox.initialize()
+  const processor = new AgentMessageProcessor({ profile: prof,
+    inbox: new PersistentCommandInbox({ rootDir: root, profile: prof }), ledger, ackOutbox: outbox,
+    validateCommand: message => f.workItemLease.preflight(message), runChat: async () => assert.fail('no chat'),
+    runCommand: message => f.execute(message, async () => { executions++; return { status: 'completed', exitCode: 0 } }),
+    sendFn: envelope => envelope.ackStatus !== ACK_STATUS.SUCCEEDED })
+  processors.push(processor); processor.start()
+  const message = { ...reassignedCommand(), targetAgentId: LEGACY }
+  await processor.handle(message)
+  await processor.waitForIdle()
+  assert.equal(ledger.getEntry(COMMAND).status, ACK_STATUS.SUCCEEDED)
+  assert.equal(executions, 1); assert.equal(calls, 4)
+  processor.stop()
+  // A fresh file-backed reader, not the in-memory entry, proves terminal persistence.
+  const reopened = new DurableDedupeLedger({ rootDir: storage, profile: prof })
+  const replayOutbox = new AckOutbox({ rootDir: storage, profile: prof })
+  reopened.initialize(); replayOutbox.initialize()
+  assert.equal(reopened.getEntry(COMMAND).status, ACK_STATUS.SUCCEEDED)
+  const replayed = []
+  const resumed = new AgentMessageProcessor({ profile: prof,
+    inbox: new PersistentCommandInbox({ rootDir: root, profile: prof }), ledger: reopened, ackOutbox: replayOutbox,
+    validateCommand: message => f.workItemLease.preflight(message), runChat: async () => assert.fail('no chat'),
+    runCommand: async () => assert.fail('a persisted completed command must not run again'),
+    sendFn: envelope => { replayed.push(envelope); return true } })
+  processors.push(resumed); resumed.start()
+  resumed.replayAcks()
+  await resumed.handle(message)
+  await resumed.waitForIdle()
+  const terminal = replayed.filter(item => item.commandId === COMMAND && item.ackStatus === ACK_STATUS.SUCCEEDED)
+  assert.ok(terminal.length >= 1)
+  assert.equal(executions, 1); assert.equal(calls, 4)
+  assert.doesNotMatch(JSON.stringify(terminal), new RegExp(TOKEN + '|must-never-be-http-bearer'))
 })

@@ -1,6 +1,6 @@
 {
   "name": "codex-ws-agent",
-  "version": "1.1.0-m4.20260913",
+  "version": "1.1.0-m4.20260913.1",
   "type": "module",
   "private": true,
   "scripts": {
