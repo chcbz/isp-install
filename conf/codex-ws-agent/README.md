@@ -30,6 +30,8 @@ Required:
 
 The installer stages both `package.json` and `package-lock.json`, then runs `npm ci --omit=dev --ignore-scripts --no-audit --no-fund` before candidate validation and atomic activation. Dependency installation failure aborts installation without requesting a service restart.
 
+Release `1.1.0-m4.20260913` includes `release-manifest.json`. The installer verifies every staged runtime/template byte and mode before dependency installation, derives a deterministic release directory from the version plus manifest digest, and can be pinned with `CODEX_WS_AGENT_EXPECTED_MANIFEST_SHA256`. `START_CODEX_WS_AGENT=n` prepares and activates files without restarting the client; switching runtime still requires a separately authorized restart.
+
 ## Multiple Codex CLI Profiles
 
 The recommended deployment mode is multi-profile:
@@ -437,7 +439,7 @@ Completed failures are archived rather than retried in a hot loop.
 
 ## E05 command-bound reassignment lease
 
-`WORK_ITEM_EXECUTE` commands marked with `reason=lease_expired_reassignment` are fail-closed before Codex unless the profile has a target-scoped JWT configuration and a trusted `reassignmentId` binding. The lease client calls only these deployed API paths on the HTTPS origin derived from `WS_URL`:
+`WORK_ITEM_EXECUTE` commands marked with `reason=lease_expired_reassignment` are fail-closed before Codex unless a matching live `native-runtime-v1` registration receipt (or an explicitly configured private target JWT compatibility file) and a trusted `reassignmentId` binding are both present. The lease client calls only these deployed API paths on the HTTPS origin derived from `WS_URL`:
 
 ```text
 POST /agent/tasks/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId}/lease
@@ -445,7 +447,7 @@ POST /agent/tasks/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId
 POST /agent/tasks/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId}/lease/heartbeat
 ```
 
-The query actor is always the selected profile's exact `agentId`. Bodies contain only `commandId`, `expectedWorkItemVersion`, and (heartbeat only) `leaseDurationMillis`. Authentication is `Authorization: Bearer` loaded from a current-user-owned regular `0600` token file; credentials are never accepted from the command envelope. Profile fields are:
+The query actor is always the selected profile's exact canonical `agt_` `agentId`. Bodies contain only `commandId`, `expectedWorkItemVersion`, and (heartbeat only) `leaseDurationMillis`. The normal release path authenticates with the opaque credential from the exact request-correlated registration receipt as `Authorization: AgentRuntime`, plus exact Agent and process-runtime headers. Disconnect, credential rotation, server rejection, or scope mismatch invalidates that credential and aborts in-flight work. Credentials are never accepted from the command envelope and are never logged. The following fields are only for the separately provisioned private JWT compatibility path; leave them empty for native runtime authentication:
 
 ```ini
 workItemLeaseTenantId=tenant-a
@@ -457,7 +459,7 @@ workItemLeaseDurationMs=300000
 
 Tenant/client, target/subject Agent, source command reference, work-item version, command ID, returned lease token/fence, and every returned resource identity are checked exactly. Read, start, and heartbeat are single attempts; HTTP/auth/stale-fence failures do not trigger redispatch or a second Codex execution. The server lease expiry is also a hard ownership fence: a hung heartbeat aborts active Codex at the last authenticated `leaseUntil`. A lost lease or configured Codex timeout becomes durable `recovery_required`/`REJECTED`, never a fabricated `FAILED` result.
 
-**Current activation gap:** API commit `ea08b28dd74c262577acd15a983b124858b9febc` does not transport `reassignmentId` in its canonical `WORK_ITEM_EXECUTE` command, and the existing native API key/runtime registration is not the JWT required by the lease controller. Therefore the production constructor intentionally has no message-derived binding fallback and rejects these commands as unavailable. Activation requires a server-authenticated target JWT delivery mechanism plus a canonical command field or authenticated lookup that supplies the exact `reassignmentId`. Runtime-instance identity is local process binding only; the current lease HTTP API does not authenticate it. The installer must also stage `work-item-lease.mjs`, and deployed `jyt-*` profile identities must be aligned with the backend's frozen canonical `agt_` identity contract before activation. Offline fake transports prove request shaping and local fencing, not a complete server/client business ACK.
+**Activation requirements:** install this versioned release only after the matching API native-runtime credential bridge has passed cloud verification. Configure each participating profile with the backend-issued canonical `agt_` Agent identity and `taskContextPackMode=required`; leave both `taskContextPackBearerTokenFile` and `workItemLeaseBearerTokenFile` empty to require the live registration receipt. The server command must carry the exact `e05-reassignment-v1` context binding and `reassignmentId`. A successful registration alone is not business acceptance: acceptance must observe a real receipt, one F01 GET, E05 lease read/start/heartbeat, Codex execution, and the durable terminal command ACK. Offline fake transports prove request shaping and local fencing only.
 
 This module adds no provider purchase, model-selection, payment, privilege, or workspace-policy bypass. Codex keeps the pre-existing command workspace/sandbox/approval boundary.
 

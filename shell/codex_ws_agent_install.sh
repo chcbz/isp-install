@@ -20,6 +20,7 @@ RELEASES_DIR="$APP_HOME/releases"
 CURRENT_LINK="$APP_HOME/current"
 STAGED_RELEASE=""
 ACTIVE_RELEASE=""
+ACTIVE_RELEASE_MANIFEST_SHA256=""
 
 cleanup_staged_release() {
     if [ -n "${STAGED_RELEASE:-}" ] && [ -e "$STAGED_RELEASE" ]; then
@@ -42,6 +43,32 @@ validate_workspace_policy_schema() {
 validate_agent_configuration() {
     local release_dir="${1:-$APP_HOME}"
     (cd "$APP_HOME" && "$NODE_BIN" "$release_dir/agent-client.mjs" --validate)
+}
+
+release_manifest_digest() {
+    local manifest="$1/release-manifest.json"
+    "$NODE_BIN" -e 'const {createHash}=require("node:crypto"),{readFileSync}=require("node:fs"); process.stdout.write(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"))' "$manifest"
+}
+
+validate_expected_release_manifest() {
+    local digest="$1"
+    local expected="${CODEX_WS_AGENT_EXPECTED_MANIFEST_SHA256:-}"
+    if [ -z "$expected" ]; then return 0; fi
+    if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]] || [ "$expected" != "$digest" ]; then
+        __red "候选 release manifest 与固定 SHA-256 不匹配，拒绝安装。"
+        return 1
+    fi
+}
+
+validate_release_manifest() {
+    local release_dir="$1"
+    local layout="$2"
+    (cd "$release_dir" && "$NODE_BIN" release-manifest-check.mjs --layout "$layout")
+}
+
+release_version() {
+    local root="$1"
+    "$NODE_BIN" -e 'const p=require(process.argv[1]); if(typeof p.version!=="string"||!/^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$/.test(p.version)) process.exit(2); process.stdout.write(p.version)' "$root/package.json"
 }
 
 run_validation_gate() {
@@ -163,6 +190,8 @@ stage_application_files() {
     install -m 0644 "$CONF_SRC/managed-host.mjs" "$stage/managed-host.mjs"
     install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$stage/workspace-manager.mjs"
     install -m 0644 "$CONF_SRC/install-policy-check.mjs" "$stage/install-policy-check.mjs"
+    install -m 0644 "$CONF_SRC/release-manifest-check.mjs" "$stage/release-manifest-check.mjs"
+    install -m 0644 "$CONF_SRC/release-manifest.json" "$stage/release-manifest.json"
     install -m 0644 "$CONF_SRC/package.json" "$stage/package.json"
     install -m 0644 "$CONF_SRC/package-lock.json" "$stage/package-lock.json"
     install -m 0644 "$CONF_SRC/README.md" "$stage/README.md"
@@ -212,7 +241,17 @@ install_compatibility_entrypoints() {
 collate_release() {
     local release_id
     local final_release
-    release_id="${CODEX_WS_AGENT_TEST_RELEASE_ID:-$(date +%Y%m%d%H%M%S)-$$}"
+    local manifest_sha256
+    local version
+    validate_release_manifest "$CONF_SRC" source
+    manifest_sha256="$(release_manifest_digest "$CONF_SRC")"
+    validate_expected_release_manifest "$manifest_sha256"
+    version="$(release_version "$CONF_SRC")"
+    release_id="${CODEX_WS_AGENT_TEST_RELEASE_ID:-${CODEX_WS_AGENT_RELEASE_ID:-${version}-${manifest_sha256:0:12}}}"
+    if [[ ! "$release_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+        __red "候选 release ID 非法，拒绝创建路径。"
+        return 1
+    fi
     STAGED_RELEASE="$RELEASES_DIR/.stage-$release_id"
     final_release="$RELEASES_DIR/$release_id"
     if [ -e "$STAGED_RELEASE" ] || [ -e "$final_release" ]; then
@@ -221,6 +260,11 @@ collate_release() {
     fi
 
     stage_application_files "$STAGED_RELEASE"
+    if [ "$(release_manifest_digest "$STAGED_RELEASE")" != "$manifest_sha256" ]; then
+        __red "暂存 release manifest 复制后摘要变化，拒绝切换。"
+        return 1
+    fi
+    validate_release_manifest "$STAGED_RELEASE" release
     install_runtime_dependencies "$STAGED_RELEASE"
     run_validation_gate "$STAGED_RELEASE"
 
@@ -229,6 +273,7 @@ collate_release() {
     atomic_switch_release "$final_release"
     install_compatibility_entrypoints
     ACTIVE_RELEASE="$final_release"
+    ACTIVE_RELEASE_MANIFEST_SHA256="$manifest_sha256"
 }
 
 if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ]; then
@@ -292,6 +337,7 @@ echo "[3/7] 在候选 release 中按锁文件安装生产依赖..."
 echo "[4/7] 验证候选 release 后原子切换 current..."
 collate_release
 __green "已激活 release: $ACTIVE_RELEASE"
+__green "release manifest SHA-256: $ACTIVE_RELEASE_MANIFEST_SHA256"
 
 echo ""
 echo "[5/7] 安装管理脚本..."

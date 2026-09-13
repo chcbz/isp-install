@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "releaseVersion": "1.1.0-m4.20260913",
+  "files": [
+    {
+      "source": "agent-client.mjs",
+      "target": "agent-client.mjs",
+      "mode": "0644",
+      "sha256": "8873e23adf38fb0c3ba82e135872a285ce874a19f02520aad0d16350135658a1"
+    },
+    {
+      "source": "work-item-lease.mjs",
+      "target": "work-item-lease.mjs",
+      "mode": "0644",
+      "sha256": "3684272aa6efa3dfb4715cf7c19541e17d126c7113e8b688a07f45c76dc84872"
+    },
+    {
+      "source": "task-context-pack.mjs",
+      "target": "task-context-pack.mjs",
+      "mode": "0644",
+      "sha256": "6caa8bd5049a23dab784514efa6231d479851406e1f47c5444f3de4e213ed89a"
+    },
+    {
+      "source": "registration-ack.mjs",
+      "target": "registration-ack.mjs",
+      "mode": "0644",
+      "sha256": "c626e7cde2b0ebe6b32d95156d1adc927b75103248fefbdd3c29e2a1f6de06fa"
+    },
+    {
+      "source": "skill-install-manager.mjs",
+      "target": "skill-install-manager.mjs",
+      "mode": "0644",
+      "sha256": "d2999b16dfae0ec50a07a2eeff7f8641f6baece5994813189689b281eabe3965"
+    },
+    {
+      "source": "managed-host.mjs",
+      "target": "managed-host.mjs",
+      "mode": "0644",
+      "sha256": "c75db9d02f9ee02e8b2ba90ecc2a6e05346937c1bb6e3109d9ac5ae236a4f814"
+    },
+    {
+      "source": "workspace-manager.mjs",
+      "target": "workspace-manager.mjs",
+      "mode": "0644",
+      "sha256": "d640c7729aa743035cd1ac6d4a6d3190c162e03dd0e192a59a46adaf84f353bc"
+    },
+    {
+      "source": "install-policy-check.mjs",
+      "target": "install-policy-check.mjs",
+      "mode": "0644",
+      "sha256": "65f199f7d7f61b83100f1018953701a7a5e19747ff1224ca1e26e1ab735a604b"
+    },
+    {
+      "source": "release-manifest-check.mjs",
+      "target": "release-manifest-check.mjs",
+      "mode": "0644",
+      "sha256": "6b5a41cdac1bef5c5bc54fe9aacccfb5f99798ec02a34b5221dd55cbceaebb36"
+    },
+    {
+      "source": "package.json",
+      "target": "package.json",
+      "mode": "0644",
+      "sha256": "97fbc9a8dc7c89db4756dc74de72cc2335e7d13f0829a353333b8c91fea7cb18"
+    },
+    {
+      "source": "package-lock.json",
+      "target": "package-lock.json",
+      "mode": "0644",
+      "sha256": "7f8aa8db4c47e42ea785e9fdf6ef58bdeb67ced802c0b97089b71b1df700e817"
+    },
+    {
+      "source": "README.md",
+      "target": "README.md",
+      "mode": "0644",
+      "sha256": "7c6ab4dba30340d1ef9a713b56183d8e90c0417d559932eb7de3c561b671be55"
+    },
+    {
+      "source": "env.example",
+      "target": ".env.example",
+      "mode": "0644",
+      "sha256": "a4bb0da18522d2b708b41486bce267ca7cfdeaa92a729a660af8ddaf1959aace"
+    },
+    {
+      "source": "codex-home.example.toml",
+      "target": "codex-home.example.toml",
+      "mode": "0644",
+      "sha256": "c86f510715776d68fd137e81f7adbd99dac2dd256ffbe93bef5d296abcc52fc2"
+    },
+    {
+      "source": "workspace-policies.example.json",
+      "target": "workspace-policies.example.json",
+      "mode": "0640",
+      "sha256": "358b304c1909e05e219fcd0fcf36a3ce9173dedd61dc6ab239c9abeafa06bba2"
+    }
+  ]
+}

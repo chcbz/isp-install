@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
@@ -21,8 +22,9 @@ const installer = resolve(root, 'shell/codex_ws_agent_install.sh')
 const config = resolve(root, 'conf/codex-ws-agent')
 const leaseModule = resolve(config, 'work-item-lease.mjs')
 const contextPackModule = resolve(config, 'task-context-pack.mjs')
+const releaseManifest = resolve(config, 'release-manifest.json')
 
-const makeFixture = () => {
+const makeFixture = ({ expectedManifestSha256 = '', testReleaseId = 'e05-contract' } = {}) => {
   const fixtureRoot = mkdtempSync(resolve(tmpdir(), 'codex-ws-agent-e05-installer-'))
   const appHome = resolve(fixtureRoot, 'app')
   const binDir = resolve(fixtureRoot, 'bin')
@@ -53,11 +55,12 @@ mkdir -p node_modules
       ...process.env,
       CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
       CODEX_WS_AGENT_INSTALL_TEST_COLLATE: '1',
-      CODEX_WS_AGENT_TEST_RELEASE_ID: 'e05-contract',
+      ...(testReleaseId === null ? {} : { CODEX_WS_AGENT_TEST_RELEASE_ID: testReleaseId }),
       CODEX_WS_AGENT_TEST_APP_HOME: appHome,
       CODEX_WS_AGENT_TEST_NODE_BIN: nodeWrapper,
       CODEX_WS_AGENT_TEST_NPM_BIN: npmWrapper,
-      START_CODEX_WS_AGENT: 'n'
+      START_CODEX_WS_AGENT: 'n',
+      CODEX_WS_AGENT_EXPECTED_MANIFEST_SHA256: expectedManifestSha256
     }
   })
   return { fixtureRoot, appHome, npmRecord, result }
@@ -71,10 +74,12 @@ test('installer stages native E05/F01 modules beside agent-client without genera
     const release = resolve(fixture.appHome, 'releases', 'e05-contract')
     const installedLease = resolve(release, 'work-item-lease.mjs')
     const installedContextPack = resolve(release, 'task-context-pack.mjs')
+    const installedManifest = resolve(release, 'release-manifest.json')
     assert.equal(readlinkSync(resolve(fixture.appHome, 'current')), 'releases/e05-contract')
     assert.equal(existsSync(installedLease), true)
     assert.deepEqual(readFileSync(installedLease), readFileSync(leaseModule))
     assert.deepEqual(readFileSync(installedContextPack), readFileSync(contextPackModule))
+    assert.deepEqual(readFileSync(installedManifest), readFileSync(releaseManifest))
     assert.equal(statSync(installedLease).mode & 0o777, 0o644)
     assert.equal(statSync(installedContextPack).mode & 0o777, 0o644)
     assert.equal(readFileSync(fixture.npmRecord, 'utf8'), `${resolve(fixture.appHome, 'releases', '.stage-e05-contract')}\n`)
@@ -86,6 +91,34 @@ test('installer stages native E05/F01 modules beside agent-client without genera
     assert.match(env, /AGENT_TASK_CONTEXT_PACK_TENANT_ID=\n/)
     assert.doesNotMatch(env, /leaseToken|token-secret|ey[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/)
     assert.equal(existsSync(resolve(fixture.appHome, 'lease-token')), false)
+  } finally {
+    rmSync(fixture.fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+
+test('installer rejects a non-matching pinned release manifest before npm or cutover', () => {
+  const fixture = makeFixture({ expectedManifestSha256: '0'.repeat(64) })
+  try {
+    assert.notEqual(fixture.result.status, 0, `${fixture.result.stdout}\n${fixture.result.stderr}`)
+    assert.equal(existsSync(resolve(fixture.appHome, 'current')), false)
+    assert.equal(existsSync(fixture.npmRecord), false)
+    assert.deepEqual(readFileSync(resolve(fixture.appHome, '.env')), readFileSync(resolve(config, 'env.example')))
+  } finally {
+    rmSync(fixture.fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+
+test('installer derives the production release directory from package version and pinned manifest digest', () => {
+  const digest = createHash('sha256').update(readFileSync(releaseManifest)).digest('hex')
+  const fixture = makeFixture({ expectedManifestSha256: digest, testReleaseId: null })
+  try {
+    assert.equal(fixture.result.status, 0, `${fixture.result.stdout}\n${fixture.result.stderr}`)
+    const releaseId = `1.1.0-m4.20260913-${digest.slice(0, 12)}`
+    assert.equal(readlinkSync(resolve(fixture.appHome, 'current')), `releases/${releaseId}`)
+    assert.deepEqual(readFileSync(resolve(fixture.appHome, 'releases', releaseId, 'release-manifest.json')),
+      readFileSync(releaseManifest))
   } finally {
     rmSync(fixture.fixtureRoot, { recursive: true, force: true })
   }
