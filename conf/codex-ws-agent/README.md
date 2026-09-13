@@ -435,6 +435,32 @@ A06 closes the A05 crash window with two durable guards:
 
 Completed failures are archived rather than retried in a hot loop.
 
+## E05 command-bound reassignment lease
+
+`WORK_ITEM_EXECUTE` commands marked with `reason=lease_expired_reassignment` are fail-closed before Codex unless the profile has a target-scoped JWT configuration and a trusted `reassignmentId` binding. The lease client calls only these deployed API paths on the HTTPS origin derived from `WS_URL`:
+
+```text
+POST /agent/tasks/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId}/lease
+POST /agent/tasks/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId}/lease/start
+POST /agent/tasks/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId}/lease/heartbeat
+```
+
+The query actor is always the selected profile's exact `agentId`. Bodies contain only `commandId`, `expectedWorkItemVersion`, and (heartbeat only) `leaseDurationMillis`. Authentication is `Authorization: Bearer` loaded from a current-user-owned regular `0600` token file; credentials are never accepted from the command envelope. Profile fields are:
+
+```ini
+workItemLeaseTenantId=tenant-a
+workItemLeaseClientId=client-a
+workItemLeaseSubjectAgentId=agt_0123456789abcdef0123456789abcdef
+workItemLeaseBearerTokenFile=/run/cyf-agent/lease-token.jwt
+workItemLeaseDurationMs=300000
+```
+
+Tenant/client, target/subject Agent, source command reference, work-item version, command ID, returned lease token/fence, and every returned resource identity are checked exactly. Read, start, and heartbeat are single attempts; HTTP/auth/stale-fence failures do not trigger redispatch or a second Codex execution. The server lease expiry is also a hard ownership fence: a hung heartbeat aborts active Codex at the last authenticated `leaseUntil`. A lost lease or configured Codex timeout becomes durable `recovery_required`/`REJECTED`, never a fabricated `FAILED` result.
+
+**Current activation gap:** API commit `ea08b28dd74c262577acd15a983b124858b9febc` does not transport `reassignmentId` in its canonical `WORK_ITEM_EXECUTE` command, and the existing native API key/runtime registration is not the JWT required by the lease controller. Therefore the production constructor intentionally has no message-derived binding fallback and rejects these commands as unavailable. Activation requires a server-authenticated target JWT delivery mechanism plus a canonical command field or authenticated lookup that supplies the exact `reassignmentId`. Runtime-instance identity is local process binding only; the current lease HTTP API does not authenticate it. The installer must also stage `work-item-lease.mjs`, and deployed `jyt-*` profile identities must be aligned with the backend's frozen canonical `agt_` identity contract before activation. Offline fake transports prove request shaping and local fencing, not a complete server/client business ACK.
+
+This module adds no provider purchase, model-selection, payment, privilege, or workspace-policy bypass. Codex keeps the pre-existing command workspace/sandbox/approval boundary.
+
 ## Codex Invocation
 
 For a managed command, the client calls Codex with the resolved task/Agent worktree as both process cwd and `--cd`:

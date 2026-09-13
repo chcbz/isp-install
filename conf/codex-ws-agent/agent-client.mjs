@@ -30,6 +30,11 @@ import { pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
+import {
+  ReassignmentWorkItemLease,
+  WorkItemLeaseError,
+  isReassignmentWorkItemCommand
+} from './work-item-lease.mjs'
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -480,6 +485,13 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
       profile.workspaceNonCodingCommandTypes ?? fallback.workspaceNonCodingCommandTypes
     ),
     workspaceFallbackWorkdir: profile.workspaceFallbackWorkdir || fallback.workspaceFallbackWorkdir || '',
+    workItemLeaseTenantId: profile.workItemLeaseTenantId || fallback.workItemLeaseTenantId || '',
+    workItemLeaseClientId: profile.workItemLeaseClientId || fallback.workItemLeaseClientId || '',
+    workItemLeaseSubjectAgentId: profile.workItemLeaseSubjectAgentId || fallback.workItemLeaseSubjectAgentId || '',
+    workItemLeaseBearerTokenFile: profile.workItemLeaseBearerTokenFile || fallback.workItemLeaseBearerTokenFile || '',
+    workItemLeaseDurationMs: parsePositiveInteger(
+      profile.workItemLeaseDurationMs ?? fallback.workItemLeaseDurationMs, 0
+    ),
     enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
@@ -504,6 +516,11 @@ const legacyProfile = () => normalizeProfile({
   workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
   workspaceNonCodingCommandTypes: process.env.CODEX_WORKSPACE_NON_CODING_COMMAND_TYPES || '',
   workspaceFallbackWorkdir: process.env.CODEX_WORKSPACE_FALLBACK_WORKDIR || '',
+  workItemLeaseTenantId: process.env.AGENT_WORK_ITEM_LEASE_TENANT_ID || '',
+  workItemLeaseClientId: process.env.AGENT_WORK_ITEM_LEASE_CLIENT_ID || '',
+  workItemLeaseSubjectAgentId: process.env.AGENT_WORK_ITEM_LEASE_SUBJECT_AGENT_ID || '',
+  workItemLeaseBearerTokenFile: process.env.AGENT_WORK_ITEM_LEASE_BEARER_TOKEN_FILE || '',
+  workItemLeaseDurationMs: parsePositiveInteger(process.env.AGENT_WORK_ITEM_LEASE_DURATION_MS, 0),
   isDefault: true
 })
 
@@ -2116,7 +2133,7 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = P
 export class AgentMessageProcessor {
   constructor({
     profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
-    recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
+    recoverCommandOutcome = () => null, validateCommand = () => null, onReject = () => {}, sendChatBusy = () => {},
     ledger = null, ackOutbox = null, sendFn = null
   }) {
     this.profile = profile
@@ -2126,6 +2143,7 @@ export class AgentMessageProcessor {
     this.onTaskEvent = onTaskEvent
     this.onWorkResultReceipt = onWorkResultReceipt
     this.recoverCommandOutcome = recoverCommandOutcome
+    this.validateCommand = validateCommand
     this.onReject = onReject
     this.sendChatBusy = sendChatBusy
     this.ledger = ledger
@@ -2535,6 +2553,26 @@ export class AgentMessageProcessor {
             if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(check.entry.status)) void this.drain()
             return { kind: 'command-duplicate', commandId }
           }
+        }
+
+        try {
+          const validation = this.validateCommand(message)
+          if (validation && typeof validation.then === 'function') await validation
+        } catch (error) {
+          const protocolError = error instanceof AgentProtocolError
+            ? error
+            : new AgentProtocolError(error?.code || 'COMMAND_UNAVAILABLE', error?.message || 'Command is unavailable')
+          try {
+            this.ledger?.markRejected(commandId, protocolError.message)
+            this._emitAck(ACK_STATUS.REJECTED, { ...meta, commandId, rejectReason: protocolError.message })
+          } catch (durabilityError) {
+            this._failClosed(new AgentProtocolError(
+              'DEDUPE_LEDGER_ERROR',
+              `Failed to persist command rejection: ${durabilityError.message}`
+            ), raw)
+          }
+          this.onReject(protocolError, raw)
+          return { kind: 'rejected', error: protocolError }
         }
 
         try {
@@ -3663,8 +3701,30 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   let sessionRemembered = false
   let streamQueue = Promise.resolve()
   let settled = false
+  let unconfirmedTermination = null
+  const abortSignal = overrides.abortSignal
+  const terminateUnconfirmed = (code, message) => {
+    if (!unconfirmedTermination) unconfirmedTermination = { code, message }
+    try { child.kill('SIGTERM') } catch {}
+  }
+  const onAbort = () => {
+    const reason = abortSignal?.reason
+    terminateUnconfirmed(
+      reason?.code || 'COMMAND_LEASE_ABORTED',
+      reason?.message || 'command execution was cancelled because its command-bound lease became unavailable'
+    )
+  }
+  if (abortSignal?.aborted) onAbort()
+  else abortSignal?.addEventListener?.('abort', onAbort, { once: true })
   const timeout = profile.codexTimeoutMs > 0
-    ? setTimeout(() => child.kill('SIGTERM'), profile.codexTimeoutMs)
+    ? setTimeout(() => {
+      if (overrides.timeoutAsRecoveryRequired === true) {
+        terminateUnconfirmed(
+          'CODEX_TIMEOUT_UNCONFIRMED',
+          'configured Codex transport timeout elapsed; execution outcome is unknown and is not FAILED'
+        )
+      } else child.kill('SIGTERM')
+    }, profile.codexTimeoutMs)
     : null
 
   const streamAgentReplyText = async (content, extra = {}) => {
@@ -3726,6 +3786,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     if (settled) return
     settled = true
     clearTimeout(timeout)
+    abortSignal?.removeEventListener?.('abort', onAbort)
     if (jsonLineBuffer.trim()) handleJsonLine(jsonLineBuffer)
     currentRuns.delete(profile.agentId)
     if (sessionCaptureEligible && runSessionId && !sessionRemembered && findCodexSessionById(profile, runSessionId)) {
@@ -3733,10 +3794,16 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     }
     const leaseError = releaseWorkspaceLease()
     const effectiveError = spawnError || leaseError
-    const status = !effectiveError && code === 0 ? 'completed' : 'failed'
+    const status = unconfirmedTermination
+      ? 'recovery_required'
+      : !effectiveError && code === 0 ? 'completed' : 'failed'
     const replyContent = trimReply(agentReplyText) || trimReply(stdout) || trimReply(stderr)
-      || (status === 'completed' ? '已处理，但无可返回内容。' : '执行失败，暂无详细输出。')
-    const errorMessage = effectiveError?.message || stderr.trim()
+      || (status === 'completed' ? '已处理，但无可返回内容。'
+        : status === 'recovery_required' ? '执行结果未知，需要人工核对后再决定是否产生新命令。'
+          : '执行失败，暂无详细输出。')
+    const errorMessage = unconfirmedTermination
+      ? `${unconfirmedTermination.code}: ${unconfirmedTermination.message}`
+      : effectiveError?.message || stderr.trim()
     const payload = {
       taskId,
       workItemId: message.workItemId || '',
@@ -3757,7 +3824,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
       }
       await streamQueue
       sendChatFinal(profile, message, replyContent, { status }, sendProtocolFn)
-    } else {
+    } else if (status !== 'recovery_required') {
       sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
     }
@@ -3803,6 +3870,10 @@ export const buildConfigurationReport = runtimeConfig => ({
     if (profile.codexSandbox === 'danger-full-access') warnings.push('UNRESTRICTED_SANDBOX: model-generated commands are not filesystem-sandboxed')
     if (profile.codexModel) warnings.push('MODEL_OVERRIDE: Agent --model overrides the model in Codex Home')
     if (profile.codexSessionMode === 'resume') warnings.push('SESSION_MAPPING_STRICT: only an exact conversation mapping can resume a session in this profile Home')
+    const leaseConfigured = Boolean(profile.workItemLeaseTenantId && profile.workItemLeaseClientId
+      && profile.workItemLeaseSubjectAgentId === profile.agentId && profile.workItemLeaseBearerTokenFile
+      && profile.workItemLeaseDurationMs > 0)
+    if (!leaseConfigured) warnings.push('WORK_ITEM_REASSIGNMENT_UNAVAILABLE: command-bound JWT lease configuration is incomplete')
     return {
       profileId: profile.profileId,
       agentId: profile.agentId,
@@ -3819,6 +3890,9 @@ export const buildConfigurationReport = runtimeConfig => ({
       websocketAuthSource: profile.apiKey ? 'profile.apiKey' : (process.env.OPENCLAW_API_KEY ? 'OPENCLAW_API_KEY' : 'missing'),
       workspacePolicyId: profile.workspacePolicyId || null,
       commandReadiness: policyConfigured ? 'policy-configured; requires --validate' : 'blocked-no-workspace-policy',
+      reassignmentLeaseReadiness: leaseConfigured
+        ? 'configured; command still requires a trusted reassignmentId binding'
+        : 'blocked-no-target-scoped-jwt',
       schedulingAbilities: resolveProfileAbilities(profile),
       errors: profileConfigurationErrors(profile),
       warnings
@@ -3827,11 +3901,25 @@ export const buildConfigurationReport = runtimeConfig => ({
 })
 
 
-export const runManagedCommand = ({ profile, message, skillInstallManager, workspaceManager, runCodexFn = runCodex }) => (
-  message.commandType === 'SKILL_INSTALL'
-    ? skillInstallManager.execute(message)
-    : runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
-)
+export const runManagedCommand = ({
+  profile, message, skillInstallManager, workspaceManager, workItemLease = null, runCodexFn = runCodex
+}) => {
+  if (message.commandType === 'SKILL_INSTALL') return skillInstallManager.execute(message)
+  const run = ({ signal } = {}) => runCodexFn(profile, message, 'command', {
+    workspaceManager,
+    requireWorkspace: true,
+    abortSignal: signal,
+    timeoutAsRecoveryRequired: Boolean(signal)
+  })
+  if (!isReassignmentWorkItemCommand(message)) return run()
+  if (!workItemLease) {
+    return Promise.resolve({
+      status: 'recovery_required',
+      errorMessage: 'WORK_ITEM_LEASE_UNAVAILABLE: command-bound lease coordinator is unavailable'
+    })
+  }
+  return workItemLease.execute(message, run)
+}
 
 const canonicalizeConfiguredPath = configuredPath => {
   let existingPrefix = resolve(configuredPath)
@@ -3965,6 +4053,17 @@ const createProfileState = profile => {
     profile
   })
   const sendAckFn = envelope => sendRaw(envelope, profile)
+  const workItemLease = new ReassignmentWorkItemLease({
+    profile,
+    runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+    tenantId: profile.workItemLeaseTenantId,
+    clientId: profile.workItemLeaseClientId,
+    subjectAgentId: profile.workItemLeaseSubjectAgentId,
+    bearerTokenFile: profile.workItemLeaseBearerTokenFile,
+    leaseDurationMillis: profile.workItemLeaseDurationMs,
+    wsUrl: config.wsUrl,
+    fetchFn: globalThis.fetch
+  })
   const skillInstallManager = new SkillInstallManager({
     profile,
     stateRoot: defaultSkillInstallStateRoot(config.commandInboxDir, profile, config.wsUrl),
@@ -3997,6 +4096,7 @@ const createProfileState = profile => {
     ledger,
     ackOutbox,
     skillInstallManager,
+    workItemLease,
     workspaceManager,
     processor: null,
     registration: new RegistrationAckObserver({
@@ -4012,7 +4112,7 @@ const createProfileState = profile => {
     inbox,
     runCommand: message => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
-      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager })
+      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workItemLease })
     },
     runChat: message => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
@@ -4025,6 +4125,12 @@ const createProfileState = profile => {
     },
     onWorkResultReceipt: message => skillInstallManager.acknowledgeResultReceipt(message),
     recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message),
+    validateCommand: message => {
+      try { workItemLease.preflight(message) } catch (error) {
+        if (error instanceof WorkItemLeaseError) throw new AgentProtocolError(error.code, error.message)
+        throw error
+      }
+    },
     onReject: (error, raw) => {
       console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
       sendProtocol(MESSAGE_TYPES.PROTOCOL_ERROR, {
