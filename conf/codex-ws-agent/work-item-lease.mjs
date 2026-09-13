@@ -3,18 +3,30 @@ import { lstatSync, readFileSync } from 'node:fs'
 const COMMAND_TYPE = 'WORK_ITEM_EXECUTE'
 const REASSIGNMENT_REASON = 'lease_expired_reassignment'
 const ACTION_TYPE = 'work_item_execute'
+const REASSIGNMENT_BINDING_VERSION = 'e05-reassignment-v1'
 const MAX_RESPONSE_BYTES = 32 * 1024
 const MAX_LEASE_DURATION_MS = 900_000
 const SAFE_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const CANONICAL_AGENT_ID = /^agt_[0-9a-f]{32}$/
 const REASSIGNMENT_ID = /^rsn_[0-9a-f]{64}$/
+const HALL_COMMAND_ID = /^cmd_hall_action_[0-9a-f]{64}$/
 const POSITIVE_DECIMAL = /^(0|[1-9][0-9]*)$/
 const JWT_COMPACT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
 const RESPONSE_FIELDS = new Set([
   'reassignmentId', 'commandId', 'taskId', 'workItemId', 'agentId', 'status',
   'leaseToken', 'leaseUntil', 'workItemVersion', 'attemptCount', 'maxAttempts', 'changedAt'
 ])
-const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
+const REASSIGNMENT_PAYLOAD_FIELDS = new Set([
+  'actionType', 'instruction', 'conversationType', 'reason', 'conversationId',
+  'triggerEventId', 'autonomyLevel', 'requiresApproval', 'context'
+])
+const REASSIGNMENT_CONTEXT_FIELDS = new Set([
+  'taskTitle', 'workItemTitle', 'requestSummary', 'reviewSummary', 'contextVersion',
+  'referenceIds', 'tags', 'bindingVersion', 'reassignmentId'
+])
+const RESOLVED_BINDING_FIELDS = new Set([
+  'bindingVersion', 'reassignmentId', 'sourceCommandId', 'expectedWorkItemVersion', 'targetAgentId'
+])
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 export const WORK_ITEM_LEASE_FAILURE = Object.freeze({
@@ -40,6 +52,33 @@ export class WorkItemLeaseError extends Error {
 const failure = (code, message, cause) => new WorkItemLeaseError(code, message, cause ? { cause } : {})
 
 const exact = (value, pattern = SAFE_SCOPE) => typeof value === 'string' && value === value.trim() && pattern.test(value)
+const exactKeys = (value, fields) => isObject(value)
+  && Object.keys(value).length === fields.size
+  && Object.keys(value).every(key => fields.has(key))
+const validSurrogates = value => {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index)
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+      index += 1
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false
+  }
+  return true
+}
+const boundedContent = (value, max) => typeof value === 'string' && value.length > 0
+  && value.length <= max && value === value.trim() && validSurrogates(value)
+  && !/[\u0000-\u001f\u007f]/.test(value)
+const nonSecretContent = (value, max) => {
+  if (!boundedContent(value, max)) return false
+  const lower = value.toLowerCase()
+  return ![
+    'authorization:', 'bearer ', 'x-api-key:', 'api-key:', 'apikey:', 'api_key=',
+    'api-key=', 'apikey=', 'password=', 'password:', 'passwd=', 'token=', 'token:',
+    'secret=', 'secret:', 'client_secret', 'access_token', 'refresh_token', 'private_key',
+    'ssh-rsa ', '-----begin private key', '-----begin rsa private key'
+  ].some(marker => lower.includes(marker))
+}
 
 const canonicalApiOrigin = wsUrl => {
   let endpoint
@@ -80,7 +119,8 @@ const requireReassignmentMarkers = message => {
 
 const sourceCommandId = message => {
   const values = message?.payload?.context?.referenceIds
-  if (!Array.isArray(values) || values.length !== 1 || !exact(values[0]) || values[0] === message.commandId) {
+  if (!Array.isArray(values) || values.length !== 1 || !exact(values[0], HALL_COMMAND_ID)
+      || values[0] === message.commandId) {
     throw failure(WORK_ITEM_LEASE_FAILURE.SOURCE_COMMAND_INVALID,
       'reassignment command must carry exactly one distinct source command reference')
   }
@@ -98,6 +138,40 @@ const expectedVersion = message => {
     throw failure(WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID, 'reassignment work-item version is outside the safe range')
   }
   return parsed
+}
+
+export const resolveReassignmentCommandBinding = message => {
+  const payload = message?.payload
+  const context = payload?.context
+  if (!exactKeys(payload, REASSIGNMENT_PAYLOAD_FIELDS)
+      || !exactKeys(context, REASSIGNMENT_CONTEXT_FIELDS)) {
+    throw failure(WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID,
+      'reassignment command payload/context contains unknown or missing fields')
+  }
+  if (context.bindingVersion !== REASSIGNMENT_BINDING_VERSION
+      || !exact(context.reassignmentId, REASSIGNMENT_ID)) {
+    throw failure(WORK_ITEM_LEASE_FAILURE.BINDING_UNAVAILABLE,
+      'reassignment command lacks the exact supported command binding')
+  }
+  if (context.taskTitle !== null || !nonSecretContent(context.workItemTitle, 500)
+      || context.requestSummary !== null || context.reviewSummary !== null
+      || payload.conversationId !== null || !exact(payload.triggerEventId)
+      || payload.autonomyLevel !== 'autonomous' || payload.requiresApproval !== false
+      || payload.conversationType !== 'juyiting'
+      || context.tags[0] !== 'lease-expired' || context.tags[1] !== 'reassignment'
+      || !nonSecretContent(payload.instruction, 8_000)) {
+    throw failure(WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID,
+      'reassignment command context is outside the E05 non-secret allowlist')
+  }
+  const source = sourceCommandId(message)
+  const version = expectedVersion(message)
+  return Object.freeze({
+    bindingVersion: context.bindingVersion,
+    reassignmentId: context.reassignmentId,
+    sourceCommandId: source,
+    expectedWorkItemVersion: version,
+    targetAgentId: message.targetAgentId
+  })
 }
 
 export const readBearerTokenFile = path => {
@@ -246,7 +320,8 @@ export class ReassignmentWorkItemLease {
   constructor({
     profile, runtimeInstanceId, tenantId = '', clientId = '', subjectAgentId = '',
     bearerTokenFile = '', leaseDurationMillis = 0, wsUrl,
-    fetchFn = globalThis.fetch, tokenProvider = null, bindingResolver = () => null,
+    fetchFn = globalThis.fetch, tokenProvider = null,
+    bindingResolver = resolveReassignmentCommandBinding,
     schedule = (callback, delay) => setTimeout(callback, delay), cancel = handle => clearTimeout(handle),
     now = () => Date.now()
   }) {
@@ -288,12 +363,20 @@ export class ReassignmentWorkItemLease {
     const source = sourceCommandId(message)
     const version = expectedVersion(message)
     const resolved = this.bindingResolver(message)
-    if (!isObject(resolved) || !exact(resolved.reassignmentId, REASSIGNMENT_ID)) {
+    if (!exactKeys(resolved, RESOLVED_BINDING_FIELDS)
+        || resolved.bindingVersion !== REASSIGNMENT_BINDING_VERSION
+        || !exact(resolved.reassignmentId, REASSIGNMENT_ID)) {
       throw failure(WORK_ITEM_LEASE_FAILURE.BINDING_UNAVAILABLE,
-        'reassignmentId is not present in the frozen command envelope and no trusted binding is available')
+        'reassignmentId is not present in the verified E05 command context')
     }
-    if (hasOwn(resolved, 'sourceCommandId') && resolved.sourceCommandId !== source) {
+    if (resolved.sourceCommandId !== source) {
       throw failure(WORK_ITEM_LEASE_FAILURE.SOURCE_COMMAND_INVALID, 'trusted reassignment binding changed source command identity')
+    }
+    if (resolved.expectedWorkItemVersion !== version) {
+      throw failure(WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID, 'trusted reassignment binding changed work-item version')
+    }
+    if (resolved.targetAgentId !== message.targetAgentId) {
+      throw failure(WORK_ITEM_LEASE_FAILURE.TARGET_MISMATCH, 'trusted reassignment binding changed target Agent identity')
     }
     return Object.freeze({
       reassignmentId: resolved.reassignmentId,

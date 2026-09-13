@@ -9,6 +9,7 @@ import {
   AgentMessageProcessor,
   DurableDedupeLedger,
   PersistentCommandInbox,
+  normalizeInboundMessage,
   runCodex
 } from '../agent-client.mjs'
 import {
@@ -40,6 +41,9 @@ const command = overrides => ({
   taskId: 'task-a',
   workItemId: 'work-a',
   targetAgentId: AGENT,
+  correlationId: 'task-a',
+  causationId: 'evt-e05',
+  intentId: 'rsi_' + 'd'.repeat(64),
   issuedAt: 1000,
   expiresAt: 9999999999999,
   attempt: 1,
@@ -48,12 +52,20 @@ const command = overrides => ({
     instruction: 'Execute reassigned work item',
     conversationType: 'juyiting',
     reason: 'lease_expired_reassignment',
+    conversationId: null,
+    triggerEventId: 'evt-e05',
     autonomyLevel: 'autonomous',
     requiresApproval: false,
     context: {
+      taskTitle: null,
+      workItemTitle: 'Implement E05',
+      requestSummary: null,
+      reviewSummary: null,
       contextVersion: '5',
       referenceIds: [PREVIOUS_COMMAND],
-      tags: ['lease-expired', 'reassignment']
+      tags: ['lease-expired', 'reassignment'],
+      bindingVersion: 'e05-reassignment-v1',
+      reassignmentId: REASSIGNMENT
     }
   },
   ...overrides
@@ -96,19 +108,73 @@ const coordinator = overrides => new ReassignmentWorkItemLease({
   leaseDurationMillis: 30_000,
   wsUrl: 'wss://api.example.test/ws/agent/channel',
   tokenProvider: () => 'header.payload.signature',
-  bindingResolver: () => ({ reassignmentId: REASSIGNMENT, sourceCommandId: PREVIOUS_COMMAND }),
   schedule: () => 1,
   cancel: () => {},
   now: () => 0,
   ...overrides
 })
 
-test('frozen backend reassignment envelope fails closed because reassignmentId is not transported', () => {
-  const lease = coordinator({ bindingResolver: () => null, fetchFn: async () => assert.fail('must not call API') })
+test('old E05 command without the versioned reassignment binding fails closed', () => {
+  const legacy = command()
+  const { bindingVersion, reassignmentId, ...oldContext } = legacy.payload.context
+  const lease = coordinator({ fetchFn: async () => assert.fail('must not call API') })
   assert.throws(
-    () => lease.preflight(command()),
-    error => error.code === WORK_ITEM_LEASE_FAILURE.BINDING_UNAVAILABLE
+    () => lease.preflight({ ...legacy, payload: { ...legacy.payload, context: oldContext } }),
+    error => error.code === WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID
   )
+})
+
+test('actual generated command.dispatch JSON is normalized and binds the exact E05 context', () => {
+  const normalized = normalizeInboundMessage(Buffer.from(JSON.stringify(command())))
+  const binding = coordinator().preflight(normalized)
+  assert.deepEqual(binding, {
+    reassignmentId: REASSIGNMENT,
+    sourceCommandId: PREVIOUS_COMMAND,
+    commandId: COMMAND,
+    taskId: 'task-a',
+    workItemId: 'work-a',
+    targetAgentId: AGENT,
+    expectedWorkItemVersion: 5,
+    runtimeInstanceId: 'runtime-local-1'
+  })
+})
+
+test('binding ID source version target and unknown resolved fields fail closed', () => {
+  const valid = {
+    bindingVersion: 'e05-reassignment-v1', reassignmentId: REASSIGNMENT,
+    sourceCommandId: PREVIOUS_COMMAND, expectedWorkItemVersion: 5, targetAgentId: AGENT
+  }
+  const cases = [
+    [{ ...valid, reassignmentId: 'rsn-invalid' }, WORK_ITEM_LEASE_FAILURE.BINDING_UNAVAILABLE],
+    [{ ...valid, sourceCommandId: 'cmd_hall_action_' + 'e'.repeat(64) }, WORK_ITEM_LEASE_FAILURE.SOURCE_COMMAND_INVALID],
+    [{ ...valid, expectedWorkItemVersion: 6 }, WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID],
+    [{ ...valid, targetAgentId: 'agt_' + 'e'.repeat(32) }, WORK_ITEM_LEASE_FAILURE.TARGET_MISMATCH],
+    [{ ...valid, bearerToken: 'forged' }, WORK_ITEM_LEASE_FAILURE.BINDING_UNAVAILABLE]
+  ]
+  for (const [resolved, code] of cases) {
+    assert.throws(
+      () => coordinator({ bindingResolver: () => resolved }).preflight(command()),
+      error => error.code === code
+    )
+  }
+})
+
+test('unknown payload/context fields and noncanonical source/version fail closed', () => {
+  const lease = coordinator({ fetchFn: async () => assert.fail('must not call API') })
+  const context = command().payload.context
+  for (const message of [
+    command({ payload: { ...command().payload, apiKey: 'forged' } }),
+    command({ payload: { ...command().payload, context: { ...context, leaseToken: 'forged' } } }),
+    command({ payload: { ...command().payload, context: { ...context, workItemTitle: 'Authorization: Bearer forged' } } }),
+    command({ payload: { ...command().payload, context: { ...context, contextVersion: '05' } } }),
+    command({ payload: { ...command().payload, context: { ...context, tags: ['reassignment', 'lease-expired'] } } }),
+    command({ payload: { ...command().payload, context: { ...context, referenceIds: [COMMAND] } } })
+  ]) {
+    assert.throws(() => lease.preflight(message), error => [
+      WORK_ITEM_LEASE_FAILURE.COMMAND_INVALID,
+      WORK_ITEM_LEASE_FAILURE.SOURCE_COMMAND_INVALID
+    ].includes(error.code))
+  }
 })
 
 test('partial reassignment markers fail closed instead of bypassing the lease path', () => {
@@ -209,6 +275,38 @@ test('old command rejection is not retried and never invokes Codex', async () =>
     fetchFn: async url => {
       calls += 1
       return response(url, 409, { code: 'WORK_ITEM_SOURCE_COMMAND_INVALID' })
+    }
+  })
+  const result = await lease.execute(command(), async () => { runs += 1; return { status: 'completed' } })
+  assert.equal(result.status, 'recovery_required')
+  assert.match(result.errorMessage, /WORK_ITEM_LEASE_STALE/)
+  assert.equal(calls, 1)
+  assert.equal(runs, 0)
+})
+
+test('mismatched reassignment response identity fails closed before Codex', async () => {
+  let calls = 0
+  let runs = 0
+  const lease = coordinator({
+    fetchFn: async url => {
+      calls += 1
+      return response(url, 200, leaseBody({ reassignmentId: 'rsn_' + 'e'.repeat(64) }))
+    }
+  })
+  const result = await lease.execute(command(), async () => { runs += 1; return { status: 'completed' } })
+  assert.equal(result.status, 'recovery_required')
+  assert.match(result.errorMessage, /WORK_ITEM_LEASE_RESPONSE_INVALID/)
+  assert.equal(calls, 1)
+  assert.equal(runs, 0)
+})
+
+test('mismatched initial work-item version fails closed before start or Codex', async () => {
+  let calls = 0
+  let runs = 0
+  const lease = coordinator({
+    fetchFn: async url => {
+      calls += 1
+      return response(url, 200, leaseBody({ workItemVersion: 6 }))
     }
   })
   const result = await lease.execute(command(), async () => { runs += 1; return { status: 'completed' } })

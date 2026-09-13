@@ -3891,7 +3891,7 @@ export const buildConfigurationReport = runtimeConfig => ({
       workspacePolicyId: profile.workspacePolicyId || null,
       commandReadiness: policyConfigured ? 'policy-configured; requires --validate' : 'blocked-no-workspace-policy',
       reassignmentLeaseReadiness: leaseConfigured
-        ? 'configured; command still requires a trusted reassignmentId binding'
+        ? 'configured; command requires a verified e05-reassignment-v1 context binding'
         : 'blocked-no-target-scoped-jwt',
       schedulingAbilities: resolveProfileAbilities(profile),
       errors: profileConfigurationErrors(profile),
