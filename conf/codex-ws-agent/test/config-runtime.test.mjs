@@ -520,3 +520,25 @@ test('section-style profile template has a conservative inherited sandbox', t =>
   assert.equal(report.profiles[0].codexSandbox, 'workspace-write')
   assert.equal(report.profiles[0].codexTimeoutMs, 900000)
 })
+
+
+test('profile task context-pack configuration is parsed without exposing the JWT file or WS key as auth', t => {
+  const root = fixture(t)
+  const selected = {
+    ...profileFor(root),
+    taskContextPackTenantId: 'tenant-a',
+    taskContextPackClientId: 'client-a',
+    taskContextPackSubjectAgentId: 'audit-agent',
+    taskContextPackBearerTokenFile: '/protected/audit-agent.jwt',
+    taskContextPackTimeoutMs: 1234,
+    apiKey: 'ws-key-secret'
+  }
+  const result = runCli(root, [selected], ['--inspect-config'])
+  assert.equal(result.status, 0, result.stderr)
+  const report = JSON.parse(result.stdout)
+  assert.equal(report.profiles[0].taskContextPackReadiness,
+    'configured; task dispatch reads metadata-only context before execution')
+  assert.equal(report.profiles[0].websocketAuthSource, 'profile.apiKey')
+  assert.equal(result.stdout.includes('/protected/audit-agent.jwt'), false)
+  assert.equal(result.stdout.includes('ws-key-secret'), false)
+})
