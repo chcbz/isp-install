@@ -1,0 +1,20 @@
+[Unit]
+Description=CYF Agent Runtime v1 (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/isp/apps/cyf-agent-runtime-v1/%i
+Environment=PATH=/home/isp/apps/nodejs/bin:/home/isp/apps/node/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/cyf-agent-runtime-v1/%i.conf
+ExecStartPre=/usr/bin/env node /home/isp/apps/cyf-agent-runtime-v1/%i/agent-runtime.mjs validate --manifest /home/isp/apps/cyf-agent-runtime-v1/%i/manifest.json
+ExecStart=/usr/bin/env node /home/isp/apps/cyf-agent-runtime-v1/%i/agent-runtime.mjs run --manifest /home/isp/apps/cyf-agent-runtime-v1/%i/manifest.json --state-dir /home/isp/apps/cyf-agent-runtime-v1/%i/runtime-state
+Restart=on-failure
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

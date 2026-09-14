@@ -2,12 +2,28 @@
 
 A separate Node 20 Runtime v1 package. It does not reuse `codex-ws-agent`, WebSocket URLs, `.env` files, legacy `api_key` configuration, profiles, or state.
 
-## Offline validation
+## Offline validation and installation
 
 ```bash
-node agent-runtime.mjs validate --manifest manifest.example.json
+./validate.sh --manifest manifest.example.json
 npm test
 ```
+
+The repository release profile also provides `./install.sh runtime-v1` (which invokes
+`shell/cyf_agent_runtime_v1_install.sh`) and the `systemd/cyf-agent-runtime-v1@.service`
+template. The copied Runtime v1 payload contains its own `install.sh`, `validate.sh`, and
+`systemd/` template. Both installers create a **new** directory and never copy, read, stop,
+or overwrite `codex-ws-agent` files.
+
+For a standalone sealed package delivery, use the payload installer with a real manifest:
+
+```bash
+./install.sh --target /home/isp/apps/cyf-agent-runtime-v1/AGENT_INSTANCE \
+  --manifest /secure/channel/manifest.json
+```
+
+It copies only Runtime v1 files, validates the installed manifest, creates a private
+`runtime-state/` directory, and does not enable or start a service.
 
 A deployment channel must deliver a real read-only `manifest.json` with exact `tenantId`, `clientId`, `canonicalAgentId`, `installationId`, `manifestVersion`, and `manifestSha256`. `manifestSha256` is calculated as `sha256:` plus the lowercase SHA-256 of the recursively key-sorted JSON object with the `manifestSha256` member omitted. This local packaging rule is deliberately isolated because the API design does not yet specify a manifest canonicalization wire format.
 

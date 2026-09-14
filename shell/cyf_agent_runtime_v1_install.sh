@@ -50,7 +50,7 @@ validate_node() {
 install_package() {
     install -d -m 0755 "$APP_HOME" "$APP_HOME/lib"
     install -d -m 0700 "$APP_HOME/runtime-state"
-    install -m 0755 "$CONF_SRC/agent-runtime.mjs" "$APP_HOME/agent-runtime.mjs"
+    install -m 0755 "$CONF_SRC/agent-runtime.mjs" "$CONF_SRC/install.sh" "$CONF_SRC/validate.sh" "$APP_HOME/"
     install -m 0644 "$CONF_SRC/lib/manifest.mjs" "$APP_HOME/lib/manifest.mjs"
     install -m 0644 "$CONF_SRC/lib/runtime-client.mjs" "$APP_HOME/lib/runtime-client.mjs"
     install -m 0644 "$CONF_SRC/lib/security.mjs" "$APP_HOME/lib/security.mjs"
@@ -58,11 +58,13 @@ install_package() {
     install -m 0644 "$CONF_SRC/README.md" "$APP_HOME/README.md"
     install -m 0644 "$CONF_SRC/manifest.example.json" "$APP_HOME/manifest.example.json"
     install -m 0644 "$CONF_SRC/runtime.env.example" "$APP_HOME/runtime.env.example"
+    install -d -m 0755 "$APP_HOME/systemd"
+    install -m 0644 "$CONF_SRC/systemd/$APP_NAME@.service" "$APP_HOME/systemd/$APP_NAME@.service"
 
     # A real manifest and root-only EnvironmentFile are supplied separately by
     # the controlled deployment channel. This installer never creates or copies
     # a .env, legacy URL API key, authorization, enrollment secret, or old state.
-    "$NODE_BIN" "$APP_HOME/agent-runtime.mjs" validate --manifest "$APP_HOME/manifest.example.json"
+    "$APP_HOME/validate.sh" --root "$APP_HOME" --manifest "$APP_HOME/manifest.example.json" --node "$NODE_BIN"
 }
 
 if [ "${CYF_RUNTIME_V1_INSTALL_TEST_MODE:-0}" != "1" ]; then
@@ -78,7 +80,7 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
 fi
 validate_node "$NODE_BIN"
 
-if [ ! -d "$CONF_SRC" ] || [ ! -f "$SERVICE_SRC" ]; then
+if [ ! -d "$CONF_SRC" ] || [ ! -f "$SERVICE_SRC" ] || [ ! -f "$CONF_SRC/install.sh" ] || [ ! -f "$CONF_SRC/validate.sh" ] || [ ! -f "$CONF_SRC/systemd/$APP_NAME@.service" ]; then
     __red "Runtime v1 package or service template is missing"
     exit 1
 fi
