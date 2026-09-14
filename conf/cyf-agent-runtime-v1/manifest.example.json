@@ -1,0 +1,9 @@
+{
+  "runtimeProtocolVersion": "v1",
+  "manifestVersion": "1",
+  "installationId": "INSTALLATION_ID_REQUIRED",
+  "tenantId": "TENANT_ID_REQUIRED",
+  "clientId": "CLIENT_ID_REQUIRED",
+  "canonicalAgentId": "CANONICAL_AGENT_ID_REQUIRED",
+  "manifestSha256": "sha256:4a7437fffaed32ae946b5bdb3d415e2f747f003a8d4dc4888cf2cb818ccb4169"
+}

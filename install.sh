@@ -117,6 +117,8 @@ declare -A COMPONENT_SCRIPTS=(
     ["ftp"]="pureftpd_install.sh"
     ["codex-ws-agent"]="codex_ws_agent_install.sh"
     ["codex"]="codex_ws_agent_install.sh"
+    ["cyf-agent-runtime-v1"]="cyf_agent_runtime_v1_install.sh"
+    ["runtime-v1"]="cyf_agent_runtime_v1_install.sh"
     ["xray"]="xray_install.sh"
     ["xray-core"]="xray_install.sh"
 )

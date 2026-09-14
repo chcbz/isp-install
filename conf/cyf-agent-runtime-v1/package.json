@@ -1,0 +1,12 @@
+{
+  "name": "@cyf/agent-runtime-v1",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Node 20 CYF Agent Runtime v1 client",
+  "type": "module",
+  "engines": { "node": ">=20 <21" },
+  "scripts": {
+    "test": "node --test",
+    "validate": "node agent-runtime.mjs validate --manifest manifest.example.json"
+  }
+}
