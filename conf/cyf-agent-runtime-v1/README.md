@@ -37,9 +37,9 @@ node agent-runtime.mjs run --manifest manifest.json --state-dir runtime-state
 
 The frozen design specifies endpoint paths but not request/response schemas or command-channel transport. This package therefore sends the documented identity fields to all Runtime v1 HTTP endpoints and assumes:
 
-1. enrollment accepts `enrollmentSecret` and returns `runtimeAuthorization`;
+1. enrollment accepts `enrollmentSecret` and returns `data.runtimeAuthorization` in CYF's common JSON envelope;
 2. runtime authorization is sent as `Authorization: Bearer <runtimeAuthorization>`;
-3. ACK body uses `status` and responses use optional `result: ADVANCED|PRIOR`;
-4. session/heartbeat can report `status` or `sessionStatus: REBINDS_REQUIRED`.
+3. ACK body uses `status` and returns `data.kind: ADVANCED|PRIOR`;
+4. session/heartbeat return `data.status`, including `REBINDS_REQUIRED`.
 
 No command-polling or command-channel transport is invented here: `run` establishes a session, heartbeats, and flushes already durable ACKs. An API-owned command channel contract is required before it can consume commands or execute F01/E05 work.

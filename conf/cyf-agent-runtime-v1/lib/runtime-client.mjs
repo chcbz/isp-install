@@ -62,6 +62,10 @@ export class RuntimeV1Client {
       error.status = response.status;
       throw error;
     }
+    // CYF Runtime v1 uses the common JsonResult envelope. Keep the transport
+    // boundary here so the rest of the client deals only with the v1 payload.
+    if (json && typeof json === 'object' && !Array.isArray(json)
+        && Object.prototype.hasOwnProperty.call(json, 'data')) return json.data;
     return json;
   }
 
@@ -124,7 +128,7 @@ export class RuntimeV1Client {
             `/agent/runtime/v1/commands/${encodeURIComponent(record.command.messageId)}/acks`,
             { ...record.command, status: ack.status }, authorization
           );
-          if (response.result && !['ADVANCED', 'PRIOR'].includes(response.result)) throw new Error('unexpected ACK result');
+          if (!response || !['ADVANCED', 'PRIOR'].includes(response.kind)) throw new Error('unexpected ACK result');
           delivered += 1;
         }
       } catch {

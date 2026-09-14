@@ -67,8 +67,9 @@ test('HTTP client sends explicit v1 identity, uses bearer authorization, and dur
     manifest: manifest(), apiBaseUrl: 'https://api.example.test', stateDir: directory,
     fetchFn: async (url, options) => {
       requests.push({ url, options, body: JSON.parse(options.body) });
-      if (url.endsWith('/enroll')) return response({ runtimeAuthorization: 'runtime-token' });
-      return response({ result: 'ADVANCED' });
+      if (url.endsWith('/enroll')) return response({ data: { runtimeAuthorization: 'runtime-token' } });
+      if (url.endsWith('/session') || url.endsWith('/heartbeat')) return response({ data: { status: 'ACTIVE' } });
+      return response({ data: { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: 1 } });
     }
   });
   await client.enroll('enroll-secret');
