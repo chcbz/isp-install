@@ -21,7 +21,11 @@ SERVICE_SRC="$ROOT_DIR/systemd/$APP_NAME@.service"
 SERVICE_DST="/etc/systemd/system/$APP_NAME@.service"
 
 find_node_bin() {
-    if [ -x "${ISP_APPS:-/home/isp/apps}/nodejs/bin/node" ]; then
+    # A controlled runtime may provide its exact Node 20 path when the default
+    # application-managed node has already moved to another major version.
+    if [ -n "${CYF_RUNTIME_V1_NODE_BIN:-}" ]; then
+        echo "$CYF_RUNTIME_V1_NODE_BIN"
+    elif [ -x "${ISP_APPS:-/home/isp/apps}/nodejs/bin/node" ]; then
         echo "${ISP_APPS:-/home/isp/apps}/nodejs/bin/node"
     elif [ -x "${ISP_APPS:-/home/isp/apps}/node/bin/node" ]; then
         echo "${ISP_APPS:-/home/isp/apps}/node/bin/node"
