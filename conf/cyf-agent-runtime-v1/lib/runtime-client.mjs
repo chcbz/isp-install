@@ -9,7 +9,8 @@ const REQUIRED_COMMAND_FIELDS = [
 
 function identityOf(manifest) {
   const { installationId, tenantId, clientId, canonicalAgentId, manifestVersion, manifestSha256 } = manifest;
-  return { installationId, tenantId, clientId, canonicalAgentId, manifestVersion, manifestSha256 };
+  // The sealed manifest keeps its self-digest in `sha256:<hex>` form; Runtime v1 wire DTOs carry bare lowercase hex.
+  return { installationId, tenantId, clientId, canonicalAgentId, manifestVersion, manifestSha256: manifestSha256.slice('sha256:'.length) };
 }
 
 function normalizeBaseUrl(apiBaseUrl) {

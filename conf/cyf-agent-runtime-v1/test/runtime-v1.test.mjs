@@ -76,6 +76,7 @@ test('HTTP client sends explicit v1 identity, uses bearer authorization, and dur
   assert.equal(requests[0].body.tenantId, 'tenant-a');
   assert.equal(requests[0].body.clientId, 'client-a');
   assert.equal(requests[0].body.canonicalAgentId, 'agent-a');
+  assert.equal(requests[0].body.manifestSha256, manifest().manifestSha256.slice('sha256:'.length));
   assert.equal(requests[0].body.enrollmentSecret, 'enroll-secret');
 
   await client.session();
