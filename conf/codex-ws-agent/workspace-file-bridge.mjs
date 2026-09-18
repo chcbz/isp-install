@@ -634,6 +634,31 @@ export class WorkspaceFileBridge {
     })
   }
 
+  async reportFailure(rawCommand, code, { runtimeAuthHeader, runtimeAgentId, runtimeInstanceId } = {}) {
+    const command = parseWorkspaceFileCommand(rawCommand)
+    const auth = validateRuntimeAuth(runtimeAuthHeader)
+    const runtimeHeaders = runtimeIdentityHeaders({ runtimeAgentId, runtimeInstanceId })
+    if (typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{0,99}$/.test(code)) fail('COMMAND_INVALID', 'failure code must be a stable uppercase identifier')
+    const endpoint = endpointUrl(this.#apiOrigin, `${INPUT_PREFIX}/${command.taskId}/runs/${command.runId}/failure`)
+    let response
+    try {
+      response = await this.#fetchFn(endpoint, {
+        method: 'POST', redirect: 'error',
+        headers: { Authorization: auth, ...runtimeHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      })
+    } catch {
+      fail('FAILURE_REPORT_FAILED', 'runtime failure report failed')
+    }
+    if (!response || response.status !== 200 || response.redirected === true) fail('FAILURE_REPORT_FAILED', 'runtime failure endpoint did not return a direct 200 response')
+    let observed
+    try { observed = new URL(response.url) } catch { fail('FAILURE_REPORT_FAILED', 'runtime failure response URL is invalid') }
+    if (observed.origin !== endpoint.origin || observed.pathname !== endpoint.pathname
+        || observed.search || observed.hash || observed.username || observed.password) {
+      fail('FAILURE_REPORT_FAILED', 'runtime failure response escaped the configured same-origin exact path')
+    }
+  }
+
   async uploadOutputsAndCommit(rawCommand, { runtimeAuthHeader, runtimeAgentId, runtimeInstanceId } = {}) {
     const command = parseWorkspaceFileCommand(rawCommand)
     const auth = validateRuntimeAuth(runtimeAuthHeader)

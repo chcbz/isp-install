@@ -33,6 +33,7 @@ import {
   pollWorkspaceFileCommands,
   resolveProfileAbilities,
   runCodex,
+  materializeImageGenerationResult,
   runManagedCommand,
   sanitizeWebSocketEndpoint,
   workspaceFilePrompt
@@ -2463,6 +2464,8 @@ const workspaceFileResponse = (bytes, url, status = 200) => ({
   body: (async function * () { yield bytes })()
 })
 
+const generatedPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9J4kAAAAAASUVORK5CYII=', 'base64')
+
 test('workspace file runtime auth stays process-memory only and profile configuration rejects a supplied header', () => {
   const source = readFileSync(new URL('../agent-client.mjs', import.meta.url), 'utf8')
   assert.match(source, /workspaceFileRuntimeAuthHeader must not be configured/)
@@ -2534,20 +2537,24 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
   assert.equal(JSON.stringify(reports).includes('runtime-secret'), false)
 })
 
-test('image workspace delivery requires imagegen and attaches only the materialized image input', async () => {
+test('image workspace delivery materializes the one built-in imagegen raster before upload', async () => {
   const root = temporaryDirectory()
-  const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const image = generatedPng
   const payload = workspaceFilePayload(image)
   payload.inputManifest[0] = {
     ...payload.inputManifest[0], inputId: 'source', relativePath: 'inputs/source.png',
     sha256: createHash('sha256').update(image).digest('hex'), length: image.length
   }
   payload.outputManifest[0] = {
-    ...payload.outputManifest[0], relativePath: 'outputs/result.png', contentType: 'image/png'
+    ...payload.outputManifest[0], relativePath: 'outputs/result.png', contentType: 'image/png', maxLength: 4096
   }
+  const calls = []
   const bridge = new WorkspaceFileBridge({
     apiOrigin: 'https://api.example.test', rootDir: root,
-    fetchFn: async (url, options = {}) => workspaceFileResponse(options.method === 'GET' ? image : Buffer.from('{"data":{}}'), url.toString())
+    fetchFn: async (url, options = {}) => {
+      calls.push({ url: url.toString(), options })
+      return workspaceFileResponse(options.method === 'GET' ? image : Buffer.from('{"data":{}}'), url.toString())
+    }
   })
   const outcome = await runManagedCommand({
     profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}` },
@@ -2558,15 +2565,50 @@ test('image workspace delivery requires imagegen and attaches only the materiali
     workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
     runCodexFn: async (_profile, codexMessage, _mode, overrides) => {
       assert.match(codexMessage.prompt, /authenticated Codex imagegen capability/)
-      assert.match(codexMessage.prompt, /Do not use deterministic overlays/)
+      assert.match(codexMessage.prompt, /Do not create a PNG\/JPEG yourself/)
       assert.deepEqual(overrides.imagePaths, [resolve(overrides.codexWorkdir, 'inputs/source.png')])
-      mkdirSync(resolve(overrides.codexWorkdir, 'outputs'), { recursive: true })
-      writeFileSync(resolve(overrides.codexWorkdir, 'outputs/result.png'), image)
+      overrides.onImageGenerationResult({ type: 'image_generation_call', status: 'completed', result: image.toString('base64') })
       return { status: 'completed', exitCode: 0 }
     },
+    materializeImageFn: args => materializeImageGenerationResult({ ...args, validateOutput: () => {} }),
     sendLegacyFn: () => {}, sendStatusFn: () => {}
   })
-  assert.equal(outcome.status, 'completed')
+  assert.equal(outcome.status, 'completed', outcome.errorMessage)
+  assert.equal(calls.filter(call => call.options.method === 'POST').length, 2)
+  const uploaded = calls.find(call => call.url.endsWith('/outputs/result/content'))
+  assert.ok(uploaded)
+  assert.deepEqual(Buffer.from(await uploaded.options.body.get('file').arrayBuffer()), image)
+})
+
+test('missing built-in imagegen result fails stably and reports it to the runtime', async () => {
+  const root = temporaryDirectory()
+  const payload = workspaceFilePayload()
+  payload.outputManifest[0] = { ...payload.outputManifest[0], relativePath: 'outputs/result.png', contentType: 'image/png' }
+  const calls = []
+  const bridge = new WorkspaceFileBridge({
+    apiOrigin: 'https://api.example.test', rootDir: root,
+    fetchFn: async (url, options = {}) => {
+      calls.push({ url: url.toString(), options })
+      return workspaceFileResponse(options.method === 'GET' ? Buffer.from('workspace input\n') : Buffer.from('{"data":{}}'), url.toString())
+    }
+  })
+  const outcome = await runManagedCommand({
+    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}` },
+    message: normalizeInboundMessage({ ...command(254), payload }),
+    skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
+    workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
+    workspaceFileBridge: bridge,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+    runCodexFn: async () => ({ status: 'completed', exitCode: 0 }),
+    sendLegacyFn: () => {}, sendStatusFn: () => {}
+  })
+  assert.equal(outcome.status, 'failed')
+  assert.match(outcome.errorMessage, /^WORKSPACE_IMAGEGEN_RESULT_MISSING:/)
+  const failure = calls.find(call => call.url.endsWith('/failure'))
+  assert.ok(failure)
+  assert.equal(failure.options.method, 'POST')
+  assert.deepEqual(JSON.parse(failure.options.body), { code: 'WORKSPACE_IMAGEGEN_RESULT_MISSING' })
+  assert.equal(calls.some(call => call.url.endsWith('/outputs/result/content')), false)
 })
 
 test('workspace file prompt never derives paths from untrusted instruction text', () => {
@@ -2737,7 +2779,7 @@ test('workspace file upload failure is reported failed after Codex and never com
     sendLegacyFn: (type, payload) => reports.push({ type, payload }),
     sendStatusFn: () => {}
   })
-  assert.equal(posts, 1)
+  assert.equal(posts, 2)
   assert.equal(outcome.status, 'failed')
   assert.match(outcome.errorMessage, /^UPLOAD_FAILED:/)
   assert.ok(reports.every(report => report.payload.status === 'failed'))

@@ -5,6 +5,7 @@ import {
   chmodSync,
   closeSync,
   constants as fsConstants,
+  copyFileSync,
   existsSync,
   fsyncSync,
   fstatSync,
@@ -3750,6 +3751,9 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
       agentReplyText += `${trimmed}\n`
       return
     }
+    if (isExactImageGenerationResult(event) && typeof overrides.onImageGenerationResult === 'function') {
+      try { overrides.onImageGenerationResult(event) } catch {}
+    }
     const sessionId = extractCodexSessionId(event)
     if (sessionCaptureEligible && sessionId) {
       runSessionId = sessionId
@@ -3908,6 +3912,65 @@ const strictWorkspaceFileCommand = message => {
  * uploadable output path.
  */
 const isImageContentType = value => value === 'image/png' || value === 'image/jpeg'
+const imageResultSignature = contentType => contentType === 'image/png'
+  ? Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  : Buffer.from([0xff, 0xd8, 0xff])
+
+const isExactImageGenerationResult = event => event && event.type === 'image_generation_call'
+  && event.status === 'completed' && typeof event.result === 'string' && event.result.length > 0
+
+const workspaceImageOutputs = command => command.outputs.filter(output => isImageContentType(output.contentType))
+
+export const materializeImageGenerationResult = ({ command, runDirectory, imageResults, validateOutput = validateWorkspaceFileOutput }) => {
+  const outputs = workspaceImageOutputs(command)
+  if (outputs.length !== 1) {
+    throw new AgentProtocolError('WORKSPACE_IMAGE_OUTPUT_AMBIGUOUS', 'image workspace delivery requires exactly one declared PNG or JPEG output')
+  }
+  const results = imageResults.filter(isExactImageGenerationResult)
+  if (results.length === 0) {
+    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_MISSING', 'Codex completed without one materializable built-in imagegen result')
+  }
+  if (results.length !== 1) {
+    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_AMBIGUOUS', 'Codex returned multiple built-in imagegen results for one declared output')
+  }
+
+  const output = outputs[0]
+  let bytes
+  try { bytes = Buffer.from(results[0].result, 'base64') } catch {
+    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_INVALID', 'built-in imagegen result could not be decoded')
+  }
+  const signature = imageResultSignature(output.contentType)
+  if (bytes.length < signature.length || !bytes.subarray(0, signature.length).equals(signature) || bytes.length > output.maxLength) {
+    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_INVALID', 'built-in imagegen result does not match the declared raster output')
+  }
+
+  const sourceDirectory = resolve(runDirectory, 'scratch', '.imagegen')
+  const sourcePath = resolve(sourceDirectory, `generated-${randomUUID()}${output.contentType === 'image/png' ? '.png' : '.jpg'}`)
+  const targetPath = resolve(runDirectory, ...output.relativePath.split('/'))
+  if (!targetPath.startsWith(`${resolve(runDirectory)}${sep}`) || !sourcePath.startsWith(`${resolve(runDirectory)}${sep}`)) {
+    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_INVALID', 'imagegen materialization escaped the private run directory')
+  }
+  mkdirSync(sourceDirectory, { recursive: true, mode: 0o700 })
+  try {
+    writeFileSync(sourcePath, bytes, { mode: 0o600, flag: 'wx' })
+    validateOutput(Object.freeze({ contentType: output.contentType, path: sourcePath, length: bytes.length }))
+    if (existsSync(targetPath)) {
+      const destination = lstatSync(targetPath)
+      if (!destination.isFile() || destination.isSymbolicLink()) {
+        throw new AgentProtocolError('WORKSPACE_IMAGE_OUTPUT_UNSAFE', 'declared image output is not a replaceable private regular file')
+      }
+      unlinkSync(targetPath)
+    }
+    mkdirSync(dirname(targetPath), { recursive: true, mode: 0o700 })
+    copyFileSync(sourcePath, targetPath, fsConstants.COPYFILE_EXCL)
+    chmodSync(targetPath, 0o600)
+    return Object.freeze({ relativePath: output.relativePath, length: bytes.length })
+  } catch (error) {
+    try { if (existsSync(sourcePath)) unlinkSync(sourcePath) } catch {}
+    if (error instanceof AgentProtocolError) throw error
+    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_INVALID', 'built-in imagegen result could not be validated and materialized')
+  }
+}
 
 const workspaceFileImageInputPaths = (command, runDirectory) => {
   if (!command.outputs.some(output => isImageContentType(output.contentType))) return []
@@ -3922,7 +3985,7 @@ export const workspaceFilePrompt = (message, command) => {
   const outputs = command.outputs.map(item => `- ${item.relativePath} (${item.contentType}; required delivery)`).join('\n')
   const imageDelivery = command.outputs.some(output => isImageContentType(output.contentType))
   const formatGuidance = imageDelivery
-    ? 'For PNG or JPEG outputs, use the authenticated Codex imagegen capability for the actual generation or edit. Do not use deterministic overlays, templates, or placeholder drawings as a substitute. When an image input is attached, it is the edit target: preserve the user-requested invariants. Use the release-local delivery tool only to validate the exact generated output; if imagegen cannot complete the request, fail rather than fabricate a result.'
+    ? 'For PNG or JPEG outputs, use the authenticated Codex imagegen capability for the actual generation or edit. Do not use deterministic overlays, templates, or placeholder drawings as a substitute. When an image input is attached, it is the edit target: preserve the user-requested invariants. Invoke the built-in imagegen capability exactly once for the one declared image output. Do not create a PNG/JPEG yourself: after a completed imagegen call, the runtime will materialize that exact generated raster into the declared output and validate it. If imagegen cannot complete the request, fail rather than fabricate a result.'
     : 'For DOCX, XLSX, PPTX, or PDF outputs, first inspect every declared source input and perform the requested semantic change in that original document. A new “modification notes” page, a worksheet named “修改说明”, a title-only change, or an appended PDF note is not a completed edit. Use local content-aware document tooling or a purpose-built script to update the source content, preserve requested invariants, write only the declared output path, then run the release-local delivery tool validate command on that exact output. The helper’s create shortcut may initialize a brand-new file, but it is not an edit engine and must never be used to substitute a generic requirement summary for the requested document.'
   const networkGuidance = imageDelivery
     ? 'Use no ad-hoc network or API calls. The authenticated built-in imagegen capability is the only allowed image-generation path.'
@@ -3953,7 +4016,8 @@ const workspaceFileFailure = (message, error) => ({
 })
 
 export const runWorkspaceFileCommand = async ({
-  profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex, sendStatusFn = sendStatus
+  profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
+  materializeImageFn = materializeImageGenerationResult, sendStatusFn = sendStatus
 }) => {
   const command = strictWorkspaceFileCommand(message)
   if (!command) return null
@@ -3966,6 +4030,7 @@ export const runWorkspaceFileCommand = async ({
 
   const title = message.title || message.currentTaskTitle || 'Codex 执行任务'
   let materialized = false
+  const imageResults = []
   let result
   sendStatusFn(profile, 'busy', { taskId: message.taskId || command.taskId, title })
   try {
@@ -3983,6 +4048,7 @@ export const runWorkspaceFileCommand = async ({
       requireWorkspace: false,
       forceNewSession: true,
       imagePaths: workspaceFileImageInputPaths(command, materializedRun.runDirectory),
+      onImageGenerationResult: event => imageResults.push(event),
       env: workspaceFileToolchainEnvironment(),
       sendLegacyFn: () => {},
       sendStatusFn: () => {}
@@ -3990,6 +4056,9 @@ export const runWorkspaceFileCommand = async ({
     if (outcome?.status !== 'completed') {
       result = outcome || workspaceFileFailure(message, new Error('Codex did not return an execution outcome'))
     } else {
+      if (workspaceImageOutputs(command).length) {
+        materializeImageFn({ command, runDirectory: materializedRun.runDirectory, imageResults })
+      }
       const committed = await workspaceFileBridge.uploadOutputsAndCommit(message.payload, {
         runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
         runtimeAgentId: profile.agentId,
@@ -4002,6 +4071,16 @@ export const runWorkspaceFileCommand = async ({
       ? error
       : new AgentProtocolError('WORKSPACE_FILE_ERROR', 'workspace file command failed'))
   } finally {
+    if (materialized && result?.status === 'failed') {
+      const match = /^([A-Z][A-Z0-9_]{0,99}):/.exec(result.errorMessage || '')
+      try {
+        await workspaceFileBridge.reportFailure(message.payload, match?.[1] || 'CODEX_EXECUTION_FAILED', {
+          runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
+          runtimeAgentId: profile.agentId,
+          runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+        })
+      } catch {}
+    }
     if (materialized) {
       try { workspaceFileBridge.cleanup(message.payload) } catch (error) {
         result = workspaceFileFailure(message, error)
@@ -4014,10 +4093,10 @@ export const runWorkspaceFileCommand = async ({
 
 export const runManagedCommand = async ({
   profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
-  sendLegacyFn = sendLegacy, sendStatusFn = sendStatus
+  materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus
 }) => {
   const workspaceFileResult = await runWorkspaceFileCommand({
-    profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader, runCodexFn, sendStatusFn
+    profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader, runCodexFn, materializeImageFn, sendStatusFn
   })
   if (workspaceFileResult) {
     // Private workspace runs have no public task projection. A successfully committed output
