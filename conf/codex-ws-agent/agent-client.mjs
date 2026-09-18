@@ -30,6 +30,7 @@ import { pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
+import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -480,6 +481,9 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
       profile.workspaceNonCodingCommandTypes ?? fallback.workspaceNonCodingCommandTypes
     ),
     workspaceFallbackWorkdir: profile.workspaceFallbackWorkdir || fallback.workspaceFallbackWorkdir || '',
+    workspaceFileApiOrigin: profile.workspaceFileApiOrigin || fallback.workspaceFileApiOrigin || '',
+    workspaceFileRootDir: profile.workspaceFileRootDir || fallback.workspaceFileRootDir || '',
+    workspaceFileRuntimeAuthHeader: profile.workspaceFileRuntimeAuthHeader || fallback.workspaceFileRuntimeAuthHeader || '',
     enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
@@ -504,6 +508,9 @@ const legacyProfile = () => normalizeProfile({
   workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
   workspaceNonCodingCommandTypes: process.env.CODEX_WORKSPACE_NON_CODING_COMMAND_TYPES || '',
   workspaceFallbackWorkdir: process.env.CODEX_WORKSPACE_FALLBACK_WORKDIR || '',
+  workspaceFileApiOrigin: process.env.CODEX_WORKSPACE_FILE_API_ORIGIN || '',
+  workspaceFileRootDir: process.env.CODEX_WORKSPACE_FILE_ROOT_DIR || '',
+  workspaceFileRuntimeAuthHeader: process.env.CODEX_WORKSPACE_FILE_RUNTIME_AUTH_HEADER || '',
   isDefault: true
 })
 
@@ -3608,7 +3615,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   const sessionStore = overrides.sessionStore || codexSessionStore
   let args
   try {
-    args = buildCodexArgs(profile, message, prompt, codexWorkdir, Boolean(workspace), sessionStore)
+    args = buildCodexArgs(profile, message, prompt, codexWorkdir, Boolean(workspace) || overrides.forceNewSession === true, sessionStore)
   } catch (error) {
     const leaseError = releaseWorkspaceLease()
     const code = error.code || 'CODEX_SESSION_ERROR'
@@ -3784,6 +3791,10 @@ const profileConfigurationErrors = profile => {
   if (!Number.isSafeInteger(profile.codexTimeoutMs) || profile.codexTimeoutMs < 0 || profile.codexTimeoutMs > 2147483647) {
     errors.push('codexTimeoutMs must be an integer from 0 to 2147483647 (0 disables the timeout)')
   }
+  const workspaceFileControls = [profile.workspaceFileApiOrigin, profile.workspaceFileRootDir, profile.workspaceFileRuntimeAuthHeader]
+  if (workspaceFileControls.some(value => Boolean(value)) && workspaceFileControls.some(value => !value)) {
+    errors.push('workspaceFileApiOrigin, workspaceFileRootDir, and workspaceFileRuntimeAuthHeader must be configured together')
+  }
   return errors
 }
 
@@ -3818,6 +3829,8 @@ export const buildConfigurationReport = runtimeConfig => ({
       modelSource: profile.codexModel ? 'agent --model' : 'Codex configuration/default',
       websocketAuthSource: profile.apiKey ? 'profile.apiKey' : (process.env.OPENCLAW_API_KEY ? 'OPENCLAW_API_KEY' : 'missing'),
       workspacePolicyId: profile.workspacePolicyId || null,
+      workspaceFileRuntime: profile.workspaceFileApiOrigin && profile.workspaceFileRootDir && profile.workspaceFileRuntimeAuthHeader
+        ? 'configured' : 'disabled',
       commandReadiness: policyConfigured ? 'policy-configured; requires --validate' : 'blocked-no-workspace-policy',
       schedulingAbilities: resolveProfileAbilities(profile),
       errors: profileConfigurationErrors(profile),
@@ -3827,11 +3840,86 @@ export const buildConfigurationReport = runtimeConfig => ({
 })
 
 
-export const runManagedCommand = ({ profile, message, skillInstallManager, workspaceManager, runCodexFn = runCodex }) => (
-  message.commandType === 'SKILL_INSTALL'
+const strictWorkspaceFileCommand = message => {
+  try { return parseWorkspaceFileCommand(message?.payload) } catch { return null }
+}
+
+const workspaceFileFailure = (message, error) => ({
+  status: 'failed',
+  taskId: message.taskId || message.workItemId || message.commandId || '',
+  workItemId: message.workItemId || '',
+  commandId: message.commandId || '',
+  errorMessage: `${error.code || 'WORKSPACE_FILE_ERROR'}: ${error.message}`
+})
+
+export const runWorkspaceFileCommand = async ({
+  profile, message, workspaceFileBridge, runCodexFn = runCodex, sendStatusFn = sendStatus
+}) => {
+  const command = strictWorkspaceFileCommand(message)
+  if (!command) return null
+  if (!workspaceFileBridge || !profile.workspaceFileRuntimeAuthHeader) {
+    return workspaceFileFailure(message, new AgentProtocolError(
+      'WORKSPACE_FILE_RUNTIME_UNAVAILABLE',
+      'Strict workspace file command requires controlled runtime API origin, root, and authorization configuration'
+    ))
+  }
+
+  const title = message.title || message.currentTaskTitle || 'Codex 执行任务'
+  let materialized = false
+  let result
+  sendStatusFn(profile, 'busy', { taskId: message.taskId || command.taskId, title })
+  try {
+    const materializedRun = await workspaceFileBridge.materializeInputs(message.payload, {
+      runtimeAuthHeader: profile.workspaceFileRuntimeAuthHeader
+    })
+    materialized = true
+    const outcome = await runCodexFn(profile, message, 'command', {
+      codexWorkdir: materializedRun.runDirectory,
+      requireWorkspace: false,
+      forceNewSession: true,
+      sendLegacyFn: () => {},
+      sendStatusFn: () => {}
+    })
+    if (outcome?.status !== 'completed') {
+      result = outcome || workspaceFileFailure(message, new Error('Codex did not return an execution outcome'))
+    } else {
+      const committed = await workspaceFileBridge.uploadOutputsAndCommit(message.payload, {
+        runtimeAuthHeader: profile.workspaceFileRuntimeAuthHeader
+      })
+      result = { ...outcome, workspaceFileManifestId: committed.manifestId }
+    }
+  } catch (error) {
+    result = workspaceFileFailure(message, error instanceof WorkspaceFileBridgeError || error instanceof AgentProtocolError
+      ? error
+      : new AgentProtocolError('WORKSPACE_FILE_ERROR', 'workspace file command failed'))
+  } finally {
+    if (materialized) {
+      try { workspaceFileBridge.cleanup(message.payload) } catch (error) {
+        result = workspaceFileFailure(message, error)
+      }
+    }
+    sendStatusFn(profile, 'online')
+  }
+  return result
+}
+
+export const runManagedCommand = async ({
+  profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, runCodexFn = runCodex,
+  sendLegacyFn = sendLegacy, sendStatusFn = sendStatus
+}) => {
+  const workspaceFileResult = await runWorkspaceFileCommand({
+    profile, message, workspaceFileBridge, runCodexFn, sendStatusFn
+  })
+  if (workspaceFileResult) {
+    const payload = workspaceFileResult
+    sendLegacyFn('task.report', payload, profile)
+    sendLegacyFn('codex.result', payload, profile)
+    return payload
+  }
+  return message.commandType === 'SKILL_INSTALL'
     ? skillInstallManager.execute(message)
     : runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
-)
+}
 
 const canonicalizeConfiguredPath = configuredPath => {
   let existingPrefix = resolve(configuredPath)
@@ -3951,6 +4039,13 @@ const createProfileState = profile => {
   const workspaceManager = workspacePolicy
     ? new GitWorkspaceManager({ policy: workspacePolicy, agentId: profile.agentId, role: profile.workspaceRole }).initialize()
     : null
+  const workspaceFileBridge = profile.workspaceFileApiOrigin && profile.workspaceFileRootDir && profile.workspaceFileRuntimeAuthHeader
+    ? new WorkspaceFileBridge({
+      apiOrigin: profile.workspaceFileApiOrigin,
+      rootDir: profile.workspaceFileRootDir,
+      fetchFn: globalThis.fetch
+    })
+    : null
   const inbox = new PersistentCommandInbox({
     rootDir: config.commandInboxDir,
     profile,
@@ -3998,6 +4093,7 @@ const createProfileState = profile => {
     ackOutbox,
     skillInstallManager,
     workspaceManager,
+    workspaceFileBridge,
     processor: null,
     registration: new RegistrationAckObserver({
       agentId: profile.agentId,
@@ -4012,7 +4108,7 @@ const createProfileState = profile => {
     inbox,
     runCommand: message => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
-      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager })
+      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge })
     },
     runChat: message => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')

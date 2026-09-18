@@ -20,6 +20,7 @@ import test, { afterEach } from 'node:test'
 import {
   WorkspaceFileBridge,
   WorkspaceFileBridgeError,
+  buildOutputCommit,
   parseWorkspaceFileCommand
 } from '../workspace-file-bridge.mjs'
 
@@ -308,4 +309,92 @@ test('output collection rejects undeclared files, symlinks, oversized output, an
     writeFileSync(materialized.inputs[0].path, Buffer.alloc(bytes.length, 0x78))
     assertBridgeCode(() => bridge.collectOutputs(command), 'INPUT_CHANGED')
   })
+})
+
+
+test('uploads each declared output then commits its canonical output manifest with transient runtime auth', async () => {
+  const bytes = Buffer.from('trusted input\n')
+  const alpha = Buffer.from('alpha\n')
+  const result = Buffer.from('{"ok":true}\n')
+  const root = temporaryDirectory()
+  const command = commandFor(bytes, {
+    outputManifest: [
+      {
+        outputId: 'result', relativePath: 'outputs/result.json',
+        uploadPath: '/internal/agent/tasks/task-1/runs/run-1/outputs/result/content',
+        contentType: 'application/json', maxLength: 4096
+      },
+      {
+        outputId: 'alpha', relativePath: 'outputs/alpha.txt',
+        uploadPath: '/internal/agent/tasks/task-1/runs/run-1/outputs/alpha/content',
+        contentType: 'text/plain', maxLength: 4096
+      }
+    ]
+  })
+  const requests = []
+  const bridge = bridgeFor(root, async (url, options = {}) => {
+    requests.push({ url: url.toString(), options })
+    if (options.method === 'GET') return responseFor(bytes, url.toString())
+    return responseFor(Buffer.from('{"data":{}}'), url.toString())
+  })
+  const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
+  writeFileSync(resolve(materialized.runDirectory, 'outputs/result.json'), result)
+  writeFileSync(resolve(materialized.runDirectory, 'outputs/alpha.txt'), alpha)
+
+  const expected = buildOutputCommit({
+    taskId: 'task-1', runId: 'run-1', uploads: [
+      { outputId: 'result', sha256: digest(result), length: result.length },
+      { outputId: 'alpha', sha256: digest(alpha), length: alpha.length }
+    ]
+  })
+  const committed = await bridge.uploadOutputsAndCommit(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  assert.equal(committed.manifestId, expected.manifestId)
+  assert.equal(requests.length, 4)
+  const uploads = requests.slice(1, 3)
+  assert.deepEqual(uploads.map(request => request.options.headers.Authorization), ['Bearer runtime-secret', 'Bearer runtime-secret'])
+  assert.deepEqual(uploads.map(request => request.options.headers['Idempotency-Key']), [
+    `pwe-output-task-1-run-1-result-${digest(result).slice(0, 16)}`,
+    `pwe-output-task-1-run-1-alpha-${digest(alpha).slice(0, 16)}`
+  ])
+  assert.ok(uploads.every(request => request.options.body instanceof FormData))
+  assert.equal(uploads[0].options.body.get('outputId'), 'result')
+  assert.equal(uploads[1].options.body.get('outputId'), 'alpha')
+  const commit = requests[3]
+  assert.equal(commit.url, `https://api.example.test${expected.path}`)
+  assert.deepEqual(commit.options.headers, {
+    Authorization: 'Bearer runtime-secret',
+    'Idempotency-Key': expected.idempotencyKey,
+    'Content-Type': 'application/json'
+  })
+  assert.equal(commit.options.body, JSON.stringify(expected.body))
+  bridge.cleanup(command)
+  assert.equal(existsSync(materialized.runDirectory), false)
+})
+
+test('upload or commit failures fail closed without treating the manifest as committed', async t => {
+  const bytes = Buffer.from('trusted input\n')
+  for (const [name, failedStatus, expectedCode, expectedPostCount] of [
+    ['upload', 500, 'UPLOAD_FAILED', 1],
+    ['commit', 500, 'COMMIT_FAILED', 2]
+  ]) {
+    await t.test(name, async () => {
+      const root = temporaryDirectory()
+      let postCount = 0
+      const bridge = bridgeFor(root, async (url, options = {}) => {
+        if (options.method === 'GET') return responseFor(bytes, url.toString())
+        postCount += 1
+        const status = postCount === expectedPostCount ? failedStatus : 200
+        return responseFor(Buffer.from('{"data":{}}'), url.toString(), { status })
+      })
+      const command = commandFor(bytes)
+      const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+      mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
+      writeFileSync(resolve(materialized.runDirectory, 'outputs/result.json'), '{}')
+      await assertRejectsCode(() => bridge.uploadOutputsAndCommit(command, { runtimeAuthHeader: 'Bearer runtime-secret' }), expectedCode)
+      assert.equal(postCount, expectedPostCount)
+      bridge.cleanup(command)
+      assert.equal(existsSync(materialized.runDirectory), false)
+    })
+  }
 })

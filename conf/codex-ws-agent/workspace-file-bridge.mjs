@@ -93,6 +93,10 @@ const expectedOutputPath = (taskId, runId, outputId) => (
   `${INPUT_PREFIX}/${taskId}/runs/${runId}/outputs/${outputId}/content`
 )
 
+const expectedCommitPath = (taskId, runId, manifestId) => (
+  `${INPUT_PREFIX}/${taskId}/runs/${runId}/output-commits/${manifestId}`
+)
+
 const freezeList = list => Object.freeze(list.map(item => Object.freeze(item)))
 
 export const parseWorkspaceFileCommand = command => {
@@ -239,6 +243,22 @@ const assertInside = (parent, candidate) => {
 }
 
 const commandFingerprint = command => createHash('sha256').update(JSON.stringify(command)).digest('hex')
+
+export const buildOutputCommit = ({ taskId, runId, uploads }) => {
+  const outputs = [...uploads].map(upload => ({
+    outputId: upload.outputId,
+    sha256: upload.sha256,
+    length: upload.length
+  })).sort((left, right) => left.outputId < right.outputId ? -1 : left.outputId > right.outputId ? 1 : 0)
+  const sequence = outputs.map(output => `${output.outputId}\n${output.sha256}\n${output.length}\n`).join('')
+  const manifestId = `pwe_m_${createHash('sha256').update(sequence, 'utf8').digest('hex')}`
+  return Object.freeze({
+    manifestId,
+    idempotencyKey: `pwe-commit-${manifestId.slice(6)}`,
+    path: expectedCommitPath(taskId, runId, manifestId),
+    body: Object.freeze({ outputs: freezeList(outputs) })
+  })
+}
 
 const validateRuntimeAuth = value => {
   if (typeof value !== 'string' || !value || value.length > AUTH_MAX_LENGTH || /[\r\n\u0000]/.test(value)) {
@@ -494,5 +514,104 @@ export class WorkspaceFileBridge {
       runDirectory,
       uploads: Object.freeze(uploads)
     })
+  }
+
+  async uploadOutputsAndCommit(rawCommand, { runtimeAuthHeader } = {}) {
+    const command = parseWorkspaceFileCommand(rawCommand)
+    const auth = validateRuntimeAuth(runtimeAuthHeader)
+    if (typeof this.#fetchFn !== 'function') fail('CONFIG_INVALID', 'fetchFn must be a function')
+    const collected = this.collectOutputs(rawCommand)
+    const responseHasData = async response => {
+      if (response?.body && typeof response.body[Symbol.asyncIterator] === 'function') {
+        for await (const chunk of response.body) return Buffer.from(chunk).length > 0
+        return false
+      }
+      if (typeof response?.arrayBuffer === 'function') return Buffer.from(await response.arrayBuffer()).length > 0
+      return false
+    }
+    const assertDirectSuccess = (response, endpoint, statuses, code) => {
+      if (!response || !statuses.has(response.status) || response.redirected === true) {
+        fail(code, 'runtime API did not return an allowed direct success response')
+      }
+      let observed
+      try { observed = new URL(response.url) } catch { fail(code, 'runtime API response URL is invalid') }
+      if (observed.origin !== endpoint.origin || observed.pathname !== endpoint.pathname
+          || observed.search || observed.hash || observed.username || observed.password) {
+        fail(code, 'runtime API response escaped the configured same-origin exact path')
+      }
+    }
+
+    for (const upload of collected.uploads) {
+      const endpoint = new URL(upload.request.url)
+      const form = new FormData()
+      for (const field of upload.request.multipart.fields) form.append(field.name, field.value)
+      const bytes = readBoundedRegularFile(upload.path, upload.length)
+      if (bytes.length !== upload.length || createHash('sha256').update(bytes).digest('hex') !== upload.sha256) {
+        fail('OUTPUT_CHANGED', 'declared output changed after collection and before upload')
+      }
+      form.append(
+        upload.request.multipart.file.fieldName,
+        new Blob([bytes], { type: upload.request.multipart.file.contentType }),
+        upload.request.multipart.file.fileName
+      )
+      let response
+      try {
+        response = await this.#fetchFn(endpoint, {
+          method: 'POST',
+          redirect: 'error',
+          headers: {
+            Authorization: auth,
+            'Idempotency-Key': `pwe-output-${command.taskId}-${command.runId}-${upload.outputId}-${upload.sha256.slice(0, 16)}`
+          },
+          body: form
+        })
+      } catch {
+        fail('UPLOAD_FAILED', 'declared output upload failed')
+      }
+      assertDirectSuccess(response, endpoint, new Set([200, 201]), 'UPLOAD_FAILED')
+    }
+
+    const commit = buildOutputCommit({ taskId: command.taskId, runId: command.runId, uploads: collected.uploads })
+    const endpoint = endpointUrl(this.#apiOrigin, commit.path)
+    let response
+    try {
+      response = await this.#fetchFn(endpoint, {
+        method: 'POST',
+        redirect: 'error',
+        headers: {
+          Authorization: auth,
+          'Idempotency-Key': commit.idempotencyKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(commit.body)
+      })
+    } catch {
+      fail('COMMIT_FAILED', 'output manifest commit failed')
+    }
+    assertDirectSuccess(response, endpoint, new Set([200]), 'COMMIT_FAILED')
+    if (!(await responseHasData(response))) fail('COMMIT_FAILED', 'output manifest commit response has no body data')
+    return Object.freeze({
+      taskId: command.taskId,
+      runId: command.runId,
+      manifestId: commit.manifestId,
+      outputs: commit.body.outputs
+    })
+  }
+
+  cleanup(rawCommand) {
+    const command = parseWorkspaceFileCommand(rawCommand)
+    const key = this._runKey(command)
+    const binding = this.#runs.get(key)
+    if (!binding || binding.fingerprint !== commandFingerprint(command)) {
+      fail('RUN_NOT_BOUND', 'taskId/runId manifest is not bound to a materialized private run')
+    }
+    try {
+      assertNoSymlinkComponents(binding.runDirectory)
+      rmSync(binding.runDirectory, { recursive: true, force: false })
+      this.#runs.delete(key)
+    } catch (error) {
+      if (error instanceof WorkspaceFileBridgeError) throw error
+      fail('CLEANUP_FAILED', 'private workspace file run cleanup failed')
+    }
   }
 }

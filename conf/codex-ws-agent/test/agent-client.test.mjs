@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createServer } from 'node:http'
-import { chmodSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -31,8 +32,10 @@ import {
   normalizeInboundMessage,
   resolveProfileAbilities,
   runCodex,
+  runManagedCommand,
   sanitizeWebSocketEndpoint
 } from '../agent-client.mjs'
+import { WorkspaceFileBridge } from '../workspace-file-bridge.mjs'
 
 const temporaryDirectories = []
 afterEach(() => {
@@ -2432,4 +2435,150 @@ test('standalone --validate still works with a06 additions', () => {
     }
   })
   assert.match(output, /configuration valid/)
+})
+
+
+const workspaceFilePayload = (inputBytes = Buffer.from('workspace input\n')) => ({
+  taskId: 'task-1',
+  runId: 'run-1',
+  inputManifest: [{
+    inputId: 'source', relativePath: 'inputs/source.txt',
+    downloadPath: '/internal/agent/tasks/task-1/runs/run-1/inputs/source/content',
+    sha256: createHash('sha256').update(inputBytes).digest('hex'), length: inputBytes.length
+  }],
+  outputManifest: [{
+    outputId: 'result', relativePath: 'outputs/result.json',
+    uploadPath: '/internal/agent/tasks/task-1/runs/run-1/outputs/result/content',
+    contentType: 'application/json', maxLength: 4096
+  }]
+})
+
+const workspaceFileResponse = (bytes, url, status = 200) => ({
+  status,
+  redirected: false,
+  url,
+  headers: { get: name => name.toLowerCase() === 'content-length' ? String(bytes.length) : null },
+  body: (async function * () { yield bytes })()
+})
+
+test('strict workspace file payload uses only its private run cwd, uploads and commits before completed reports', async () => {
+  const input = Buffer.from('workspace input\n')
+  const root = temporaryDirectory()
+  const calls = []
+  const bridge = new WorkspaceFileBridge({
+    apiOrigin: 'https://api.example.test', rootDir: root,
+    fetchFn: async (url, options = {}) => {
+      calls.push({ url: url.toString(), options })
+      const bytes = options.method === 'GET' ? input : Buffer.from('{"data":{}}')
+      return workspaceFileResponse(bytes, url.toString(), 200)
+    }
+  })
+  const configured = {
+    ...profile,
+    workspaceFileApiOrigin: 'https://api.example.test',
+    workspaceFileRootDir: root,
+    workspaceFileRuntimeAuthHeader: 'Bearer runtime-secret'
+  }
+  const message = normalizeInboundMessage({
+    ...command(250),
+    content: 'write the declared result',
+    payload: workspaceFilePayload(input)
+  })
+  const reports = []
+  const statuses = []
+  const outcome = await runManagedCommand({
+    profile: configured,
+    message,
+    skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
+    workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
+    workspaceFileBridge: bridge,
+    runCodexFn: async (_profile, _message, _mode, overrides) => {
+      assert.equal(overrides.requireWorkspace, false)
+      assert.equal(overrides.forceNewSession, true)
+      assert.match(overrides.codexWorkdir, /task-1\/run-1$/)
+      assert.equal(existsSync(resolve(overrides.codexWorkdir, 'inputs/source.txt')), true)
+      mkdirSync(resolve(overrides.codexWorkdir, 'outputs'), { recursive: true })
+      writeFileSync(resolve(overrides.codexWorkdir, 'outputs/result.json'), '{"ok":true}\n')
+      return { status: 'completed', exitCode: 0, output: 'done' }
+    },
+    sendLegacyFn: (type, payload) => reports.push({ type, payload }),
+    sendStatusFn: (_profile, status) => statuses.push(status)
+  })
+  assert.equal(outcome.status, 'completed')
+  assert.match(outcome.workspaceFileManifestId, /^pwe_m_[0-9a-f]{64}$/)
+  assert.deepEqual(reports.map(report => report.type), ['task.report', 'codex.result'])
+  assert.ok(reports.every(report => report.payload.status === 'completed'))
+  assert.deepEqual(statuses, ['busy', 'online'])
+  assert.equal(calls.length, 3)
+  assert.equal(calls[1].options.headers.Authorization, 'Bearer runtime-secret')
+  assert.equal(calls[2].options.headers.Authorization, 'Bearer runtime-secret')
+  assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), false)
+  assert.equal(JSON.stringify(reports).includes('runtime-secret'), false)
+})
+
+test('strict workspace file runtime failure reports failed only and command fingerprint binds manifests', async () => {
+  const input = Buffer.from('workspace input\n')
+  const message = normalizeInboundMessage({ ...command(251), payload: workspaceFilePayload(input) })
+  const changed = normalizeInboundMessage({
+    ...command(251),
+    payload: {
+      ...workspaceFilePayload(input),
+      outputManifest: [{ ...workspaceFilePayload(input).outputManifest[0], maxLength: 4095 }]
+    }
+  })
+  assert.notEqual(CommandFingerprint.compute(message), CommandFingerprint.compute(changed))
+  const reports = []
+  const outcome = await runManagedCommand({
+    profile,
+    message,
+    skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
+    workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
+    workspaceFileBridge: null,
+    runCodexFn: async () => assert.fail('must fail before Codex'),
+    sendLegacyFn: (type, payload) => reports.push({ type, payload }),
+    sendStatusFn: () => assert.fail('must not set status without runtime')
+  })
+  assert.equal(outcome.status, 'failed')
+  assert.match(outcome.errorMessage, /^WORKSPACE_FILE_RUNTIME_UNAVAILABLE:/)
+  assert.deepEqual(reports.map(report => report.type), ['task.report', 'codex.result'])
+  assert.ok(reports.every(report => report.payload.status === 'failed'))
+})
+
+test('workspace file upload failure is reported failed after Codex and never completed', async () => {
+  const input = Buffer.from('workspace input\n')
+  const root = temporaryDirectory()
+  let posts = 0
+  const bridge = new WorkspaceFileBridge({
+    apiOrigin: 'https://api.example.test', rootDir: root,
+    fetchFn: async (url, options = {}) => {
+      if (options.method === 'GET') return workspaceFileResponse(input, url.toString())
+      posts += 1
+      return workspaceFileResponse(Buffer.from('{"data":{}}'), url.toString(), 500)
+    }
+  })
+  const reports = []
+  const outcome = await runManagedCommand({
+    profile: {
+      ...profile,
+      workspaceFileApiOrigin: 'https://api.example.test',
+      workspaceFileRootDir: root,
+      workspaceFileRuntimeAuthHeader: 'Bearer runtime-secret'
+    },
+    message: normalizeInboundMessage({ ...command(252), payload: workspaceFilePayload(input) }),
+    skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
+    workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
+    workspaceFileBridge: bridge,
+    runCodexFn: async (_profile, _message, _mode, overrides) => {
+      mkdirSync(resolve(overrides.codexWorkdir, 'outputs'), { recursive: true })
+      writeFileSync(resolve(overrides.codexWorkdir, 'outputs/result.json'), '{}')
+      return { status: 'completed', exitCode: 0 }
+    },
+    sendLegacyFn: (type, payload) => reports.push({ type, payload }),
+    sendStatusFn: () => {}
+  })
+  assert.equal(posts, 1)
+  assert.equal(outcome.status, 'failed')
+  assert.match(outcome.errorMessage, /^UPLOAD_FAILED:/)
+  assert.ok(reports.every(report => report.payload.status === 'failed'))
+  assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), false)
 })

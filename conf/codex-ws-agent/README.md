@@ -448,6 +448,12 @@ codex exec --cd "/home/isp/hosts/cyf/agent-workspaces/$TASK_ID/agent-$AGENT_ID" 
 
 Command compatibility results remain `task.report` plus `codex.result` until the later ACK/result migration. Chat and task-event paths never use those result types.
 
+### Workspace file commands
+
+A `command.dispatch` uses the private Workspace File Bridge only when its nested `payload` is *exactly* the canonical object with `taskId`, `runId`, `inputManifest`, and `outputManifest`; any other payload continues through the normal command path. The selected profile must configure all three controlled values together: `workspaceFileApiOrigin`, `workspaceFileRootDir`, and `workspaceFileRuntimeAuthHeader` (or their `CODEX_WORKSPACE_FILE_*` environment fallbacks). The authorization header is never copied into the prompt, durable inbox payload, reports, or configuration report.
+
+Inputs materialize below the private root at `<root>/<taskId>/<runId>`, and that directory is both Codex `cwd` and `--cd`; this path never acquires a Git workspace-manager lease. Successful Codex execution collects only declared outputs, uploads each output, then commits the canonical sorted output manifest. A non-200/201 upload, non-200 commit, redirect, wrong-origin response, or cleanup failure produces a failed command outcome rather than `completed`; private run storage is removed in all terminal paths.
+
 ## Test
 
 From the versioned `isp-install` checkout:
