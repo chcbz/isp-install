@@ -312,6 +312,17 @@ test('output collection rejects undeclared files, symlinks, oversized output, an
 })
 
 
+test('output commit manifest binds its exact task and run namespace', () => {
+  const uploads = [{ outputId: 'result', sha256: 'a'.repeat(64), length: 7 }]
+  const first = buildOutputCommit({ taskId: 'task-a', runId: 'run-a', uploads })
+  const same = buildOutputCommit({ taskId: 'task-a', runId: 'run-a', uploads })
+  const otherTask = buildOutputCommit({ taskId: 'task-b', runId: 'run-a', uploads })
+  const otherRun = buildOutputCommit({ taskId: 'task-a', runId: 'run-b', uploads })
+  assert.equal(first.manifestId, same.manifestId)
+  assert.notEqual(first.manifestId, otherTask.manifestId)
+  assert.notEqual(first.manifestId, otherRun.manifestId)
+})
+
 test('uploads each declared output then commits its canonical output manifest with transient runtime auth', async () => {
   const bytes = Buffer.from('trusted input\n')
   const alpha = Buffer.from('alpha\n')
