@@ -101,6 +101,18 @@ test('registration send stays pending until the matching applied ACK', () => {
   ])
 })
 
+test('valid runtime tokens are held only in memory and cleared before a new registration or disconnect', () => {
+  const f = fixture()
+  const { envelope } = send(f)
+  assert.equal(f.observer.observe({ ...ack(envelope), token: 'a'.repeat(32) }), 'registered')
+  assert.equal(f.observer.runtimeAuthHeader, `AgentRuntime ${'a'.repeat(32)}`)
+  assert.equal(JSON.stringify(f.observer.snapshot()).includes('a'.repeat(32)), false)
+  f.observer.begin('next-registration')
+  assert.equal(f.observer.runtimeAuthHeader, '')
+  f.observer.disconnect()
+  assert.equal(f.observer.runtimeAuthHeader, '')
+})
+
 test('invalid acknowledgement identity, status, or token never marks registered', () => {
   for (const changed of [
     { agentId: 'other-agent' },
@@ -178,9 +190,10 @@ test('agent runtime wires send, inbound control, timeout, and disconnect to the 
   assert.match(source, /import \{ RegistrationAckObserver, sendRegistrationWithAckObservation \} from '\.\/registration-ack\.mjs'/)
   assert.match(source, /const envelope = buildProtocolEnvelope\(\s*MESSAGE_TYPES\.AGENT_REGISTER,/)
   assert.match(source, /sendRegistrationWithAckObservation\(\{\s*observer: state\.registration,\s*envelope,/)
-  assert.match(source, /getProfileState\(profile\)\?\.registration\.observe\(parsed\)/)
   assert.match(source, /if \(profile\.managedGeneration && managedHostModule\?\.managedRegistration\(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID\)\)/)
-  assert.doesNotMatch(source, /registrationOutcome/)
+  assert.match(source, /const registrationOutcome = state\?\.registration\.observe\(parsed\)/)
+  assert.match(source, /state\.workspaceFileRuntimeAuthHeader = state\.registration\.runtimeAuthHeader/)
+  assert.match(source, /workspaceFileRuntimeAuthHeader: state\.workspaceFileRuntimeAuthHeader/)
   assert.match(source, /registrationAckTimeoutMs: parseNonNegativeMs\(process\.env\.REGISTRATION_ACK_TIMEOUT_MS, 10000\)/)
   assert.ok((source.match(/registration\.disconnect\(\)/g) || []).length >= 3)
 })

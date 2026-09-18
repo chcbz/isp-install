@@ -3791,13 +3791,12 @@ const profileConfigurationErrors = profile => {
   if (!Number.isSafeInteger(profile.codexTimeoutMs) || profile.codexTimeoutMs < 0 || profile.codexTimeoutMs > 2147483647) {
     errors.push('codexTimeoutMs must be an integer from 0 to 2147483647 (0 disables the timeout)')
   }
-  const workspaceFileControls = [profile.workspaceFileApiOrigin, profile.workspaceFileRootDir, profile.workspaceFileRuntimeAuthHeader]
+  const workspaceFileControls = [profile.workspaceFileApiOrigin, profile.workspaceFileRootDir]
   if (workspaceFileControls.some(value => Boolean(value)) && workspaceFileControls.some(value => !value)) {
-    errors.push('workspaceFileApiOrigin, workspaceFileRootDir, and workspaceFileRuntimeAuthHeader must be configured together')
+    errors.push('workspaceFileApiOrigin and workspaceFileRootDir must be configured together')
   }
-  if (workspaceFileControls.every(value => Boolean(value))
-      && !/^AgentRuntime [0-9a-f]{32}$/.test(profile.workspaceFileRuntimeAuthHeader)) {
-    errors.push('workspaceFileRuntimeAuthHeader must be an AgentRuntime credential with a 32-character lowercase hexadecimal token')
+  if (profile.workspaceFileRuntimeAuthHeader) {
+    errors.push('workspaceFileRuntimeAuthHeader must not be configured; use the current WebSocket registration token only')
   }
   return errors
 }
@@ -3833,8 +3832,8 @@ export const buildConfigurationReport = runtimeConfig => ({
       modelSource: profile.codexModel ? 'agent --model' : 'Codex configuration/default',
       websocketAuthSource: profile.apiKey ? 'profile.apiKey' : (process.env.OPENCLAW_API_KEY ? 'OPENCLAW_API_KEY' : 'missing'),
       workspacePolicyId: profile.workspacePolicyId || null,
-      workspaceFileRuntime: profile.workspaceFileApiOrigin && profile.workspaceFileRootDir && profile.workspaceFileRuntimeAuthHeader
-        ? 'configured' : 'disabled',
+      workspaceFileRuntime: profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
+        ? 'awaiting-current-registration' : 'disabled',
       commandReadiness: policyConfigured ? 'policy-configured; requires --validate' : 'blocked-no-workspace-policy',
       schedulingAbilities: resolveProfileAbilities(profile),
       errors: profileConfigurationErrors(profile),
@@ -3881,11 +3880,11 @@ const workspaceFileFailure = (message, error) => ({
 })
 
 export const runWorkspaceFileCommand = async ({
-  profile, message, workspaceFileBridge, runCodexFn = runCodex, sendStatusFn = sendStatus
+  profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex, sendStatusFn = sendStatus
 }) => {
   const command = strictWorkspaceFileCommand(message)
   if (!command) return null
-  if (!workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(profile.workspaceFileRuntimeAuthHeader || '')) {
+  if (!workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(workspaceFileRuntimeAuthHeader)) {
     return workspaceFileFailure(message, new AgentProtocolError(
       'WORKSPACE_FILE_RUNTIME_UNAVAILABLE',
       'Strict workspace file command requires controlled runtime API origin, root, and AgentRuntime authorization configuration'
@@ -3898,7 +3897,7 @@ export const runWorkspaceFileCommand = async ({
   sendStatusFn(profile, 'busy', { taskId: message.taskId || command.taskId, title })
   try {
     const materializedRun = await workspaceFileBridge.materializeInputs(message.payload, {
-      runtimeAuthHeader: profile.workspaceFileRuntimeAuthHeader
+      runtimeAuthHeader: workspaceFileRuntimeAuthHeader
     })
     materialized = true
     const outcome = await runCodexFn(profile, {
@@ -3915,7 +3914,7 @@ export const runWorkspaceFileCommand = async ({
       result = outcome || workspaceFileFailure(message, new Error('Codex did not return an execution outcome'))
     } else {
       const committed = await workspaceFileBridge.uploadOutputsAndCommit(message.payload, {
-        runtimeAuthHeader: profile.workspaceFileRuntimeAuthHeader
+        runtimeAuthHeader: workspaceFileRuntimeAuthHeader
       })
       result = { ...outcome, workspaceFileManifestId: committed.manifestId }
     }
@@ -3935,11 +3934,11 @@ export const runWorkspaceFileCommand = async ({
 }
 
 export const runManagedCommand = async ({
-  profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, runCodexFn = runCodex,
+  profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
   sendLegacyFn = sendLegacy, sendStatusFn = sendStatus
 }) => {
   const workspaceFileResult = await runWorkspaceFileCommand({
-    profile, message, workspaceFileBridge, runCodexFn, sendStatusFn
+    profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader, runCodexFn, sendStatusFn
   })
   if (workspaceFileResult) {
     // Private workspace runs have no public task projection. A successfully committed output
@@ -3971,7 +3970,7 @@ const exactResponseUrl = (response, endpoint) => {
  */
 export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = globalThis.fetch } = {}) => {
   if (!profile || !state?.workspaceFileBridge || !state?.processor) return { dispatched: 0, rejected: 0 }
-  const auth = profile.workspaceFileRuntimeAuthHeader || ''
+  const auth = state.workspaceFileRuntimeAuthHeader || ''
   if (!/^AgentRuntime [0-9a-f]{32}$/.test(auth) || typeof fetchFn !== 'function') {
     throw new AgentProtocolError('WORKSPACE_FILE_RUNTIME_UNAVAILABLE', 'workspace runtime polling is not configured')
   }
@@ -4032,7 +4031,7 @@ const stopWorkspaceFilePoller = state => {
 
 const startWorkspaceFilePoller = (profile, state) => {
   stopWorkspaceFilePoller(state)
-  if (!state?.workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(profile.workspaceFileRuntimeAuthHeader || '')) return
+  if (!state?.workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
   const tick = async () => {
     if (state.workspaceFilePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.workspaceFilePollInFlight = true
@@ -4168,7 +4167,7 @@ const createProfileState = profile => {
   const workspaceManager = workspacePolicy
     ? new GitWorkspaceManager({ policy: workspacePolicy, agentId: profile.agentId, role: profile.workspaceRole }).initialize()
     : null
-  const workspaceFileBridge = profile.workspaceFileApiOrigin && profile.workspaceFileRootDir && profile.workspaceFileRuntimeAuthHeader
+  const workspaceFileBridge = profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
     ? new WorkspaceFileBridge({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir,
@@ -4225,6 +4224,7 @@ const createProfileState = profile => {
     skillInstallManager,
     workspaceManager,
     workspaceFileBridge,
+    workspaceFileRuntimeAuthHeader: '',
     processor: null,
     registration: new RegistrationAckObserver({
       agentId: profile.agentId,
@@ -4239,7 +4239,7 @@ const createProfileState = profile => {
     inbox,
     runCommand: message => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
-      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge })
+      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader })
     },
     runChat: message => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
@@ -4292,7 +4292,13 @@ const handleMessage = async (profile, raw) => {
     getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object'), parsed)
     return
   }
-  getProfileState(profile)?.registration.observe(parsed)
+  const state = getProfileState(profile)
+  const registrationOutcome = state?.registration.observe(parsed)
+  if (registrationOutcome === 'registered') {
+    // The API rotates this registration token. Keep it only in memory for this live socket binding.
+    state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
+    startWorkspaceFilePoller(profile, state)
+  }
   if (isLegacyInboundControlFrame(parsed)) {
     if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
       const state = getProfileState(profile)
@@ -4383,6 +4389,7 @@ const connectProfile = profile => {
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
   state.registration.disconnect()
+  state.workspaceFileRuntimeAuthHeader = ''
   if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
     try { state.ws.close() } catch {}
   }
@@ -4407,6 +4414,7 @@ const connectProfile = profile => {
     if (state.ws !== socket) return
     state.managedRegistered = false
     state.registration.disconnect()
+    state.workspaceFileRuntimeAuthHeader = ''
     closeFired = true
     state.resultReplayCancel?.()
     state.resultReplayCancel = null
@@ -4437,6 +4445,7 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
   state.registration.disconnect()
+  state.workspaceFileRuntimeAuthHeader = ''
   sendStatus(profile, 'offline', { errorMessage: reason })
   try { state.ws?.close() } catch {}
   const child = currentRuns.get(profile.agentId)

@@ -20,10 +20,14 @@ export class RegistrationAckObserver {
     this.logger = logger
     this.stage = 'idle'
     this.messageId = null
+    this.runtimeToken = null
     this.timer = null
   }
 
   get registered() { return this.stage === 'registered' }
+
+  // Token remains process-memory only; snapshots and logs must never expose it.
+  get runtimeAuthHeader() { return /^[0-9a-f]{32}$/.test(this.runtimeToken || '') ? `AgentRuntime ${this.runtimeToken}` : '' }
 
   snapshot() { return { stage: this.stage, registered: this.registered } }
 
@@ -40,6 +44,7 @@ export class RegistrationAckObserver {
     this.clearTimer()
     this.stage = 'pending_ack'
     this.messageId = messageId
+    this.runtimeToken = null
     this.log('log', this.stage)
     this.timer = this.schedule(() => {
       if (this.stage !== 'pending_ack' || this.messageId !== messageId) return
@@ -65,6 +70,7 @@ export class RegistrationAckObserver {
     if (frame.type === 'agent_registered' && exactValue(payload.agentId, this.agentId, 100) &&
         payload.status === 'online' && validToken(payload.token)) {
       this.clearTimer()
+      this.runtimeToken = payload.token
       this.stage = 'registered'
       this.messageId = null
       this.log('log', this.stage)
@@ -82,6 +88,7 @@ export class RegistrationAckObserver {
     this.clearTimer()
     this.stage = 'disconnected'
     this.messageId = null
+    this.runtimeToken = null
   }
 }
 

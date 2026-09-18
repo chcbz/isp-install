@@ -2463,6 +2463,14 @@ const workspaceFileResponse = (bytes, url, status = 200) => ({
   body: (async function * () { yield bytes })()
 })
 
+test('workspace file runtime auth stays process-memory only and profile configuration rejects a supplied header', () => {
+  const source = readFileSync(new URL('../agent-client.mjs', import.meta.url), 'utf8')
+  assert.match(source, /workspaceFileRuntimeAuthHeader must not be configured/)
+  assert.match(source, /const auth = state\.workspaceFileRuntimeAuthHeader \|\| ''/)
+  assert.match(source, /workspaceFileRuntimeAuthHeader: state\.workspaceFileRuntimeAuthHeader/)
+  assert.doesNotMatch(source, /runtimeAuthHeader: profile\.workspaceFileRuntimeAuthHeader/)
+})
+
 test('strict workspace file payload uses only its private run cwd, uploads and commits before completed reports', async () => {
   const input = Buffer.from('workspace input\n')
   const root = temporaryDirectory()
@@ -2494,6 +2502,7 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
     workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
     workspaceFileBridge: bridge,
+    workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader,
     runCodexFn: async (_profile, codexMessage, _mode, overrides) => {
       assert.match(codexMessage.prompt, /private, file-bound Agent delivery run/)
       assert.match(codexMessage.prompt, /inputs\/source\.txt/)
@@ -2561,6 +2570,7 @@ test('workspace command polling accepts only exact native queue envelopes and di
   const rejected = []
   const state = {
     workspaceFileBridge: bridge,
+    workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader,
     processor: {
       handle: async raw => { handled.push(JSON.parse(raw)) },
       onReject: error => rejected.push(error.code)
@@ -2602,7 +2612,7 @@ test('workspace command polling fails closed for redirects, wrong response paths
     workspaceFileRootDir: root,
     workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
   }
-  const state = { workspaceFileBridge: new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => {} }), processor: {} }
+  const state = { workspaceFileBridge: new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => {} }), workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader, processor: {} }
   for (const [name, response] of [
     ['redirect', { status: 200, redirected: true, url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands', headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }],
     ['wrong path', { status: 200, redirected: false, url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands/extra', headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }],
@@ -2668,6 +2678,7 @@ test('workspace file upload failure is reported failed after Codex and never com
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
     workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
     workspaceFileBridge: bridge,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
     runCodexFn: async (_profile, _message, _mode, overrides) => {
       mkdirSync(resolve(overrides.codexWorkdir, 'outputs'), { recursive: true })
       writeFileSync(resolve(overrides.codexWorkdir, 'outputs/result.json'), '{}')
