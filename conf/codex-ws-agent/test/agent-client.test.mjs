@@ -30,6 +30,7 @@ import {
   isLegacyInboundControlFrame,
   loadWebSocketClient,
   normalizeInboundMessage,
+  pollWorkspaceFileCommands,
   resolveProfileAbilities,
   runCodex,
   runManagedCommand,
@@ -2477,7 +2478,7 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: 'Bearer runtime-secret'
+    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
   }
   const message = normalizeInboundMessage({
     ...command(250),
@@ -2506,14 +2507,98 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
   })
   assert.equal(outcome.status, 'completed')
   assert.match(outcome.workspaceFileManifestId, /^pwe_m_[0-9a-f]{64}$/)
-  assert.deepEqual(reports.map(report => report.type), ['task.report', 'codex.result'])
-  assert.ok(reports.every(report => report.payload.status === 'completed'))
+  assert.deepEqual(reports, [])
   assert.deepEqual(statuses, ['busy', 'online'])
   assert.equal(calls.length, 3)
-  assert.equal(calls[1].options.headers.Authorization, 'Bearer runtime-secret')
-  assert.equal(calls[2].options.headers.Authorization, 'Bearer runtime-secret')
+  assert.equal(calls[1].options.headers.Authorization, configured.workspaceFileRuntimeAuthHeader)
+  assert.equal(calls[2].options.headers.Authorization, configured.workspaceFileRuntimeAuthHeader)
   assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), false)
   assert.equal(JSON.stringify(reports).includes('runtime-secret'), false)
+})
+
+test('workspace command polling accepts only exact native queue envelopes and dispatches durable commands', async () => {
+  const input = Buffer.from('workspace input\n')
+  const root = temporaryDirectory()
+  const configured = {
+    ...profile,
+    workspaceFileApiOrigin: 'https://api.example.test',
+    workspaceFileRootDir: root,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+  }
+  const bridge = new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => assert.fail('bridge download is not expected') })
+  const valid = {
+    schemaVersion: 1,
+    messageType: MESSAGE_TYPES.COMMAND_DISPATCH,
+    messageId: 'pwe_msg_1',
+    commandId: 'pwe_cmd_1',
+    tenantId: '0',
+    clientId: 'client-a',
+    ownerJiacn: 'owner-a',
+    taskId: 'task-1',
+    runId: 'run-1',
+    targetAgentId: profile.agentId,
+    commandType: 'WORKSPACE_FILE_EXECUTE',
+    instruction: 'modify the supplied document',
+    payload: workspaceFilePayload(input)
+  }
+  const handled = []
+  const rejected = []
+  const state = {
+    workspaceFileBridge: bridge,
+    processor: {
+      handle: async raw => { handled.push(JSON.parse(raw)) },
+      onReject: error => rejected.push(error.code)
+    }
+  }
+  const fetchCalls = []
+  const result = await pollWorkspaceFileCommands({
+    profile: configured,
+    state,
+    fetchFn: async (url, options) => {
+      fetchCalls.push({ url: url.toString(), options })
+      return {
+        status: 200,
+        redirected: false,
+        url: url.toString(),
+        headers: { get: name => name.toLowerCase() === 'content-type' ? 'application/json; charset=utf-8' : null },
+        json: async () => ({ items: [valid, { ...valid, messageId: 'bad', commandId: 'bad', targetAgentId: 'other-agent' }] })
+      }
+    }
+  })
+  assert.deepEqual(result, { dispatched: 1, rejected: 1 })
+  assert.equal(handled.length, 1)
+  assert.deepEqual(rejected, ['WORKSPACE_FILE_COMMAND_INVALID'])
+  assert.deepEqual(fetchCalls, [{
+    url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands',
+    options: {
+      method: 'GET', redirect: 'error',
+      headers: { Authorization: configured.workspaceFileRuntimeAuthHeader, Accept: 'application/json' }
+    }
+  }])
+  assert.equal(JSON.stringify(fetchCalls).includes('runtime-secret'), false)
+})
+
+test('workspace command polling fails closed for redirects, wrong response paths, and invalid queue bodies', async t => {
+  const root = temporaryDirectory()
+  const configured = {
+    ...profile,
+    workspaceFileApiOrigin: 'https://api.example.test',
+    workspaceFileRootDir: root,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+  }
+  const state = { workspaceFileBridge: new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => {} }), processor: {} }
+  for (const [name, response] of [
+    ['redirect', { status: 200, redirected: true, url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands', headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }],
+    ['wrong path', { status: 200, redirected: false, url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands/extra', headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }],
+    ['invalid body', { status: 200, redirected: false, url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands', headers: { get: () => 'application/json' }, json: async () => ({ items: 'no' }) }]
+  ]) {
+    await t.test(name, async () => {
+      await assert.rejects(
+        () => pollWorkspaceFileCommands({ profile: configured, state, fetchFn: async () => response }),
+        error => error.code === 'WORKSPACE_FILE_QUEUE_UNAVAILABLE'
+      )
+    })
+  }
 })
 
 test('strict workspace file runtime failure reports failed only and command fingerprint binds manifests', async () => {
@@ -2540,8 +2625,7 @@ test('strict workspace file runtime failure reports failed only and command fing
   })
   assert.equal(outcome.status, 'failed')
   assert.match(outcome.errorMessage, /^WORKSPACE_FILE_RUNTIME_UNAVAILABLE:/)
-  assert.deepEqual(reports.map(report => report.type), ['task.report', 'codex.result'])
-  assert.ok(reports.every(report => report.payload.status === 'failed'))
+  assert.deepEqual(reports, [])
 })
 
 test('workspace file upload failure is reported failed after Codex and never completed', async () => {
@@ -2562,7 +2646,7 @@ test('workspace file upload failure is reported failed after Codex and never com
       ...profile,
       workspaceFileApiOrigin: 'https://api.example.test',
       workspaceFileRootDir: root,
-      workspaceFileRuntimeAuthHeader: 'Bearer runtime-secret'
+      workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
     },
     message: normalizeInboundMessage({ ...command(252), payload: workspaceFilePayload(input) }),
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },

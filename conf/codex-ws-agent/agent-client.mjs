@@ -3795,6 +3795,10 @@ const profileConfigurationErrors = profile => {
   if (workspaceFileControls.some(value => Boolean(value)) && workspaceFileControls.some(value => !value)) {
     errors.push('workspaceFileApiOrigin, workspaceFileRootDir, and workspaceFileRuntimeAuthHeader must be configured together')
   }
+  if (workspaceFileControls.every(value => Boolean(value))
+      && !/^AgentRuntime [0-9a-f]{32}$/.test(profile.workspaceFileRuntimeAuthHeader)) {
+    errors.push('workspaceFileRuntimeAuthHeader must be an AgentRuntime credential with a 32-character lowercase hexadecimal token')
+  }
   return errors
 }
 
@@ -3857,10 +3861,10 @@ export const runWorkspaceFileCommand = async ({
 }) => {
   const command = strictWorkspaceFileCommand(message)
   if (!command) return null
-  if (!workspaceFileBridge || !profile.workspaceFileRuntimeAuthHeader) {
+  if (!workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(profile.workspaceFileRuntimeAuthHeader || '')) {
     return workspaceFileFailure(message, new AgentProtocolError(
       'WORKSPACE_FILE_RUNTIME_UNAVAILABLE',
-      'Strict workspace file command requires controlled runtime API origin, root, and authorization configuration'
+      'Strict workspace file command requires controlled runtime API origin, root, and AgentRuntime authorization configuration'
     ))
   }
 
@@ -3911,14 +3915,112 @@ export const runManagedCommand = async ({
     profile, message, workspaceFileBridge, runCodexFn, sendStatusFn
   })
   if (workspaceFileResult) {
-    const payload = workspaceFileResult
-    sendLegacyFn('task.report', payload, profile)
-    sendLegacyFn('codex.result', payload, profile)
-    return payload
+    // Private workspace runs have no public task projection. A successfully committed output
+    // manifest is their only completion fact; sending legacy task reports would target a fake task.
+    return workspaceFileResult
   }
   return message.commandType === 'SKILL_INSTALL'
     ? skillInstallManager.execute(message)
     : runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
+}
+
+const WORKSPACE_FILE_QUEUE_PATH = '/internal/agent/tasks/workspace-executions/commands'
+
+const exactResponseUrl = (response, endpoint) => {
+  if (response?.redirected === true || typeof response?.url !== 'string' || !response.url) return false
+  try {
+    const observed = new URL(response.url)
+    return observed.origin === endpoint.origin && observed.pathname === endpoint.pathname
+      && !observed.search && !observed.hash && !observed.username && !observed.password
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Native clients pull only their own durable workspace-file commands. This deliberately uses the
+ * existing persistent inbox so crashes/restarts retain the same dedupe and recovery semantics as
+ * websocket-delivered commands.
+ */
+export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = globalThis.fetch } = {}) => {
+  if (!profile || !state?.workspaceFileBridge || !state?.processor) return { dispatched: 0, rejected: 0 }
+  const auth = profile.workspaceFileRuntimeAuthHeader || ''
+  if (!/^AgentRuntime [0-9a-f]{32}$/.test(auth) || typeof fetchFn !== 'function') {
+    throw new AgentProtocolError('WORKSPACE_FILE_RUNTIME_UNAVAILABLE', 'workspace runtime polling is not configured')
+  }
+  const endpoint = new URL(WORKSPACE_FILE_QUEUE_PATH, state.workspaceFileBridge.apiOrigin)
+  let response
+  try {
+    response = await fetchFn(endpoint, {
+      method: 'GET', redirect: 'error',
+      headers: { Authorization: auth, Accept: 'application/json' }
+    })
+  } catch {
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup failed')
+  }
+  if (!response || response.status !== 200 || !exactResponseUrl(response, endpoint)) {
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup was rejected')
+  }
+  const contentType = response.headers?.get?.('content-type') || ''
+  if (contentType && !/^application\/json(?:\s*;|$)/i.test(contentType)) {
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup returned an invalid content type')
+  }
+  let body
+  try { body = await response.json() } catch {
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup returned invalid JSON')
+  }
+  if (!isObject(body) || Object.keys(body).some(key => key !== 'items') || !Array.isArray(body.items) || body.items.length > 16) {
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup returned an invalid envelope')
+  }
+  let dispatched = 0
+  let rejected = 0
+  for (const item of body.items) {
+    try {
+      const normalized = normalizeInboundMessage(item)
+      if (normalized.messageType !== MESSAGE_TYPES.COMMAND_DISPATCH
+          || normalized.commandType !== 'WORKSPACE_FILE_EXECUTE'
+          || normalized.targetAgentId !== profile.agentId
+          || !strictWorkspaceFileCommand(normalized)) {
+        throw new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', 'workspace runtime command is not an authorized file execution command')
+      }
+      await state.processor.handle(JSON.stringify(item))
+      dispatched += 1
+    } catch (error) {
+      rejected += 1
+      state.processor.onReject?.(
+        error instanceof AgentProtocolError ? error : new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', 'workspace runtime command is invalid'),
+        item
+      )
+    }
+  }
+  return { dispatched, rejected }
+}
+
+const stopWorkspaceFilePoller = state => {
+  if (!state) return
+  clearInterval(state.workspaceFilePollTimer)
+  state.workspaceFilePollTimer = null
+  state.workspaceFilePollInFlight = false
+}
+
+const startWorkspaceFilePoller = (profile, state) => {
+  stopWorkspaceFilePoller(state)
+  if (!state?.workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(profile.workspaceFileRuntimeAuthHeader || '')) return
+  const tick = async () => {
+    if (state.workspaceFilePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
+    state.workspaceFilePollInFlight = true
+    try {
+      const result = await pollWorkspaceFileCommands({ profile, state })
+      if (result.rejected) console.warn(`workspace command rejected | profile=${profile.profileId} | count=${result.rejected}`)
+    } catch (error) {
+      // Do not include request/header values in diagnostics.
+      console.warn(`workspace command poll unavailable | profile=${profile.profileId} | code=${error.code || 'WORKSPACE_FILE_QUEUE_UNAVAILABLE'}`)
+    } finally {
+      state.workspaceFilePollInFlight = false
+    }
+  }
+  void tick()
+  state.workspaceFilePollTimer = setInterval(() => { void tick() }, 3000)
 }
 
 const canonicalizeConfiguredPath = configuredPath => {
@@ -4082,6 +4184,8 @@ const createProfileState = profile => {
     profile,
     ws: null,
     heartbeatTimer: null,
+    workspaceFilePollTimer: null,
+    workspaceFilePollInFlight: false,
     reconnectTimer: null,
     reconnectAttempt: 0,
     reconnectStartedAt: 0,
@@ -4241,6 +4345,7 @@ const resumeRegisteredProfile = (profile, state) => {
   const replayed = state.processor.replayAcks()
   if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
   state.processor.resume()
+  startWorkspaceFilePoller(profile, state)
   state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
 }
 
@@ -4249,6 +4354,7 @@ const connectProfile = profile => {
   if (!state) return
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
+  stopWorkspaceFilePoller(state)
   state.registration.disconnect()
   if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
     try { state.ws.close() } catch {}
@@ -4278,6 +4384,7 @@ const connectProfile = profile => {
     state.resultReplayCancel?.()
     state.resultReplayCancel = null
     clearInterval(state.heartbeatTimer)
+    stopWorkspaceFilePoller(state)
     state.processor.pause()
     if (!shuttingDown) doReconnect(profile)
   })
@@ -4301,6 +4408,7 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
   state.resultReplayCancel = null
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
+  stopWorkspaceFilePoller(state)
   state.registration.disconnect()
   sendStatus(profile, 'offline', { errorMessage: reason })
   try { state.ws?.close() } catch {}
@@ -4393,6 +4501,7 @@ const shutdown = (exitCode = 0, reason = '') => {
     if (state) state.resultReplayCancel = null
     clearReconnectState(state)
     clearInterval(state?.heartbeatTimer)
+    stopWorkspaceFilePoller(state)
     state?.registration.disconnect()
     sendStatus(profile, 'offline')
     try { state?.ws?.close() } catch {}
