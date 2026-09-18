@@ -293,6 +293,96 @@ const sameFileIdentity = (left, right) => (
   && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
 )
 
+const ZIP_EOCD_SIGNATURE = 0x06054b50
+const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50
+const ZIP_LOCAL_FILE_SIGNATURE = 0x04034b50
+const DOCX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+const XLSX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const PPTX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+
+/**
+ * Reads only the ZIP central directory. Office containers are accepted only when the declared
+ * OpenXML document part is actually present; a filename extension or a fake MIME header is not
+ * sufficient to turn arbitrary bytes into a deliverable. ZIP64 is fail-closed here because the
+ * API output contract already has a bounded byte size and does not need it.
+ */
+const zipEntryNames = bytes => {
+  const source = Buffer.from(bytes)
+  const minimum = 22
+  if (source.length < minimum) fail('OUTPUT_FORMAT_INVALID', 'Office output is not a ZIP container')
+  let eocd = -1
+  const start = Math.max(0, source.length - 65557)
+  for (let offset = source.length - minimum; offset >= start; offset -= 1) {
+    if (source.readUInt32LE(offset) === ZIP_EOCD_SIGNATURE) { eocd = offset; break }
+  }
+  if (eocd < 0 || eocd + minimum > source.length) fail('OUTPUT_FORMAT_INVALID', 'Office output is missing ZIP metadata')
+  const entries = source.readUInt16LE(eocd + 10)
+  const directoryLength = source.readUInt32LE(eocd + 12)
+  const directoryOffset = source.readUInt32LE(eocd + 16)
+  if (entries === 0xffff || directoryLength === 0xffffffff || directoryOffset === 0xffffffff
+      || directoryOffset + directoryLength > source.length) {
+    fail('OUTPUT_FORMAT_INVALID', 'Office output uses an unsupported ZIP directory')
+  }
+  const names = new Set()
+  let offset = directoryOffset
+  const end = directoryOffset + directoryLength
+  for (let index = 0; index < entries; index += 1) {
+    if (offset + 46 > end || source.readUInt32LE(offset) !== ZIP_CENTRAL_DIRECTORY_SIGNATURE) {
+      fail('OUTPUT_FORMAT_INVALID', 'Office output has an invalid ZIP entry directory')
+    }
+    const filenameLength = source.readUInt16LE(offset + 28)
+    const extraLength = source.readUInt16LE(offset + 30)
+    const commentLength = source.readUInt16LE(offset + 32)
+    const localHeaderOffset = source.readUInt32LE(offset + 42)
+    const next = offset + 46 + filenameLength + extraLength + commentLength
+    if (next > end || localHeaderOffset + 30 > directoryOffset
+        || source.readUInt32LE(localHeaderOffset) !== ZIP_LOCAL_FILE_SIGNATURE) {
+      fail('OUTPUT_FORMAT_INVALID', 'Office output ZIP entry exceeds its container')
+    }
+    const name = source.subarray(offset + 46, offset + 46 + filenameLength).toString('utf8')
+    const localNameLength = source.readUInt16LE(localHeaderOffset + 26)
+    const localExtraLength = source.readUInt16LE(localHeaderOffset + 28)
+    if (localHeaderOffset + 30 + localNameLength + localExtraLength > directoryOffset
+        || source.subarray(localHeaderOffset + 30, localHeaderOffset + 30 + localNameLength).toString('utf8') !== name) {
+      fail('OUTPUT_FORMAT_INVALID', 'Office output ZIP local entry does not match its directory')
+    }
+    names.add(name)
+    offset = next
+  }
+  if (offset !== end) fail('OUTPUT_FORMAT_INVALID', 'Office output ZIP directory has trailing bytes')
+  return names
+}
+
+const assertDeclaredOutputFormat = (contentType, bytes) => {
+  const source = Buffer.from(bytes)
+  if (contentType === 'image/png') {
+    if (source.length < 8 || !source.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+      fail('OUTPUT_FORMAT_INVALID', 'declared PNG output has an invalid signature')
+    }
+    return
+  }
+  if (contentType === 'image/jpeg') {
+    if (source.length < 3 || source[0] !== 0xff || source[1] !== 0xd8 || source[2] !== 0xff) {
+      fail('OUTPUT_FORMAT_INVALID', 'declared JPEG output has an invalid signature')
+    }
+    return
+  }
+  if (contentType === 'application/pdf') {
+    if (source.length < 5 || source.subarray(0, 5).toString('ascii') !== '%PDF-') {
+      fail('OUTPUT_FORMAT_INVALID', 'declared PDF output has an invalid signature')
+    }
+    return
+  }
+  const requiredPart = {
+    [DOCX_CONTENT_TYPE]: 'word/document.xml',
+    [XLSX_CONTENT_TYPE]: 'xl/workbook.xml',
+    [PPTX_CONTENT_TYPE]: 'ppt/presentation.xml'
+  }[contentType]
+  if (requiredPart && !zipEntryNames(source).has(requiredPart)) {
+    fail('OUTPUT_FORMAT_INVALID', `declared Office output is missing ${requiredPart}`)
+  }
+}
+
 const readBoundedRegularFile = (path, maxLength) => {
   assertNoSymlinkComponents(path)
   const descriptor = openSync(path, fsConstants.O_RDONLY | NO_FOLLOW)
@@ -475,6 +565,7 @@ export class WorkspaceFileBridge {
       if (!existsSync(path)) fail('OUTPUT_MISSING', `declared output is missing: ${output.relativePath}`)
       assertInside(runDirectory, path)
       const bytes = readBoundedRegularFile(path, output.maxLength)
+      assertDeclaredOutputFormat(output.contentType, bytes)
       const length = bytes.length
       const sha256 = createHash('sha256').update(bytes).digest('hex')
       const url = endpointUrl(this.#apiOrigin, output.uploadPath).toString()
@@ -546,6 +637,7 @@ export class WorkspaceFileBridge {
       const form = new FormData()
       for (const field of upload.request.multipart.fields) form.append(field.name, field.value)
       const bytes = readBoundedRegularFile(upload.path, upload.length)
+      assertDeclaredOutputFormat(upload.request.multipart.file.contentType, bytes)
       if (bytes.length !== upload.length || createHash('sha256').update(bytes).digest('hex') !== upload.sha256) {
         fail('OUTPUT_CHANGED', 'declared output changed after collection and before upload')
       }

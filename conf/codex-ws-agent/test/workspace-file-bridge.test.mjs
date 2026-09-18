@@ -37,6 +37,30 @@ const temporaryDirectory = () => {
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 
+// A tiny stored ZIP is sufficient for the bridge's OpenXML container boundary checks; it
+// deliberately avoids a ZIP library so this security test exercises only Node built-ins.
+const storedZip = entryName => {
+  const name = Buffer.from(entryName, 'utf8')
+  const local = Buffer.alloc(30 + name.length)
+  local.writeUInt32LE(0x04034b50, 0)
+  local.writeUInt16LE(20, 4)
+  local.writeUInt16LE(name.length, 26)
+  name.copy(local, 30)
+  const central = Buffer.alloc(46 + name.length)
+  central.writeUInt32LE(0x02014b50, 0)
+  central.writeUInt16LE(20, 4)
+  central.writeUInt16LE(20, 6)
+  central.writeUInt16LE(name.length, 28)
+  name.copy(central, 46)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(1, 8)
+  eocd.writeUInt16LE(1, 10)
+  eocd.writeUInt32LE(central.length, 12)
+  eocd.writeUInt32LE(local.length, 16)
+  return Buffer.concat([local, central, eocd])
+}
+
 const commandFor = (bytes = Buffer.from('trusted input\n'), overrides = {}) => {
   const taskId = overrides.taskId || 'task-1'
   const runId = overrides.runId || 'run-1'
@@ -311,6 +335,43 @@ test('output collection rejects undeclared files, symlinks, oversized output, an
   })
 })
 
+
+test('output collection verifies declared delivery bytes before any upload', async t => {
+  const bytes = Buffer.from('trusted input\n')
+  const cases = [
+    ['fake PDF', 'application/pdf', 'outputs/result.pdf', Buffer.from('not a pdf'), 'OUTPUT_FORMAT_INVALID'],
+    ['fake PNG', 'image/png', 'outputs/result.png', Buffer.from('not a png'), 'OUTPUT_FORMAT_INVALID'],
+    ['fake DOCX', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'outputs/result.docx', Buffer.from('not a zip'), 'OUTPUT_FORMAT_INVALID'],
+    ['wrong OpenXML part', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'outputs/result.docx', storedZip('xl/workbook.xml'), 'OUTPUT_FORMAT_INVALID']
+  ]
+  for (const [name, contentType, relativePath, output, code] of cases) {
+    await t.test(name, async () => {
+      const root = temporaryDirectory()
+      const command = commandFor(bytes, { outputManifest: [{
+        outputId: 'result', relativePath,
+        uploadPath: '/internal/agent/tasks/task-1/runs/run-1/outputs/result/content',
+        contentType, maxLength: 4096
+      }] })
+      const bridge = bridgeFor(root, async url => responseFor(bytes, url.toString()))
+      const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+      mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
+      writeFileSync(resolve(materialized.runDirectory, relativePath), output)
+      assertBridgeCode(() => bridge.collectOutputs(command), code)
+    })
+  }
+
+  const root = temporaryDirectory()
+  const command = commandFor(bytes, { outputManifest: [{
+    outputId: 'result', relativePath: 'outputs/result.docx',
+    uploadPath: '/internal/agent/tasks/task-1/runs/run-1/outputs/result/content',
+    contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', maxLength: 4096
+  }] })
+  const bridge = bridgeFor(root, async url => responseFor(bytes, url.toString()))
+  const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
+  writeFileSync(resolve(materialized.runDirectory, 'outputs/result.docx'), storedZip('word/document.xml'))
+  assert.equal(bridge.collectOutputs(command).uploads.length, 1)
+})
 
 test('output commit manifest binds its exact task and run namespace', () => {
   const uploads = [{ outputId: 'result', sha256: 'a'.repeat(64), length: 7 }]
