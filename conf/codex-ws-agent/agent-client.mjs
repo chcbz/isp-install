@@ -3848,6 +3848,30 @@ const strictWorkspaceFileCommand = message => {
   try { return parseWorkspaceFileCommand(message?.payload) } catch { return null }
 }
 
+/**
+ * Makes the private file boundary explicit to the model. The browser's original instruction stays
+ * intact, while paths are copied only from an already strict-validated manifest. This avoids the
+ * previous implicit assumption that a model would guess both the input filename and the sole
+ * uploadable output path.
+ */
+export const workspaceFilePrompt = (message, command) => {
+  const request = resolvePrompt(message).trim()
+  const inputs = command.inputs.map(item => `- ${item.relativePath} (read-only input)`).join('\n')
+  const outputs = command.outputs.map(item => `- ${item.relativePath} (${item.contentType}; required delivery)`).join('\n')
+  return [
+    'You are completing one private, file-bound Agent delivery run.',
+    'User request:',
+    request || '(No user instruction was supplied; do not invent a deliverable.)',
+    '',
+    'Controlled file contract:',
+    'Inputs (do not modify):', inputs,
+    'Deliverables (create every declared path with the declared file type):', outputs,
+    'Use scratch/ only for temporary unpacking, scripts, or intermediate files. Do not create files outside inputs/, outputs/, or scratch/.',
+    'Do not use network access, do not read unrelated user or host files, and do not report success unless each declared deliverable exists at its exact path.',
+    'Preserve requested content and structure where feasible; output must remain in the declared file format.'
+  ].join('\n')
+}
+
 const workspaceFileFailure = (message, error) => ({
   status: 'failed',
   taskId: message.taskId || message.workItemId || message.commandId || '',
@@ -3877,7 +3901,10 @@ export const runWorkspaceFileCommand = async ({
       runtimeAuthHeader: profile.workspaceFileRuntimeAuthHeader
     })
     materialized = true
-    const outcome = await runCodexFn(profile, message, 'command', {
+    const outcome = await runCodexFn(profile, {
+      ...message,
+      prompt: workspaceFilePrompt(message, command)
+    }, 'command', {
       codexWorkdir: materializedRun.runDirectory,
       requireWorkspace: false,
       forceNewSession: true,

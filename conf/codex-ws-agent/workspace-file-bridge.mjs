@@ -452,6 +452,9 @@ export class WorkspaceFileBridge {
     if (existsSync(runDirectory)) fail('RUN_EXISTS', 'private run directory already exists')
     mkdirSync(runDirectory, { mode: 0o700 })
     assertNoSymlinkComponents(runDirectory)
+    // Codex needs a private scratch area for unpack/repack workflows. It is deliberately never
+    // eligible for upload, and cleanup removes the whole private run directory on every terminal path.
+    ensureRelativeParent(runDirectory, 'scratch/.keep')
 
     try {
       const materialized = []
@@ -549,7 +552,11 @@ export class WorkspaceFileBridge {
       ...command.outputs.map(output => output.relativePath)
     ])
     for (const relativePath of walkRunFiles(runDirectory)) {
-      if (!allowedFiles.has(relativePath)) fail('OUTPUT_NOT_DECLARED', `undeclared run file is forbidden: ${relativePath}`)
+      // Scratch is a non-deliverable private work area. Inputs and declared outputs remain exact;
+      // no arbitrary file outside scratch can be retained or uploaded.
+      if (!allowedFiles.has(relativePath) && !relativePath.startsWith('scratch/')) {
+        fail('OUTPUT_NOT_DECLARED', `undeclared run file is forbidden: ${relativePath}`)
+      }
     }
 
     for (const input of command.inputs) {

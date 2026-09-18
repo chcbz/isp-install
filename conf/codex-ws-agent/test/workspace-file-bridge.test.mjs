@@ -306,6 +306,15 @@ test('output collection rejects undeclared files, symlinks, oversized output, an
     assertBridgeCode(() => bridge.collectOutputs(command), 'OUTPUT_NOT_DECLARED')
   })
 
+  await t.test('private scratch is allowed but never declared as an upload', async () => {
+    const { bridge, command, materialized } = await setup('scratch')
+    writeFileSync(resolve(materialized.runDirectory, 'outputs/result.json'), '{}')
+    writeFileSync(resolve(materialized.runDirectory, 'scratch', 'temporary.txt'), 'private work')
+    const collected = bridge.collectOutputs(command)
+    assert.equal(collected.uploads.length, 1)
+    assert.equal(collected.uploads[0].relativePath, 'outputs/result.json')
+  })
+
   await t.test('symlinked output', async () => {
     const { bridge, command, materialized } = await setup('symlink')
     const outside = resolve(temporaryDirectory(), 'outside.json')
