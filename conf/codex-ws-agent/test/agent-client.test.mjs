@@ -2525,7 +2525,11 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
   assert.deepEqual(statuses, ['busy', 'online'])
   assert.equal(calls.length, 3)
   assert.equal(calls[1].options.headers.Authorization, configured.workspaceFileRuntimeAuthHeader)
+  assert.equal(calls[1].options.headers['X-Agent-Id'], profile.agentId)
+  assert.equal(calls[1].options.headers['X-Agent-Runtime-Id'], PROCESS_RUNTIME_INSTANCE_ID)
   assert.equal(calls[2].options.headers.Authorization, configured.workspaceFileRuntimeAuthHeader)
+  assert.equal(calls[2].options.headers['X-Agent-Id'], profile.agentId)
+  assert.equal(calls[2].options.headers['X-Agent-Runtime-Id'], PROCESS_RUNTIME_INSTANCE_ID)
   assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), false)
   assert.equal(JSON.stringify(reports).includes('runtime-secret'), false)
 })
@@ -2639,7 +2643,12 @@ test('workspace command polling accepts only exact native queue envelopes and di
     url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands',
     options: {
       method: 'GET', redirect: 'error',
-      headers: { Authorization: configured.workspaceFileRuntimeAuthHeader, Accept: 'application/json' }
+      headers: {
+        Authorization: configured.workspaceFileRuntimeAuthHeader,
+        Accept: 'application/json',
+        'X-Agent-Id': configured.agentId,
+        'X-Agent-Runtime-Id': PROCESS_RUNTIME_INSTANCE_ID
+      }
     }
   }])
   assert.equal(JSON.stringify(fetchCalls).includes('runtime-secret'), false)

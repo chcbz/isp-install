@@ -3970,7 +3970,9 @@ export const runWorkspaceFileCommand = async ({
   sendStatusFn(profile, 'busy', { taskId: message.taskId || command.taskId, title })
   try {
     const materializedRun = await workspaceFileBridge.materializeInputs(message.payload, {
-      runtimeAuthHeader: workspaceFileRuntimeAuthHeader
+      runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
+      runtimeAgentId: profile.agentId,
+      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
     })
     materialized = true
     const outcome = await runCodexFn(profile, {
@@ -3989,7 +3991,9 @@ export const runWorkspaceFileCommand = async ({
       result = outcome || workspaceFileFailure(message, new Error('Codex did not return an execution outcome'))
     } else {
       const committed = await workspaceFileBridge.uploadOutputsAndCommit(message.payload, {
-        runtimeAuthHeader: workspaceFileRuntimeAuthHeader
+        runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
+        runtimeAgentId: profile.agentId,
+        runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
       })
       result = { ...outcome, workspaceFileManifestId: committed.manifestId }
     }
@@ -4054,7 +4058,12 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = glob
   try {
     response = await fetchFn(endpoint, {
       method: 'GET', redirect: 'error',
-      headers: { Authorization: auth, Accept: 'application/json' }
+      headers: {
+        Authorization: auth,
+        Accept: 'application/json',
+        'X-Agent-Id': profile.agentId,
+        'X-Agent-Runtime-Id': PROCESS_RUNTIME_INSTANCE_ID
+      }
     })
   } catch {
     throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup failed')

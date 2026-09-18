@@ -166,14 +166,20 @@ test('input materialization uses caller runtime auth transiently and verifies by
     observed.push({ url: url.toString(), options })
     return responseFor(bytes, url.toString(), { chunks: [bytes.subarray(0, 3), bytes.subarray(3)] })
   })
-  const result = await bridge.materializeInputs(commandFor(bytes), { runtimeAuthHeader: 'Bearer runtime-secret' })
+  const runtimeIdentity = { runtimeAgentId: 'agent-runtime-a', runtimeInstanceId: 'runtime-instance-a' }
+  const result = await bridge.materializeInputs(commandFor(bytes), { runtimeAuthHeader: 'Bearer runtime-secret', ...runtimeIdentity })
 
   assert.equal(observed.length, 1)
   assert.equal(observed[0].url, 'https://api.example.test/internal/agent/tasks/task-1/runs/run-1/inputs/source/content')
   assert.deepEqual(observed[0].options, {
     method: 'GET',
     redirect: 'error',
-    headers: { Authorization: 'Bearer runtime-secret', Accept: 'application/octet-stream' }
+    headers: {
+      Authorization: 'Bearer runtime-secret',
+      Accept: 'application/octet-stream',
+      'X-Agent-Id': 'agent-runtime-a',
+      'X-Agent-Runtime-Id': 'runtime-instance-a'
+    }
   })
   assert.equal(readFileSync(result.inputs[0].path, 'utf8'), bytes.toString())
   assert.equal(statSync(result.runDirectory).mode & 0o777, 0o700)
@@ -418,7 +424,8 @@ test('uploads each declared output then commits its canonical output manifest wi
     if (options.method === 'GET') return responseFor(bytes, url.toString())
     return responseFor(Buffer.from('{"data":{}}'), url.toString())
   })
-  const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  const runtimeIdentity = { runtimeAgentId: 'agent-runtime-a', runtimeInstanceId: 'runtime-instance-a' }
+  const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret', ...runtimeIdentity })
   mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
   writeFileSync(resolve(materialized.runDirectory, 'outputs/result.json'), result)
   writeFileSync(resolve(materialized.runDirectory, 'outputs/alpha.txt'), alpha)
@@ -429,11 +436,13 @@ test('uploads each declared output then commits its canonical output manifest wi
       { outputId: 'alpha', sha256: digest(alpha), length: alpha.length }
     ]
   })
-  const committed = await bridge.uploadOutputsAndCommit(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  const committed = await bridge.uploadOutputsAndCommit(command, { runtimeAuthHeader: 'Bearer runtime-secret', ...runtimeIdentity })
   assert.equal(committed.manifestId, expected.manifestId)
   assert.equal(requests.length, 4)
   const uploads = requests.slice(1, 3)
   assert.deepEqual(uploads.map(request => request.options.headers.Authorization), ['Bearer runtime-secret', 'Bearer runtime-secret'])
+  assert.deepEqual(uploads.map(request => request.options.headers['X-Agent-Id']), ['agent-runtime-a', 'agent-runtime-a'])
+  assert.deepEqual(uploads.map(request => request.options.headers['X-Agent-Runtime-Id']), ['runtime-instance-a', 'runtime-instance-a'])
   assert.deepEqual(uploads.map(request => request.options.headers['Idempotency-Key']), [
     `pwe-output-task-1-run-1-result-${digest(result).slice(0, 16)}`,
     `pwe-output-task-1-run-1-alpha-${digest(alpha).slice(0, 16)}`
@@ -445,6 +454,8 @@ test('uploads each declared output then commits its canonical output manifest wi
   assert.equal(commit.url, `https://api.example.test${expected.path}`)
   assert.deepEqual(commit.options.headers, {
     Authorization: 'Bearer runtime-secret',
+    'X-Agent-Id': 'agent-runtime-a',
+    'X-Agent-Runtime-Id': 'runtime-instance-a',
     'Idempotency-Key': expected.idempotencyKey,
     'Content-Type': 'application/json'
   })

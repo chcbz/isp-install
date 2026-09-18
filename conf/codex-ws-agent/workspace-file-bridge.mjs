@@ -22,6 +22,7 @@ const COMMAND_KEYS = ['inputManifest', 'outputManifest', 'runId', 'taskId']
 const INPUT_KEYS = ['downloadPath', 'inputId', 'length', 'relativePath', 'sha256']
 const OUTPUT_KEYS = ['contentType', 'maxLength', 'outputId', 'relativePath', 'uploadPath']
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
+const SAFE_RUNTIME_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const SHA256 = /^[a-f0-9]{64}$/
 const CONTENT_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/
@@ -267,6 +268,17 @@ const validateRuntimeAuth = value => {
   return value
 }
 
+// Native runtime requests are bound to the same agent and process instance that received the
+// transient registration credential. The optional form preserves bridge-only format tests while
+// production execution supplies both headers required by the narrow runtime API lane.
+const runtimeIdentityHeaders = ({ runtimeAgentId = '', runtimeInstanceId = '' } = {}) => {
+  if (!runtimeAgentId && !runtimeInstanceId) return Object.freeze({})
+  if (!SAFE_RUNTIME_REFERENCE.test(runtimeAgentId) || !SAFE_RUNTIME_REFERENCE.test(runtimeInstanceId)) {
+    fail('AUTH_INVALID', 'runtime agent and instance identifiers must be canonical')
+  }
+  return Object.freeze({ 'X-Agent-Id': runtimeAgentId, 'X-Agent-Runtime-Id': runtimeInstanceId })
+}
+
 const writeResponseToFile = async ({ response, descriptor, expectedLength }) => {
   const hash = createHash('sha256')
   let total = 0
@@ -443,9 +455,10 @@ export class WorkspaceFileBridge {
     return directory
   }
 
-  async materializeInputs(rawCommand, { runtimeAuthHeader } = {}) {
+  async materializeInputs(rawCommand, { runtimeAuthHeader, runtimeAgentId, runtimeInstanceId } = {}) {
     const command = parseWorkspaceFileCommand(rawCommand)
     const auth = validateRuntimeAuth(runtimeAuthHeader)
+    const runtimeHeaders = runtimeIdentityHeaders({ runtimeAgentId, runtimeInstanceId })
     if (typeof this.#fetchFn !== 'function') fail('CONFIG_INVALID', 'fetchFn must be a function')
     const key = this._runKey(command)
     if (this.#runs.has(key)) fail('RUN_EXISTS', 'taskId/runId is already bound in this bridge')
@@ -468,7 +481,7 @@ export class WorkspaceFileBridge {
           response = await this.#fetchFn(endpoint, {
             method: 'GET',
             redirect: 'error',
-            headers: { Authorization: auth, Accept: 'application/octet-stream' }
+            headers: { Authorization: auth, Accept: 'application/octet-stream', ...runtimeHeaders }
           })
         } catch {
           fail('DOWNLOAD_FAILED', 'input download failed')
@@ -621,9 +634,10 @@ export class WorkspaceFileBridge {
     })
   }
 
-  async uploadOutputsAndCommit(rawCommand, { runtimeAuthHeader } = {}) {
+  async uploadOutputsAndCommit(rawCommand, { runtimeAuthHeader, runtimeAgentId, runtimeInstanceId } = {}) {
     const command = parseWorkspaceFileCommand(rawCommand)
     const auth = validateRuntimeAuth(runtimeAuthHeader)
+    const runtimeHeaders = runtimeIdentityHeaders({ runtimeAgentId, runtimeInstanceId })
     if (typeof this.#fetchFn !== 'function') fail('CONFIG_INVALID', 'fetchFn must be a function')
     const collected = this.collectOutputs(rawCommand)
     const responseHasData = async response => {
@@ -667,6 +681,7 @@ export class WorkspaceFileBridge {
           redirect: 'error',
           headers: {
             Authorization: auth,
+            ...runtimeHeaders,
             'Idempotency-Key': `pwe-output-${command.taskId}-${command.runId}-${upload.outputId}-${upload.sha256.slice(0, 16)}`
           },
           body: form
@@ -686,6 +701,7 @@ export class WorkspaceFileBridge {
         redirect: 'error',
         headers: {
           Authorization: auth,
+          ...runtimeHeaders,
           'Idempotency-Key': commit.idempotencyKey,
           'Content-Type': 'application/json'
         },
