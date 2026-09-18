@@ -76,9 +76,7 @@ def create_image(lib, output, instruction, source=None, jpeg=False):
 def create_docx(lib, output, instruction, source=None):
     Document = lib['Document']
     if source:
-        document = Document(source)
-        document.add_page_break()
-        document.add_heading('本次 Agent 修改说明', level=1)
+        raise ValueError('delivery-tool create cannot semantically modify an existing DOCX; edit source content with a content-aware workflow, then validate')
     else:
         document = Document()
         document.add_heading('Agent 交付文档', level=0)
@@ -91,12 +89,11 @@ def create_docx(lib, output, instruction, source=None):
 def create_xlsx(lib, output, instruction, source=None):
     Workbook, load_workbook = lib['Workbook'], lib['load_workbook']
     if source:
-        workbook = load_workbook(source, data_only=False)
-    else:
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = '交付说明'
-        sheet['A1'] = 'Agent 交付表格'
+        raise ValueError('delivery-tool create cannot semantically modify an existing XLSX; edit source cells with a content-aware workflow, then validate')
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = '交付说明'
+    sheet['A1'] = 'Agent 交付表格'
     sheet = workbook['修改说明'] if '修改说明' in workbook.sheetnames else workbook.create_sheet('修改说明')
     sheet['A1'] = '需求说明'
     sheet['B1'] = clean_text(instruction)
@@ -109,14 +106,11 @@ def create_xlsx(lib, output, instruction, source=None):
 
 def create_pptx(lib, output, instruction, source=None):
     Presentation, Inches, Pt = lib['Presentation'], lib['Inches'], lib['Pt']
-    presentation = Presentation(source) if source else Presentation()
-    if source and presentation.slides:
-        slide = presentation.slides[0]
-        title = slide.shapes.title
-        if title is not None:
-            title.text = title.text or '已更新演示文稿'
+    if source:
+        raise ValueError('delivery-tool create cannot semantically modify an existing PPTX; edit source slides with a content-aware workflow, then validate')
+    presentation = Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[1])
-    slide.shapes.title.text = '本次 Agent 修改说明' if source else 'Agent 交付演示'
+    slide.shapes.title.text = 'Agent 交付演示'
     body = slide.placeholders[1].text_frame
     body.clear()
     for index, line in enumerate(wrapped(instruction, 40)[:10]):
@@ -128,13 +122,13 @@ def create_pptx(lib, output, instruction, source=None):
 
 def create_pdf(lib, output, instruction, source=None):
     PdfFileReader, PdfFileWriter, A4, canvas = lib['PdfFileReader'], lib['PdfFileWriter'], lib['A4'], lib['canvas']
-    # ReportLab creates a valid append-only change note. With an input, preserve every original
-    # page and append a clearly labelled modification page rather than silently rewriting layout.
+    if source:
+        raise ValueError('delivery-tool create cannot semantically modify an existing PDF; use a content-aware PDF workflow, then validate')
     note = io.BytesIO()
     pdf = canvas.Canvas(note, pagesize=A4)
     pdf.setTitle('Agent 交付 PDF')
     pdf.setFont('Helvetica', 18)
-    pdf.drawString(48, 800, 'Agent Delivery PDF' if not source else 'Agent Modification Notes')
+    pdf.drawString(48, 800, 'Agent Delivery PDF')
     y = 768
     pdf.setFont('Helvetica', 11)
     for line in wrapped(instruction, 82)[:42]:
@@ -143,12 +137,6 @@ def create_pdf(lib, output, instruction, source=None):
     pdf.save()
     note.seek(0)
     writer = PdfFileWriter()
-    if source:
-        original = PdfFileReader(source, strict=True)
-        if original.isEncrypted:
-            raise ValueError('encrypted PDFs are not supported')
-        for page_index in range(original.getNumPages()):
-            writer.addPage(original.getPage(page_index))
     generated = PdfFileReader(note, strict=True)
     writer.addPage(generated.getPage(0))
     with open(output, 'wb') as target:
