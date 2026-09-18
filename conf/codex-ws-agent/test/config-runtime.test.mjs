@@ -96,6 +96,20 @@ for (const sandbox of ['read-only', 'workspace-write', 'danger-full-access']) {
   })
 }
 
+test('workspace image attachments are restricted to declared regular inputs', t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const imagePath = resolve(root, 'inputs', 'source.png')
+  mkdirSync(resolve(root, 'inputs'), { recursive: true })
+  writeFileSync(imagePath, 'not-a-real-image-but-a-regular-fixture')
+  const args = buildCodexArgs(selectedProfile, {}, 'edit image', root, true, undefined, [imagePath])
+  assert.deepEqual(args.slice(args.indexOf('--image'), args.indexOf('--image') + 2), ['--image', imagePath])
+  assert.throws(
+    () => buildCodexArgs(selectedProfile, {}, 'edit image', root, true, undefined, [resolve(root, 'outside.png')]),
+    error => error.code === 'WORKSPACE_FILE_IMAGE_INVALID'
+  )
+})
+
 test('resume mode starts new for an unmapped conversation even when Home has history', t => {
   const root = fixture(t)
   const selectedProfile = profileFor(root)

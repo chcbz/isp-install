@@ -3551,13 +3551,32 @@ export class CodexSessionError extends Error {
   }
 }
 
+const safeCodexImageArgs = (imagePaths, codexWorkdir) => {
+  if (!Array.isArray(imagePaths) || imagePaths.length === 0) return []
+  const root = resolve(codexWorkdir)
+  const inputsRoot = resolve(root, 'inputs')
+  const args = []
+  for (const candidate of imagePaths) {
+    if (typeof candidate !== 'string' || !candidate) continue
+    const path = resolve(candidate)
+    const extension = extname(path).toLowerCase()
+    if (!['.png', '.jpg', '.jpeg'].includes(extension)
+        || !path.startsWith(`${inputsRoot}${sep}`) || !existsSync(path) || !lstatSync(path).isFile()) {
+      throw new AgentProtocolError('WORKSPACE_FILE_IMAGE_INVALID', 'workspace image attachment is not a declared regular input')
+    }
+    args.push('--image', path)
+  }
+  return args
+}
+
 export const buildCodexArgs = (
   profile,
   message,
   prompt,
   codexWorkdir = profile.codexWorkdir,
   forceNewSession = false,
-  sessionStore = codexSessionStore
+  sessionStore = codexSessionStore,
+  imagePaths = []
 ) => {
   // Parent exec options must precede `resume`: the resume subcommand has no --sandbox/--cd.
   const executionArgs = [
@@ -3566,6 +3585,7 @@ export const buildCodexArgs = (
   ]
   const outputArgs = [
     '--json', '--skip-git-repo-check',
+    ...safeCodexImageArgs(imagePaths, codexWorkdir),
     ...(profile.codexModel ? ['--model', profile.codexModel] : [])
   ]
   if (!forceNewSession && profile.codexSessionMode === 'resume') {
@@ -3645,7 +3665,8 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   const sessionStore = overrides.sessionStore || codexSessionStore
   let args
   try {
-    args = buildCodexArgs(profile, message, prompt, codexWorkdir, Boolean(workspace) || overrides.forceNewSession === true, sessionStore)
+    args = buildCodexArgs(profile, message, prompt, codexWorkdir, Boolean(workspace) || overrides.forceNewSession === true,
+      sessionStore, overrides.imagePaths || [])
   } catch (error) {
     const leaseError = releaseWorkspaceLease()
     const code = error.code || 'CODEX_SESSION_ERROR'
@@ -3886,10 +3907,26 @@ const strictWorkspaceFileCommand = message => {
  * previous implicit assumption that a model would guess both the input filename and the sole
  * uploadable output path.
  */
+const isImageContentType = value => value === 'image/png' || value === 'image/jpeg'
+
+const workspaceFileImageInputPaths = (command, runDirectory) => {
+  if (!command.outputs.some(output => isImageContentType(output.contentType))) return []
+  return command.inputs
+    .map(input => resolve(runDirectory, input.relativePath))
+    .filter(path => ['.png', '.jpg', '.jpeg'].includes(extname(path).toLowerCase()))
+}
+
 export const workspaceFilePrompt = (message, command) => {
   const request = resolvePrompt(message).trim()
   const inputs = command.inputs.map(item => `- ${item.relativePath} (read-only input)`).join('\n')
   const outputs = command.outputs.map(item => `- ${item.relativePath} (${item.contentType}; required delivery)`).join('\n')
+  const imageDelivery = command.outputs.some(output => isImageContentType(output.contentType))
+  const formatGuidance = imageDelivery
+    ? 'For PNG or JPEG outputs, use the authenticated Codex imagegen capability for the actual generation or edit. Do not use deterministic overlays, templates, or placeholder drawings as a substitute. When an image input is attached, it is the edit target: preserve the user-requested invariants. Use the release-local delivery tool only to validate the exact generated output; if imagegen cannot complete the request, fail rather than fabricate a result.'
+    : 'For DOCX, XLSX, PPTX, or PDF outputs, use the release-local delivery tool to create or modify the declared output, then run its validate command on the exact output path. For an edit, pass the exact declared source input through --input; do not replace it with unrelated content.'
+  const networkGuidance = imageDelivery
+    ? 'Use no ad-hoc network or API calls. The authenticated built-in imagegen capability is the only allowed image-generation path.'
+    : 'Do not use network access.'
   return [
     'You are completing one private, file-bound Agent delivery run.',
     'User request:',
@@ -3899,10 +3936,10 @@ export const workspaceFilePrompt = (message, command) => {
     'Inputs (do not modify):', inputs,
     'Deliverables (create every declared path with the declared file type):', outputs,
     'The release-local delivery tool is available as $CYF_WORKSPACE_FILE_DELIVERY_TOOL and its Python as $CYF_WORKSPACE_FILE_TOOLCHAIN_PYTHON.',
-    'For DOCX, XLSX, PPTX, PDF, PNG, or JPEG outputs, use that versioned tool to create or modify the declared output, then run its validate command on the exact output path. For an edit, pass the exact declared source input through --input; do not replace it with unrelated content.',
+    formatGuidance,
     'The helper performs a real file-format reopen check. PDF input changes are append-only change-note pages unless the request explicitly permits reflow; do not silently claim pixel-identical PDF layout.',
     'Use scratch/ only for temporary unpacking, scripts, or intermediate files. Do not create files outside inputs/, outputs/, or scratch/.',
-    'Do not use network access, do not read unrelated user or host files, and do not report success unless each declared deliverable exists at its exact path and reopens successfully.',
+    `${networkGuidance} Do not read unrelated user or host files, and do not report success unless each declared deliverable exists at its exact path and reopens successfully.`,
     'Preserve requested content and structure where feasible; output must remain in the declared file format.'
   ].join('\n')
 }
@@ -3943,6 +3980,7 @@ export const runWorkspaceFileCommand = async ({
       codexWorkdir: materializedRun.runDirectory,
       requireWorkspace: false,
       forceNewSession: true,
+      imagePaths: workspaceFileImageInputPaths(command, materializedRun.runDirectory),
       env: workspaceFileToolchainEnvironment(),
       sendLegacyFn: () => {},
       sendStatusFn: () => {}

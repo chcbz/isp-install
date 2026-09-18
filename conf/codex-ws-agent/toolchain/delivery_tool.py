@@ -68,26 +68,9 @@ def _font(size):
 
 
 def create_image(lib, output, instruction, source=None, jpeg=False):
-    Image, ImageDraw = lib['Image'], lib['ImageDraw']
-    if source:
-        image = Image.open(source).convert('RGB')
-        image.thumbnail((1600, 1000))
-        canvas = image.copy()
-    else:
-        canvas = Image.new('RGB', (1200, 675), '#13253f')
-    draw = ImageDraw.Draw(canvas)
-    width, height = canvas.size
-    overlay_top = max(0, height - max(200, height // 3))
-    draw.rectangle((0, overlay_top, width, height), fill=(8, 18, 31))
-    draw.text((36, overlay_top + 28), 'Agent 交付件', fill='white', font=_font(30))
-    y = overlay_top + 76
-    for line in wrapped(instruction, 34)[:6]:
-        draw.text((36, y), line, fill='#dfefff', font=_font(22))
-        y += 32
-    if jpeg:
-        canvas.save(output, format='JPEG', quality=92, optimize=True)
-    else:
-        canvas.save(output, format='PNG', optimize=True)
+    # Semantic generation/editing belongs to Codex imagegen, whose authenticated output is then
+    # re-opened by this helper. Never silently replace that request with a deterministic overlay.
+    raise ValueError('semantic image generation must use the authenticated Codex imagegen capability')
 
 
 def create_docx(lib, output, instruction, source=None):
