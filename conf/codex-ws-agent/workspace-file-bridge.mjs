@@ -250,7 +250,7 @@ export const buildOutputCommit = ({ taskId, runId, uploads }) => {
     sha256: upload.sha256,
     length: upload.length
   })).sort((left, right) => left.outputId < right.outputId ? -1 : left.outputId > right.outputId ? 1 : 0)
-  const sequence = outputs.map(output => `${output.outputId}\n${output.sha256}\n${output.length}\n`).join('')
+  const sequence = `${taskId}\n${runId}\n${outputs.map(output => `${output.outputId}\n${output.sha256}\n${output.length}\n`).join('')}`
   const manifestId = `pwe_m_${createHash('sha256').update(sequence, 'utf8').digest('hex')}`
   return Object.freeze({
     manifestId,
