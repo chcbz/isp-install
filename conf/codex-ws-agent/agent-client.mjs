@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   accessSync,
@@ -26,11 +26,41 @@ import {
 } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
+
+const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
+const WORKSPACE_FILE_TOOLCHAIN_DIR = resolve(AGENT_RELEASE_ROOT, '.toolchain')
+const WORKSPACE_FILE_TOOLCHAIN_PYTHON = resolve(WORKSPACE_FILE_TOOLCHAIN_DIR, 'bin', 'python')
+const WORKSPACE_FILE_DELIVERY_TOOL = resolve(AGENT_RELEASE_ROOT, 'toolchain', 'delivery_tool.py')
+
+/** Release-local file producer/re-opener. It is intentionally not configured from profile input. */
+export const workspaceFileToolchain = () => Object.freeze({
+  python: WORKSPACE_FILE_TOOLCHAIN_PYTHON,
+  tool: WORKSPACE_FILE_DELIVERY_TOOL,
+  ready: existsSync(WORKSPACE_FILE_TOOLCHAIN_PYTHON) && existsSync(WORKSPACE_FILE_DELIVERY_TOOL)
+})
+
+export const validateWorkspaceFileOutput = ({ contentType, path }) => {
+  const toolchain = workspaceFileToolchain()
+  if (!toolchain.ready) throw new Error('release-local delivery toolchain is unavailable')
+  const result = spawnSync(toolchain.python, [toolchain.tool, 'validate', '--mime', contentType, '--file', path], {
+    stdio: 'ignore', timeout: 30000
+  })
+  if (result.error || result.status !== 0 || result.signal) throw new Error('delivery output could not be reopened')
+}
+
+const workspaceFileToolchainEnvironment = () => {
+  const toolchain = workspaceFileToolchain()
+  return toolchain.ready ? {
+    CYF_WORKSPACE_FILE_TOOLCHAIN_PYTHON: toolchain.python,
+    CYF_WORKSPACE_FILE_DELIVERY_TOOL: toolchain.tool,
+    PATH: `${dirname(toolchain.python)}:${process.env.PATH || ''}`
+  } : {}
+}
 
 const envPath = resolve(process.cwd(), '.env')
 if (existsSync(envPath)) {
@@ -3640,7 +3670,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   try {
     child = spawnFn(profile.codexBin, args, {
       cwd: codexWorkdir,
-      env: { ...process.env, ...(profile.codexHome ? { CODEX_HOME: profile.codexHome } : {}) },
+      env: { ...process.env, ...(profile.codexHome ? { CODEX_HOME: profile.codexHome } : {}), ...(overrides.env || {}) },
       stdio: ['ignore', 'pipe', 'pipe']
     })
   } catch (error) {
@@ -3798,6 +3828,9 @@ const profileConfigurationErrors = profile => {
   if (profile.workspaceFileRuntimeAuthHeader) {
     errors.push('workspaceFileRuntimeAuthHeader must not be configured; use the current WebSocket registration token only')
   }
+  if (workspaceFileControls.every(value => Boolean(value)) && !workspaceFileToolchain().ready) {
+    errors.push('release-local workspace delivery toolchain is missing or incomplete')
+  }
   return errors
 }
 
@@ -3865,8 +3898,11 @@ export const workspaceFilePrompt = (message, command) => {
     'Controlled file contract:',
     'Inputs (do not modify):', inputs,
     'Deliverables (create every declared path with the declared file type):', outputs,
+    'The release-local delivery tool is available as $CYF_WORKSPACE_FILE_DELIVERY_TOOL and its Python as $CYF_WORKSPACE_FILE_TOOLCHAIN_PYTHON.',
+    'For DOCX, XLSX, PPTX, PDF, PNG, or JPEG outputs, use that versioned tool to create or modify the declared output, then run its validate command on the exact output path. For an edit, pass the exact declared source input through --input; do not replace it with unrelated content.',
+    'The helper performs a real file-format reopen check. PDF input changes are append-only change-note pages unless the request explicitly permits reflow; do not silently claim pixel-identical PDF layout.',
     'Use scratch/ only for temporary unpacking, scripts, or intermediate files. Do not create files outside inputs/, outputs/, or scratch/.',
-    'Do not use network access, do not read unrelated user or host files, and do not report success unless each declared deliverable exists at its exact path.',
+    'Do not use network access, do not read unrelated user or host files, and do not report success unless each declared deliverable exists at its exact path and reopens successfully.',
     'Preserve requested content and structure where feasible; output must remain in the declared file format.'
   ].join('\n')
 }
@@ -3907,6 +3943,7 @@ export const runWorkspaceFileCommand = async ({
       codexWorkdir: materializedRun.runDirectory,
       requireWorkspace: false,
       forceNewSession: true,
+      env: workspaceFileToolchainEnvironment(),
       sendLegacyFn: () => {},
       sendStatusFn: () => {}
     })
@@ -4171,7 +4208,8 @@ const createProfileState = profile => {
     ? new WorkspaceFileBridge({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir,
-      fetchFn: globalThis.fetch
+      fetchFn: globalThis.fetch,
+      validateOutput: validateWorkspaceFileOutput
     })
     : null
   const inbox = new PersistentCommandInbox({

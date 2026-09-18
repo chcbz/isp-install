@@ -20,6 +20,7 @@ RELEASES_DIR="$APP_HOME/releases"
 CURRENT_LINK="$APP_HOME/current"
 STAGED_RELEASE=""
 ACTIVE_RELEASE=""
+PYTHON_BIN=""
 
 cleanup_staged_release() {
     if [ -n "${STAGED_RELEASE:-}" ] && [ -e "$STAGED_RELEASE" ]; then
@@ -93,6 +94,14 @@ find_npm_bin() {
     fi
 }
 
+find_python_bin() {
+    if [ -n "${CODEX_WS_AGENT_PYTHON_BIN:-}" ] && [ -x "${CODEX_WS_AGENT_PYTHON_BIN}" ]; then
+        echo "${CODEX_WS_AGENT_PYTHON_BIN}"
+    elif command -v python3 >/dev/null 2>&1; then
+        command -v python3
+    fi
+}
+
 node_major_version() {
     local node_bin="$1"
     "$node_bin" -v 2>/dev/null | sed 's/^v//' | cut -d. -f1
@@ -160,6 +169,10 @@ stage_application_files() {
     install -m 0644 "$CONF_SRC/skill-install-manager.mjs" "$stage/skill-install-manager.mjs"
     install -m 0644 "$CONF_SRC/managed-host.mjs" "$stage/managed-host.mjs"
     install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$stage/workspace-manager.mjs"
+    install -m 0644 "$CONF_SRC/workspace-file-bridge.mjs" "$stage/workspace-file-bridge.mjs"
+    install -d -m 0755 "$stage/toolchain"
+    install -m 0755 "$CONF_SRC/toolchain/delivery_tool.py" "$stage/toolchain/delivery_tool.py"
+    install -m 0644 "$CONF_SRC/toolchain/requirements.txt" "$stage/toolchain/requirements.txt"
     install -m 0644 "$CONF_SRC/install-policy-check.mjs" "$stage/install-policy-check.mjs"
     install -m 0644 "$CONF_SRC/package.json" "$stage/package.json"
     install -m 0644 "$CONF_SRC/package-lock.json" "$stage/package-lock.json"
@@ -181,6 +194,26 @@ install_runtime_dependencies() {
     fi
     (cd "$release_dir" && PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" ci --omit=dev --ignore-scripts --no-audit --no-fund)
 }
+
+
+install_delivery_toolchain() {
+    local release_dir="$1"
+    local venv="$release_dir/.toolchain"
+    if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ]; then
+        # The installer integration suite verifies staging/atomicity with mocked Node only.
+        # Production always builds and health-checks this release-local venv before cutover.
+        return 0
+    fi
+    if [ -z "${PYTHON_BIN:-}" ] || [ ! -x "$PYTHON_BIN" ]; then
+        __red "未找到 Python 3，无法安装受控文件交付工具链。"
+        return 1
+    fi
+    "$PYTHON_BIN" -m venv "$venv"
+    "$venv/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir --upgrade 'pip<22'
+    "$venv/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir -r "$release_dir/toolchain/requirements.txt"
+    "$venv/bin/python" "$release_dir/toolchain/delivery_tool.py" health >/dev/null
+}
+
 
 atomic_switch_release() {
     local release_dir="$1"
@@ -220,6 +253,7 @@ collate_release() {
 
     stage_application_files "$STAGED_RELEASE"
     install_runtime_dependencies "$STAGED_RELEASE"
+    install_delivery_toolchain "$STAGED_RELEASE"
     run_validation_gate "$STAGED_RELEASE"
 
     mv -T "$STAGED_RELEASE" "$final_release"
@@ -232,6 +266,7 @@ collate_release() {
 if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ]; then
     NODE_BIN="${CODEX_WS_AGENT_TEST_NODE_BIN:-$(command -v node || true)}"
     NPM_BIN="${CODEX_WS_AGENT_TEST_NPM_BIN:-$(find_npm_bin "$NODE_BIN" || true)}"
+    PYTHON_BIN="${CODEX_WS_AGENT_TEST_PYTHON_BIN:-$(find_python_bin || true)}"
     if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
         __red "测试模式未提供可执行 Node.js"
         exit 1
@@ -276,6 +311,12 @@ fi
 NPM_BIN="$(find_npm_bin "$NODE_BIN" || true)"
 if [ -z "$NPM_BIN" ]; then
     __red "未找到 npm，无法按 package-lock.json 安装运行时依赖。"
+    exit 1
+fi
+
+PYTHON_BIN="$(find_python_bin || true)"
+if [ -z "$PYTHON_BIN" ]; then
+    __red "未找到 Python 3，无法安装受控文件交付工具链。"
     exit 1
 fi
 

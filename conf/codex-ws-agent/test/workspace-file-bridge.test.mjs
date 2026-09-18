@@ -479,3 +479,38 @@ test('upload or commit failures fail closed without treating the manifest as com
     })
   }
 })
+
+test('configured delivery validator must reopen every declared output before upload', async () => {
+  const bytes = Buffer.from('trusted input\n')
+  const root = temporaryDirectory()
+  const observations = []
+  const command = commandFor(bytes, { outputManifest: [{
+    outputId: 'result', relativePath: 'outputs/result.docx',
+    uploadPath: '/internal/agent/tasks/task-1/runs/run-1/outputs/result/content',
+    contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', maxLength: 4096
+  }] })
+  const bridge = new WorkspaceFileBridge({
+    apiOrigin: 'https://api.example.test', rootDir: root,
+    fetchFn: async url => responseFor(bytes, url.toString()),
+    validateOutput: value => observations.push(value)
+  })
+  const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
+  writeFileSync(resolve(materialized.runDirectory, 'outputs/result.docx'), storedZip('word/document.xml'))
+  assert.equal(bridge.collectOutputs(command).uploads.length, 1)
+  assert.deepEqual(observations, [{
+    contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    path: resolve(materialized.runDirectory, 'outputs/result.docx'), length: storedZip('word/document.xml').length
+  }])
+
+  const rejectedRoot = temporaryDirectory()
+  const rejected = new WorkspaceFileBridge({
+    apiOrigin: 'https://api.example.test', rootDir: rejectedRoot,
+    fetchFn: async url => responseFor(bytes, url.toString()),
+    validateOutput: () => { throw new Error('cannot reopen') }
+  })
+  const rejectedRun = await rejected.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  mkdirSync(resolve(rejectedRun.runDirectory, 'outputs'), { recursive: true })
+  writeFileSync(resolve(rejectedRun.runDirectory, 'outputs/result.docx'), storedZip('word/document.xml'))
+  assertBridgeCode(() => rejected.collectOutputs(command), 'OUTPUT_FORMAT_INVALID')
+})

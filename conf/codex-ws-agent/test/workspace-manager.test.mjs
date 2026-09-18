@@ -1386,10 +1386,12 @@ test('installer stages dependencies/source, validates, preserves secrets/state, 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/candidate-release')
   const release = resolve(appHome, 'releases', 'candidate-release')
-  for (const file of ['agent-client.mjs', 'skill-install-manager.mjs', 'managed-host.mjs', 'workspace-manager.mjs', 'package.json', 'package-lock.json']) {
+  for (const file of ['agent-client.mjs', 'skill-install-manager.mjs', 'managed-host.mjs', 'workspace-manager.mjs', 'workspace-file-bridge.mjs', 'package.json', 'package-lock.json']) {
     assert.equal(existsSync(resolve(release, file)), true, file)
     assert.deepEqual(readFileSync(resolve(release, file)), readFileSync(new URL(`../${file}`, import.meta.url)), file)
   }
+  assert.deepEqual(readFileSync(resolve(release, 'toolchain', 'delivery_tool.py')), readFileSync(new URL('../toolchain/delivery_tool.py', import.meta.url)))
+  assert.deepEqual(readFileSync(resolve(release, 'toolchain', 'requirements.txt')), readFileSync(new URL('../toolchain/requirements.txt', import.meta.url)))
   assert.equal(readlinkSync(resolve(appHome, 'agent-client.mjs')), 'current/agent-client.mjs')
   assert.equal(readlinkSync(resolve(appHome, 'workspace-manager.mjs')), 'current/workspace-manager.mjs')
   for (const file of ['README.md', '.env.example', 'codex-home.example.toml']) {

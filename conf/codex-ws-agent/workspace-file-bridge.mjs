@@ -419,14 +419,17 @@ export class WorkspaceFileBridge {
   #apiOrigin
   #rootDir
   #fetchFn
+  #validateOutput
   #runs = new Map()
 
-  constructor({ apiOrigin, rootDir, fetchFn = globalThis.fetch } = {}) {
+  constructor({ apiOrigin, rootDir, fetchFn = globalThis.fetch, validateOutput = null } = {}) {
     this.#apiOrigin = parseApiOrigin(apiOrigin)
     if (typeof rootDir !== 'string' || !isAbsolute(rootDir)) fail('CONFIG_INVALID', 'rootDir must be an absolute path')
     this.#rootDir = resolve(rootDir)
     ensureDirectory(this.#rootDir)
     this.#fetchFn = fetchFn
+    if (validateOutput !== null && typeof validateOutput !== 'function') fail('CONFIG_INVALID', 'validateOutput must be a function when supplied')
+    this.#validateOutput = validateOutput
   }
 
   get apiOrigin() { return this.#apiOrigin }
@@ -573,6 +576,10 @@ export class WorkspaceFileBridge {
       assertInside(runDirectory, path)
       const bytes = readBoundedRegularFile(path, output.maxLength)
       assertDeclaredOutputFormat(output.contentType, bytes)
+      if (this.#validateOutput) {
+        try { this.#validateOutput(Object.freeze({ contentType: output.contentType, path, length: bytes.length })) }
+        catch { fail('OUTPUT_FORMAT_INVALID', 'declared output could not be reopened by the configured delivery toolchain') }
+      }
       const length = bytes.length
       const sha256 = createHash('sha256').update(bytes).digest('hex')
       const url = endpointUrl(this.#apiOrigin, output.uploadPath).toString()
