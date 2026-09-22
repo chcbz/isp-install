@@ -39,6 +39,7 @@ import {
   workspaceFilePrompt
 } from '../agent-client.mjs'
 import { WorkspaceFileBridge } from '../workspace-file-bridge.mjs'
+import { ExecutionReportOutbox, EXECUTION_REPORT_RESULT_TYPE } from '../report-outbox.mjs'
 
 const temporaryDirectories = []
 afterEach(() => {
@@ -2784,4 +2785,93 @@ test('workspace file upload failure is reported failed after Codex and never com
   assert.match(outcome.errorMessage, /^UPLOAD_FAILED:/)
   assert.ok(reports.every(report => report.payload.status === 'failed'))
   assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), false)
+})
+
+test('opt-in command execution persists and replays an exact Protocol-v1 work.result until its matching receipt', async () => {
+  const rootDir = temporaryDirectory()
+  const reportProfile = { ...profile, executionReportCommandTypes: ['TASK_EXECUTE'] }
+  const outbox = new ExecutionReportOutbox({
+    profile: reportProfile,
+    rootDir: resolve(rootDir, 'execution-report-outbox'),
+    runtimeInstanceId: 'runtime-report-1',
+    createId: () => 'report-message-1'
+  })
+  outbox.initialize()
+  const inbox = new PersistentCommandInbox({ rootDir, profile: reportProfile })
+  const sent = []
+  const processor = new AgentMessageProcessor({
+    profile: reportProfile,
+    inbox,
+    runCommand: async () => ({ status: 'completed', exitCode: 0, output: 'must not be reported' }),
+    runChat: async () => {},
+    executionReportOutbox: outbox,
+    sendFn: wire => { sent.push(wire); return true }
+  })
+  processor.start()
+  await processor.handle({ ...command(1), targetAgentId: reportProfile.agentId })
+  await processor.waitForIdle()
+
+  assert.equal(sent.length, 1)
+  const report = JSON.parse(sent[0])
+  assert.deepEqual(report, {
+    schemaVersion: 1,
+    messageType: 'work.result',
+    messageId: 'report-message-1',
+    resultType: EXECUTION_REPORT_RESULT_TYPE,
+    sourceAgentId: reportProfile.agentId,
+    agentId: reportProfile.agentId,
+    runtimeInstanceId: 'runtime-report-1',
+    targetAgentId: reportProfile.agentId,
+    commandId: 'command-1',
+    correlationId: 'message-1',
+    status: 'SUCCEEDED',
+    exitCode: 0
+  })
+  assert.equal(JSON.stringify(report).includes('must not be reported'), false)
+  const pending = outbox.pendingReports()
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].wire, sent[0])
+
+  const restarted = new ExecutionReportOutbox({
+    profile: reportProfile,
+    rootDir: resolve(rootDir, 'execution-report-outbox'),
+    runtimeInstanceId: 'runtime-report-2'
+  })
+  restarted.initialize()
+  const replayed = []
+  assert.equal(restarted.sendPending(wire => { replayed.push(wire); return true }), 1)
+  assert.deepEqual(replayed, sent)
+
+  const receipt = {
+    schemaVersion: 1,
+    messageType: 'work.result.receipt',
+    messageId: 'receipt-1',
+    resultType: EXECUTION_REPORT_RESULT_TYPE,
+    receiptStatus: 'ACCEPTED',
+    correlationId: report.messageId,
+    commandId: 'command-1',
+    targetAgentId: reportProfile.agentId
+  }
+  assert.equal(restarted.acknowledgeReceipt(receipt).status, 'acknowledged')
+  assert.equal(restarted.pendingReports().length, 0)
+  assert.throws(() => restarted.acknowledgeReceipt({ ...receipt, commandId: 'other-command' }), /does not match its durable execution report/)
+})
+
+test('non-opt-in command types do not create execution reports', async () => {
+  const rootDir = temporaryDirectory()
+  const reportProfile = { ...profile, executionReportCommandTypes: ['OTHER_COMMAND'] }
+  const outbox = new ExecutionReportOutbox({ profile: reportProfile, rootDir: resolve(rootDir, 'execution-report-outbox') })
+  outbox.initialize()
+  const processor = new AgentMessageProcessor({
+    profile: reportProfile,
+    inbox: new PersistentCommandInbox({ rootDir, profile: reportProfile }),
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: async () => {},
+    executionReportOutbox: outbox,
+    sendFn: () => true
+  })
+  processor.start()
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+  assert.equal(outbox.pendingReports().length, 0)
 })

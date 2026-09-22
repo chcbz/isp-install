@@ -30,6 +30,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
+import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 
@@ -511,6 +512,9 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     workspaceNonCodingCommandTypes: parseStringList(
       profile.workspaceNonCodingCommandTypes ?? fallback.workspaceNonCodingCommandTypes
     ),
+    executionReportCommandTypes: parseStringList(
+      profile.executionReportCommandTypes ?? fallback.executionReportCommandTypes
+    ),
     workspaceFallbackWorkdir: profile.workspaceFallbackWorkdir || fallback.workspaceFallbackWorkdir || '',
     workspaceFileApiOrigin: profile.workspaceFileApiOrigin || fallback.workspaceFileApiOrigin || '',
     workspaceFileRootDir: profile.workspaceFileRootDir || fallback.workspaceFileRootDir || '',
@@ -538,6 +542,7 @@ const legacyProfile = () => normalizeProfile({
   workspaceRole: process.env.CODEX_WORKSPACE_ROLE || 'coder',
   workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
   workspaceNonCodingCommandTypes: process.env.CODEX_WORKSPACE_NON_CODING_COMMAND_TYPES || '',
+  executionReportCommandTypes: process.env.CODEX_EXECUTION_REPORT_COMMAND_TYPES || '',
   workspaceFallbackWorkdir: process.env.CODEX_WORKSPACE_FALLBACK_WORKDIR || '',
   workspaceFileApiOrigin: process.env.CODEX_WORKSPACE_FILE_API_ORIGIN || '',
   workspaceFileRootDir: process.env.CODEX_WORKSPACE_FILE_ROOT_DIR || '',
@@ -2155,7 +2160,7 @@ export class AgentMessageProcessor {
   constructor({
     profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
     recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
-    ledger = null, ackOutbox = null, sendFn = null
+    ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null
   }) {
     this.profile = profile
     this.inbox = inbox
@@ -2168,6 +2173,7 @@ export class AgentMessageProcessor {
     this.sendChatBusy = sendChatBusy
     this.ledger = ledger
     this.ackOutbox = ackOutbox
+    this.executionReportOutbox = executionReportOutbox
     this.sendFn = sendFn
     this.drainPromise = null
     this.chatActive = false
@@ -2753,6 +2759,9 @@ export class AgentMessageProcessor {
             outcome: entry.outcome
           })
         }
+        if (this.executionReportOutbox?.profile.executionReportCommandTypes.includes(validated.normalized.commandType)) {
+          this.executionReportOutbox.enqueueAndSend(validated.normalized, durableOutcome, this.sendFn)
+        }
         this.inbox.settleCompletedFile(item.path, item.fileName, completed)
       } catch (error) {
         this._failClosed(new AgentProtocolError(
@@ -3037,7 +3046,7 @@ const sendRaw = (event, profile = defaultProfile) => {
   const state = getProfileState(profile)
   if (!state?.ws || state.ws.readyState !== WebSocketClient.OPEN) return false
   if (Number(state.ws.bufferedAmount || 0) > MAX_WS_BUFFERED_BYTES) return false
-  state.ws.send(JSON.stringify(event))
+  state.ws.send(typeof event === 'string' ? event : JSON.stringify(event))
   return true
 }
 
@@ -4352,6 +4361,11 @@ const createProfileState = profile => {
     profile
   })
   const sendAckFn = envelope => sendRaw(envelope, profile)
+  const executionReportOutbox = new ExecutionReportOutbox({
+    profile,
+    rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile), 'execution-report-outbox'),
+    runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+  })
   const skillInstallManager = new SkillInstallManager({
     profile,
     stateRoot: defaultSkillInstallStateRoot(config.commandInboxDir, profile, config.wsUrl),
@@ -4366,6 +4380,7 @@ const createProfileState = profile => {
   })
   ledger.initialize()
   ackOutbox.initialize()
+  executionReportOutbox.initialize()
   skillInstallManager.initialize()
 
 
@@ -4381,10 +4396,12 @@ const createProfileState = profile => {
     reconnectStartedAt: 0,
     reconnectScheduled: false,
     resultReplayCancel: null,
+    executionReportReplayCancel: null,
     taskEvents,
     inbox,
     ledger,
     ackOutbox,
+    executionReportOutbox,
     skillInstallManager,
     workspaceManager,
     workspaceFileBridge,
@@ -4414,7 +4431,9 @@ const createProfileState = profile => {
       taskEvents.set(key, { ...message, observedAt: Date.now() })
       console.log(`task event observed | profile=${profile.profileId} | event=${message.eventType || ''} | taskId=${message.taskId || ''}`)
     },
-    onWorkResultReceipt: message => skillInstallManager.acknowledgeResultReceipt(message),
+    onWorkResultReceipt: message => executionReportOutbox.isExecutionReceipt(message)
+      ? executionReportOutbox.acknowledgeReceipt(message)
+      : skillInstallManager.acknowledgeResultReceipt(message),
     recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message),
     onReject: (error, raw) => {
       console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
@@ -4427,6 +4446,7 @@ const createProfileState = profile => {
     sendChatBusy: message => sendChatFinal(profile, message, '当前正在处理其他请求，请稍后再试。', { status: 'busy' }),
     ledger,
     ackOutbox,
+    executionReportOutbox,
     sendFn: sendAckFn
   })
   const recovery = state.processor.start({ drain: false })
@@ -4508,6 +4528,17 @@ const doReconnect = profile => {
   }, delay)
 }
 
+export const startBoundedExecutionReportReplay = ({ outbox, sendFn, isStable = () => true, schedule = callback => setImmediate(callback) }) => {
+  let cancelled = false
+  const run = () => {
+    if (cancelled || !isStable()) return
+    const replayed = outbox.sendPending(sendFn)
+    if (!cancelled && replayed && isStable()) schedule(run)
+  }
+  schedule(run)
+  return () => { cancelled = true }
+}
+
 export const startBoundedSkillResultReplay = ({
   manager,
   replayToken,
@@ -4529,8 +4560,14 @@ export const startBoundedSkillResultReplay = ({
 const resumeRegisteredProfile = (profile, state) => {
   clearInterval(state.heartbeatTimer)
   state.resultReplayCancel?.()
+  state.executionReportReplayCancel?.()
   const replaySocket = state.ws
   const replayToken = `connection:${randomUUID()}`
+  state.executionReportReplayCancel = startBoundedExecutionReportReplay({
+    outbox: state.executionReportOutbox,
+    sendFn: envelope => sendRaw(envelope, profile),
+    isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN
+  })
   state.resultReplayCancel = startBoundedSkillResultReplay({
     manager: state.skillInstallManager,
     replayToken,
@@ -4582,6 +4619,8 @@ const connectProfile = profile => {
     closeFired = true
     state.resultReplayCancel?.()
     state.resultReplayCancel = null
+    state.executionReportReplayCancel?.()
+    state.executionReportReplayCancel = null
     clearInterval(state.heartbeatTimer)
     stopWorkspaceFilePoller(state)
     state.processor.pause()
@@ -4605,6 +4644,8 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
   state.processor.pause()
   state.resultReplayCancel?.()
   state.resultReplayCancel = null
+  state.executionReportReplayCancel?.()
+  state.executionReportReplayCancel = null
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
@@ -4698,7 +4739,8 @@ const shutdown = (exitCode = 0, reason = '') => {
     const state = getProfileState(profile)
     state?.processor.pause()
     state?.resultReplayCancel?.()
-    if (state) state.resultReplayCancel = null
+    state?.executionReportReplayCancel?.()
+    if (state) { state.resultReplayCancel = null; state.executionReportReplayCancel = null }
     clearReconnectState(state)
     clearInterval(state?.heartbeatTimer)
     stopWorkspaceFilePoller(state)
