@@ -644,6 +644,13 @@ const ensureSecureDirectory = (fs, directory) => {
 }
 
 const forceSecureFileMode = (fs, filePath) => {
+  const metadata = fs.lstatSync(filePath)
+  if (!metadata.isFile()) throw new Error(`expected a regular durable file: ${filePath}`)
+  // Atomic writes and durable renames already fsync the new inode before the directory entry.
+  // Re-fsyncing each already-secure immutable record on every replay makes a large ACK
+  // high-water history block the event loop, leaving the durable sequence lock stranded
+  // during a service restart. Reassert and sync only when an existing file was changed.
+  if ((metadata.mode & 0o777) === 0o600) return
   fs.chmodSync(filePath, 0o600)
   const descriptor = fs.openSync(filePath, 'r')
   try {

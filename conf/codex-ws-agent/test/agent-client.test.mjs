@@ -2875,3 +2875,36 @@ test('non-opt-in command types do not create execution reports', async () => {
   await processor.waitForIdle()
   assert.equal(outbox.pendingReports().length, 0)
 })
+
+test('ACK high-water replay verifies immutable secure markers without fsyncing each file', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const writer = new AckOutbox({ rootDir: storageRoot, profile })
+  writer.initialize()
+  for (let index = 0; index < 48; index += 1) {
+    writer.enqueue(buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: `history-${index}` }), { kind: 'none' })
+  }
+  for (const item of writer.pendingEnvelopes()) writer.dequeue(item.fileName)
+
+  let fsyncCalls = 0
+  const observer = new AckOutbox({
+    rootDir: storageRoot,
+    profile,
+    fs: {
+      fsyncSync: descriptor => {
+        fsyncCalls += 1
+        return fsyncSync(descriptor)
+      }
+    }
+  })
+  observer.initialize()
+  observer.pendingEnvelopes()
+
+  assert.ok(fsyncCalls < 25, `secure immutable high-water verification must remain O(1), got ${fsyncCalls} fsync calls`)
+
+  const marker = resolve(observer.highWaterDir, '00000000000000000048.json')
+  chmodSync(marker, 0o644)
+  const repairingObserver = new AckOutbox({ rootDir: storageRoot, profile })
+  repairingObserver.initialize()
+  assert.equal(statSync(marker).mode & 0o777, 0o600)
+})
