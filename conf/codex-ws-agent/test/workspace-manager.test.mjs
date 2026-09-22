@@ -1386,7 +1386,7 @@ test('installer stages dependencies/source, validates, preserves secrets/state, 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/candidate-release')
   const release = resolve(appHome, 'releases', 'candidate-release')
-  for (const file of ['agent-client.mjs', 'skill-install-manager.mjs', 'managed-host.mjs', 'workspace-manager.mjs', 'workspace-file-bridge.mjs', 'package.json', 'package-lock.json']) {
+  for (const file of ['agent-client.mjs', 'report-outbox.mjs', 'skill-install-manager.mjs', 'managed-host.mjs', 'workspace-manager.mjs', 'workspace-file-bridge.mjs', 'package.json', 'package-lock.json']) {
     assert.equal(existsSync(resolve(release, file)), true, file)
     assert.deepEqual(readFileSync(resolve(release, file)), readFileSync(new URL(`../${file}`, import.meta.url)), file)
   }
