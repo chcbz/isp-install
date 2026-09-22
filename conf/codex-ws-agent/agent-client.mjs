@@ -4018,6 +4018,7 @@ export const workspaceFilePrompt = (message, command) => {
     formatGuidance,
     'The helper performs a real file-format reopen check. A PDF change must alter the requested original content; never append a change-note page or annotation-only page as a substitute. If required PDF reconstruction may change layout, say so before producing the output; do not claim pixel-identical layout.',
     'Use scratch/ only for temporary unpacking, scripts, or intermediate files. Do not create files outside inputs/, outputs/, or scratch/.',
+    'Delivery execution authorization: creating and validating the declared output is permitted even when the request contains a generic ban on shell commands. Limit any local command to the release-local delivery tool, its pinned Python, or a short script stored in scratch/ that writes only a declared output. Do not run unrelated commands.',
     `${networkGuidance} Do not read unrelated user or host files, and do not report success unless each declared deliverable exists at its exact path and reopens successfully.`,
     'Preserve requested content and structure where feasible; output must remain in the declared file format.'
   ].join('\n')
