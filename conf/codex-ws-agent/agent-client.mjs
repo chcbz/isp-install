@@ -4162,21 +4162,31 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = glob
       }
     })
   } catch {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup failed')
+    // Fetch errors intentionally stay opaque: transport details can contain request targets.
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_TRANSPORT', 'workspace runtime command pickup failed')
   }
-  if (!response || response.status !== 200 || !exactResponseUrl(response, endpoint)) {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup was rejected')
+  if (!response || !Number.isInteger(response.status)) {
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_RESPONSE', 'workspace runtime command pickup returned no valid response')
+  }
+  if (response.status !== 200) {
+    throw new AgentProtocolError(`WORKSPACE_FILE_QUEUE_HTTP_${response.status}`, 'workspace runtime command pickup was rejected')
+  }
+  if (response.redirected === true) {
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_REDIRECT', 'workspace runtime command pickup redirected')
+  }
+  if (!exactResponseUrl(response, endpoint)) {
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_URL', 'workspace runtime command pickup returned an unexpected URL')
   }
   const contentType = response.headers?.get?.('content-type') || ''
   if (contentType && !/^application\/json(?:\s*;|$)/i.test(contentType)) {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup returned an invalid content type')
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_CONTENT_TYPE', 'workspace runtime command pickup returned an invalid content type')
   }
   let body
   try { body = await response.json() } catch {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup returned invalid JSON')
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_JSON', 'workspace runtime command pickup returned invalid JSON')
   }
   if (!isObject(body) || Object.keys(body).some(key => key !== 'items') || !Array.isArray(body.items) || body.items.length > 16) {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_UNAVAILABLE', 'workspace runtime command pickup returned an invalid envelope')
+    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_ENVELOPE', 'workspace runtime command pickup returned an invalid envelope')
   }
   let dispatched = 0
   let rejected = 0

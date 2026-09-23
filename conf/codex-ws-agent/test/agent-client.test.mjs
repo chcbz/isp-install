@@ -2699,7 +2699,7 @@ test('workspace command polling accepts only exact native queue envelopes and di
   assert.equal(JSON.stringify(fetchCalls).includes('runtime-secret'), false)
 })
 
-test('workspace command polling fails closed for redirects, wrong response paths, and invalid queue bodies', async t => {
+test('workspace command polling exposes safe failure categories while failing closed', async t => {
   const root = temporaryDirectory()
   const configured = {
     ...profile,
@@ -2708,15 +2708,21 @@ test('workspace command polling fails closed for redirects, wrong response paths
     workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
   }
   const state = { workspaceFileBridge: new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => {} }), workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader, processor: {} }
-  for (const [name, response] of [
-    ['redirect', { status: 200, redirected: true, url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands', headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }],
-    ['wrong path', { status: 200, redirected: false, url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands/extra', headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }],
-    ['invalid body', { status: 200, redirected: false, url: 'https://api.example.test/internal/agent/tasks/workspace-executions/commands', headers: { get: () => 'application/json' }, json: async () => ({ items: 'no' }) }]
+  const nativeUrl = 'https://api.example.test/internal/agent/tasks/workspace-executions/commands'
+  for (const [name, fetchFn, code] of [
+    ['transport', async () => { throw new Error('connection failed') }, 'WORKSPACE_FILE_QUEUE_TRANSPORT'],
+    ['missing response', async () => null, 'WORKSPACE_FILE_QUEUE_RESPONSE'],
+    ['unauthorized', async () => ({ status: 401, redirected: false, url: nativeUrl, headers: { get: () => 'application/json' }, json: async () => ({}) }), 'WORKSPACE_FILE_QUEUE_HTTP_401'],
+    ['redirect', async () => ({ status: 200, redirected: true, url: nativeUrl, headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }), 'WORKSPACE_FILE_QUEUE_REDIRECT'],
+    ['wrong path', async () => ({ status: 200, redirected: false, url: `${nativeUrl}/extra`, headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }), 'WORKSPACE_FILE_QUEUE_URL'],
+    ['wrong content type', async () => ({ status: 200, redirected: false, url: nativeUrl, headers: { get: () => 'text/html' }, json: async () => ({ items: [] }) }), 'WORKSPACE_FILE_QUEUE_CONTENT_TYPE'],
+    ['invalid JSON', async () => ({ status: 200, redirected: false, url: nativeUrl, headers: { get: () => 'application/json' }, json: async () => { throw new Error('not json') } }), 'WORKSPACE_FILE_QUEUE_JSON'],
+    ['invalid body', async () => ({ status: 200, redirected: false, url: nativeUrl, headers: { get: () => 'application/json' }, json: async () => ({ items: 'no' }) }), 'WORKSPACE_FILE_QUEUE_ENVELOPE']
   ]) {
     await t.test(name, async () => {
       await assert.rejects(
-        () => pollWorkspaceFileCommands({ profile: configured, state, fetchFn: async () => response }),
-        error => error.code === 'WORKSPACE_FILE_QUEUE_UNAVAILABLE'
+        () => pollWorkspaceFileCommands({ profile: configured, state, fetchFn }),
+        error => error.code === code
       )
     })
   }
