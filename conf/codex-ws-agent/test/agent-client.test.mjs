@@ -39,6 +39,7 @@ import {
   workspaceFilePrompt
 } from '../agent-client.mjs'
 import { WorkspaceFileBridge } from '../workspace-file-bridge.mjs'
+import { RegistrationAckObserver } from '../registration-ack.mjs'
 import { ExecutionReportOutbox, EXECUTION_REPORT_RESULT_TYPE } from '../report-outbox.mjs'
 
 const temporaryDirectories = []
@@ -2955,4 +2956,48 @@ test('ACK high-water replay verifies immutable secure markers without fsyncing e
   const repairingObserver = new AckOutbox({ rootDir: storageRoot, profile })
   repairingObserver.initialize()
   assert.equal(statSync(marker).mode & 0o777, 0o600)
+})
+
+
+test('late correlated registration ACK restores native queue pickup without repeating execution writes', async () => {
+  let timeout
+  const observer = new RegistrationAckObserver({
+    agentId: profile.agentId, runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+    schedule: callback => { timeout = callback; return 1 }, cancel: () => {},
+    logger: { log: () => {}, warn: () => {} }
+  })
+  observer.begin('registration-late-queue')
+  timeout()
+  const handled = []
+  const state = {
+    workspaceFileBridge: { apiOrigin: 'https://api.example.test' },
+    workspaceFileRuntimeAuthHeader: observer.runtimeAuthHeader,
+    processor: { handle: async raw => handled.push(JSON.parse(raw)) }
+  }
+  let queueCalls = 0
+  const valid = {
+    schemaVersion: 1, messageType: MESSAGE_TYPES.COMMAND_DISPATCH,
+    messageId: 'pwe_msg_late', commandId: 'pwe_cmd_late',
+    tenantId: '0', clientId: 'client-a', ownerJiacn: 'owner-a',
+    taskId: 'task-1', runId: 'run-1', targetAgentId: profile.agentId,
+    commandType: 'WORKSPACE_FILE_EXECUTE', instruction: 'create supplied result',
+    payload: workspaceFilePayload(Buffer.from('input'))
+  }
+  const fetchFn = async (url, options) => {
+    queueCalls++
+    assert.equal(options.method, 'GET')
+    assert.equal(options.headers.Authorization, `AgentRuntime ${'a'.repeat(32)}`)
+    return { status: 200, redirected: false, url: url.toString(),
+      headers: { get: () => 'application/json' }, json: async () => ({ items: [valid] }) }
+  }
+  await assert.rejects(() => pollWorkspaceFileCommands({ profile, state, fetchFn }),
+    error => error.code === 'WORKSPACE_FILE_RUNTIME_UNAVAILABLE')
+  assert.equal(queueCalls, 0)
+  assert.equal(observer.observe({ type: 'agent_registered', agentId: profile.agentId,
+    messageId: 'registration-late-queue', runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+    status: 'online', token: 'a'.repeat(32) }), 'registered')
+  state.workspaceFileRuntimeAuthHeader = observer.runtimeAuthHeader
+  assert.deepEqual(await pollWorkspaceFileCommands({ profile, state, fetchFn }), { dispatched: 1, rejected: 0 })
+  assert.equal(queueCalls, 1)
+  assert.deepEqual(handled, [valid])
 })

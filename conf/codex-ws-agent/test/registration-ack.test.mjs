@@ -163,12 +163,14 @@ test('ACK timeout and send failure remain unregistered with explicit stages', ()
   assert.equal(failed.logs.at(-1), 'registration stage=send_failed')
 })
 
-test('late valid ACK after observation timeout stays observationally expired', () => {
+test('late exact ACK after observation timeout completes current registration', () => {
   const f = fixture()
   const { envelope } = send(f)
   f.fireTimers()
-  assert.equal(f.observer.observe(ack(envelope)), null)
-  assert.deepEqual(f.observer.snapshot(), { stage: 'ack_timeout', registered: false })
+  assert.equal(f.observer.observe({ ...ack(envelope), token: 'b'.repeat(32) }), 'registered')
+  assert.deepEqual(f.observer.snapshot(), { stage: 'registered', registered: true })
+  assert.equal(f.observer.runtimeAuthHeader, `AgentRuntime ${'b'.repeat(32)}`)
+  assert.equal(f.timerCount(), 0)
 })
 
 test('disconnect cancels pending timeout and a new registration rejects stale ACKs', () => {
@@ -196,4 +198,54 @@ test('agent runtime wires send, inbound control, timeout, and disconnect to the 
   assert.match(source, /workspaceFileRuntimeAuthHeader: state\.workspaceFileRuntimeAuthHeader/)
   assert.match(source, /registrationAckTimeoutMs: parseNonNegativeMs\(process\.env\.REGISTRATION_ACK_TIMEOUT_MS, 10000\)/)
   assert.ok((source.match(/registration\.disconnect\(\)/g) || []).length >= 3)
+})
+
+
+test('observation timeout never weakens identity, correlation or token validation', () => {
+  const f = fixture()
+  const { envelope } = send(f)
+  f.fireTimers()
+  for (const changed of [
+    { messageId: 'wrong-request' }, { runtimeInstanceId: 'wrong-runtime' },
+    { agentId: 'wrong-agent' }, { status: 'offline' }, { token: '' },
+    { token: 'bad\ntoken' }
+  ]) {
+    assert.equal(f.observer.observe({ ...ack(envelope), ...changed }), null)
+    assert.equal(f.observer.registered, false)
+    assert.equal(f.observer.runtimeAuthHeader, '')
+  }
+  assert.equal(f.observer.observe(ack(envelope)), 'registered')
+})
+
+test('new attempt, disconnect and send failure invalidate late timeout ACKs', () => {
+  for (const action of ['new-attempt', 'disconnect', 'send-failed']) {
+    const f = fixture()
+    const first = send(f).envelope
+    f.fireTimers()
+    if (action === 'new-attempt') send(f)
+    if (action === 'disconnect') f.observer.disconnect()
+    if (action === 'send-failed') send(f, false)
+    assert.equal(f.observer.observe(ack(first)), null)
+    assert.equal(f.observer.runtimeAuthHeader, '')
+  }
+})
+
+test('correlated rejection after observation timeout remains terminal for that attempt', () => {
+  const f = fixture()
+  const { envelope } = send(f)
+  f.fireTimers()
+  assert.equal(f.observer.observe({ type: 'error', messageId: envelope.messageId, runtimeInstanceId }), 'rejected')
+  assert.equal(f.observer.observe(ack(envelope)), null)
+  assert.equal(f.observer.runtimeAuthHeader, '')
+})
+
+test('late nested ACK cannot rotate token again after exact registration completes', () => {
+  const f = fixture()
+  const { envelope } = send(f)
+  f.fireTimers()
+  assert.equal(f.observer.observe({ type: 'agent_registered', data: { ...ack(envelope), token: 'c'.repeat(32) } }), 'registered')
+  assert.equal(f.observer.observe({ ...ack(envelope), token: 'd'.repeat(32) }), null)
+  assert.equal(f.observer.runtimeAuthHeader, `AgentRuntime ${'c'.repeat(32)}`)
+  for (const value of Object.values(secret)) assert.equal(f.logs.join('\n').includes(value), false)
+  assert.equal(f.logs.join('\n').includes('c'.repeat(32)), false)
 })

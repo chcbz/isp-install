@@ -49,8 +49,10 @@ export class RegistrationAckObserver {
     this.timer = this.schedule(() => {
       if (this.stage !== 'pending_ack' || this.messageId !== messageId) return
       this.timer = null
+      // This timer is a slow-registration observation, not an authority deadline.
+      // Keep the current request correlation so a late exact ACK can still enable
+      // the native file lane. begin/sendFailed/disconnect invalidate old attempts.
       this.stage = 'ack_timeout'
-      this.messageId = null
       this.log('warn', this.stage)
     }, this.timeoutMs)
   }
@@ -64,7 +66,7 @@ export class RegistrationAckObserver {
   }
 
   observe(frame) {
-    if (this.stage !== 'pending_ack' || !isObject(frame)) return null
+    if (!['pending_ack', 'ack_timeout'].includes(this.stage) || !isObject(frame)) return null
     const payload = framePayload(frame)
     if (!isObject(payload) || !traceMatches(payload, this.messageId, this.runtimeInstanceId)) return null
     if (frame.type === 'agent_registered' && exactValue(payload.agentId, this.agentId, 100) &&
