@@ -4160,20 +4160,27 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = glob
     throw new AgentProtocolError('WORKSPACE_FILE_RUNTIME_UNAVAILABLE', 'workspace runtime polling is not configured')
   }
   const endpoint = new URL(WORKSPACE_FILE_QUEUE_PATH, state.workspaceFileBridge.apiOrigin)
+  const request = {
+    method: 'GET', redirect: 'error',
+    headers: {
+      Authorization: auth,
+      Accept: 'application/json',
+      'X-Agent-Id': profile.agentId,
+      'X-Agent-Runtime-Id': PROCESS_RUNTIME_INSTANCE_ID
+    }
+  }
   let response
-  try {
-    response = await fetchFn(endpoint, {
-      method: 'GET', redirect: 'error',
-      headers: {
-        Authorization: auth,
-        Accept: 'application/json',
-        'X-Agent-Id': profile.agentId,
-        'X-Agent-Runtime-Id': PROCESS_RUNTIME_INSTANCE_ID
-      }
-    })
-  } catch (error) {
-    // Fetch errors intentionally stay opaque: transport details can contain request targets.
-    throw new AgentProtocolError(workspaceQueueTransportCode(error), 'workspace runtime command pickup failed')
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      response = await fetchFn(endpoint, request)
+      break
+    } catch (error) {
+      // A stale undici reusable socket can fail before this read-only GET is sent. Retry that
+      // exact transport condition once; never retry a write or broaden this to other failures.
+      if (attempt === 0 && error?.cause?.code === 'UND_ERR_SOCKET') continue
+      // Fetch errors intentionally stay opaque: transport details can contain request targets.
+      throw new AgentProtocolError(workspaceQueueTransportCode(error), 'workspace runtime command pickup failed')
+    }
   }
   if (!response || !Number.isInteger(response.status)) {
     throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_RESPONSE', 'workspace runtime command pickup returned no valid response')

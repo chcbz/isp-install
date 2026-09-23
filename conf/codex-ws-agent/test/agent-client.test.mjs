@@ -2699,6 +2699,45 @@ test('workspace command polling accepts only exact native queue envelopes and di
   assert.equal(JSON.stringify(fetchCalls).includes('runtime-secret'), false)
 })
 
+test('workspace command polling retries one stale undici socket before dispatching the read-only queue response', async () => {
+  const root = temporaryDirectory()
+  const configured = {
+    ...profile,
+    workspaceFileApiOrigin: 'https://api.example.test',
+    workspaceFileRootDir: root,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+  }
+  const bridge = new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => assert.fail('bridge download is not expected') })
+  const state = {
+    workspaceFileBridge: bridge,
+    workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader,
+    processor: { handle: async () => assert.fail('empty queue must not dispatch') }
+  }
+  const nativeUrl = 'https://api.example.test/internal/agent/tasks/workspace-executions/commands'
+  let calls = 0
+  const result = await pollWorkspaceFileCommands({
+    profile: configured,
+    state,
+    fetchFn: async () => {
+      calls += 1
+      if (calls === 1) {
+        const error = new TypeError('fetch failed')
+        error.cause = { code: 'UND_ERR_SOCKET' }
+        throw error
+      }
+      return {
+        status: 200,
+        redirected: false,
+        url: nativeUrl,
+        headers: { get: () => 'application/json' },
+        json: async () => ({ items: [] })
+      }
+    }
+  })
+  assert.deepEqual(result, { dispatched: 0, rejected: 0 })
+  assert.equal(calls, 2)
+})
+
 test('workspace command polling exposes safe failure categories while failing closed', async t => {
   const root = temporaryDirectory()
   const configured = {
