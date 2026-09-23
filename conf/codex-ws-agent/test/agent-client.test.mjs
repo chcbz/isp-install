@@ -2711,6 +2711,7 @@ test('workspace command polling exposes safe failure categories while failing cl
   const nativeUrl = 'https://api.example.test/internal/agent/tasks/workspace-executions/commands'
   for (const [name, fetchFn, code] of [
     ['transport', async () => { throw new Error('connection failed') }, 'WORKSPACE_FILE_QUEUE_TRANSPORT'],
+    ['refused transport', async () => { const error = new TypeError('fetch failed'); error.cause = { code: 'ECONNREFUSED' }; throw error }, 'WORKSPACE_FILE_QUEUE_TRANSPORT_ECONNREFUSED'],
     ['missing response', async () => null, 'WORKSPACE_FILE_QUEUE_RESPONSE'],
     ['unauthorized', async () => ({ status: 401, redirected: false, url: nativeUrl, headers: { get: () => 'application/json' }, json: async () => ({}) }), 'WORKSPACE_FILE_QUEUE_HTTP_401'],
     ['redirect', async () => ({ status: 200, redirected: true, url: nativeUrl, headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }), 'WORKSPACE_FILE_QUEUE_REDIRECT'],

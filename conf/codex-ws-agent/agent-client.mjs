@@ -4127,6 +4127,16 @@ export const runManagedCommand = async ({
 
 const WORKSPACE_FILE_QUEUE_PATH = '/internal/agent/tasks/workspace-executions/commands'
 
+const workspaceQueueTransportCode = error => {
+  if (error?.name === 'AbortError') return 'WORKSPACE_FILE_QUEUE_TRANSPORT_ABORTED'
+  // A fixed allow-list yields actionable diagnostics without serializing arbitrary error text,
+  // request headers, targets, or other transport-provided metadata.
+  const code = typeof error?.cause?.code === 'string' ? error.cause.code : ''
+  return new Set(['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']).has(code)
+    ? `WORKSPACE_FILE_QUEUE_TRANSPORT_${code}`
+    : 'WORKSPACE_FILE_QUEUE_TRANSPORT'
+}
+
 const exactResponseUrl = (response, endpoint) => {
   if (response?.redirected === true || typeof response?.url !== 'string' || !response.url) return false
   try {
@@ -4161,9 +4171,9 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = glob
         'X-Agent-Runtime-Id': PROCESS_RUNTIME_INSTANCE_ID
       }
     })
-  } catch {
+  } catch (error) {
     // Fetch errors intentionally stay opaque: transport details can contain request targets.
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_TRANSPORT', 'workspace runtime command pickup failed')
+    throw new AgentProtocolError(workspaceQueueTransportCode(error), 'workspace runtime command pickup failed')
   }
   if (!response || !Number.isInteger(response.status)) {
     throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_RESPONSE', 'workspace runtime command pickup returned no valid response')
