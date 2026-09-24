@@ -4057,6 +4057,13 @@ export const runWorkspaceFileCommand = async ({
       runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
     })
     materialized = true
+    await workspaceFileBridge.startExecution(message.payload, {
+      commandId: message.commandId,
+      messageId: message.messageId,
+      runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
+      runtimeAgentId: profile.agentId,
+      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+    })
     const outcome = await runCodexFn(profile, {
       ...message,
       prompt: workspaceFilePrompt(message, command)
@@ -4087,6 +4094,7 @@ export const runWorkspaceFileCommand = async ({
     result = workspaceFileFailure(message, error instanceof WorkspaceFileBridgeError || error instanceof AgentProtocolError
       ? error
       : new AgentProtocolError('WORKSPACE_FILE_ERROR', 'workspace file command failed'))
+    if (error?.code === 'START_OUTCOME_UNKNOWN') result.status = 'recovery_required'
   } finally {
     if (materialized && result?.status === 'failed') {
       const match = /^([A-Z][A-Z0-9_]{0,99}):/.exec(result.errorMessage || '')

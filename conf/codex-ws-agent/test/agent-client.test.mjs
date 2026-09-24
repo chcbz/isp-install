@@ -2462,6 +2462,9 @@ const workspaceFileResponse = (bytes, url, status = 200) => ({
   status,
   redirected: false,
   url,
+  json: async () => url.endsWith('/start')
+    ? { executionId: 'pwe_exact', taskId: 'task-1', runId: 'run-1', state: 'STARTED' }
+    : JSON.parse(bytes.toString()),
   headers: { get: name => name.toLowerCase() === 'content-length' ? String(bytes.length) : null },
   body: (async function * () { yield bytes })()
 })
@@ -2509,6 +2512,7 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
     workspaceFileBridge: bridge,
     workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader,
     runCodexFn: async (_profile, codexMessage, _mode, overrides) => {
+      assert.ok(calls.some(call => call.url.endsWith('/start')))
       assert.match(codexMessage.prompt, /private, file-bound Agent delivery run/)
       assert.match(codexMessage.prompt, /inputs\/source\.txt/)
       assert.match(codexMessage.prompt, /outputs\/result\.json/)
@@ -2528,7 +2532,9 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
   assert.match(outcome.workspaceFileManifestId, /^pwe_m_[0-9a-f]{64}$/)
   assert.deepEqual(reports, [])
   assert.deepEqual(statuses, ['busy', 'online'])
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 4)
+  assert.ok(calls[1].url.endsWith('/start'))
+  assert.deepEqual(JSON.parse(calls[1].options.body), { commandId: message.commandId, messageId: message.messageId })
   assert.equal(calls[1].options.headers.Authorization, configured.workspaceFileRuntimeAuthHeader)
   assert.equal(calls[1].options.headers['X-Agent-Id'], profile.agentId)
   assert.equal(calls[1].options.headers['X-Agent-Runtime-Id'], PROCESS_RUNTIME_INSTANCE_ID)
@@ -2576,7 +2582,7 @@ test('image workspace delivery materializes the one built-in imagegen raster bef
     sendLegacyFn: () => {}, sendStatusFn: () => {}
   })
   assert.equal(outcome.status, 'completed', outcome.errorMessage)
-  assert.equal(calls.filter(call => call.options.method === 'POST').length, 2)
+  assert.equal(calls.filter(call => call.options.method === 'POST').length, 3)
   const uploaded = calls.find(call => call.url.endsWith('/outputs/result/content'))
   assert.ok(uploaded)
   assert.deepEqual(Buffer.from(await uploaded.options.body.get('file').arrayBuffer()), image)
@@ -2804,6 +2810,7 @@ test('workspace file upload failure is reported failed after Codex and never com
     apiOrigin: 'https://api.example.test', rootDir: root,
     fetchFn: async (url, options = {}) => {
       if (options.method === 'GET') return workspaceFileResponse(input, url.toString())
+      if (url.pathname.endsWith('/start')) return workspaceFileResponse(Buffer.from('{}'), url.toString())
       posts += 1
       return workspaceFileResponse(Buffer.from('{"data":{}}'), url.toString(), 500)
     }
@@ -3001,3 +3008,34 @@ test('late correlated registration ACK restores native queue pickup without repe
   assert.equal(queueCalls, 1)
   assert.deepEqual(handled, [valid])
 })
+
+for (const startCase of ['transport', 'wrong-run', 'server-error', 'rejected']) {
+  test(`native start ${startCase} never calls Provider or repeats the start write`, async () => {
+    const root = temporaryDirectory()
+    const calls = []
+    const input = Buffer.from('workspace input\n')
+    const bridge = new WorkspaceFileBridge({ apiOrigin: 'https://api.example.test', rootDir: root,
+      fetchFn: async (url, options) => {
+        calls.push({ path: url.pathname, method: options.method })
+        if (options.method === 'GET') return workspaceFileResponse(input, url.toString())
+        if (url.pathname.endsWith('/start')) {
+          if (startCase === 'transport') throw new Error('opaque transport error')
+          const response = workspaceFileResponse(Buffer.from('{}'), url.toString(), startCase === 'server-error' ? 500 : startCase === 'rejected' ? 409 : 200)
+          if (startCase === 'wrong-run') response.json = async () => ({ executionId: 'pwe_other', taskId: 'task-1', runId: 'other-run', state: 'STARTED' })
+          return response
+        }
+        return workspaceFileResponse(Buffer.from('{}'), url.toString())
+      }
+    })
+    const outcome = await runManagedCommand({ profile,
+      message: normalizeInboundMessage({ ...command(987), payload: workspaceFilePayload(input) }),
+      workspaceFileBridge: bridge, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+      runCodexFn: async () => assert.fail('Provider must not run without exact start receipt'),
+      sendLegacyFn: () => assert.fail('must not send legacy completion'), sendStatusFn: () => {}
+    })
+    assert.equal(outcome.status, startCase === 'rejected' ? 'failed' : 'recovery_required')
+    assert.equal(calls.filter(call => call.path.endsWith('/start')).length, 1)
+    assert.equal(calls.some(call => call.path.includes('/outputs/')), false)
+    if (startCase !== 'rejected') assert.equal(calls.some(call => call.path.endsWith('/failure')), false)
+  })
+}

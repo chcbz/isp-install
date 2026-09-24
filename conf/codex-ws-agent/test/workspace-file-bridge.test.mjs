@@ -525,3 +525,27 @@ test('configured delivery validator must reopen every declared output before upl
   writeFileSync(resolve(rejectedRun.runDirectory, 'outputs/result.docx'), storedZip('word/document.xml'))
   assertBridgeCode(() => rejected.collectOutputs(command), 'OUTPUT_FORMAT_INVALID')
 })
+
+test('native start is bound to verified inputs and validates the exact direct receipt', async () => {
+  const root = temporaryDirectory()
+  const input = Buffer.from('trusted input\n')
+  const command = commandFor(input)
+  const requests = []
+  const bridge = bridgeFor(root, async (url, options) => {
+    requests.push({ url: url.toString(), options })
+    if (options.method === 'GET') return responseFor(input, url.toString())
+    return { status: 200, redirected: false, url: url.toString(), json: async () => ({ executionId: 'pwe_exact', taskId: command.taskId, runId: command.runId, state: 'STARTED' }) }
+  })
+  const options = { commandId: 'pwe_cmd_exact', messageId: 'pwe_msg_exact', runtimeAuthHeader: 'AgentRuntime token', runtimeAgentId: 'agent-a', runtimeInstanceId: 'runtime-a' }
+  await assertRejectsCode(() => bridge.startExecution(command, options), 'RUN_NOT_BOUND')
+  assert.equal(requests.length, 0)
+  await bridge.materializeInputs(command, options)
+  const receipt = await bridge.startExecution(command, options)
+  assert.equal(receipt.state, 'STARTED')
+  assert.equal(requests.length, 2)
+  assert.equal(requests[1].url, 'https://api.example.test/internal/agent/tasks/task-1/runs/run-1/start')
+  assert.equal(requests[1].options.redirect, 'error')
+  assert.equal(requests[1].options.headers['X-Agent-Id'], 'agent-a')
+  assert.deepEqual(JSON.parse(requests[1].options.body), { commandId: options.commandId, messageId: options.messageId })
+  bridge.cleanup(command)
+})

@@ -634,6 +634,47 @@ export class WorkspaceFileBridge {
     })
   }
 
+  async startExecution(rawCommand, { commandId, messageId, runtimeAuthHeader, runtimeAgentId, runtimeInstanceId } = {}) {
+    const command = parseWorkspaceFileCommand(rawCommand)
+    const auth = validateRuntimeAuth(runtimeAuthHeader)
+    const runtimeHeaders = runtimeIdentityHeaders({ runtimeAgentId, runtimeInstanceId })
+    if (!SAFE_RUNTIME_REFERENCE.test(commandId || '') || !SAFE_RUNTIME_REFERENCE.test(messageId || '')) {
+      fail('START_REJECTED', 'start requires exact command and message identifiers')
+    }
+    const binding = this.#runs.get(this._runKey(command))
+    if (!binding || binding.fingerprint !== commandFingerprint(command)) {
+      fail('RUN_NOT_BOUND', 'start requires the exact verified materialized inputs')
+    }
+    const endpoint = endpointUrl(this.#apiOrigin, `${INPUT_PREFIX}/${command.taskId}/runs/${command.runId}/start`)
+    let response
+    try {
+      // Exactly one write. Unknown outcomes must not start Provider work or be blindly retried.
+      response = await this.#fetchFn(endpoint, {
+        method: 'POST', redirect: 'error',
+        headers: { Authorization: auth, ...runtimeHeaders, 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ commandId, messageId })
+      })
+    } catch { fail('START_OUTCOME_UNKNOWN', 'native start request outcome is unknown') }
+    if (Number.isInteger(response?.status) && response.status >= 400 && response.status < 500) {
+      fail('START_REJECTED', 'native start was rejected')
+    }
+    if (response?.status !== 200 || response.redirected) fail('START_OUTCOME_UNKNOWN', 'native start did not return a direct 200')
+    let observed
+    try { observed = new URL(response.url) } catch { fail('START_OUTCOME_UNKNOWN', 'native start response URL is invalid') }
+    if (observed.origin !== endpoint.origin || observed.pathname !== endpoint.pathname
+        || observed.search || observed.hash || observed.username || observed.password) {
+      fail('START_OUTCOME_UNKNOWN', 'native start response escaped its exact endpoint')
+    }
+    let receipt
+    try { receipt = await response.json() } catch { fail('START_OUTCOME_UNKNOWN', 'native start response is not JSON') }
+    if (!isPlainObject(receipt) || receipt.state !== 'STARTED'
+        || receipt.taskId !== command.taskId || receipt.runId !== command.runId
+        || !SAFE_RUNTIME_REFERENCE.test(receipt.executionId || '')) {
+      fail('START_OUTCOME_UNKNOWN', 'native start receipt does not match this run')
+    }
+    return Object.freeze(receipt)
+  }
+
   async reportFailure(rawCommand, code, { runtimeAuthHeader, runtimeAgentId, runtimeInstanceId } = {}) {
     const command = parseWorkspaceFileCommand(rawCommand)
     const auth = validateRuntimeAuth(runtimeAuthHeader)
