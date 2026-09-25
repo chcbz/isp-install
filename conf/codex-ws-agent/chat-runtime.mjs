@@ -16,7 +16,10 @@ export const MAX_CHAT_CONTENT_BYTES = 64 * 1024
 export const MAX_LONG_DECIMAL = 9223372036854775807n
 export const CHAT_ACK_TYPE = 'chat.dispatch.ack'
 export const CHAT_DELIVERY_SEMANTICS = 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'
-export const API_HOSTED_WIRE_COMMIT = '0e879cc9dd8ff2927a9a5e56ea8cadc781105cb1'
+export const API_HOSTED_WIRE_COMMIT = 'caee54fc27a08146f9cc57219cf86c763e41c531'
+export const API_HOSTED_WIRE_SHA256 = '5ffd3ce6fd11dd1141f850409d6024abd0666443df9330b2bbf7df61a83edf86'
+export const API_HOSTED_WIRE_SOURCE = 'api/chat/jia-chat-service/src/chatDeliberationTest/resources/contracts/api-hosted-wire-v1.json'
+export const API_HOSTED_WIRE_GENERATOR = 'cn.jia.chat.service.ApiHostedWireV1ContractTest'
 const MAX_QUEUE = 256
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -57,20 +60,24 @@ export const canonicalSha256 = value => `sha256:${createHash('sha256').update(ca
 const contractRoot = resolve(dirname(fileURLToPath(import.meta.url)), 'contracts')
 let verifiedHostedWireContract = null
 export function verifyHostedWireContract({
-  fixturePath = resolve(contractRoot, 'api-hosted-wire-0e879cc9.json'),
-  provenancePath = resolve(contractRoot, 'api-hosted-wire-0e879cc9.provenance.json')
+  fixturePath = resolve(contractRoot, 'api-hosted-wire-v1.json'),
+  provenancePath = resolve(contractRoot, 'api-hosted-wire-v1.provenance.json')
 } = {}) {
   const fixture = readFileSync(fixturePath)
   const provenance = JSON.parse(readFileSync(provenancePath, 'utf8'))
   const digest = createHash('sha256').update(fixture).digest('hex')
   if (provenance.schemaVersion !== 1 || provenance.apiCommit !== API_HOSTED_WIRE_COMMIT ||
-      provenance.fixtureFile !== 'api-hosted-wire-0e879cc9.json' || provenance.fixtureSha256 !== digest ||
-      !['PENDING_API_GENERATED_ARTIFACT', 'API_GENERATED'].includes(provenance.provenanceStatus)) {
+      provenance.fixtureFile !== 'api-hosted-wire-v1.json' || provenance.fixtureSha256 !== API_HOSTED_WIRE_SHA256 ||
+      digest !== API_HOSTED_WIRE_SHA256 || provenance.provenanceStatus !== 'API_GENERATED_VERIFIED' ||
+      provenance.apiSourcePath !== API_HOSTED_WIRE_SOURCE || provenance.generatorClass !== API_HOSTED_WIRE_GENERATOR) {
     throw new Error('API_HOSTED_WIRE_CONTRACT_PROVENANCE_INVALID')
   }
   const wire = JSON.parse(fixture.toString('utf8'))
   validateChatDispatch(wire)
-  verifiedHostedWireContract = Object.freeze({ apiCommit: provenance.apiCommit, fixtureSha256: digest, provenanceStatus: provenance.provenanceStatus, measured: true })
+  verifiedHostedWireContract = Object.freeze({
+    apiCommit: provenance.apiCommit, fixtureSha256: digest, provenanceStatus: provenance.provenanceStatus,
+    apiSourcePath: provenance.apiSourcePath, generatorClass: provenance.generatorClass, productionPath: provenance.productionPath, measured: true
+  })
   return verifiedHostedWireContract
 }
 export const hostedWireContractReadback = () => verifiedHostedWireContract
