@@ -201,61 +201,138 @@ export class PersistentChatInbox {
     archiveMaxFiles = profile.chatArchiveMaxFiles || 256,
     archiveMaxBytes = profile.chatArchiveMaxBytes || 16 * 1024 * 1024,
     archiveRetentionMs = profile.chatArchiveRetentionMs || 7 * 24 * 60 * 60 * 1000,
+    dedupeMaxEntries = profile.chatDedupeMaxEntries || 100000,
+    dedupeMaxBytes = profile.chatDedupeMaxBytes || 128 * 1024 * 1024,
+    dedupeRetentionMs = profile.chatDedupeRetentionMs || 30 * 24 * 60 * 60 * 1000,
     lockTimeoutMs = 2000
   }) {
     this.profile = profile; this.maxFiles = maxFiles; this.maxBytes = maxBytes
     this.archiveMaxFiles = archiveMaxFiles; this.archiveMaxBytes = archiveMaxBytes; this.archiveRetentionMs = archiveRetentionMs; this.lockTimeoutMs = lockTimeoutMs
+    this.dedupeMaxEntries = dedupeMaxEntries; this.dedupeMaxBytes = dedupeMaxBytes; this.dedupeRetentionMs = dedupeRetentionMs
     this.dir = resolve(rootDir, 'chat-inbox', Buffer.from(profile.agentId).toString('hex'))
     this.pending = resolve(this.dir, 'pending'); this.processing = resolve(this.dir, 'processing'); this.recovery = resolve(this.dir, 'recovery'); this.archive = resolve(this.dir, 'archive')
-    this.dedupePath = resolve(this.dir, 'dedupe-index.json'); this.lockPath = resolve(this.dir, '.profile.lock'); this.dedupe = {}
+    this.dedupeDir = resolve(this.dir, 'dedupe-ledger'); this.dedupeUsagePath = resolve(this.dir, 'dedupe-ledger-usage.json')
+    this.legacyDedupePath = resolve(this.dir, 'dedupe-index.json'); this.lockPath = resolve(this.dir, '.profile.lock')
   }
-  _sleep(milliseconds) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds) }
-  _withLock(operation) {
+  _processStartTime(pid) {
+    try { const raw = readFileSync(`/proc/${pid}/stat`, 'utf8'); const fields = raw.slice(raw.lastIndexOf(') ') + 2).trim().split(/\s+/); return fields[19] || '' } catch { return '' }
+  }
+  _tryAcquireLock() {
     ensureDirectory(this.dir)
-    const deadline = Date.now() + this.lockTimeoutMs
-    let fd
-    while (fd === undefined) {
+    const nonce = randomUUID(); const owner = { pid: process.pid, startTime: this._processStartTime(process.pid), nonce }
+    const bytes = `${JSON.stringify(owner)}\n`
+    try {
+      const fd = openSync(this.lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+      writeFileSync(fd, bytes); fsyncSync(fd); directoryFsync(this.dir); return { fd, bytes }
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
       try {
-        fd = openSync(this.lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-        writeFileSync(fd, `${process.pid}\n`); fsyncSync(fd); directoryFsync(this.dir)
-      } catch (error) {
-        if (error.code !== 'EEXIST') throw error
-        try {
-          const age = Date.now() - statSync(this.lockPath).mtimeMs
-          const owner = Number.parseInt(readFileSync(this.lockPath, 'utf8'), 10)
-          let alive = Number.isInteger(owner) && owner > 0
-          if (alive) { try { process.kill(owner, 0) } catch (probe) { if (probe.code === 'ESRCH') alive = false } }
-          if (!alive && age > 30000) { unlinkSync(this.lockPath); directoryFsync(this.dir); continue }
-        } catch (probe) { if (probe.code === 'ENOENT') continue }
-        if (Date.now() >= deadline) { const timeout = new Error('CHAT_INBOX_LOCK_TIMEOUT'); timeout.code = 'CHAT_INBOX_CAPACITY_EXCEEDED'; throw timeout }
-        this._sleep(5)
+        const age = Date.now() - statSync(this.lockPath).mtimeMs
+        const existing = JSON.parse(readFileSync(this.lockPath, 'utf8'))
+        const alive = Number.isInteger(existing.pid) && existing.pid > 0 && existing.startTime && this._processStartTime(existing.pid) === existing.startTime
+        if (!alive && age > 30000) { unlinkSync(this.lockPath); directoryFsync(this.dir); return this._tryAcquireLock() }
+      } catch (probe) { if (probe.code === 'ENOENT') return this._tryAcquireLock() }
+      return null
+    }
+  }
+  _releaseLock(lock) {
+    closeSync(lock.fd)
+    let current
+    try { current = readFileSync(this.lockPath, 'utf8') } catch (error) { if (error.code === 'ENOENT') throw new Error('CHAT_INBOX_LOCK_OWNERSHIP_LOST'); throw error }
+    if (current !== lock.bytes) throw new Error('CHAT_INBOX_LOCK_OWNERSHIP_LOST')
+    unlinkSync(this.lockPath); directoryFsync(this.dir)
+  }
+  _withLock(operation) {
+    const lock = this._tryAcquireLock()
+    if (!lock) { const error = new Error('CHAT_INBOX_LOCK_BUSY'); error.code = 'CHAT_INBOX_CAPACITY_EXCEEDED'; throw error }
+    try { return operation() } finally { this._releaseLock(lock) }
+  }
+  async _withLockAsync(operation) {
+    const deadline = Date.now() + this.lockTimeoutMs
+    let lock
+    while (!(lock = this._tryAcquireLock())) {
+      if (Date.now() >= deadline) { const error = new Error('CHAT_INBOX_LOCK_TIMEOUT'); error.code = 'CHAT_INBOX_CAPACITY_EXCEEDED'; throw error }
+      await new Promise(resolveWait => setTimeout(resolveWait, 5 + Math.floor(Math.random() * 16)))
+    }
+    try { return await operation() } finally { this._releaseLock(lock) }
+  }
+  _dedupePath(key) { return resolve(this.dedupeDir, key.slice(0, 2), `${key}.json`) }
+  _readDedupe(key) { const path = this._dedupePath(key); return existsSync(path) ? { path, record: JSON.parse(readFileSync(path, 'utf8')) } : null }
+  _listDedupe() {
+    const entries = []
+    for (const shard of readdirSync(this.dedupeDir).filter(name => /^[0-9a-f]{2}$/.test(name)).sort()) {
+      const directory = resolve(this.dedupeDir, shard)
+      for (const name of readdirSync(directory).filter(value => /^[0-9a-f]{64}\.json$/.test(value)).sort()) {
+        const path = resolve(directory, name); const stat = statSync(path); entries.push({ key: name.slice(0, -5), path, size: stat.size, mtimeMs: stat.mtimeMs })
       }
     }
-    try { return operation() } finally {
-      closeSync(fd)
-      try { unlinkSync(this.lockPath); directoryFsync(this.dir) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    return entries
+  }
+  _writeDedupeUsage(usage) {
+    const stored = {
+      schemaVersion: 1, profileId: this.profile.profileId, agentId: this.profile.agentId,
+      count: usage.count, totalBytes: usage.totalBytes, lastGcAt: usage.lastGcAt
     }
+    atomicJson(this.dedupeUsagePath, stored); return stored
   }
-  _loadDedupe() {
-    if (!existsSync(this.dedupePath)) { this.dedupe = {}; return }
-    const stored = JSON.parse(readFileSync(this.dedupePath, 'utf8'))
+  _scanDedupeUsage(lastGcAt = Date.now()) {
+    const entries = this._listDedupe()
+    return { entries, count: entries.length, totalBytes: entries.reduce((sum, entry) => sum + entry.size, 0), lastGcAt }
+  }
+  _readDedupeUsage() {
+    if (!existsSync(this.dedupeUsagePath)) return this._writeDedupeUsage(this._scanDedupeUsage())
+    const usage = JSON.parse(readFileSync(this.dedupeUsagePath, 'utf8'))
+    if (usage.schemaVersion !== 1 || usage.profileId !== this.profile.profileId || usage.agentId !== this.profile.agentId ||
+        !Number.isSafeInteger(usage.count) || usage.count < 0 || !Number.isSafeInteger(usage.totalBytes) || usage.totalBytes < 0 ||
+        !Number.isSafeInteger(usage.lastGcAt) || usage.lastGcAt < 0) throw new Error('CHAT_DEDUPE_USAGE_INVALID')
+    return usage
+  }
+  _gcDedupe({ force = false } = {}) {
+    const now = Date.now(); const current = this._readDedupeUsage()
+    const interval = Math.min(60 * 60 * 1000, Math.max(60 * 1000, Math.floor(this.dedupeRetentionMs / 4)))
+    if (!force && now - current.lastGcAt < interval) return current
+    const cutoff = now - this.dedupeRetentionMs; const scanned = this._scanDedupeUsage(now)
+    let count = scanned.count; let totalBytes = scanned.totalBytes
+    for (const entry of scanned.entries) {
+      let terminalAt = entry.mtimeMs
+      try { terminalAt = Number(JSON.parse(readFileSync(entry.path, 'utf8')).terminalAt || terminalAt) } catch {}
+      if (terminalAt >= cutoff) continue
+      unlinkSync(entry.path); directoryFsync(dirname(entry.path)); count--; totalBytes -= entry.size
+    }
+    const remaining = this._writeDedupeUsage({ count, totalBytes, lastGcAt: now })
+    if (remaining.count > this.dedupeMaxEntries || remaining.totalBytes > this.dedupeMaxBytes) throw Object.assign(new Error('CHAT_DEDUPE_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
+    return remaining
+  }
+  _migrateLegacyDedupe() {
+    if (!existsSync(this.legacyDedupePath)) return
+    const stored = JSON.parse(readFileSync(this.legacyDedupePath, 'utf8'))
     if (stored.schemaVersion !== 1 || stored.profileId !== this.profile.profileId || stored.agentId !== this.profile.agentId || !object(stored.entries)) throw new Error('CHAT_DEDUPE_INDEX_INVALID')
-    this.dedupe = stored.entries
+    for (const [key, record] of Object.entries(stored.entries)) if (/^[0-9a-f]{64}$/.test(key) && !this._readDedupe(key)) atomicJson(this._dedupePath(key), record)
+    const migrated = resolve(this.dir, 'dedupe-index.migrated.json'); durableRename(this.legacyDedupePath, migrated)
   }
-  _persistDedupe() { atomicJson(this.dedupePath, { schemaVersion: 1, profileId: this.profile.profileId, agentId: this.profile.agentId, entries: this.dedupe }) }
   _compactMessage(message) {
     const fields = ['tenantId', 'ownerJiacn', 'clientId', 'messageId', 'requestId', 'requestRevision', 'turnId', 'dispatchId', 'targetAgentId', 'conversationId', 'conversationGeneration', 'contextSnapshotId', 'contextHash', 'dedupeKey']
     return Object.fromEntries(fields.filter(field => message[field] !== undefined).map(field => [field, message[field]]))
   }
   _recordTerminal(key, record) {
-    this._loadDedupe()
-    const previous = this.dedupe[key]
-    if (previous && previous.fingerprint !== record.fingerprint) throw new Error('CHAT_DEDUPE_INDEX_CONFLICT')
-    this.dedupe = { ...this.dedupe, [key]: {
+    const previous = this._readDedupe(key)
+    if (previous) {
+      if (previous.record.fingerprint !== record.fingerprint) throw new Error('CHAT_DEDUPE_INDEX_CONFLICT')
+      return previous.record
+    }
+    const marker = {
       fingerprint: record.fingerprint, state: record.state, terminalAt: record.completedAt || record.cancelledAt || Date.now(),
       message: this._compactMessage(record.message)
-    } }
-    this._persistDedupe()
+    }
+    const markerBytes = Buffer.byteLength(`${JSON.stringify(marker)}\n`)
+    let usage = this._readDedupeUsage()
+    if (usage.count + 1 > this.dedupeMaxEntries || usage.totalBytes + markerBytes > this.dedupeMaxBytes) usage = this._gcDedupe({ force: true })
+    if (usage.count + 1 > this.dedupeMaxEntries || usage.totalBytes + markerBytes > this.dedupeMaxBytes) throw Object.assign(new Error('CHAT_DEDUPE_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
+    // Reserve usage before publishing evidence. A crash can only over-count; initialize rebuilds exact usage.
+    const reserved = { count: usage.count + 1, totalBytes: usage.totalBytes + markerBytes, lastGcAt: usage.lastGcAt }
+    this._writeDedupeUsage(reserved)
+    try { atomicJson(this._dedupePath(key), marker) } catch (error) { try { this._writeDedupeUsage(usage) } catch {} throw error }
+    return marker
   }
   _finalizeTerminal(item, record) {
     atomicJson(item.path, record) // durable forward-settlement marker before archive movement
@@ -278,9 +355,9 @@ export class PersistentChatInbox {
     }
   }
   initialize() {
-    for (const dir of [this.pending, this.processing, this.recovery, this.archive]) ensureDirectory(dir)
+    for (const dir of [this.pending, this.processing, this.recovery, this.archive, this.dedupeDir]) ensureDirectory(dir)
     return this._withLock(() => {
-      this._loadDedupe()
+      this._migrateLegacyDedupe(); this._writeDedupeUsage(this._scanDedupeUsage(0)); this._gcDedupe({ force: true })
       let recovered = 0; let settled = 0
       for (const name of readdirSync(this.processing).sort()) {
         if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
@@ -298,8 +375,8 @@ export class PersistentChatInbox {
   path(state, key) { return resolve(this[state], `${key}.json`) }
   findByKey(key) {
     for (const state of ['pending', 'processing', 'recovery', 'archive']) { const path = this.path(state, key); if (existsSync(path)) return { key, state, path, record: JSON.parse(readFileSync(path, 'utf8')) } }
-    this._loadDedupe(); const marker = this.dedupe[key]
-    return marker ? { key, state: 'ledger', path: this.dedupePath, record: marker } : null
+    const marker = this._readDedupe(key)
+    return marker ? { key, state: 'ledger', path: marker.path, record: marker.record } : null
   }
   usage() {
     let files = 0; let totalBytes = 0
@@ -311,16 +388,24 @@ export class PersistentChatInbox {
     }
     return { files, totalBytes }
   }
-  accept(message) {
-    return this._withLock(() => {
+  async accept(message) {
+    return this._withLockAsync(async () => {
       const key = durableChatKey(message); const fingerprint = chatFingerprint(message); const existing = this.findByKey(key)
       if (existing) {
         if (existing.record.fingerprint !== fingerprint) { const error = new Error('CHAT_FINGERPRINT_CONFLICT'); error.code = 'CHAT_FINGERPRINT_CONFLICT'; throw error }
         return { accepted: false, duplicate: true, key, item: existing }
       }
+      let dedupeUsage = this._gcDedupe()
       const record = { state: 'RECEIVED', receivedAt: Date.now(), fingerprint, message }
       const encodedBytes = Buffer.byteLength(`${JSON.stringify(record)}\n`); const usage = this.usage()
-      if (usage.files + 1 > this.maxFiles || usage.totalBytes + encodedBytes > this.maxBytes) throw Object.assign(new Error('CHAT_INBOX_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
+      let exceedsDedupe = dedupeUsage.count + usage.files + 1 > this.dedupeMaxEntries || dedupeUsage.totalBytes + usage.totalBytes + encodedBytes > this.dedupeMaxBytes
+      if (exceedsDedupe) {
+        dedupeUsage = this._gcDedupe({ force: true })
+        exceedsDedupe = dedupeUsage.count + usage.files + 1 > this.dedupeMaxEntries || dedupeUsage.totalBytes + usage.totalBytes + encodedBytes > this.dedupeMaxBytes
+      }
+      if (usage.files + 1 > this.maxFiles || usage.totalBytes + encodedBytes > this.maxBytes || exceedsDedupe) {
+        throw Object.assign(new Error('CHAT_INBOX_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
+      }
       atomicJson(this.path('pending', key), record)
       return { accepted: true, duplicate: false, key, item: { key, state: 'pending', path: this.path('pending', key), record } }
     })
@@ -348,12 +433,11 @@ export class PersistentChatInbox {
       const key = name.slice(0, -5); const path = this.path(state, key); const item = { key, state, path, record: JSON.parse(readFileSync(path, 'utf8')) }
       seen.add(key); if (match(item.record)) matches.push(item)
     }
-    this._loadDedupe()
-    for (const [key, record] of Object.entries(this.dedupe)) if (!seen.has(key) && match(record)) matches.push({ key, state: 'ledger', path: this.dedupePath, record })
+    for (const entry of this._listDedupe()) if (!seen.has(entry.key)) { const record = JSON.parse(readFileSync(entry.path, 'utf8')); if (match(record)) matches.push({ key: entry.key, state: 'ledger', path: entry.path, record }) }
     if (matches.length > 1) { const error = new Error('CHAT_STOP_AMBIGUOUS'); error.code = 'CHAT_STOP_AMBIGUOUS'; throw error }
     return matches[0] || null
   }
-  count(state) { if (state === 'ledger') { this._loadDedupe(); return Object.keys(this.dedupe).length } return readdirSync(this[state]).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).length }
+  count(state) { if (state === 'ledger') return this._readDedupeUsage().count; return readdirSync(this[state]).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).length }
 }
 
 export class ChatAckOutbox {

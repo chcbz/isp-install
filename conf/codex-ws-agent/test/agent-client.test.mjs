@@ -255,7 +255,7 @@ test('processing command restart enters durable recovery-required state without 
 test('durable CHAT startup drains pending exact keys and processing restart stays recovery-required', async () => {
   const rootDir = temporaryDirectory()
   const seeded = new PersistentChatInbox({ rootDir, profile }); seeded.initialize()
-  seeded.accept(normalizeInboundMessage(durableChat(1)))
+  await seeded.accept(normalizeInboundMessage(durableChat(1)))
   const executed = []
   const first = createChatRuntime(rootDir, { runChat: async message => { executed.push(message.dispatchId); return { status: 'completed' } } })
   const recovery = first.processor.start()
@@ -266,7 +266,7 @@ test('durable CHAT startup drains pending exact keys and processing restart stay
 
   const secondRoot = temporaryDirectory()
   const acceptedInbox = new PersistentChatInbox({ rootDir: secondRoot, profile }); acceptedInbox.initialize()
-  const accepted = acceptedInbox.accept(normalizeInboundMessage(durableChat(2)))
+  const accepted = await acceptedInbox.accept(normalizeInboundMessage(durableChat(2)))
   acceptedInbox.claim(accepted.key)
   const restartedCalls = []
   const restarted = createChatRuntime(secondRoot, { runChat: async message => { restartedCalls.push(message.dispatchId) } })
@@ -316,6 +316,19 @@ test('CHAT admission still schedules and retries ACK when initial durable ACK en
   assert.deepEqual(rejected, ['CHAT_ACK_OUTBOX_ERROR'])
 })
 
+test('modern CHAT trust failure enters durable recovery and emits explicit recovery ACK', async () => {
+  const rootDir = temporaryDirectory(); const rejected = []
+  const runtime = createChatRuntime(rootDir, {
+    runChat: async () => { throw Object.assign(new Error('schema mismatch'), { code: 'APP_SERVER_BINARY_UNTRUSTED' }) },
+    onReject: error => rejected.push(error.code)
+  })
+  runtime.processor.start(); const message = durableChat(31); await runtime.processor.handle(message); await runtime.processor.waitForIdle()
+  const normalized = normalizeInboundMessage(message); const item = runtime.chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(item.record.state, 'RECOVERY_REQUIRED')
+  assert.ok(runtime.sent.some(envelope => envelope.dispatchId === message.dispatchId && envelope.status === 'recovery_required' && envelope.errorCode === 'APP_SERVER_BINARY_UNTRUSTED'))
+  assert.deepEqual(rejected, ['APP_SERVER_BINARY_UNTRUSTED'])
+})
+
 test('CHAT and COMMAND lanes start independently in both arrival orders and after pending restart', async () => {
   for (const order of ['chat-first', 'command-first']) {
     const chatGate = deferred(); const commandGate = deferred(); const started = []
@@ -333,7 +346,7 @@ test('CHAT and COMMAND lanes start independently in both arrival orders and afte
 
   const rootDir = temporaryDirectory()
   const commandInbox = new PersistentCommandInbox({ rootDir, profile }); commandInbox.initialize(); commandInbox.enqueue(normalizeInboundMessage(command(5)))
-  const chatInbox = new PersistentChatInbox({ rootDir, profile }); chatInbox.initialize(); chatInbox.accept(normalizeInboundMessage(durableChat(5)))
+  const chatInbox = new PersistentChatInbox({ rootDir, profile }); chatInbox.initialize(); await chatInbox.accept(normalizeInboundMessage(durableChat(5)))
   const restarted = []
   const runtime = createChatRuntime(rootDir, {
     runChat: async () => { restarted.push('chat'); return { status: 'completed' } },
@@ -3146,23 +3159,27 @@ test('ACK high-water replay verifies immutable secure markers without fsyncing e
   assert.equal(statSync(marker).mode & 0o777, 0o600)
 })
 
-test('default-disabled production legacy fallback registers exact child cancellation and persists CANCELLED without final', async () => {
-  const rootDir = temporaryDirectory(); const inbox = new PersistentCommandInbox({ rootDir, profile }); const chatInbox = new PersistentChatInbox({ rootDir, profile }); const chatAckOutbox = new ChatAckOutbox({ rootDir, profile })
+test('default-disabled modern fallback is confined to empty read-only CHAT workdir and remains exactly cancellable', async () => {
+  const rootDir = temporaryDirectory(); const chatWorkdir = resolve(rootDir, 'empty-chat'); mkdirSync(chatWorkdir, { mode: 0o700 })
+  const inbox = new PersistentCommandInbox({ rootDir, profile }); const chatInbox = new PersistentChatInbox({ rootDir, profile }); const chatAckOutbox = new ChatAckOutbox({ rootDir, profile })
   const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.killed = false
-  let spawned = false; child.kill = () => { child.killed = true; queueMicrotask(() => { child.exitCode = null; child.emit('close', null) }); return true }
+  let spawned = false; let spawnedArgs; let spawnedOptions
+  child.kill = () => { child.killed = true; queueMicrotask(() => { child.exitCode = null; child.emit('close', null) }); return true }
   const protocol = []
   const processor = new AgentMessageProcessor({
     profile, inbox, chatInbox, chatAckOutbox, lanes: new FairLaneScheduler({ chatConcurrency: 1, commandConcurrency: 1 }), sendFn: () => true,
     runCommand: async () => ({ status: 'completed' }),
     runChat: (message, controls) => runProfileChat(profile, message, {
-      controls,
+      controls, chatWorkdir,
       runLegacy: (selectedProfile, selectedMessage, mode, options) => runCodex(selectedProfile, selectedMessage, mode, {
-        ...options, spawnFn: () => { spawned = true; return child }, sendProtocolFn: (...args) => protocol.push(args), sendLegacyFn: () => {}, sendStatusFn: () => {}
+        ...options, spawnFn: (_binary, args, spawnOptions) => { spawned = true; spawnedArgs = args; spawnedOptions = spawnOptions; return child }, sendProtocolFn: (...args) => protocol.push(args), sendLegacyFn: () => {}, sendStatusFn: () => {}
       })
     })
   })
   processor.start(); const message = durableChat(91); await processor.handle(message)
   while (!spawned) await new Promise(resolvePromise => setImmediate(resolvePromise))
+  assert.equal(spawnedOptions.cwd, chatWorkdir); assert.equal(spawnedArgs[spawnedArgs.indexOf('--sandbox') + 1], 'read-only')
+  assert.equal(spawnedArgs[spawnedArgs.indexOf('--ask-for-approval') + 1], 'never'); assert.equal(spawnedOptions.env.HTTPS_PROXY, '')
   const stop = await processor.handle({ schemaVersion: 1, messageType: MESSAGE_TYPES.CHAT_STOP, requestId: message.requestId, turnId: message.turnId, dispatchId: message.dispatchId, targetAgentId: message.targetAgentId })
   assert.equal(stop.status, 'cancel-requested'); await processor.waitForIdle(); assert.equal(child.killed, true); assert.deepEqual(protocol, [])
   const normalized = normalizeInboundMessage(message); const item = chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))

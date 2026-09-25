@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -12,8 +12,8 @@ import {
   buildContextEnvelope, validateChatDispatch, buildChatDispatchAck, PersistentChatInbox,
   ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, verifyHostedWireContract
 } from '../chat-runtime.mjs'
-import { AppServerAdapter, measureCodexAppServerBinary } from '../app-server-adapter.mjs'
-import { normalizeInboundMessage, runFastChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
+import { AppServerAdapter, measureCodexAppServerBinary, verifyCodexAppServerBinaryIdentity } from '../app-server-adapter.mjs'
+import { normalizeInboundMessage, runFastChat, runProfileChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
 
 const profile = { profileId: 'profile-A', agentId: 'hosted-a', fastChatEnabled: false, appServerEnabled: false }
 const fixturePath = resolve(import.meta.dirname, '..', 'contracts', 'api-hosted-wire-v1.json')
@@ -147,20 +147,20 @@ test('Fast CHAT persists unknown turn acceptance as recovery-required after read
   assert.match(recovered[0].reason, /timed out/)
 })
 
-test('durable inbox replays pending, quarantines processing as acceptance unknown, and rejects fingerprint conflicts', () => {
+test('durable inbox replays pending, quarantines processing as acceptance unknown, and rejects fingerprint conflicts', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'chat-inbox-'))
   try {
     const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
-    const message = normalizedWire(); const accepted = inbox.accept(message)
+    const message = normalizedWire(); const accepted = await inbox.accept(message)
     assert.equal(new PersistentChatInbox({ rootDir: root, profile }).initialize().pending, 1)
     const claimed = inbox.claim(accepted.key); assert.equal(claimed.record.state, 'STARTING')
     const restarted = new PersistentChatInbox({ rootDir: root, profile }); const recovery = restarted.initialize()
     assert.equal(recovery.recoveryRequired, 1); assert.equal(restarted.findByKey(accepted.key).record.state, 'ACCEPTANCE_UNKNOWN')
 
     const other = normalizedWire({ messageId: 'evt-other', dispatchId: 'dispatch-other' })
-    const second = restarted.accept(other); assert.equal(second.accepted, true)
-    assert.throws(() => restarted.accept({ ...other, content: 'changed' }), error => error.code === 'CHAT_FINGERPRINT_CONFLICT')
-    assert.throws(() => restarted.accept({ ...other, messageId: 'changed-event-id' }), error => error.code === 'CHAT_FINGERPRINT_CONFLICT')
+    const second = await restarted.accept(other); assert.equal(second.accepted, true)
+    await assert.rejects(() => restarted.accept({ ...other, content: 'changed' }), error => error.code === 'CHAT_FINGERPRINT_CONFLICT')
+    await assert.rejects(() => restarted.accept({ ...other, messageId: 'changed-event-id' }), error => error.code === 'CHAT_FINGERPRINT_CONFLICT')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -306,15 +306,15 @@ test('durable wire rejects numeric Long tokens, context drift, and non-canonical
   assert.throws(() => validateChatDispatch({ ...wire, contextSnapshot: { ...wire.contextSnapshot, contextHash: 'sha256:' + '0'.repeat(64) } }), /CONTEXT_HASH_MISMATCH/)
 })
 
-test('durable inbox applies hard file and byte backpressure before acceptance', () => {
+test('durable inbox applies hard file and byte backpressure before acceptance', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'chat-capacity-'))
   try {
     const inbox = new PersistentChatInbox({ rootDir: root, profile, maxFiles: 1, maxBytes: 1024 * 1024 }); inbox.initialize()
-    inbox.accept(normalizedWire())
+    await inbox.accept(normalizedWire())
     const second = normalizedWire({ messageId: 'evt-2', dispatchId: 'dispatch-2' })
-    assert.throws(() => inbox.accept(second), error => error.code === 'CHAT_INBOX_CAPACITY_EXCEEDED')
+    await assert.rejects(() => inbox.accept(second), error => error.code === 'CHAT_INBOX_CAPACITY_EXCEEDED')
     const tiny = new PersistentChatInbox({ rootDir: resolve(root, 'tiny'), profile, maxFiles: 2, maxBytes: 64 }); tiny.initialize()
-    assert.throws(() => tiny.accept(normalizedWire()), error => error.code === 'CHAT_INBOX_CAPACITY_EXCEEDED')
+    await assert.rejects(() => tiny.accept(normalizedWire()), error => error.code === 'CHAT_INBOX_CAPACITY_EXCEEDED')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -323,7 +323,7 @@ test('cross-process profile lock keeps hot admission within one-file quota', asy
   try {
     new PersistentChatInbox({ rootDir: root, profile, maxFiles: 1, maxBytes: 1024 * 1024 }).initialize()
     const barrier = resolve(root, 'go'); const moduleUrl = pathToFileURL(resolve(import.meta.dirname, '..', 'chat-runtime.mjs')).href
-    const code = `import{existsSync,readFileSync}from'node:fs';import{PersistentChatInbox,validateChatDispatch}from ${JSON.stringify(moduleUrl)};const[root,barrier,fixture,id]=process.argv.slice(1);process.stdout.write('ready\\n');while(!existsSync(barrier))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);const wire=JSON.parse(readFileSync(fixture));const message=validateChatDispatch({...wire,messageId:'evt-'+id,dispatchId:'dispatch-'+id,dedupeKey:wire.tenantId+':'+wire.ownerJiacn+':'+wire.clientId+':dispatch-'+id});try{new PersistentChatInbox({rootDir:root,profile:{profileId:'profile-A',agentId:'hosted-a'},maxFiles:1,maxBytes:1048576}).accept(message);process.stdout.write('accepted\\n')}catch(e){process.stdout.write((e.code||e.message)+'\\n')}`
+    const code = `import{existsSync,readFileSync}from'node:fs';import{PersistentChatInbox,validateChatDispatch}from ${JSON.stringify(moduleUrl)};const[root,barrier,fixture,id]=process.argv.slice(1);process.stdout.write('ready\\n');while(!existsSync(barrier))await new Promise(r=>setTimeout(r,5));const wire=JSON.parse(readFileSync(fixture));const message=validateChatDispatch({...wire,messageId:'evt-'+id,dispatchId:'dispatch-'+id,dedupeKey:wire.tenantId+':'+wire.ownerJiacn+':'+wire.clientId+':dispatch-'+id});try{await new PersistentChatInbox({rootDir:root,profile:{profileId:'profile-A',agentId:'hosted-a'},maxFiles:1,maxBytes:1048576}).accept(message);process.stdout.write('accepted\\n')}catch(e){process.stdout.write((e.code||e.message)+'\\n')}`
     const launch = id => new Promise((resolveResult, rejectResult) => {
       const child = spawn(process.execPath, ['--input-type=module', '-e', code, root, barrier, fixturePath, id], { stdio: ['ignore', 'pipe', 'pipe'] })
       let stdout = ''; let stderr = ''; child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk })
@@ -335,35 +335,52 @@ test('cross-process profile lock keeps hot admission within one-file quota', asy
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('archive has independent quota while compact dedupe evidence permits continuous admission', () => {
+test('archive has independent quota while compact dedupe evidence permits continuous admission', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'chat-archive-quota-'))
   try {
     const inbox = new PersistentChatInbox({ rootDir: root, profile, maxFiles: 1, maxBytes: 1024 * 1024, archiveMaxFiles: 1, archiveMaxBytes: 1024 * 1024, archiveRetentionMs: 60_000 })
     inbox.initialize(); const completed = []
     for (let index = 1; index <= 4; index++) {
       const message = normalizedWire({ messageId: `evt-continuous-${index}`, dispatchId: `dispatch-continuous-${index}` })
-      const accepted = inbox.accept(message); const claimed = inbox.claim(accepted.key)
+      const accepted = await inbox.accept(message); const claimed = inbox.claim(accepted.key)
       if (index === 4) inbox.cancelProcessing(claimed); else inbox.complete(claimed, { status: 'completed' })
       completed.push(message)
       assert.equal(inbox.usage().files, 0)
     }
     assert.ok(inbox.count('archive') <= 1)
     assert.equal(inbox.count('ledger'), 4)
-    for (const message of completed) assert.equal(inbox.accept(message).duplicate, true)
+    for (const message of completed) assert.equal((await inbox.accept(message)).duplicate, true)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('completed processing marker is forward-settled to archive and dedupe ledger after restart', () => {
+test('sharded dedupe admission uses constant-size usage metadata instead of rescanning all evidence', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-dedupe-usage-'))
+  try {
+    const inbox = new PersistentChatInbox({ rootDir: root, profile, maxFiles: 8, maxBytes: 1024 * 1024 })
+    inbox.initialize()
+    const originalList = inbox._listDedupe.bind(inbox); let scans = 0
+    inbox._listDedupe = () => { scans++; return originalList() }
+    for (let index = 1; index <= 4; index++) {
+      const message = normalizedWire({ messageId: `evt-ledger-${index}`, dispatchId: `dispatch-ledger-${index}` })
+      const accepted = await inbox.accept(message); inbox.complete(inbox.claim(accepted.key), { status: 'completed' })
+    }
+    assert.equal(scans, 0)
+    assert.equal(inbox.count('ledger'), 4)
+    assert.equal(scans, 0)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('completed processing marker is forward-settled to archive and dedupe ledger after restart', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'chat-forward-settlement-'))
   try {
     const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
     const message = normalizedWire({ messageId: 'evt-forward', dispatchId: 'dispatch-forward' })
-    const accepted = inbox.accept(message); const claimed = inbox.claim(accepted.key)
+    const accepted = await inbox.accept(message); const claimed = inbox.claim(accepted.key)
     writeFileSync(claimed.path, `${JSON.stringify({ ...claimed.record, state: 'COMPLETED', completedAt: Date.now(), result: { status: 'completed' } })}\n`)
     const restarted = new PersistentChatInbox({ rootDir: root, profile }); const recovery = restarted.initialize()
     assert.equal(recovery.forwardSettled, 1); assert.equal(recovery.recoveryRequired, 0)
     assert.equal(restarted.findByKey(accepted.key).record.state, 'COMPLETED')
-    assert.equal(restarted.accept(message).duplicate, true)
+    assert.equal((await restarted.accept(message)).duplicate, true)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -381,6 +398,80 @@ test('actual codex binary version and generated experimental schema are measured
     assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, cliVersion: 'wrong' }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
     assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, bundleSha256: '0'.repeat(64) }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
     assert.deepEqual(readdirSync(temp), [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+
+test('OpenAI JavaScript launcher measurement binds require-resolved native executable before sibling fallback', () => {
+  const target = process.platform === 'linux' && process.arch === 'arm64'
+    ? ['codex-linux-arm64', 'aarch64-unknown-linux-musl']
+    : process.platform === 'linux' && process.arch === 'x64'
+      ? ['codex-linux-x64', 'x86_64-unknown-linux-musl'] : null
+  if (!target) return
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-launcher-measure-'))
+  try {
+    const [packageName, triple] = target; const openai = resolve(root, 'node_modules', '@openai')
+    const launcher = resolve(openai, 'codex', 'bin', 'codex.js')
+    const native = resolve(openai, 'codex', 'node_modules', '@openai', packageName, 'vendor', triple, 'bin', 'codex')
+    const sibling = resolve(openai, packageName, 'vendor', triple, 'bin', 'codex')
+    mkdirSync(resolve(openai, 'codex', 'bin'), { recursive: true }); mkdirSync(resolve(native, '..'), { recursive: true }); mkdirSync(resolve(sibling, '..'), { recursive: true })
+    writeFileSync(launcher, `#!/usr/bin/env node
+const PLATFORM_PACKAGE_BY_TARGET = {'${triple}':'@openai/${packageName}'};
+`); chmodSync(launcher, 0o700)
+    const bundle = '{"launcher":"native"}\n'; const digest = createHash('sha256').update(bundle).digest('hex')
+    writeFileSync(native, `#!/usr/bin/env node
+const fs=require('fs'),p=require('path');if(process.argv[2]==='--version'){process.stdout.write('codex-cli launcher-test\\n');process.exit(0)}const i=process.argv.indexOf('--out');fs.mkdirSync(process.argv[i+1],{recursive:true});fs.writeFileSync(p.join(process.argv[i+1],'codex_app_server_protocol.schemas.json'),${JSON.stringify(bundle)});
+`); chmodSync(native, 0o700)
+    writeFileSync(sibling, `#!/usr/bin/env node\nprocess.stdout.write('codex-cli untrusted-sibling\\n')\n`); chmodSync(sibling, 0o700)
+    const measured = measureCodexAppServerBinary({ codexBin: launcher, codexHome: root }, {
+      expected: { cliVersion: 'launcher-test', bundleSha256: digest }, cache: new Map(), temporaryRoot: root
+    })
+    assert.equal(measured.configuredIdentity.realpath, launcher)
+    assert.equal(measured.executableIdentity.realpath, native)
+    assert.notEqual(measured.configuredIdentity.sha256, measured.executableIdentity.sha256)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('measured executable identity rejects file and symlink replacement before app-server spawn', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-bin-toctou-'))
+  try {
+    const bundle = '{"measured":"schema"}\n'; const digest = createHash('sha256').update(bundle).digest('hex')
+    const script = version => `#!/usr/bin/env node\nconst fs=require('fs'),p=require('path');if(process.argv[2]==='--version'){process.stdout.write('codex-cli ${version}\\n');process.exit(0)}const i=process.argv.indexOf('--out');if(i<0)process.exit(2);fs.mkdirSync(process.argv[i+1],{recursive:true});fs.writeFileSync(p.join(process.argv[i+1],'codex_app_server_protocol.schemas.json'),${JSON.stringify(bundle)});\n`
+    const good = resolve(root, 'good-codex'); const evil = resolve(root, 'evil-codex'); const link = resolve(root, 'codex-link')
+    writeFileSync(good, script('test-1')); writeFileSync(evil, script('evil')); chmodSync(good, 0o700); chmodSync(evil, 0o700); symlinkSync(good, link)
+    const expected = { cliVersion: 'test-1', bundleSha256: digest }; const temp = resolve(root, 'temporary'); mkdirSync(temp)
+    const profileForLink = { codexBin: link, codexHome: root }
+    const measuredLink = measureCodexAppServerBinary(profileForLink, { expected, cache: new Map(), temporaryRoot: temp })
+    assert.equal(measuredLink.configuredIdentity.realpath, good); assert.equal(measuredLink.executableIdentity.sha256, measuredLink.binarySha256)
+    assert.equal(verifyCodexAppServerBinaryIdentity(profileForLink, measuredLink), true)
+    unlinkSync(link); symlinkSync(evil, link)
+    let spawns = 0
+    assert.throws(() => AppServerAdapter.spawn(profileForLink, { cwd: root, schemaMeasurement: measuredLink, spawnFn: () => { spawns++; return fakeChild() } }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    assert.equal(spawns, 0)
+
+    const direct = resolve(root, 'direct-codex'); const replacement = resolve(root, 'replacement-codex')
+    writeFileSync(direct, script('test-1')); writeFileSync(replacement, script('evil')); chmodSync(direct, 0o700); chmodSync(replacement, 0o700)
+    const directProfile = { codexBin: direct, codexHome: root }
+    const measuredDirect = measureCodexAppServerBinary(directProfile, { expected, cache: new Map(), temporaryRoot: temp })
+    renameSync(replacement, direct)
+    assert.throws(() => AppServerAdapter.spawn(directProfile, { cwd: root, schemaMeasurement: measuredDirect, spawnFn: () => { spawns++; return fakeChild() } }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    assert.equal(spawns, 0)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('modern durable CHAT fails closed on binary trust mismatch and never invokes legacy execution', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-trust-fail-chat-'))
+  try {
+    const bad = resolve(root, 'bad-codex'); writeFileSync(bad, `#!/usr/bin/env node\nif(process.argv[2]==='--version')process.stdout.write('codex-cli wrong\\n');\n`); chmodSync(bad, 0o700)
+    let trustError
+    try { measureCodexAppServerBinary({ codexBin: bad, codexHome: root }, { cache: new Map(), temporaryRoot: root }) } catch (error) { trustError = error }
+    assert.equal(trustError?.code, 'APP_SERVER_BINARY_UNTRUSTED')
+    let legacySpawns = 0
+    await assert.rejects(() => runProfileChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, normalizedWire(), {
+      adapterPromise: Promise.reject(trustError), chatWorkdir: root,
+      runLegacy: async () => { legacySpawns++; return { status: 'completed' } }
+    }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    assert.equal(legacySpawns, 0)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

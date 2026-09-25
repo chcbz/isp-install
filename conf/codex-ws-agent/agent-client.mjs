@@ -34,7 +34,7 @@ import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
-import { AppServerAdapter, measureCodexAppServerBinary } from './app-server-adapter.mjs'
+import { AppServerAdapter, cleanupCodexAppServerSnapshots, measureCodexAppServerBinary } from './app-server-adapter.mjs'
 export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract }
 
 const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
@@ -568,6 +568,9 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     chatArchiveMaxFiles: parsePositiveInteger(profile.chatArchiveMaxFiles ?? fallback.chatArchiveMaxFiles, 256),
     chatArchiveMaxBytes: parsePositiveInteger(profile.chatArchiveMaxBytes ?? fallback.chatArchiveMaxBytes, 16 * 1024 * 1024),
     chatArchiveRetentionMs: parsePositiveInteger(profile.chatArchiveRetentionMs ?? fallback.chatArchiveRetentionMs, 7 * 24 * 60 * 60 * 1000),
+    chatDedupeMaxEntries: parsePositiveInteger(profile.chatDedupeMaxEntries ?? fallback.chatDedupeMaxEntries, 100000),
+    chatDedupeMaxBytes: parsePositiveInteger(profile.chatDedupeMaxBytes ?? fallback.chatDedupeMaxBytes, 128 * 1024 * 1024),
+    chatDedupeRetentionMs: parsePositiveInteger(profile.chatDedupeRetentionMs ?? fallback.chatDedupeRetentionMs, 30 * 24 * 60 * 60 * 1000),
     abilities: parseStringList(profile.abilities ?? fallback.abilities),
     skills: parseStringList(profile.skills ?? fallback.skills),
     workspacePolicyId: profile.workspacePolicyId || fallback.workspacePolicyId || '',
@@ -611,6 +614,9 @@ const legacyProfile = () => normalizeProfile({
   chatArchiveMaxFiles: process.env.CODEX_CHAT_ARCHIVE_MAX_FILES || 256,
   chatArchiveMaxBytes: process.env.CODEX_CHAT_ARCHIVE_MAX_BYTES || 16777216,
   chatArchiveRetentionMs: process.env.CODEX_CHAT_ARCHIVE_RETENTION_MS || 604800000,
+  chatDedupeMaxEntries: process.env.CODEX_CHAT_DEDUPE_MAX_ENTRIES || 100000,
+  chatDedupeMaxBytes: process.env.CODEX_CHAT_DEDUPE_MAX_BYTES || 134217728,
+  chatDedupeRetentionMs: process.env.CODEX_CHAT_DEDUPE_RETENTION_MS || 2592000000,
   workspacePolicyId: process.env.CODEX_WORKSPACE_POLICY_ID || '',
   workspaceRole: process.env.CODEX_WORKSPACE_ROLE || 'coder',
   workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
@@ -670,6 +676,7 @@ let config = null
 let defaultProfile = null
 let shuttingDown = false
 let shutdownStarted = false
+let shutdownPromise = null
 let profileReloadTimer = null
 let profileReloadInFlight = false
 let lastProfileSignature = ''
@@ -2647,7 +2654,9 @@ export class AgentMessageProcessor {
       } catch (error) {
         const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
         this.chatInbox.recoveryRequired(claimed, `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`, unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED')
-        this.onReject(new AgentProtocolError(unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_RUNTIME_ERROR', error.message), claimed.record.message.rawPayload)
+        const recoveryAck = { status: 'recovery_required', errorCode: error?.code || 'CHAT_RUNTIME_ERROR', reason: String(error.message || 'CHAT runtime failure').slice(0, 512) }
+        try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
+        this.onReject(new AgentProtocolError(unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : (error?.code || 'CHAT_RUNTIME_ERROR'), error.message), claimed.record.message.rawPayload)
       } finally { this.chatActive = false; this.activeChats.delete(item.key); void this.drain(); this._schedulePendingChats() }
     }
     try { void this.lanes.enqueue('chat', this._chatFairness(message), task, this._chatTurnKey(message)).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_LANE_ERROR', error.message), message.rawPayload); this._schedulePendingChats() }) }
@@ -2764,7 +2773,7 @@ export class AgentMessageProcessor {
       case MESSAGE_TYPES.CHAT_MESSAGE: {
         if (message.durable && this.chatInbox) {
           let accepted
-          try { accepted = this.chatInbox.accept(message) }
+          try { accepted = await this.chatInbox.accept(message) }
           catch (error) { const protocolError = new AgentProtocolError(error.code || 'CHAT_INBOX_ERROR', error.message); this.onReject(protocolError, raw); return { kind: 'rejected', error: protocolError } }
           const ack = { status: accepted.accepted ? 'received' : 'duplicate' }
           try { this._emitChatAck(message, ack) } catch (error) { this._retryChatAck(message, ack, error) }
@@ -4009,17 +4018,32 @@ const appServerReadbackSummary = adapter => {
 
 export const runFastChat = async (profile, message, {
   adapter = null, adapterPromise = null, bindingStore = null, controls = { markRunning: () => {}, isCancelled: () => false },
-  fallback = null, sendProtocolFn = sendProtocol, chatWorkdir = profile.chatWorkdir,
+  fallback = null, sendProtocolFn = sendProtocol, chatWorkdir = profile.chatWorkdir, getAppServerFailure = () => null,
   enginePolicyHash = '', instructionSourceHash = '', modelConfigHash = '', toolPolicyHash = ''
 } = {}) => {
-  const legacy = reason => {
-    if (fallback) return fallback({ routeUsed: 'CHAT_LEGACY_FALLBACK', fallbackReason: reason })
+  const modern = message?.durable === true || (message?.ackRequired === true && message?.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED')
+  const legacy = (reason, secureBoundaryRequired = false) => {
+    if (fallback) return fallback({ routeUsed: 'CHAT_LEGACY_FALLBACK', fallbackReason: reason, modern, secureBoundaryRequired })
     throw new AgentProtocolError('AGENT_FAST_PATH_UNAVAILABLE', reason)
   }
-  // Feature negotiation and old-message compatibility happen before Context Envelope validation.
-  if (!profile.fastChatEnabled || !profile.appServerEnabled || message.legacy || !message.contextSnapshot) return legacy('FAST_CHAT_DISABLED_OR_LEGACY_MESSAGE')
-  const selectedAdapter = adapter || (adapterPromise ? await adapterPromise.catch(() => null) : null)
-  if (!selectedAdapter || !chatWorkdir) return legacy('APP_SERVER_UNAVAILABLE')
+  // Explicit old protocol is the only unrestricted compatibility fallback. Modern feature-disabled fallback must stay in the dedicated read-only CHAT boundary.
+  if (message.legacy || !modern) return legacy('LEGACY_CHAT_PROTOCOL', false)
+  if (!profile.fastChatEnabled || !profile.appServerEnabled) return legacy('FAST_CHAT_FEATURE_DISABLED', true)
+  if (!message.contextSnapshot) throw new AgentProtocolError('FAST_CHAT_CONTEXT_REQUIRED', 'Modern durable CHAT requires contextSnapshot')
+  let selectedAdapter = adapter
+  if (!selectedAdapter && adapterPromise) {
+    try { selectedAdapter = await adapterPromise }
+    catch (error) {
+      const code = error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? 'APP_SERVER_BINARY_UNTRUSTED' : 'APP_SERVER_UNAVAILABLE'
+      throw new AgentProtocolError(code, error?.message || code)
+    }
+  }
+  if (!selectedAdapter) {
+    const permanent = getAppServerFailure?.()
+    if (permanent) throw new AgentProtocolError(permanent.code || 'APP_SERVER_BINARY_UNTRUSTED', permanent.message || 'Permanent app-server trust failure')
+    throw new AgentProtocolError('APP_SERVER_UNAVAILABLE', 'Modern durable CHAT app-server is unavailable; legacy workspace execution is forbidden')
+  }
+  if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
   const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
   const effectiveEnginePolicyHash = enginePolicyHash || canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {} })
   const effectiveToolPolicyHash = toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
@@ -4059,7 +4083,16 @@ export const runProfileChat = (profile, message, {
 } = {}) => runFastChat(profile, message, {
   ...options,
   fallback: info => {
-    const invoke = () => runLegacy(profile, message, 'chat', { controls: options.controls, sendProtocolFn: options.sendProtocolFn })
+    let selectedProfile = profile; const legacyOptions = { controls: options.controls, sendProtocolFn: options.sendProtocolFn }
+    if (info.secureBoundaryRequired) {
+      if (!options.chatWorkdir) throw new AgentProtocolError('FAST_CHAT_SECURE_FALLBACK_UNAVAILABLE', 'Modern CHAT fallback requires a dedicated empty CHAT workdir')
+      selectedProfile = { ...profile, codexWorkdir: options.chatWorkdir, codexSandbox: 'read-only', codexApproval: 'never', codexSessionMode: 'new' }
+      Object.assign(legacyOptions, {
+        codexWorkdir: options.chatWorkdir, forceNewSession: true,
+        env: { NO_PROXY: '*', no_proxy: '*', HTTP_PROXY: '', HTTPS_PROXY: '', ALL_PROXY: '' }
+      })
+    }
+    const invoke = () => runLegacy(selectedProfile, message, 'chat', legacyOptions)
     return legacyGate ? legacyGate.run(invoke) : invoke()
   }
 })
@@ -4097,6 +4130,12 @@ const profileConfigurationErrors = profile => {
   if (!Number.isSafeInteger(chatArchiveMaxFiles) || chatArchiveMaxFiles < 1 || chatArchiveMaxFiles > 100000) errors.push('chatArchiveMaxFiles must be an integer from 1 to 100000')
   if (!Number.isSafeInteger(chatArchiveMaxBytes) || chatArchiveMaxBytes < 4096 || chatArchiveMaxBytes > 10737418240) errors.push('chatArchiveMaxBytes must be an integer from 4096 to 10737418240')
   if (!Number.isSafeInteger(chatArchiveRetentionMs) || chatArchiveRetentionMs < 1000 || chatArchiveRetentionMs > 31536000000) errors.push('chatArchiveRetentionMs must be an integer from 1000 to 31536000000')
+  const chatDedupeMaxEntries = profile.chatDedupeMaxEntries ?? 100000
+  const chatDedupeMaxBytes = profile.chatDedupeMaxBytes ?? 128 * 1024 * 1024
+  const chatDedupeRetentionMs = profile.chatDedupeRetentionMs ?? 30 * 24 * 60 * 60 * 1000
+  if (!Number.isSafeInteger(chatDedupeMaxEntries) || chatDedupeMaxEntries < 1 || chatDedupeMaxEntries > 10000000) errors.push('chatDedupeMaxEntries must be an integer from 1 to 10000000')
+  if (!Number.isSafeInteger(chatDedupeMaxBytes) || chatDedupeMaxBytes < 4096 || chatDedupeMaxBytes > 10737418240) errors.push('chatDedupeMaxBytes must be an integer from 4096 to 10737418240')
+  if (!Number.isSafeInteger(chatDedupeRetentionMs) || chatDedupeRetentionMs < 60000 || chatDedupeRetentionMs > 31536000000) errors.push('chatDedupeRetentionMs must be an integer from 60000 to 31536000000')
   if (!Number.isSafeInteger(profile.codexTimeoutMs) || profile.codexTimeoutMs < 0 || profile.codexTimeoutMs > 2147483647) {
     errors.push('codexTimeoutMs must be an integer from 0 to 2147483647 (0 disables the timeout)')
   }
@@ -4636,12 +4675,10 @@ const createProfileState = profile => {
   const chatInbox = new PersistentChatInbox({ rootDir: config.commandInboxDir, profile })
   const chatAckOutbox = new ChatAckOutbox({ rootDir: config.commandInboxDir, profile })
   const threadBindingStore = new ThreadBindingStore({ rootDir: config.commandInboxDir, profile }).initialize()
-  const chatWorkdir = profile.fastChatEnabled && profile.appServerEnabled
-    ? prepareChatWorkdir({
-      rootDir: resolve(config.commandInboxDir, 'chat-workdirs'), profile,
-      forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
-    })
-    : ''
+  const chatWorkdir = prepareChatWorkdir({
+    rootDir: resolve(config.commandInboxDir, 'chat-workdirs'), profile,
+    forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
+  })
   const hostedWireContract = profile.fastChatEnabled && profile.appServerEnabled ? verifyHostedWireContract() : null
   const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 256 })
   const legacyExecutionGate = new SerialExecutionGate()
@@ -4779,7 +4816,7 @@ const createProfileState = profile => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
       return runProfileChat(profile, message, {
         adapter: state.appServerAdapter, adapterPromise: state.ensureAppServer ? state.ensureAppServer() : state.appServerPromise, bindingStore: threadBindingStore,
-        controls, chatWorkdir, legacyGate: legacyExecutionGate
+        controls, chatWorkdir, legacyGate: legacyExecutionGate, getAppServerFailure: () => state.appServerPermanentFailure
       })
     },
     onTaskEvent: message => {
@@ -5107,31 +5144,37 @@ const startProfileWatcher = () => {
 }
 
 const shutdown = (exitCode = 0, reason = '') => {
-  if (shutdownStarted) return
+  if (shutdownPromise) return shutdownPromise
   shutdownStarted = true
   shuttingDown = true
-  if (reason) console.warn(`shutting down codex-ws-agent | reason=${reason}`)
-  managedHostChannel?.close()
-  terminateAllRuns()
-  if (profileReloadTimer) clearInterval(profileReloadTimer)
-  const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-  if (profilesFile) unwatchFile(resolve(profilesFile))
-  for (const profile of config.profiles) {
-    const state = getProfileState(profile)
-    state?.processor.pause()
-    state?.resultReplayCancel?.()
-    state?.executionReportReplayCancel?.()
-    if (state) { state.resultReplayCancel = null; state.executionReportReplayCancel = null }
-    clearReconnectState(state)
-    clearInterval(state?.heartbeatTimer)
-    stopWorkspaceFilePoller(state)
-    state?.registration.disconnect()
-    if (state?.appServerRestartTimer) clearTimeout(state.appServerRestartTimer)
-    state?.appServerAdapter?.close()
-    sendStatus(profile, 'offline')
-    try { state?.ws?.close() } catch {}
-  }
-  setTimeout(() => process.exit(exitCode), 100)
+  shutdownPromise = (async () => {
+    if (reason) console.warn(`shutting down codex-ws-agent | reason=${reason}`)
+    managedHostChannel?.close()
+    terminateAllRuns()
+    if (profileReloadTimer) clearInterval(profileReloadTimer)
+    const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
+    if (profilesFile) unwatchFile(resolve(profilesFile))
+    const adapterShutdowns = []
+    for (const profile of config.profiles) {
+      const state = getProfileState(profile)
+      state?.processor.pause()
+      state?.resultReplayCancel?.()
+      state?.executionReportReplayCancel?.()
+      if (state) { state.resultReplayCancel = null; state.executionReportReplayCancel = null }
+      clearReconnectState(state)
+      clearInterval(state?.heartbeatTimer)
+      stopWorkspaceFilePoller(state)
+      state?.registration.disconnect()
+      if (state) adapterShutdowns.push(disposeAppServerState(state, { timeoutMs: 5000 }).catch(error => console.error(`app-server shutdown failed | profile=${profile.profileId} | ${error.message}`)))
+      sendStatus(profile, 'offline')
+      try { state?.ws?.close() } catch {}
+    }
+    await Promise.all(adapterShutdowns)
+    cleanupCodexAppServerSnapshots()
+    await new Promise(resolveExit => setTimeout(resolveExit, 100))
+    process.exit(exitCode)
+  })()
+  return shutdownPromise
 }
 
 export const loadWebSocketClient = async () => {
@@ -5191,8 +5234,8 @@ export const main = async () => {
   }
 
   for (const profile of config.profiles) profileStates.set(profile.agentId, createProfileState(profile))
-  process.on('SIGINT', () => shutdown(0, 'SIGINT'))
-  process.on('SIGTERM', () => shutdown(0, 'SIGTERM'))
+  process.on('SIGINT', () => { void shutdown(0, 'SIGINT') })
+  process.on('SIGTERM', () => { void shutdown(0, 'SIGTERM') })
   for (const profile of config.profiles) connectProfile(profile)
   startProfileWatcher()
   // Inert unless explicitly configured at release. Never entered by --validate.
