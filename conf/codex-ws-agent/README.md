@@ -454,6 +454,25 @@ A `command.dispatch` uses the private Workspace File Bridge only when its nested
 
 Inputs materialize below the private root at `<root>/<taskId>/<runId>`, and that directory is both Codex `cwd` and `--cd`; this path never acquires a Git workspace-manager lease. Successful Codex execution collects only declared outputs, uploads each output, then commits the canonical sorted output manifest. A non-200/201 upload, non-200 commit, redirect, wrong-origin response, or cleanup failure produces a failed command outcome rather than `completed`; private run storage is removed in all terminal paths.
 
+## Managed-host identity and socket deployment
+
+Managed hosting stays disabled unless `AGENT_MANAGED_HOST_ENABLED=true`. Configure exact
+`AGENT_MANAGED_HOST_TENANT_ID` and `AGENT_MANAGED_HOST_CLIENT_ID`. Set
+`AGENT_MANAGED_HOST_OWNER_JIACN` to one exact owner for the compatible fixed-owner mode, or to `*`
+to accept validated non-empty request owners. Wildcard mode does not wildcard tenant/client; each
+owner receives a separate encoded directory, Codex Home, workspace, profile, credential association,
+and engine identity. A canonical Agent ID claimed by one owner is never reused by another owner.
+
+A managed Agent is not ready merely because provisioning files exist. The runner initializes the
+execution engine, sends authenticated `agent.register`, waits for the exact current-process
+`agent_registered` acknowledgement, and only then publishes `ONLINE` and returns `SERVICE_READY`.
+Historical readiness is not replayed while that exact managed profile is offline.
+
+Production systemd source uses `User=root` and `Group=isp`. Create the socket parent as canonical
+`root:isp` mode `0750`; the runner creates the socket as `root:isp` mode `0660`. The API service user
+must belong to group `isp`, and its configured runner UID must remain `0`. Do not use `0666`, a
+world-writable parent, a symlinked path, or a stale socket from another process.
+
 ## Test
 
 From the versioned `isp-install` checkout:

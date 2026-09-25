@@ -25,6 +25,7 @@ import {
   buildProtocolEnvelope,
   buildWebSocketOptions,
   buildWebSocketUrl,
+  canPublishProfileOnline,
   discoverCodexSkills,
   discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
@@ -610,6 +611,17 @@ test('FIFO and symlinked containers cannot escape bounded scanning', () => {
     process.stdout.write(JSON.stringify(discoverWorkspaceAbilities({ codexWorkdir: ${JSON.stringify(root)} })))
   `], { encoding: 'utf8', timeout: 15000 })
   assert.deepEqual(JSON.parse(output), ['天气查询'])
+})
+
+test('managed profiles publish ONLINE only after exact authenticated registration and engine readiness', () => {
+  const managed = { ...profile, managedGeneration: 'hri_fixture' }
+  const state = { managedRegistered: false, managedEngine: { ready: true } }
+  assert.equal(canPublishProfileOnline(managed, state), false)
+  state.managedRegistered = true
+  assert.equal(canPublishProfileOnline(managed, state), true)
+  state.managedEngine.ready = false
+  assert.equal(canPublishProfileOnline(managed, state), false)
+  assert.equal(canPublishProfileOnline(profile, {}), true)
 })
 
 test('register and presence refresh business abilities after directory changes', () => {

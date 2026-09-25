@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
+Group=isp
 WorkingDirectory=/home/isp/apps/codex-ws-agent
 Environment=PATH=/home/isp/apps/nodejs/bin:/home/isp/apps/node/bin:/usr/local/bin:/usr/bin:/bin
 ExecStartPre=/usr/bin/env node /home/isp/apps/codex-ws-agent/agent-client.mjs --validate

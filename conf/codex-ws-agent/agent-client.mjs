@@ -4539,6 +4539,9 @@ const createProfileState = profile => {
 
 const isProfileBusy = profile => getProfileState(profile)?.processor?.isBusy() || currentRuns.has(profile.agentId)
 
+export const canPublishProfileOnline = (profile, state) => !profile.managedGeneration ||
+  Boolean(state?.managedRegistered && state?.managedEngine?.ready)
+
 const handleMessage = async (profile, raw) => {
   let parsed
   try { parsed = JSON.parse(raw.toString()) } catch (error) {
@@ -4561,6 +4564,8 @@ const handleMessage = async (profile, raw) => {
       const state = getProfileState(profile)
       if (state?.managedEngine?.ready && !state.managedRegistered) {
         state.managedRegistered = true
+        if (!canPublishProfileOnline(profile, state)) return
+        sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
         resumeRegisteredProfile(profile, state)
       }
     } else if (parsed.type === 'connected') {
@@ -4680,8 +4685,10 @@ const connectProfile = profile => {
     state.reconnectAttempt = 0
     state.reconnectStartedAt = 0
     registerAgent(profile)
-    sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-    if (!profile.managedGeneration) resumeRegisteredProfile(profile, state)
+    if (canPublishProfileOnline(profile, state)) {
+      sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
+      resumeRegisteredProfile(profile, state)
+    }
   })
   socket.addEventListener('message', event => { if (state.ws === socket) void handleMessage(profile, event.data) })
   socket.addEventListener('close', () => {
@@ -4906,15 +4913,18 @@ export const main = async () => {
         codexBin: required('AGENT_MANAGED_HOST_CODEX_BIN'), runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
         tenantId: required('AGENT_MANAGED_HOST_TENANT_ID'), clientId: required('AGENT_MANAGED_HOST_CLIENT_ID'),
         ownerJiacn: required('AGENT_MANAGED_HOST_OWNER_JIACN'),
-        conflicts: (agentId, generation) => config.profiles.some(profile => profile.agentId === agentId && profile.managedGeneration !== generation),
-        profileState: agentId => {
+        conflicts: (ownerJiacn, agentId, generation) => config.profiles.some(profile => profile.agentId === agentId &&
+          (profile.managedOwnerJiacn !== ownerJiacn || profile.managedGeneration !== generation)),
+        profileState: (ownerJiacn, agentId) => {
           const state = profileStates.get(agentId)
           return state ? { registered: state.managedRegistered && state.ws?.readyState === WebSocketClient.OPEN,
-            generation: state.profile.managedGeneration, runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
+            ownerJiacn: state.profile.managedOwnerJiacn, generation: state.profile.managedGeneration,
+            runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
         },
         attachProfile: async (profile, engine) => {
           let state = profileStates.get(profile.agentId)
-          if (state && state.profile.managedGeneration !== profile.managedGeneration) throw new Error('Managed profile collision')
+          if (state && (state.profile.managedOwnerJiacn !== profile.managedOwnerJiacn ||
+              state.profile.managedGeneration !== profile.managedGeneration)) throw new Error('Managed profile collision')
           if (!state) {
             state = createProfileState(profile)
             profileStates.set(profile.agentId, state)

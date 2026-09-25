@@ -12,6 +12,19 @@ const fields = ['tenantId', 'clientId', 'ownerJiacn', 'agentId', 'intentId', 'le
   'reservedAt', 'operationId', 'requestedAt', 'validUntil']
 const exact = (value, max = 100) => typeof value === 'string' && value.length > 0 &&
   Buffer.byteLength(value) <= max && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value)
+const wellFormedUnicode = value => {
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index)
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(++index)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false
+  }
+  return true
+}
+const exactOwner = value => exact(value, 50) && value !== '*' && value !== '.' && value !== '..' &&
+  !/[\/\\]/u.test(value) && wellFormedUnicode(value)
+const ownerSegment = value => `owner-${Buffer.from(value, 'utf8').toString('base64url')}`
 const positive = value => typeof value === 'string' && /^[1-9][0-9]{0,18}$/.test(value) && BigInt(value) <= 9223372036854775807n
 const exists = path => {
   try { lstatSync(path); return true } catch (error) { if (error.code === 'ENOENT') return false; throw error }
@@ -26,7 +39,8 @@ export function validateHostingRequest(request) {
       Object.keys(request).length !== fields.length + 3 ||
       Object.keys(request).some(key => ![...fields, 'protocol', 'method', 'apiKey'].includes(key)) ||
       request.protocol !== '1' || !['ensure', 'observe'].includes(request.method) ||
-      !fields.slice(0, 7).every(key => exact(request[key], ['tenantId', 'clientId'].includes(key) ? 50 : 100)) ||
+      !fields.slice(0, 7).every(key => exact(request[key], ['tenantId', 'clientId', 'ownerJiacn'].includes(key) ? 50 : 100)) ||
+      !exactOwner(request.ownerJiacn) ||
       !/^agt_[0-9a-f]{32}$/.test(request.agentId) || !/^hri_[0-9a-f-]{36}$/.test(request.intentId) ||
       !/^hrl_[0-9a-f-]{36}$/.test(request.leaseId) || !positive(request.bindingId) ||
       !positive(request.reservedAt) || !positive(request.requestedAt) ||
@@ -59,6 +73,11 @@ function readPrivate(path) {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077) || stat.size > MAX_FILE) throw new Error('Unsafe managed file')
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
   try { return readFileSync(fd, 'utf8') } finally { closeSync(fd) }
+}
+function atomicCreate(path, value) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  try { writeFileSync(fd, value); fsyncSync(fd) } finally { closeSync(fd) }
+  syncDirectory(dirname(path))
 }
 function atomic(path, value) {
   const temp = `${path}.${randomUUID()}.tmp`
@@ -128,15 +147,21 @@ export function initializeHostingEngine(profile, { spawnFn = spawn, timeoutMs = 
 /** Trust only the successful server registration on the current socket for this managed profile. */
 export function managedRegistration(frame, profile, runtimeInstanceId) {
   const payload = frame?.data || frame
-  return frame?.type === 'agent_registered' && payload?.agentId === profile.agentId &&
-    payload?.runtimeInstanceId === runtimeInstanceId && payload?.status === 'online' && exact(payload?.token, 512)
+  return frame?.type === 'agent_registered' && exactOwner(profile?.managedOwnerJiacn) &&
+    exact(profile?.managedGeneration) && exact(profile?.apiKey, 256) &&
+    payload?.agentId === profile.agentId && payload?.runtimeInstanceId === runtimeInstanceId &&
+    payload?.status === 'online' && exact(payload?.token, 512)
 }
 
 export class ManagedHost {
   constructor({ root, templateHome, codexBin, runtimeInstanceId, tenantId, clientId, ownerJiacn,
     attachProfile, profileState, conflicts, workspacePolicyId, initializeEngine = initializeHostingEngine, maxProfiles = 64, now = Date.now }) {
     this.root = root; this.templateHome = templateHome; this.codexBin = codexBin
+    if (!exact(tenantId, 50) || !exact(clientId, 50) || !(ownerJiacn === '*' || exactOwner(ownerJiacn))) {
+      throw new Error('Invalid managed host identity scope')
+    }
     this.runtimeInstanceId = runtimeInstanceId; this.tenantId = tenantId; this.clientId = clientId; this.ownerJiacn = ownerJiacn
+    this.multiOwner = ownerJiacn === '*'
     this.workspacePolicyId = workspacePolicyId
     this.attachProfile = attachProfile; this.profileState = profileState; this.conflicts = conflicts
     this.initializeEngine = initializeEngine; this.maxProfiles = maxProfiles; this.now = now
@@ -144,7 +169,8 @@ export class ManagedHost {
   }
   async handle(raw) {
     const request = validateHostingRequest(raw)
-    if (this.closed || request.tenantId !== this.tenantId || request.clientId !== this.clientId || request.ownerJiacn !== this.ownerJiacn) return unknown(request)
+    if (this.closed || request.tenantId !== this.tenantId || request.clientId !== this.clientId ||
+        (!this.multiOwner && request.ownerJiacn !== this.ownerJiacn)) return unknown(request)
     if (request.method === 'observe') return this.observe(request)
     const key = request.agentId
     if (this.inflight.has(key)) return unknown(request) // Durable state, not parallel creation.
@@ -153,16 +179,32 @@ export class ManagedHost {
     this.inflight.set(key, action)
     return action
   }
+  identityKey(request) { return `${ownerSegment(request.ownerJiacn)}:${request.agentId}` }
   paths(request) {
-    const agentRoot = resolve(this.root, request.agentId)
+    const ownersRoot = this.multiOwner ? resolve(this.root, 'owners') : this.root
+    const ownerRoot = this.multiOwner ? resolve(ownersRoot, ownerSegment(request.ownerJiacn)) : this.root
+    const agentRoot = resolve(ownerRoot, request.agentId)
     const generationRoot = resolve(agentRoot, request.intentId)
-    return { agentRoot, generationRoot, manifest: resolve(generationRoot, 'association.json'),
-      journal: resolve(generationRoot, `${request.operationId}.json`),
+    return { ownersRoot, ownerRoot, agentRoot, generationRoot, claimsRoot: resolve(this.root, '.agent-claims'),
+      claim: resolve(this.root, '.agent-claims', `${request.agentId}.json`),
+      manifest: resolve(generationRoot, 'association.json'), journal: resolve(generationRoot, `${request.operationId}.json`),
       home: resolve(generationRoot, 'home'), workdir: resolve(generationRoot, 'work') }
+  }
+  claimAgent(request, paths) {
+    directory(paths.claimsRoot)
+    const claim = { tenantId: request.tenantId, clientId: request.clientId, ownerJiacn: request.ownerJiacn, agentId: request.agentId }
+    if (!exists(paths.claim)) {
+      try { atomicCreate(paths.claim, JSON.stringify(claim)) } catch (error) { if (error.code !== 'EEXIST') throw error }
+    }
+    if (digest(JSON.parse(readPrivate(paths.claim))) !== digest(claim)) throw new Error('Managed Agent owner collision')
   }
   read(request) {
     const paths = this.paths(request)
-    for (const dir of [this.root, paths.agentRoot, paths.generationRoot]) requirePrivateDirectory(dir)
+    const directories = this.multiOwner
+      ? [this.root, paths.ownersRoot, paths.ownerRoot, paths.agentRoot, paths.generationRoot, paths.claimsRoot]
+      : [this.root, paths.agentRoot, paths.generationRoot, paths.claimsRoot]
+    for (const dir of directories) requirePrivateDirectory(dir)
+    this.claimAgent(request, paths)
     const manifest = JSON.parse(readPrivate(paths.manifest))
     if (digest(manifest.association) !== digest(association(request)) || manifest.apiKeyHash !== digest(request.apiKey)) throw new Error('Managed association mismatch')
     const journal = exists(paths.journal) ? JSON.parse(readPrivate(paths.journal)) : null
@@ -170,12 +212,17 @@ export class ManagedHost {
         (!journal.result && journal.state !== 'STARTED'))) throw new Error('Managed operation mismatch')
     return { paths, manifest, journal }
   }
+  currentReady(request, engine = this.engines.get(this.identityKey(request))) {
+    const state = this.profileState(request.ownerJiacn, request.agentId)
+    return Boolean(engine?.ready && state?.registered && state.ownerJiacn === request.ownerJiacn &&
+      state.generation === request.intentId && state.runtimeInstanceId === this.runtimeInstanceId)
+  }
   observe(request) {
     try {
       const { journal } = this.read(request)
       if (!journal?.result) return unknown(request)
-      // Durable historical success proves that this exact operation was once ready, even across restart.
-      // A NEW free operation must initialize/register again; it cannot use another operation's receipt.
+      if (journal.result.outcome === 'FAILED_NO_EFFECT') return journal.result
+      if (journal.result.runtimeInstanceId !== this.runtimeInstanceId || !this.currentReady(request)) return unknown(request)
       return journal.result
     } catch { return unknown(request) }
   }
@@ -187,11 +234,15 @@ export class ManagedHost {
     if (!existingGeneration && exists(paths.generationRoot)) return unknown(request)
     if (existingGeneration) {
       const prior = this.read(request)
-      if (prior.journal?.result) return prior.journal.result
+      if (prior.journal?.result?.outcome === 'FAILED_NO_EFFECT') return prior.journal.result
+      if (prior.journal?.result?.runtimeInstanceId === this.runtimeInstanceId && this.currentReady(request)) return prior.journal.result
     }
     // Expiry does not imply no-effect: an earlier attempt may have taken effect.
     if (request.validUntil !== null && BigInt(request.validUntil) <= BigInt(this.now())) return unknown(request)
-    if (this.conflicts(request.agentId, request.intentId) || (!this.engines.has(request.agentId) && this.engines.size >= this.maxProfiles)) return unknown(request)
+    if (this.conflicts(request.ownerJiacn, request.agentId, request.intentId) ||
+        (!this.engines.has(this.identityKey(request)) && this.engines.size >= this.maxProfiles)) return unknown(request)
+    this.claimAgent(request, paths)
+    if (this.multiOwner) { directory(paths.ownersRoot); directory(paths.ownerRoot) }
     directory(paths.agentRoot); directory(paths.generationRoot)
     if (!existingGeneration) atomic(paths.manifest, JSON.stringify({ association: association(request), apiKeyHash: digest(request.apiKey) }))
     let { journal } = this.read(request)
@@ -216,28 +267,33 @@ export class ManagedHost {
       if (!exists(target)) atomic(target, readPrivate(resolve(this.templateHome, name)))
       else readPrivate(target)
     }
-    const profile = { profileId: `managed:${request.agentId}:${request.intentId}`, agentId: request.agentId,
+    const profile = { profileId: this.multiOwner
+        ? `managed:${ownerSegment(request.ownerJiacn)}:${request.agentId}:${request.intentId}`
+        : `managed:${request.agentId}:${request.intentId}`, agentId: request.agentId,
       agentName: request.agentId, personaName: request.agentId, apiKey: request.apiKey, codexBin: this.codexBin,
       codexHome: paths.home, codexWorkdir: paths.workdir, codexSandbox: 'workspace-write', codexApproval: 'never',
       codexSessionMode: 'new', codexTimeoutMs: 900000, abilities: [], skills: [], enabled: true,
-      managedGeneration: request.intentId, managedProfileRef: `${request.agentId}/${request.intentId}`,
+      managedGeneration: request.intentId, managedOwnerJiacn: request.ownerJiacn,
+      managedScopeKey: this.identityKey(request), managedProfileRef: `${request.agentId}/${request.intentId}`,
       workspacePolicyId: this.workspacePolicyId, workspaceRole: 'coder', workspaceNoTaskPolicy: 'reject', workspaceNonCodingCommandTypes: [] }
-    let engine = this.engines.get(request.agentId)
+    const engineKey = this.identityKey(request)
+    let engine = this.engines.get(engineKey)
     if (!engine?.ready) {
       // An engine with unknown termination must not be duplicated on retry.
       if (engine && !engine.closed) return unknown(request)
       try { engine = await this.initializeEngine(profile) } catch (error) {
-        if (error.engine) this.engines.set(request.agentId, error.engine)
+        if (error.engine) this.engines.set(engineKey, error.engine)
         throw error
       }
       if (this.closed) { engine.close(); return unknown(request) }
-      this.engines.set(request.agentId, engine)
+      this.engines.set(engineKey, engine)
     }
     if (!engine.ready) return unknown(request)
     if (request.validUntil !== null && BigInt(request.validUntil) <= BigInt(this.now())) return unknown(request)
     await this.attachProfile(profile, engine)
-    const state = this.profileState(request.agentId)
-    if (!engine.ready || !state?.registered || state.generation !== request.intentId || state.runtimeInstanceId !== this.runtimeInstanceId) return unknown(request)
+    const state = this.profileState(request.ownerJiacn, request.agentId)
+    if (!engine.ready || !state?.registered || state.ownerJiacn !== request.ownerJiacn ||
+        state.generation !== request.intentId || state.runtimeInstanceId !== this.runtimeInstanceId) return unknown(request)
     if (BigInt(this.now()) < BigInt(request.requestedAt)) return unknown(request)
     const serviceReadyAt = String(this.now())
     const result = { ...unknown(request), outcome: 'SERVICE_READY', serviceReadyAt,
