@@ -211,7 +211,7 @@ test('processing command restart enters durable recovery-required state without 
   assert.equal(entry.ackRejectedEmitted, true)
 })
 
-test('chat run emits only chat.message.delta and chat.message', async () => {
+test('legacy chat run emits final only and never fabricates delta', async () => {
   const protocolTypes = []
   const legacyTypes = []
   const statuses = []
@@ -244,9 +244,7 @@ test('chat run emits only chat.message.delta and chat.message', async () => {
 
   const result = await run
   assert.equal(result.status, 'completed')
-  assert.ok(protocolTypes.includes(MESSAGE_TYPES.CHAT_MESSAGE_DELTA))
-  assert.equal(protocolTypes.at(-1), MESSAGE_TYPES.CHAT_MESSAGE)
-  assert.ok(protocolTypes.every(type => [MESSAGE_TYPES.CHAT_MESSAGE_DELTA, MESSAGE_TYPES.CHAT_MESSAGE].includes(type)))
+  assert.deepEqual(protocolTypes, [MESSAGE_TYPES.CHAT_MESSAGE])
   assert.deepEqual(legacyTypes, [])
   assert.deepEqual(statuses, [])
 })
@@ -886,7 +884,7 @@ test('chat failure and busy branches emit chat responses only', async () => {
     sendLegacyFn: () => assert.fail('chat must not send legacy result'),
     sendStatusFn: () => assert.fail('chat must not send presence')
   })
-  assert.deepEqual(protocol.map(entry => entry.type), [MESSAGE_TYPES.CHAT_MESSAGE_DELTA, MESSAGE_TYPES.CHAT_MESSAGE])
+  assert.deepEqual(protocol.map(entry => entry.type), [MESSAGE_TYPES.CHAT_MESSAGE])
   assert.ok(protocol.every(entry => entry.payload.senderName === profile.personaName))
 
   const gate = deferred()
@@ -895,14 +893,14 @@ test('chat failure and busy branches emit chat responses only', async () => {
     profile,
     inbox: createInbox(temporaryDirectory()),
     runCommand: async () => { await gate.promise; return { status: 'completed' } },
-    runChat: async () => assert.fail('busy chat must not start Codex'),
+    runChat: async () => busyReplies.push('chat-ran'),
     sendChatBusy: async inbound => busyReplies.push(inbound.senderName)
   })
   processor.start()
   await processor.handle(command(20))
   const result = await processor.handle(chat())
-  assert.equal(result.kind, 'chat-busy')
-  assert.deepEqual(busyReplies, ['Caller Name'])
+  assert.equal(result.kind, 'chat')
+  assert.deepEqual(busyReplies, ['chat-ran'])
   gate.resolve()
   await processor.waitForIdle()
 })
