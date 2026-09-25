@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, closeSync, constants, copyFileSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -335,21 +335,28 @@ test('cross-process profile lock keeps hot admission within one-file quota', asy
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('profile lock recovers O_EXCL-empty, partial JSON, dead-owner and cross-process crash records after grace', async () => {
+test('profile lock reclaims malformed legacy records only in confirmed-stopped migration and dead owners after grace', async () => {
   const cases = [
-    { name: 'empty', write: path => { const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600); closeSync(fd) }, grace: { lockMalformedGraceMs: 0 } },
-    { name: 'partial', write: path => writeFileSync(path, '{"pid":', { mode: 0o600 }), grace: { lockMalformedGraceMs: 0 } },
-    { name: 'start-mismatch', write: path => writeFileSync(path, `${JSON.stringify({ pid: process.pid, startTime: 'wrong', nonce: 'aaaaaaaaaaaaaaaa' })}\n`, { mode: 0o600 }), grace: { lockDeadGraceMs: 0 } }
+    { name: 'empty', write: path => { const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600); closeSync(fd) }, options: { lockMalformedGraceMs: 0, malformedLockMigrationMode: 'confirmed-stopped' } },
+    { name: 'partial', write: path => writeFileSync(path, '{"pid":', { mode: 0o600 }), options: { lockMalformedGraceMs: 0, malformedLockMigrationMode: 'confirmed-stopped' } },
+    { name: 'start-mismatch', write: path => writeFileSync(path, `${JSON.stringify({ pid: process.pid, startTime: 'wrong', nonce: 'aaaaaaaaaaaaaaaa' })}\n`, { mode: 0o600 }), options: { lockDeadGraceMs: 0 } }
   ]
   for (const item of cases) {
     const root = mkdtempSync(resolve(tmpdir(), `chat-lock-${item.name}-`))
     try {
-      const inbox = new PersistentChatInbox({ rootDir: root, profile, ...item.grace }); inbox.initialize(); item.write(inbox.lockPath)
+      const inbox = new PersistentChatInbox({ rootDir: root, profile, ...item.options }); inbox.initialize(); item.write(inbox.lockPath)
       const old = new Date(Date.now() - 1000); utimesSync(inbox.lockPath, old, old)
       const accepted = await inbox.accept(normalizedWire({ messageId: `evt-lock-${item.name}`, dispatchId: `dispatch-lock-${item.name}` }))
       assert.equal(accepted.accepted, true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }
+
+  const strictRoot = mkdtempSync(resolve(tmpdir(), 'chat-lock-malformed-strict-'))
+  try {
+    const strict = new PersistentChatInbox({ rootDir: strictRoot, profile, lockMalformedGraceMs: 0 }); strict.initialize()
+    writeFileSync(strict.lockPath, '{"pid":', { mode: 0o600 }); const old = new Date(Date.now() - 60_000); utimesSync(strict.lockPath, old, old)
+    assert.equal(strict._tryAcquireLock(), null, 'mtime alone must not reclaim an identity-less legacy lock')
+  } finally { rmSync(strictRoot, { recursive: true, force: true }) }
 
   const root = mkdtempSync(resolve(tmpdir(), 'chat-lock-cross-restart-'))
   try {
@@ -359,6 +366,25 @@ test('profile lock recovers O_EXCL-empty, partial JSON, dead-owner and cross-pro
     const old = new Date(Date.now() - 1000); utimesSync(inbox.lockPath, old, old)
     const accepted = await inbox.accept(normalizedWire({ messageId: 'evt-lock-cross', dispatchId: 'dispatch-lock-cross' }))
     assert.equal(accepted.accepted, true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('profile lock publishes a complete owner atomically and a paused creator cannot double-hold', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-lock-publish-race-'))
+  try {
+    const ready = resolve(root, 'creator-ready'); const go = resolve(root, 'creator-go'); const moduleUrl = pathToFileURL(resolve(import.meta.dirname, '..', 'chat-runtime.mjs')).href
+    const code = `import{existsSync,writeFileSync}from'node:fs';import{PersistentChatInbox}from ${JSON.stringify(moduleUrl)};const[root,ready,go]=process.argv.slice(1);const inbox=new PersistentChatInbox({rootDir:root,profile:{profileId:'profile-A',agentId:'hosted-a'},beforeLockPublish:()=>{writeFileSync(ready,'ready\\n');while(!existsSync(go))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}});const lock=inbox._tryAcquireLock();if(lock){process.stdout.write('acquired\\n');inbox._releaseLock(lock)}else process.stdout.write('busy\\n')`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code, root, ready, go], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''; let stderr = ''; child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk })
+    const deadline = Date.now() + 2000
+    while (!existsSync(ready) && Date.now() < deadline) await new Promise(resolveWait => setTimeout(resolveWait, 5))
+    assert.equal(existsSync(ready), true, stderr)
+    const winner = new PersistentChatInbox({ rootDir: root, profile }); const held = winner._tryAcquireLock(); assert.ok(held)
+    const published = readFileSync(winner.lockPath, 'utf8'); assert.doesNotThrow(() => JSON.parse(published))
+    writeFileSync(go, 'go\n')
+    await new Promise((resolveChild, rejectChild) => { child.on('error', rejectChild); child.on('close', status => status === 0 ? resolveChild() : rejectChild(new Error(stderr || `creator exited ${status}`))) })
+    assert.equal(stdout.trim(), 'busy'); assert.equal(readFileSync(winner.lockPath, 'utf8'), published)
+    winner._releaseLock(held)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -401,17 +427,48 @@ test('sharded dedupe admission uses constant-size usage metadata instead of resc
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('dirty dedupe usage metadata is exactly repaired once after interrupted mutation', async () => {
+test('dirty dedupe repair exactly replaces turn-index after marker-delete crash and redelivery is unambiguous', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'chat-dedupe-dirty-repair-'))
   try {
     const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
     const message = normalizedWire({ messageId: 'evt-dirty-repair', dispatchId: 'dispatch-dirty-repair' })
     const accepted = await inbox.accept(message); inbox.complete(inbox.claim(accepted.key), { status: 'completed' })
+    const staleIndex = inbox._turnIndexPath(message, accepted.key); const staleBucket = resolve(staleIndex, '..')
+    assert.equal(existsSync(staleIndex), true)
+    // Simulate a GC crash after authoritative marker/archive deletion but before stale index cleanup.
+    unlinkSync(inbox._dedupePath(accepted.key)); unlinkSync(inbox.path('archive', accepted.key))
     const usage = JSON.parse(readFileSync(inbox.dedupeUsagePath, 'utf8'))
     writeFileSync(inbox.dedupeUsagePath, `${JSON.stringify({ ...usage, count: usage.count + 7, totalBytes: usage.totalBytes + 7000, dirty: true })}\n`)
     const restarted = new PersistentChatInbox({ rootDir: root, profile }); restarted.initialize()
     const repaired = JSON.parse(readFileSync(restarted.dedupeUsagePath, 'utf8'))
-    assert.equal(repaired.dirty, false); assert.equal(repaired.count, 1); assert.equal(restarted.count('ledger'), 1)
+    assert.equal(repaired.dirty, false); assert.equal(repaired.count, 0); assert.equal(restarted.count('ledger'), 0)
+    assert.equal(existsSync(staleIndex), false); assert.equal(existsSync(staleBucket), false)
+
+    const redelivery = await restarted.accept(message); assert.equal(redelivery.accepted, true)
+    restarted.complete(restarted.claim(redelivery.key), { status: 'completed' })
+    const stop = Object.fromEntries(['tenantId', 'clientId', 'ownerJiacn', 'requestId', 'turnId', 'dispatchId', 'targetAgentId', 'conversationGeneration'].map(field => [field, message[field]]))
+    const found = restarted.findExactTurn(stop)
+    assert.equal(found.key, redelivery.key); assert.equal(found.state, 'ledger'); assert.equal(found.record.fingerprint, chatFingerprint(message))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('turn-index lookup verifies authoritative marker, repairs stale fingerprints, and removes orphan buckets', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-turn-index-verify-'))
+  try {
+    const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+    const message = normalizedWire({ messageId: 'evt-index-verify', dispatchId: 'dispatch-index-verify' })
+    const accepted = await inbox.accept(message); inbox.complete(inbox.claim(accepted.key), { status: 'completed' })
+    const indexPath = inbox._turnIndexPath(message, accepted.key); const bucket = resolve(indexPath, '..')
+    const indexed = JSON.parse(readFileSync(indexPath, 'utf8'))
+    writeFileSync(indexPath, `${JSON.stringify({ ...indexed, record: { ...indexed.record, fingerprint: 'sha256:' + '0'.repeat(64) } })}\n`)
+    const stop = Object.fromEntries(['requestId', 'turnId', 'dispatchId', 'targetAgentId'].map(field => [field, message[field]]))
+    const repaired = inbox.findExactTurn(stop)
+    assert.equal(repaired.record.fingerprint, chatFingerprint(message))
+    assert.equal(JSON.parse(readFileSync(indexPath, 'utf8')).record.fingerprint, chatFingerprint(message))
+
+    unlinkSync(inbox._dedupePath(accepted.key))
+    assert.equal(inbox.findExactTurn(stop), null)
+    assert.equal(existsSync(indexPath), false); assert.equal(existsSync(bucket), false)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -556,21 +613,33 @@ test('spawn probe kills a child that executes replacement bytes after measuremen
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('stale app-server snapshot cleanup is prefix, owner and live-process constrained', () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'codex-stale-snapshot-'))
+test('stale app-server snapshot cleanup is prefix, filesystem-owner, age and live-pid constrained', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-stale-snapshot-')); let liveChild
   try {
-    const startTime = pid => readFileSync(`/proc/${pid}/stat`, 'utf8').slice(readFileSync(`/proc/${pid}/stat`, 'utf8').lastIndexOf(') ') + 2).trim().split(/\s+/)[19]
-    const make = (name, owner, mode = 0o700) => {
+    const startTime = pid => { const raw = readFileSync(`/proc/${pid}/stat`, 'utf8'); return raw.slice(raw.lastIndexOf(') ') + 2).trim().split(/\s+/)[19] }
+    const make = (name, owner, mode = 0o700, ownerMode = 0o600) => {
       const directory = resolve(root, name); mkdirSync(directory, { mode }); chmodSync(directory, mode)
-      writeFileSync(resolve(directory, 'owner.json'), `${JSON.stringify(owner)}\n`, { mode: 0o600 }); chmodSync(resolve(directory, 'owner.json'), 0o600)
+      if (owner !== undefined) {
+        const body = typeof owner === 'string' ? owner : `${JSON.stringify(owner)}\n`
+        writeFileSync(resolve(directory, 'owner.json'), body, { mode: ownerMode }); chmodSync(resolve(directory, 'owner.json'), ownerMode)
+      }
       const old = new Date(Date.now() - 60_000); utimesSync(directory, old, old); return directory
     }
     const dead = make('.cyf-app-server-bin-Ab12Cd', { schemaVersion: 1, pid: 99999999, startTime: '1', nonce: 'dead-dead-dead-dead' })
     const active = make('.cyf-app-server-bin-Ef34Gh', { schemaVersion: 1, pid: process.pid, startTime: startTime(process.pid), nonce: 'live-live-live-live' })
+    const missing = make('.cyf-app-server-bin-Ij56Kl', undefined)
+    const malformed = make('.cyf-app-server-bin-Mn78Op', '{"pid":')
+    const malformedButLive = make('.cyf-app-server-bin-Qr90St', `{"pid":${process.pid},"startTime":"${startTime(process.pid)}",`)
+    const liveExecutable = make('.cyf-app-server-bin-Yz34Ab', undefined); const liveBin = resolve(liveExecutable, 'bin')
+    mkdirSync(liveBin, { mode: 0o700 }); const livePath = resolve(liveBin, 'codex'); copyFileSync('/bin/sleep', livePath); chmodSync(livePath, 0o500)
+    const oldLive = new Date(Date.now() - 60_000); utimesSync(liveExecutable, oldLive, oldLive)
+    liveChild = spawn(livePath, ['10'], { stdio: 'ignore' }); await new Promise((resolveSpawn, rejectSpawn) => { liveChild.once('spawn', resolveSpawn); liveChild.once('error', rejectSpawn) })
+    const unsafeOwner = make('.cyf-app-server-bin-Uv12Wx', '{"pid":', 0o700, 0o666)
     const foreign = make('not-runtime-snapshot', { schemaVersion: 1, pid: 99999999, startTime: '1', nonce: 'dead-dead-dead-dead' })
-    assert.equal(reclaimStaleCodexAppServerSnapshots(root, { graceMs: 0 }), 1)
-    assert.equal(readdirSync(root).includes(dead.split('/').at(-1)), false); assert.equal(readdirSync(root).includes(active.split('/').at(-1)), true); assert.equal(readdirSync(root).includes(foreign.split('/').at(-1)), true)
-  } finally { rmSync(root, { recursive: true, force: true }) }
+    assert.equal(reclaimStaleCodexAppServerSnapshots(root, { graceMs: 0 }), 3)
+    for (const removed of [dead, missing, malformed]) assert.equal(existsSync(removed), false)
+    for (const retained of [active, malformedButLive, liveExecutable, unsafeOwner, foreign]) assert.equal(existsSync(retained), true)
+  } finally { try { liveChild?.kill('SIGKILL') } catch {}; rmSync(root, { recursive: true, force: true }) }
 })
 
 test('modern durable CHAT fails closed on binary trust mismatch and never invokes legacy execution', async () => {

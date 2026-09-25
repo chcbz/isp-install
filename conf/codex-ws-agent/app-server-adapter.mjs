@@ -77,6 +77,16 @@ const SNAPSHOT_OWNER_FILE = 'owner.json'
 const processStartTime = pid => {
   try { const raw = readFileSync(`/proc/${pid}/stat`, 'utf8'); return raw.slice(raw.lastIndexOf(') ') + 2).trim().split(/\s+/)[19] || '' } catch { return '' }
 }
+const liveProcessUsesSnapshot = directory => {
+  if (process.platform !== 'linux') return false
+  for (const name of readdirSync('/proc').filter(value => /^[0-9]+$/.test(value))) {
+    try {
+      const executable = realpathSync(`/proc/${name}/exe`)
+      if (executable === directory || executable.startsWith(`${directory}/`)) return true
+    } catch {}
+  }
+  return false
+}
 const resourceManifest = root => {
   if (!existsSync(root)) return []
   const rootLexical = lstatSync(root, { bigint: true }); if (rootLexical.isSymbolicLink() || !rootLexical.isDirectory()) throw failTrust('CODEX_APP_SERVER_RESOURCE_ROOT_UNSAFE')
@@ -142,15 +152,25 @@ export function reclaimStaleCodexAppServerSnapshots(snapshotRoot, { graceMs = 5 
     const directory = resolve(root, name); let lexical; let stat
     try { lexical = lstatSync(directory); stat = statSync(directory, { bigint: true }) } catch { continue }
     if (lexical.isSymbolicLink() || !lexical.isDirectory() || (uid !== null && stat.uid !== uid) || Number(stat.mode & 0o777n) !== 0o700) continue
-    const age = Date.now() - Number(stat.mtimeMs); const ownerPath = resolve(directory, SNAPSHOT_OWNER_FILE); let active = false; let ownerValid = false
+    const age = Date.now() - Number(stat.mtimeMs); if (age < graceMs || binarySnapshotDirectories.has(directory)) continue
+    const ownerPath = resolve(directory, SNAPSHOT_OWNER_FILE); let owner = null; let ownerRaw = ''
     try {
       const ownerLexical = lstatSync(ownerPath); const ownerStat = statSync(ownerPath, { bigint: true })
+      // Unsafe owner-file metadata is not treated as a stale malformed record; fail closed.
       if (ownerLexical.isSymbolicLink() || !ownerLexical.isFile() || (uid !== null && ownerStat.uid !== uid) || Number(ownerStat.mode & 0o777n) !== 0o600 || ownerStat.size > 4096n) continue
-      const owner = JSON.parse(readFileSync(ownerPath, 'utf8'))
-      ownerValid = owner?.schemaVersion === 1 && Number.isInteger(owner.pid) && owner.pid > 0 && typeof owner.startTime === 'string' && owner.startTime && typeof owner.nonce === 'string' && owner.nonce.length >= 16
-      active = ownerValid && processStartTime(owner.pid) === owner.startTime
-    } catch {}
-    if (!ownerValid || active || age < graceMs) continue
+      ownerRaw = readFileSync(ownerPath, 'utf8')
+      try { owner = JSON.parse(ownerRaw) } catch {
+        const pid = ownerRaw.match(/\"pid\"\s*:\s*([1-9][0-9]*)/); const startTime = ownerRaw.match(/\"startTime\"\s*:\s*\"([0-9]+)\"/)
+        if (pid && startTime && Number.isSafeInteger(Number(pid[1]))) owner = { pid: Number(pid[1]), startTime: startTime[1] }
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') continue
+      ownerRaw = ''
+    }
+    const hasProcessIdentity = Number.isInteger(owner?.pid) && owner.pid > 0 && typeof owner.startTime === 'string' && owner.startTime.length > 0
+    if ((hasProcessIdentity && processStartTime(owner.pid) === owner.startTime) || liveProcessUsesSnapshot(directory)) continue
+    // A missing or malformed owner is recoverable only after the private-directory age gate and
+    // only when neither a locally tracked snapshot, recoverable owner identity, nor live executable uses it.
     rmSync(directory, { recursive: true, force: true }); fsyncDirectory(root); binarySnapshotDirectories.delete(directory); removed++
   }
   return removed
