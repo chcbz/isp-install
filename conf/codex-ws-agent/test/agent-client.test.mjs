@@ -18,6 +18,10 @@ import {
   LEDGER_STATUS,
   MESSAGE_TYPES,
   PersistentCommandInbox,
+  PersistentChatInbox,
+  ChatAckOutbox,
+  FairLaneScheduler,
+  SerialExecutionGate,
   PROCESS_RUNTIME_INSTANCE_ID,
   buildAckEnvelope,
   buildAgentPresencePayload,
@@ -33,6 +37,7 @@ import {
   pollWorkspaceFileCommands,
   resolveProfileAbilities,
   runCodex,
+  runProfileChat,
   materializeImageGenerationResult,
   runManagedCommand,
   sanitizeWebSocketEndpoint,
@@ -95,6 +100,54 @@ const chat = () => ({
   conversationId: 'conversation-1',
   content: 'hello'
 })
+
+const durableChat = (number = 1, overrides = {}) => ({
+  schemaVersion: 1,
+  messageType: MESSAGE_TYPES.CHAT_MESSAGE,
+  messageId: `chat-event-${number}`,
+  requestId: `chat-request-${number}`,
+  requestRevision: '1',
+  turnId: `chat-turn-${number}`,
+  dispatchId: `chat-dispatch-${number}`,
+  targetAgentId: profile.agentId,
+  conversationId: `chat-conversation-${number}`,
+  conversationGeneration: '1',
+  route: 'CHAT',
+  content: `chat ${number}`,
+  tenantId: 'tenant-a',
+  clientId: 'client-a',
+  dispatchAckType: MESSAGE_TYPES.CHAT_DISPATCH_ACK,
+  ackRequired: true,
+  deliverySemantics: 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED',
+  dedupeKey: `tenant-a:owner-a:client-a:chat-dispatch-${number}`,
+  contextSnapshot: {
+    schemaVersion: '1',
+    contextSnapshotId: `snapshot-${number}`,
+    contextHash: `sha256:context-${number}`,
+    sourceVector: {},
+    facts: {}
+  },
+  ...overrides
+})
+
+const createChatRuntime = (rootDir, options = {}) => {
+  const inbox = new PersistentCommandInbox({ rootDir, profile })
+  const chatInbox = new PersistentChatInbox({ rootDir, profile })
+  const chatAckOutbox = new ChatAckOutbox({ rootDir, profile })
+  const sent = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    chatInbox,
+    chatAckOutbox,
+    lanes: options.lanes || new FairLaneScheduler({ chatConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 16 }),
+    runCommand: options.runCommand || (async () => ({ status: 'completed' })),
+    runChat: options.runChat || (async () => ({ status: 'completed' })),
+    sendFn: envelope => { sent.push(envelope); return options.sendResult === undefined ? true : options.sendResult },
+    onReject: options.onReject || (() => {})
+  })
+  return { processor, inbox, chatInbox, chatAckOutbox, sent }
+}
 
 const taskEvent = () => ({
   type: MESSAGE_TYPES.TASK_EVENT,
@@ -209,6 +262,134 @@ test('processing command restart enters durable recovery-required state without 
   const entry = ledger.getEntry('command-1')
   assert.equal(entry.status, LEDGER_STATUS.RECOVERY_REQUIRED)
   assert.equal(entry.ackRejectedEmitted, true)
+})
+
+test('durable CHAT startup drains pending exact keys and processing restart stays recovery-required', async () => {
+  const rootDir = temporaryDirectory()
+  const seeded = new PersistentChatInbox({ rootDir, profile }); seeded.initialize()
+  seeded.accept(normalizeInboundMessage(durableChat(1)))
+  const executed = []
+  const first = createChatRuntime(rootDir, { runChat: async message => { executed.push(message.dispatchId); return { status: 'completed' } } })
+  const recovery = first.processor.start()
+  await first.processor.waitForIdle()
+  assert.equal(recovery.chatPending, 1)
+  assert.deepEqual(executed, ['chat-dispatch-1'])
+  assert.equal(first.chatInbox.count('archive'), 1)
+
+  const secondRoot = temporaryDirectory()
+  const acceptedInbox = new PersistentChatInbox({ rootDir: secondRoot, profile }); acceptedInbox.initialize()
+  const accepted = acceptedInbox.accept(normalizeInboundMessage(durableChat(2)))
+  acceptedInbox.claim(accepted.key)
+  const restartedCalls = []
+  const restarted = createChatRuntime(secondRoot, { runChat: async message => { restartedCalls.push(message.dispatchId) } })
+  const restartedRecovery = restarted.processor.start()
+  await restarted.processor.waitForIdle()
+  assert.equal(restartedRecovery.chatRecoveryRequired, 1)
+  assert.deepEqual(restartedCalls, [])
+  assert.equal(restarted.chatInbox.count('recovery'), 1)
+})
+
+test('durable CHAT duplicate only re-ACKs while fingerprint conflict neither ACKs nor invokes twice', async () => {
+  const calls = []
+  const runtime = createChatRuntime(temporaryDirectory(), { runChat: async message => { calls.push(message.dispatchId); return { status: 'completed' } } })
+  runtime.processor.start()
+  const first = await runtime.processor.handle(durableChat(3))
+  await runtime.processor.waitForIdle()
+  const duplicate = await runtime.processor.handle(durableChat(3))
+  const ackCount = runtime.sent.length
+  const conflict = await runtime.processor.handle(durableChat(3, { content: 'different content' }))
+  assert.equal(first.kind, 'chat-accepted')
+  assert.equal(duplicate.kind, 'chat-duplicate')
+  assert.deepEqual(calls, ['chat-dispatch-3'])
+  assert.equal(runtime.sent.at(-1).status, 'duplicate')
+  assert.equal(conflict.kind, 'rejected')
+  assert.equal(conflict.error.code, 'CHAT_FINGERPRINT_CONFLICT')
+  assert.equal(runtime.sent.length, ackCount)
+})
+
+test('CHAT and COMMAND lanes start independently in both arrival orders and after pending restart', async () => {
+  for (const order of ['chat-first', 'command-first']) {
+    const chatGate = deferred(); const commandGate = deferred(); const started = []
+    const runtime = createChatRuntime(temporaryDirectory(), {
+      runChat: async () => { started.push('chat'); await chatGate.promise; return { status: 'completed' } },
+      runCommand: async () => { started.push('command'); await commandGate.promise; return { status: 'completed' } }
+    })
+    runtime.processor.start()
+    if (order === 'chat-first') { await runtime.processor.handle(durableChat(4)); await runtime.processor.handle(command(4)) }
+    else { await runtime.processor.handle(command(4)); await runtime.processor.handle(durableChat(4)) }
+    await new Promise(resolvePromise => setImmediate(resolvePromise))
+    assert.deepEqual(new Set(started), new Set(['chat', 'command']), order)
+    chatGate.resolve(); commandGate.resolve(); await runtime.processor.waitForIdle()
+  }
+
+  const rootDir = temporaryDirectory()
+  const commandInbox = new PersistentCommandInbox({ rootDir, profile }); commandInbox.initialize(); commandInbox.enqueue(normalizeInboundMessage(command(5)))
+  const chatInbox = new PersistentChatInbox({ rootDir, profile }); chatInbox.initialize(); chatInbox.accept(normalizeInboundMessage(durableChat(5)))
+  const restarted = []
+  const runtime = createChatRuntime(rootDir, {
+    runChat: async () => { restarted.push('chat'); return { status: 'completed' } },
+    runCommand: async () => { restarted.push('command'); return { status: 'completed' } }
+  })
+  runtime.processor.start(); await runtime.processor.waitForIdle()
+  assert.deepEqual(new Set(restarted), new Set(['chat', 'command']))
+})
+
+test('chat.stop without conversationId cancels only the exact queued or running durable turn', async () => {
+  const firstGate = deferred(); const runningGate = deferred(); const started = []; const cancelled = []
+  const runtime = createChatRuntime(temporaryDirectory(), {
+    runChat: async (message, controls) => {
+      started.push(message.dispatchId)
+      if (message.dispatchId === 'chat-dispatch-6') await firstGate.promise
+      if (message.dispatchId === 'chat-dispatch-8') {
+        controls.markRunning(async () => { cancelled.push(message.dispatchId); runningGate.resolve() })
+        await runningGate.promise
+      }
+      return { status: 'completed' }
+    }
+  })
+  runtime.processor.start()
+  await runtime.processor.handle(durableChat(6))
+  await runtime.processor.handle(durableChat(7))
+  const queuedStop = await runtime.processor.handle({
+    schemaVersion: 1, messageType: MESSAGE_TYPES.CHAT_STOP,
+    requestId: 'chat-request-7', turnId: 'chat-turn-7', dispatchId: 'chat-dispatch-7', targetAgentId: profile.agentId
+  })
+  assert.equal(queuedStop.status, 'cancelled')
+  firstGate.resolve(); await runtime.processor.waitForIdle()
+  assert.deepEqual(started, ['chat-dispatch-6'])
+
+  await runtime.processor.handle(durableChat(8))
+  await new Promise(resolvePromise => setImmediate(resolvePromise))
+  const runningStop = await runtime.processor.handle({
+    schemaVersion: 1, messageType: MESSAGE_TYPES.CHAT_STOP,
+    requestId: 'chat-request-8', turnId: 'chat-turn-8', dispatchId: 'chat-dispatch-8', targetAgentId: profile.agentId
+  })
+  assert.equal(runningStop.status, 'cancel-requested')
+  await runtime.processor.waitForIdle()
+  assert.deepEqual(cancelled, ['chat-dispatch-8'])
+  assert.ok(runtime.sent.some(ack => ack.dispatchId === 'chat-dispatch-7' && ack.status === 'cancelled'))
+  assert.ok(runtime.sent.some(ack => ack.dispatchId === 'chat-dispatch-8' && ack.status === 'cancel-requested'))
+})
+
+test('production chat runner takes disabled and legacy messages directly to serialized final-only fallback', async () => {
+  const gate = new SerialExecutionGate(); const calls = []
+  const result = await runProfileChat(profile, { ...chat(), legacy: true, contextSnapshot: { get schemaVersion() { throw new Error('must not inspect snapshot') } } }, {
+    legacyGate: gate,
+    runLegacy: async (_profile, message, mode) => { calls.push([message.messageId, mode]); return { status: 'completed' } }
+  })
+  assert.deepEqual(calls, [['chat-message-1', 'chat']])
+  assert.equal(result.status, 'completed')
+})
+
+test('registration advertises only implemented v1 durable CHAT, Context Envelope v2, ACK and app-server policy', () => {
+  const capabilities = buildAgentRegistrationPayload({ ...profile, fastChatEnabled: true, appServerEnabled: true, trueDeltaEnabled: true }).runtimeCapabilities
+  assert.deepEqual(capabilities.protocolVersions, [1])
+  assert.deepEqual(capabilities.chatProtocolVersions, [1])
+  assert.deepEqual(capabilities.contextSnapshotVersions, [1])
+  assert.deepEqual(capabilities.contextEnvelopeVersions, [2])
+  assert.deepEqual(capabilities.dispatchAckTypes, ['chat.dispatch.ack'])
+  assert.deepEqual(capabilities.deliverySemantics, ['AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'])
+  assert.equal(capabilities.appServerPolicy, 'server-requests-deny-and-interrupt')
 })
 
 test('legacy chat run emits final only and never fabricates delta', async () => {
@@ -346,9 +527,10 @@ test('legacy execution types, missing messageType, and ambiguous envelopes fail 
     () => normalizeInboundMessage({ ...command(1), messageType: null }),
     error => error.code === 'INVALID_MESSAGE_TYPE'
   )
-  assert.throws(
-    () => normalizeInboundMessage({ ...command(1), requestId: 'different-request' }),
-    error => error.code === 'ENVELOPE_FIELD_CONFLICT'
+  assert.equal(
+    normalizeInboundMessage({ ...command(1), requestId: 'different-request' }).messageId,
+    command(1).messageId,
+    'messageId is transport identity and may differ from requestId'
   )
   assert.throws(
     () => normalizeInboundMessage(JSON.stringify(command(1)).replace('\"schemaVersion\":1', '\"schemaVersion\":1.0')),

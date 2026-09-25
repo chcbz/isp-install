@@ -1,75 +1,157 @@
+import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 
-const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const id = value => typeof value === 'string' && value.length > 0
 const deniedMethods = /(?:command|file|permission|network|mcp|dynamic.?tool|tool)/i
+const terminalMethods = new Set(['turn/completed', 'turn/failed', 'turn/cancelled', 'turn/interrupted'])
 
-/** Minimal stdio JSON-RPC adapter. It exposes only real app-server events. */
 export class AppServerAdapter extends EventEmitter {
-  constructor({ child, send = null, now = Date.now } = {}) {
+  static spawn(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000 } = {}) {
+    const child = spawnFn(profile.codexBin, ['app-server'], {
+      cwd, shell: false, stdio: ['pipe', 'pipe', 'pipe'],
+      env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome, NO_PROXY: '*', no_proxy: '*' }
+    })
+    return new AppServerAdapter({ child, requestTimeoutMs })
+  }
+  constructor({ child, send = null, now = Date.now, requestTimeoutMs = 15000, maxStderrBytes = 1024 * 1024 } = {}) {
     super(); if (!child) throw new Error('APP_SERVER_CHILD_REQUIRED')
-    this.child = child; this.now = now; this.nextId = 1; this.pending = new Map(); this.buffer = ''; this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [] }
+    this.child = child; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.maxStderrBytes = maxStderrBytes
+    this.nextId = 1; this.pending = new Map(); this.buffer = ''; this.stderrBytes = 0; this.closed = false
+    this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [] }
     this.send = send || (frame => child.stdin.write(`${JSON.stringify(frame)}\n`))
     child.stdout.on('data', chunk => this._onData(chunk.toString('utf8')))
-    child.on('exit', () => { for (const pending of this.pending.values()) pending.reject(new Error('APP_SERVER_EXITED')); this.pending.clear(); this.emit('exit') })
+    child.stderr?.on('data', chunk => { this.stderrBytes += chunk.length; if (this.stderrBytes > this.maxStderrBytes) this.close(new Error('APP_SERVER_STDERR_LIMIT')) })
+    child.on('error', error => this.close(error)); child.on('exit', () => this.close(new Error('APP_SERVER_EXITED')))
   }
-  request(method, params = {}) { const requestId = this.nextId++; return new Promise((resolve, reject) => { this.pending.set(requestId, { resolve, reject, method }); this.send({ id: requestId, method, params }) }) }
-  notify(method, params = {}) { this.send({ method, params }) }
+  request(method, params = {}, timeoutMs = this.requestTimeoutMs) {
+    if (this.closed) return Promise.reject(new Error('APP_SERVER_CLOSED'))
+    const requestId = this.nextId++
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pending.delete(requestId); const error = new Error(`APP_SERVER_RPC_TIMEOUT:${method}`); error.code = 'APP_SERVER_RPC_TIMEOUT'; reject(error) }, timeoutMs)
+      this.pending.set(requestId, { resolve, reject, method, timer }); this.send({ id: requestId, method, params })
+    })
+  }
+  notify(method, params = {}) { if (!this.closed) this.send({ method, params }) }
   async initialize() {
     this.readback.initialize = await this.request('initialize', { clientInfo: { name: 'cyf-juyiting-runtime', version: '2' } })
     this.notify('initialized', {})
     this.readback.account = await this.request('account/read', { refreshToken: false })
-    this.readback.models = await this.request('model/list', {}).catch(() => null)
-    this.readback.config = await this.request('config/read', {}).catch(() => null)
-    this.readback.tools = await this.request('tool/catalog/read', {}).catch(() => null)
+    this.readback.models = await this.request('model/list', {})
+    this.readback.config = await this.request('config/read', {})
+    this.readback.tools = await this.request('tool/catalog/read', {}).catch(error => ({ unavailable: true, reason: error.code || error.message }))
     return this.readback
   }
   async startOrResumeThread(binding, policy) {
-    const params = { cwd: policy.cwd, model: policy.model, approvalPolicy: 'never', sandbox: 'read-only', config: policy.config || {}, instructions: policy.instructions || '' }
-    const result = binding.threadId ? await this.request('thread/resume', { threadId: binding.threadId, ...params }) : await this.request('thread/start', params)
+    const params = { cwd: policy.cwd, model: policy.model || undefined, approvalPolicy: 'never', sandbox: 'read-only', config: { ...(policy.config || {}), network: false }, instructions: policy.instructions || '' }
+    const result = binding?.threadId ? await this.request('thread/resume', { threadId: binding.threadId, ...params }) : await this.request('thread/start', params)
     const threadId = result?.thread?.id || result?.threadId
     if (!id(threadId)) throw new Error('APP_SERVER_THREAD_ID_MISSING')
-    return { ...binding, threadId }
+    return { ...(binding || {}), threadId, state: 'HOT', updatedAt: this.now() }
   }
-  async startTurn({ threadId, clientUserMessageId, input, policy = {} }) {
+  async runTurn({ threadId, clientUserMessageId, input, policy = {}, onAccepted = () => {}, onDelta = () => {}, onClarification = () => {} }) {
     if (!id(threadId) || !id(clientUserMessageId)) throw new Error('TURN_BINDING_REQUIRED')
-    const key = `${threadId}:${clientUserMessageId}`
-    if (this.turns.has(key)) return this.turns.get(key)
-    const turn = { threadId, clientUserMessageId, state: 'STARTING', deltaSeq: 0, final: null, startedAt: this.now() }
-    this.turns.set(key, turn)
+    const provisional = `${threadId}:${clientUserMessageId}`
+    if (this.turns.has(provisional)) throw new Error('TURN_ALREADY_ACTIVE')
+    const turn = { threadId, clientUserMessageId, state: 'STARTING', startedAt: this.now(), turnId: null }
+    this.turns.set(provisional, turn)
+
+    let finalContent = ''; let settled = false; const buffered = []
+    let resolveTerminal; let rejectTerminal
+    const terminalPromise = new Promise((resolve, reject) => { resolveTerminal = resolve; rejectTerminal = reject })
+    const cleanup = () => {
+      this.off('delta', delta); this.off('final', final); this.off('terminal', terminal)
+      this.off('clarification', clarification); this.off('policy_violation', violation); this.off('exit', exited)
+      this.turns.delete(provisional)
+      if (turn.turnId) this.turns.delete(`${threadId}:${turn.turnId}`)
+    }
+    const matches = event => event.threadId === threadId && event.turnId === turn.turnId
+    const settle = (error, value) => {
+      if (settled) return
+      settled = true; cleanup()
+      if (error) rejectTerminal(error); else resolveTerminal(value)
+    }
+    const consume = (kind, event) => {
+      if (event.threadId !== threadId) return
+      if (!turn.turnId) { buffered.push([kind, event]); return }
+      if (!matches(event)) return
+      if (kind === 'delta') onDelta(event)
+      else if (kind === 'final') finalContent = event.content
+      else if (kind === 'clarification') onClarification(event)
+      else if (kind === 'violation') settle(Object.assign(new Error(event.code), { code: event.code }))
+      else if (kind === 'terminal') {
+        if (event.status === 'completed') settle(null, { turnId: turn.turnId, threadId, content: finalContent, finishReason: 'completed' })
+        else settle(Object.assign(new Error(`TURN_${event.status.toUpperCase()}`), { code: `TURN_${event.status.toUpperCase()}` }))
+      }
+    }
+    const delta = event => consume('delta', event)
+    const final = event => consume('final', event)
+    const terminal = event => consume('terminal', event)
+    const clarification = event => consume('clarification', event)
+    const violation = event => consume('violation', event)
+    const exited = () => { if (turn.turnId) settle(Object.assign(new Error('APP_SERVER_EXITED_DURING_TURN'), { code: 'TURN_ACCEPTANCE_UNKNOWN', turn: { ...turn } })) }
+    this.on('delta', delta); this.on('final', final); this.on('terminal', terminal)
+    this.on('clarification', clarification); this.on('policy_violation', violation); this.on('exit', exited)
+
+    let response
     try {
-      const response = await this.request('turn/start', { threadId, clientUserMessageId, input, cwd: policy.cwd, model: policy.model, effort: policy.effort, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
-      turn.turnId = response?.turn?.id || response?.turnId || clientUserMessageId; turn.state = 'RUNNING'; return turn
-    } catch (error) { turn.state = 'ACCEPTANCE_UNKNOWN'; turn.error = error.message; this.emit('recovery_required', turn); throw error }
+      response = await this.request('turn/start', { threadId, clientUserMessageId, input, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
+    } catch (cause) {
+      cleanup(); turn.state = 'ACCEPTANCE_UNKNOWN'; turn.error = cause.message
+      const reconciliation = await this.reconcileTurn(turn).catch(() => ({ status: 'RECOVERY_REQUIRED' }))
+      const error = Object.assign(cause, { code: 'TURN_ACCEPTANCE_UNKNOWN', turn: { ...turn }, reconciliation })
+      this.emit('recovery_required', { ...turn, reconciliation }); throw error
+    }
+    const turnId = response?.turn?.id || response?.turnId
+    if (!id(turnId)) {
+      cleanup(); turn.state = 'ACCEPTANCE_UNKNOWN'
+      const reconciliation = await this.reconcileTurn(turn).catch(() => ({ status: 'RECOVERY_REQUIRED' }))
+      this.emit('recovery_required', { ...turn, reason: 'TURN_START_RESPONSE_MISSING_ID', reconciliation })
+      throw Object.assign(new Error('TURN_START_RESPONSE_MISSING_ID'), { code: 'TURN_ACCEPTANCE_UNKNOWN', turn: { ...turn }, reconciliation })
+    }
+    turn.turnId = turnId; turn.state = 'RUNNING'; this.turns.set(`${threadId}:${turnId}`, turn); onAccepted({ threadId, turnId })
+    for (const [kind, event] of buffered.splice(0)) consume(kind, event)
+    return terminalPromise
   }
-  async interrupt(threadId, turnId) { return this.request('turn/interrupt', { threadId, turnId }) }
-  async unsubscribe(threadId) { return this.request('thread/unsubscribe', { threadId }) }
-  async compact(threadId) { return this.request('thread/compact/start', { threadId }) }
-  async archive(threadId) { return this.request('thread/archive', { threadId }) }
-  _onData(data) { this.buffer += data; let newline; while ((newline = this.buffer.indexOf('\n')) >= 0) { const line = this.buffer.slice(0, newline); this.buffer = this.buffer.slice(newline + 1); if (!line.trim()) continue; let frame; try { frame = JSON.parse(line) } catch { this.emit('protocol_error', new Error('APP_SERVER_INVALID_JSON')); continue } this._frame(frame) } }
+  async reconcileTurn({ threadId, turnId = null, clientUserMessageId = null }) {
+    return this.request('thread/read', { threadId, includeTurns: true }).then(
+      result => ({ status: 'READBACK', result, turnId, clientUserMessageId }),
+      () => ({ status: 'RECOVERY_REQUIRED', turnId, clientUserMessageId })
+    )
+  }
+  interrupt(threadId, turnId) { return this.request('turn/interrupt', { threadId, turnId }) }
+  unsubscribe(threadId) { return this.request('thread/unsubscribe', { threadId }) }
+  compact(threadId) { return this.request('thread/compact/start', { threadId }) }
+  archive(threadId) { return this.request('thread/archive', { threadId }) }
+  close(reason = new Error('APP_SERVER_CLOSED')) {
+    if (this.closed) return; this.closed = true
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(reason) } this.pending.clear()
+    try { if (this.child.exitCode === null && !this.child.killed) this.child.kill('SIGTERM') } catch {}
+    this.emit('exit', reason)
+  }
+  _onData(data) {
+    this.buffer += data
+    if (Buffer.byteLength(this.buffer) > 1024 * 1024) { this.close(new Error('APP_SERVER_FRAME_LIMIT')); return }
+    let newline
+    while ((newline = this.buffer.indexOf('\n')) >= 0) { const line = this.buffer.slice(0, newline); this.buffer = this.buffer.slice(newline + 1); if (!line.trim()) continue; let frame; try { frame = JSON.parse(line) } catch { this.emit('protocol_error', new Error('APP_SERVER_INVALID_JSON')); continue } this._frame(frame) }
+  }
   _frame(frame) {
-    if (frame.id != null && (frame.result !== undefined || frame.error !== undefined)) { const pending = this.pending.get(frame.id); if (!pending) return; this.pending.delete(frame.id); if (frame.error) pending.reject(Object.assign(new Error(frame.error.message || 'APP_SERVER_RPC_ERROR'), { code: frame.error.code })); else pending.resolve(frame.result); return }
+    if (frame.id != null && (frame.result !== undefined || frame.error !== undefined)) { const pending = this.pending.get(frame.id); if (!pending) return; this.pending.delete(frame.id); clearTimeout(pending.timer); if (frame.error) pending.reject(Object.assign(new Error(frame.error.message || 'APP_SERVER_RPC_ERROR'), { code: frame.error.code })); else pending.resolve(frame.result); return }
     if (!frame.method) return
-    this.readback.eventMethods.push(frame.method)
+    if (!this.readback.eventMethods.includes(frame.method)) this.readback.eventMethods.push(frame.method)
     if (frame.id != null || deniedMethods.test(frame.method)) { this._denyServerRequest(frame); return }
-    const params = frame.params || {}
-    if (frame.method === 'item/agentMessage/delta') {
-      const delta = params.delta || params.text || params.content || params.item?.text
-      if (typeof delta === 'string' && delta) this.emit('delta', { threadId: params.threadId, turnId: params.turnId, content: delta })
-      return
-    }
-    if (frame.method === 'item/agentMessage' || frame.method === 'item/completed') {
-      const content = params.text || params.content || params.item?.text
-      if (typeof content === 'string') this.emit('final', { threadId: params.threadId, turnId: params.turnId, content })
-      return
-    }
+    const params = frame.params || {}; const threadId = params.threadId || params.thread_id; const turnId = params.turnId || params.turn_id || params.turn?.id
+    if (frame.method === 'item/agentMessage/delta') { const content = params.delta || params.text || params.content; if (typeof content === 'string' && content) this.emit('delta', { threadId, turnId, content }); return }
+    if (frame.method === 'item/agentMessage') { const content = params.text || params.content || params.item?.text; if (typeof content === 'string') this.emit('final', { threadId, turnId, content }); return }
+    if (frame.method === 'item/completed') { const item = params.item || {}; if (['agentMessage', 'agent_message'].includes(item.type) && typeof item.text === 'string') this.emit('final', { threadId, turnId, content: item.text }); return }
+    if (terminalMethods.has(frame.method)) { this.emit('terminal', { threadId, turnId, status: frame.method.slice(5) }); return }
     this.emit('event', frame)
   }
   _denyServerRequest(frame) {
     const params = frame.params || {}; const threadId = params.threadId || params.thread_id; const turnId = params.turnId || params.turn_id
-    if (/user.?input/i.test(frame.method)) this.emit('clarification', { threadId, turnId, request: frame.method })
+    const clarification = /user.?input/i.test(frame.method)
+    if (clarification) this.emit('clarification', { threadId, turnId, request: frame.method })
     else this.emit('policy_violation', { threadId, turnId, request: frame.method, code: 'FAST_CHAT_TOOL_POLICY_VIOLATION' })
-    if (frame.id != null) this.send({ id: frame.id, error: { code: -32001, message: /user.?input/i.test(frame.method) ? 'Clarification required; confirmation cannot authorize execution' : 'Denied by CHAT read-only-constrained policy' } })
-    if (id(threadId) && id(turnId)) void this.interrupt(threadId, turnId).catch(() => {})
+    if (frame.id != null) this.send({ id: frame.id, error: { code: -32001, message: clarification ? 'Clarification only; it cannot authorize execution' : 'Denied by read-only-constrained CHAT policy' } })
+    if (!clarification && id(threadId) && id(turnId)) void this.interrupt(threadId, turnId).catch(() => {})
   }
 }
