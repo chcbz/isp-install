@@ -482,3 +482,11 @@ Rollback to the pre-A05 client does not understand the durable inbox, ledger, AC
 - On shutdown, the agent sends `offline` and terminates active Codex children. Any unsettled `processing/` record becomes fail-closed `recovery-required/` on the next process and is not automatically retried.
 - Pending commands wait until the profile WebSocket reconnects before executing; recovery-required commands remain paused until explicit reconciliation.
 - Runtime logs are available from `journalctl -u codex-ws-agent`.
+
+## Juyi Hall durable Fast CHAT (disabled by default)
+
+Fast CHAT is opt-in per profile with `fastChatEnabled=true`, `appServerEnabled=true`, and `chatEngine=app-server`; `trueDeltaEnabled` independently controls publication of genuine app-server deltas. The runtime is pinned to the locally audited Codex CLI/app-server `0.153.4` schema bundle SHA-256 `b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978`. It sends `turn/start.input` as `UserInput[]`, uses `developerInstructions`/`baseInstructions` on thread start/resume, and treats a schema change as a compatibility event requiring fixture regeneration and review.
+
+The Fast CHAT child runs in a runtime-owned empty directory, with `read-only`, network disabled, and approval `never`. Approval `never` is **not** a deny-all tool policy, so every app-server command/file/permission/network/MCP/dynamic-tool server request is also rejected and the matching turn interrupted. User-input requests are clarification-only and cannot authorize execution. Child exits use bounded exponential restart backoff; CHAT may safely fall back to the legacy final-only path without expanding permissions.
+
+Durable hosted CHAT is admitted before ACK under `COMMAND_INBOX_DIR/chat-inbox/<agent>/`. Defaults are `chatInboxMaxFiles=1024` and `chatInboxMaxBytes=67108864` per profile; `CODEX_CHAT_INBOX_MAX_FILES` and `CODEX_CHAT_INBOX_MAX_BYTES` are legacy single-profile fallbacks. Capacity rejection occurs before `chat.dispatch.ack`. Processing records found after restart become `ACCEPTANCE_UNKNOWN`/recovery-required and are reconciled through `thread/read`, never blindly replayed. Thread bindings are profile/agent/key self-bound and capacity-limited; they are a cache only, while the API business database remains authoritative.

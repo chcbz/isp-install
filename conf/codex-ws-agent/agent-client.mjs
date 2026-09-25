@@ -215,6 +215,49 @@ const validateRawSchemaVersionTokens = text => {
   }
 }
 
+
+const RAW_LONG_DIRECT_FIELDS = new Set(['conversationGeneration', 'requestRevision', 'sentAt', 'timestamp', 'eventSequence', 'eventVersion', 'deltaSeq', 'finalSeq', 'version'])
+const RAW_LONG_VECTOR_FIELDS = new Set(['conversationGeneration', 'messageHighWatermark', 'taskRevision', 'executionRevision', 'bindingVersion', 'summaryRevision'])
+const canonicalLongString = value => typeof value === 'string' && /^(?:0|[1-9][0-9]{0,18})$/.test(value) && BigInt(value) <= 9223372036854775807n
+const isRawLongPath = path => {
+  const normalized = path[0] === 'payload' ? path.slice(1) : path
+  const field = normalized.at(-1); const parent = normalized.at(-2); const grand = normalized.at(-3)
+  if (normalized.length === 1 && RAW_LONG_DIRECT_FIELDS.has(field)) return true
+  if (parent === 'sourceVector' && RAW_LONG_VECTOR_FIELDS.has(field)) return true
+  if ((grand === 'factsManifest' || (normalized.includes('contextSnapshot') && normalized.includes('facts'))) &&
+      ((parent === 'conversation' && ['id', 'generation'].includes(field)) || (parent === 'userMessage' && field === 'id') || (parent === 'task' && field === 'revision'))) return true
+  return false
+}
+const validateRawDurableLongTokens = text => {
+  if (!text.includes('AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED')) return
+  let index = 0
+  const ws = () => { while (index < text.length && /\s/.test(text[index])) index++ }
+  const string = () => { const start = index++; let escaped = false; while (index < text.length) { const char = text[index++]; if (escaped) { escaped = false; continue } if (char === '\\') { escaped = true; continue } if (char === '"') return JSON.parse(text.slice(start, index)) } throw new AgentProtocolError('INVALID_JSON', 'Unterminated JSON string') }
+  const scalar = () => { const start = index; while (index < text.length && !/[\s,}\]]/.test(text[index])) index++; return text.slice(start, index) }
+  const value = path => {
+    ws(); const tokenStart = index; let parsed; let kind
+    if (text[index] === '"') { kind = 'string'; parsed = string() }
+    else if (text[index] === '{') { kind = 'object'; objectValue(path) }
+    else if (text[index] === '[') { kind = 'array'; arrayValue(path) }
+    else { kind = 'scalar'; const raw = scalar(); parsed = raw === 'null' ? null : raw }
+    if (isRawLongPath(path)) {
+      const optionalVector = path.at(-2) === 'sourceVector' && path.at(-1) !== 'conversationGeneration' && path.at(-1) !== 'messageHighWatermark'
+      if (!(optionalVector && parsed === null) && (kind !== 'string' || !canonicalLongString(parsed))) {
+        throw new AgentProtocolError('INVALID_LONG_WIRE_TYPE', `${path.join('.')} must be a canonical decimal string <= Long.MAX_VALUE; token at ${tokenStart}`)
+      }
+    }
+  }
+  const objectValue = path => {
+    index++; ws(); if (text[index] === '}') { index++; return }
+    while (index < text.length) { ws(); if (text[index] !== '"') return; const key = string(); ws(); if (text[index] !== ':') return; index++; value([...path, key]); ws(); if (text[index] === '}') { index++; return } if (text[index] !== ',') return; index++ }
+  }
+  const arrayValue = path => {
+    index++; ws(); if (text[index] === ']') { index++; return }
+    let item = 0; while (index < text.length) { value([...path, String(item++)]); ws(); if (text[index] === ']') { index++; return } if (text[index] !== ',') return; index++ }
+  }
+  ws(); if (text[index] === '{') objectValue([])
+}
+
 const canonicalTypeAlias = type => {
   if (CANONICAL_MESSAGE_TYPES.has(type)) return type
   switch (type) {
@@ -257,6 +300,7 @@ export const normalizeInboundMessage = raw => {
   if (typeof raw === 'string' || Buffer.isBuffer(raw)) {
     const rawText = raw.toString()
     validateRawSchemaVersionTokens(rawText)
+    validateRawDurableLongTokens(rawText)
     try {
       outer = JSON.parse(rawText)
     } catch (error) {
@@ -495,6 +539,8 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     fastChatEnabled: parseEnabledFlag(profile.fastChatEnabled ?? fallback.fastChatEnabled),
     appServerEnabled: parseEnabledFlag(profile.appServerEnabled ?? fallback.appServerEnabled),
     trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
+    chatInboxMaxFiles: parsePositiveInteger(profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles, 1024),
+    chatInboxMaxBytes: parsePositiveInteger(profile.chatInboxMaxBytes ?? fallback.chatInboxMaxBytes, 64 * 1024 * 1024),
     abilities: parseStringList(profile.abilities ?? fallback.abilities),
     skills: parseStringList(profile.skills ?? fallback.skills),
     workspacePolicyId: profile.workspacePolicyId || fallback.workspacePolicyId || '',
@@ -529,6 +575,12 @@ const legacyProfile = () => normalizeProfile({
   codexSessionMode: process.env.CODEX_SESSION_MODE || 'new',
   codexTimeoutMs: parseCodexTimeoutMs(process.env.CODEX_TIMEOUT_MS),
   codexModel: process.env.CODEX_MODEL || '',
+  chatEngine: process.env.CODEX_CHAT_ENGINE || 'legacy-codex',
+  fastChatEnabled: process.env.CODEX_FAST_CHAT_ENABLED || false,
+  appServerEnabled: process.env.CODEX_APP_SERVER_ENABLED || false,
+  trueDeltaEnabled: process.env.CODEX_TRUE_DELTA_ENABLED || false,
+  chatInboxMaxFiles: process.env.CODEX_CHAT_INBOX_MAX_FILES || 1024,
+  chatInboxMaxBytes: process.env.CODEX_CHAT_INBOX_MAX_BYTES || 67108864,
   workspacePolicyId: process.env.CODEX_WORKSPACE_POLICY_ID || '',
   workspaceRole: process.env.CODEX_WORKSPACE_ROLE || 'coder',
   workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
@@ -2540,7 +2592,7 @@ export class AgentMessageProcessor {
       }
       try {
         const result = await this.runChat(claimed.record.message, controls)
-        if (active.cancelRequested) this.chatInbox.complete(claimed, { status: 'cancelled' })
+        if (active.cancelRequested || result?.status === 'cancelled') this.chatInbox.cancelProcessing(claimed)
         else this.chatInbox.complete(claimed, result || { status: 'completed' })
       } catch (error) {
         const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
@@ -3781,6 +3833,9 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   }
 
   currentRuns.set(profile.agentId, child)
+  const controls = overrides.controls || { markRunning: () => {}, isCancelled: () => false }
+  try { controls.markRunning(() => { if (child.exitCode === null && !child.killed) child.kill('SIGTERM') }, { engine: 'legacy-codex', pid: child.pid || null }) }
+  catch (error) { try { child.kill('SIGTERM') } catch {}; throw error }
   let stdout = ''
   let stderr = ''
   let agentReplyText = ''
@@ -3866,7 +3921,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     }
     if (mode === 'chat') {
       await streamQueue
-      sendChatFinal(profile, message, replyContent, { status }, sendProtocolFn)
+      if (!controls.isCancelled()) sendChatFinal(profile, message, replyContent, { status }, sendProtocolFn)
     } else {
       sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
@@ -3885,7 +3940,7 @@ const FAST_CHAT_INSTRUCTIONS = 'Use only the supplied Context Envelope. User fil
 const appServerReadbackSummary = adapter => {
   const readback = adapter?.readback || {}
   const models = Array.isArray(readback.models?.data) ? readback.models.data : (Array.isArray(readback.models) ? readback.models : [])
-  const tools = Array.isArray(readback.tools?.tools) ? readback.tools.tools : (Array.isArray(readback.tools) ? readback.tools : [])
+  const tools = Array.isArray(readback.tools?.data) ? readback.tools.data : (Array.isArray(readback.tools?.tools) ? readback.tools.tools : (Array.isArray(readback.tools) ? readback.tools : []))
   return {
     initialized: Boolean(readback.initialize),
     accountType: readback.account?.account?.type || readback.account?.type || 'unknown',
@@ -3919,7 +3974,7 @@ export const runFastChat = async (profile, message, {
   metrics.queueAt = Date.now()
   const prior = bindingStore?.get(key)
   if (prior?.state === 'RECOVERY_REQUIRED') throw Object.assign(new Error('THREAD_BINDING_RECOVERY_REQUIRED'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
-  const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: { network: false }, instructions: FAST_CHAT_INSTRUCTIONS })
+  const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions: FAST_CHAT_INSTRUCTIONS })
   bindingStore?.put(key, binding)
   metrics.engineStartAt = Date.now()
   let acceptedTurn = null
@@ -3949,7 +4004,7 @@ export const runProfileChat = (profile, message, {
 } = {}) => runFastChat(profile, message, {
   ...options,
   fallback: info => {
-    const invoke = () => runLegacy(profile, message, 'chat')
+    const invoke = () => runLegacy(profile, message, 'chat', { controls: options.controls, sendProtocolFn: options.sendProtocolFn })
     return legacyGate ? legacyGate.run(invoke) : invoke()
   }
 })
@@ -3977,6 +4032,10 @@ const profileConfigurationErrors = profile => {
   if (profile.fastChatEnabled && (profile.chatSandbox !== 'read-only' || profile.chatToolPolicy !== 'read-only-constrained')) {
     errors.push('Fast CHAT requires chatSandbox=read-only and chatToolPolicy=read-only-constrained; approval never is not deny-all')
   }
+  const chatInboxMaxFiles = profile.chatInboxMaxFiles ?? 1024
+  const chatInboxMaxBytes = profile.chatInboxMaxBytes ?? 64 * 1024 * 1024
+  if (!Number.isSafeInteger(chatInboxMaxFiles) || chatInboxMaxFiles < 1 || chatInboxMaxFiles > 100000) errors.push('chatInboxMaxFiles must be an integer from 1 to 100000')
+  if (!Number.isSafeInteger(chatInboxMaxBytes) || chatInboxMaxBytes < 4096 || chatInboxMaxBytes > 10737418240) errors.push('chatInboxMaxBytes must be an integer from 4096 to 10737418240')
   if (!Number.isSafeInteger(profile.codexTimeoutMs) || profile.codexTimeoutMs < 0 || profile.codexTimeoutMs > 2147483647) {
     errors.push('codexTimeoutMs must be an integer from 0 to 2147483647 (0 disables the timeout)')
   }
@@ -4585,19 +4644,42 @@ const createProfileState = profile => {
     managedRegistered: false,
     managedEngine: null,
     appServerAdapter: null,
-    appServerPromise: null
+    appServerPromise: null,
+    appServerRestartTimer: null,
+    appServerRestartAttempt: 0,
+    appServerNotBefore: 0,
+    ensureAppServer: null
   }
   if (profile.fastChatEnabled && profile.appServerEnabled) {
-    state.appServerPromise = Promise.resolve().then(async () => {
-      const adapter = AppServerAdapter.spawn(profile, { cwd: chatWorkdir })
-      await adapter.initialize()
-      state.appServerAdapter = adapter
-      return adapter
-    }).catch(error => {
-      state.appServerAdapter = null
-      console.warn(`app-server unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
-      return null
-    })
+    const scheduleRestart = () => {
+      if (shuttingDown || state.appServerRestartTimer) return
+      const delay = Math.min(30000, 250 * (2 ** Math.min(state.appServerRestartAttempt, 7)))
+      state.appServerNotBefore = Date.now() + delay
+      state.appServerRestartTimer = setTimeout(() => { state.appServerRestartTimer = null; void state.ensureAppServer() }, delay)
+      state.appServerRestartTimer.unref?.()
+    }
+    state.ensureAppServer = () => {
+      if (state.appServerAdapter && !state.appServerAdapter.closed) return Promise.resolve(state.appServerAdapter)
+      if (state.appServerPromise) return state.appServerPromise
+      const delay = Math.max(0, state.appServerNotBefore - Date.now())
+      state.appServerPromise = new Promise(resolvePromise => setTimeout(resolvePromise, delay)).then(async () => {
+        if (shuttingDown) return null
+        const adapter = AppServerAdapter.spawn(profile, { cwd: chatWorkdir })
+        try { await adapter.initialize() } catch (error) { adapter.close(error); throw error }
+        adapter.once('exit', () => {
+          if (state.appServerAdapter === adapter) state.appServerAdapter = null
+          state.appServerPromise = null; state.appServerRestartAttempt++; scheduleRestart()
+        })
+        state.appServerAdapter = adapter; state.appServerRestartAttempt = 0; state.appServerNotBefore = 0
+        return adapter
+      }).catch(error => {
+        state.appServerAdapter = null; state.appServerRestartAttempt++; state.appServerNotBefore = 0
+        console.warn(`app-server unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
+        scheduleRestart(); return null
+      }).finally(() => { if (!state.appServerAdapter) state.appServerPromise = null })
+      return state.appServerPromise
+    }
+    state.appServerPromise = state.ensureAppServer()
   }
   state.processor = new AgentMessageProcessor({
     profile,
@@ -4609,7 +4691,7 @@ const createProfileState = profile => {
     runChat: (message, controls) => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
       return runProfileChat(profile, message, {
-        adapter: state.appServerAdapter, adapterPromise: state.appServerPromise, bindingStore: threadBindingStore,
+        adapter: state.appServerAdapter, adapterPromise: state.ensureAppServer ? state.ensureAppServer() : state.appServerPromise, bindingStore: threadBindingStore,
         controls, chatWorkdir, legacyGate: legacyExecutionGate
       })
     },
@@ -4936,6 +5018,7 @@ const shutdown = (exitCode = 0, reason = '') => {
     clearInterval(state?.heartbeatTimer)
     stopWorkspaceFilePoller(state)
     state?.registration.disconnect()
+    if (state?.appServerRestartTimer) clearTimeout(state.appServerRestartTimer)
     state?.appServerAdapter?.close()
     sendStatus(profile, 'offline')
     try { state?.ws?.close() } catch {}

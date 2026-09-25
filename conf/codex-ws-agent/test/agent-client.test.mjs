@@ -101,34 +101,22 @@ const chat = () => ({
   content: 'hello'
 })
 
-const durableChat = (number = 1, overrides = {}) => ({
-  schemaVersion: 1,
-  messageType: MESSAGE_TYPES.CHAT_MESSAGE,
-  messageId: `chat-event-${number}`,
-  requestId: `chat-request-${number}`,
-  requestRevision: '1',
-  turnId: `chat-turn-${number}`,
-  dispatchId: `chat-dispatch-${number}`,
-  targetAgentId: profile.agentId,
-  conversationId: `chat-conversation-${number}`,
-  conversationGeneration: '1',
-  route: 'CHAT',
-  content: `chat ${number}`,
-  tenantId: 'tenant-a',
-  clientId: 'client-a',
-  dispatchAckType: MESSAGE_TYPES.CHAT_DISPATCH_ACK,
-  ackRequired: true,
-  deliverySemantics: 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED',
-  dedupeKey: `tenant-a:owner-a:client-a:chat-dispatch-${number}`,
-  contextSnapshot: {
-    schemaVersion: '1',
-    contextSnapshotId: `snapshot-${number}`,
-    contextHash: `sha256:context-${number}`,
-    sourceVector: {},
-    facts: {}
-  },
-  ...overrides
-})
+const durableChat = (number = 1, overrides = {}) => {
+  const sourceVector = { conversationGeneration: '1', messageHighWatermark: String(100 + number) }
+  const facts = { schemaVersion: '1', conversation: { id: String(number), generation: '1' }, userMessage: { id: String(100 + number) } }
+  const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}` : JSON.stringify(value)
+  const contextHash = `sha256:${createHash('sha256').update(canonical({ sourceVector, facts })).digest('hex')}`
+  return {
+    schemaVersion: 1, messageType: MESSAGE_TYPES.CHAT_MESSAGE, messageId: `chat-event-${number}`,
+    requestId: `chat-request-${number}`, requestRevision: '1', turnId: `chat-turn-${number}`,
+    dispatchId: `chat-dispatch-${number}`, targetAgentId: profile.agentId, conversationId: `chat-conversation-${number}`,
+    conversationGeneration: '1', route: 'CHAT', content: `chat ${number}`, tenantId: 'tenant-a', ownerJiacn: 'owner-a', clientId: 'client-a',
+    dispatchAckType: MESSAGE_TYPES.CHAT_DISPATCH_ACK, ackRequired: true, deliverySemantics: 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED',
+    dedupeKey: `tenant-a:owner-a:client-a:chat-dispatch-${number}`, contextSnapshotId: `snapshot-${number}`, contextHash, sourceVector, factsManifest: facts,
+    contextSnapshot: { schemaVersion: '1', contextSnapshotId: `snapshot-${number}`, contextHash, sourceVector, facts },
+    ...overrides
+  }
+}
 
 const createChatRuntime = (rootDir, options = {}) => {
   const inbox = new PersistentCommandInbox({ rootDir, profile })
@@ -3135,4 +3123,27 @@ test('ACK high-water replay verifies immutable secure markers without fsyncing e
   const repairingObserver = new AckOutbox({ rootDir: storageRoot, profile })
   repairingObserver.initialize()
   assert.equal(statSync(marker).mode & 0o777, 0o600)
+})
+
+test('default-disabled production legacy fallback registers exact child cancellation and persists CANCELLED without final', async () => {
+  const rootDir = temporaryDirectory(); const inbox = new PersistentCommandInbox({ rootDir, profile }); const chatInbox = new PersistentChatInbox({ rootDir, profile }); const chatAckOutbox = new ChatAckOutbox({ rootDir, profile })
+  const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.killed = false
+  let spawned = false; child.kill = () => { child.killed = true; queueMicrotask(() => { child.exitCode = null; child.emit('close', null) }); return true }
+  const protocol = []
+  const processor = new AgentMessageProcessor({
+    profile, inbox, chatInbox, chatAckOutbox, lanes: new FairLaneScheduler({ chatConcurrency: 1, commandConcurrency: 1 }), sendFn: () => true,
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: (message, controls) => runProfileChat(profile, message, {
+      controls,
+      runLegacy: (selectedProfile, selectedMessage, mode, options) => runCodex(selectedProfile, selectedMessage, mode, {
+        ...options, spawnFn: () => { spawned = true; return child }, sendProtocolFn: (...args) => protocol.push(args), sendLegacyFn: () => {}, sendStatusFn: () => {}
+      })
+    })
+  })
+  processor.start(); const message = durableChat(91); await processor.handle(message)
+  while (!spawned) await new Promise(resolvePromise => setImmediate(resolvePromise))
+  const stop = await processor.handle({ schemaVersion: 1, messageType: MESSAGE_TYPES.CHAT_STOP, requestId: message.requestId, turnId: message.turnId, dispatchId: message.dispatchId, targetAgentId: message.targetAgentId })
+  assert.equal(stop.status, 'cancel-requested'); await processor.waitForIdle(); assert.equal(child.killed, true); assert.deepEqual(protocol, [])
+  const normalized = normalizeInboundMessage(message); const item = chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(item.record.state, 'CANCELLED')
 })

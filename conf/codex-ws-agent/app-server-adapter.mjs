@@ -3,7 +3,8 @@ import { EventEmitter } from 'node:events'
 
 const id = value => typeof value === 'string' && value.length > 0
 const deniedMethods = /(?:command|file|permission|network|mcp|dynamic.?tool|tool)/i
-const terminalMethods = new Set(['turn/completed', 'turn/failed', 'turn/cancelled', 'turn/interrupted'])
+const terminalMethods = new Set(['turn/failed', 'turn/cancelled', 'turn/interrupted'])
+export const CODEX_APP_SERVER_SCHEMA = Object.freeze({ cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' })
 
 export class AppServerAdapter extends EventEmitter {
   static spawn(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000 } = {}) {
@@ -17,7 +18,7 @@ export class AppServerAdapter extends EventEmitter {
     super(); if (!child) throw new Error('APP_SERVER_CHILD_REQUIRED')
     this.child = child; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.maxStderrBytes = maxStderrBytes
     this.nextId = 1; this.pending = new Map(); this.buffer = ''; this.stderrBytes = 0; this.closed = false
-    this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [] }
+    this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [], schema: CODEX_APP_SERVER_SCHEMA }
     this.send = send || (frame => child.stdin.write(`${JSON.stringify(frame)}\n`))
     child.stdout.on('data', chunk => this._onData(chunk.toString('utf8')))
     child.stderr?.on('data', chunk => { this.stderrBytes += chunk.length; if (this.stderrBytes > this.maxStderrBytes) this.close(new Error('APP_SERVER_STDERR_LIMIT')) })
@@ -38,11 +39,11 @@ export class AppServerAdapter extends EventEmitter {
     this.readback.account = await this.request('account/read', { refreshToken: false })
     this.readback.models = await this.request('model/list', {})
     this.readback.config = await this.request('config/read', {})
-    this.readback.tools = await this.request('tool/catalog/read', {}).catch(error => ({ unavailable: true, reason: error.code || error.message }))
+    this.readback.tools = await this.request('mcpServerStatus/list', { detail: 'toolsAndAuthOnly' }).catch(error => ({ unavailable: true, reason: error.code || error.message }))
     return this.readback
   }
   async startOrResumeThread(binding, policy) {
-    const params = { cwd: policy.cwd, model: policy.model || undefined, approvalPolicy: 'never', sandbox: 'read-only', config: { ...(policy.config || {}), network: false }, instructions: policy.instructions || '' }
+    const params = { cwd: policy.cwd, model: policy.model || undefined, approvalPolicy: 'never', sandbox: 'read-only', config: { ...(policy.config || {}), network: false }, developerInstructions: policy.developerInstructions || policy.instructions || '', ...(policy.baseInstructions ? { baseInstructions: policy.baseInstructions } : {}) }
     const result = binding?.threadId ? await this.request('thread/resume', { threadId: binding.threadId, ...params }) : await this.request('thread/start', params)
     const threadId = result?.thread?.id || result?.threadId
     if (!id(threadId)) throw new Error('APP_SERVER_THREAD_ID_MISSING')
@@ -94,7 +95,8 @@ export class AppServerAdapter extends EventEmitter {
 
     let response
     try {
-      response = await this.request('turn/start', { threadId, clientUserMessageId, input, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' } })
+      const userInput = Array.isArray(input) ? input : [{ type: 'text', text: String(input) }]
+      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false } })
     } catch (cause) {
       cleanup(); turn.state = 'ACCEPTANCE_UNKNOWN'; turn.error = cause.message
       const reconciliation = await this.reconcileTurn(turn).catch(() => ({ status: 'RECOVERY_REQUIRED' }))
@@ -113,10 +115,17 @@ export class AppServerAdapter extends EventEmitter {
     return terminalPromise
   }
   async reconcileTurn({ threadId, turnId = null, clientUserMessageId = null }) {
-    return this.request('thread/read', { threadId, includeTurns: true }).then(
-      result => ({ status: 'READBACK', result, turnId, clientUserMessageId }),
-      () => ({ status: 'RECOVERY_REQUIRED', turnId, clientUserMessageId })
-    )
+    try {
+      const result = await this.request('thread/read', { threadId, includeTurns: true })
+      const turns = Array.isArray(result?.thread?.turns) ? result.thread.turns : []
+      const matched = turns.find(candidate => candidate?.id === turnId || (clientUserMessageId && candidate?.items?.some(item => item?.type === 'userMessage' && item?.clientId === clientUserMessageId)))
+      if (!matched) return { status: 'ABSENT', result, turnId, clientUserMessageId }
+      if (matched.status === 'inProgress') return { status: 'ACCEPTED', result, turn: matched, turnId: matched.id, clientUserMessageId }
+      if (['completed', 'failed', 'interrupted'].includes(matched.status)) return { status: 'TERMINAL', terminalStatus: matched.status, error: matched.error || null, result, turn: matched, turnId: matched.id, clientUserMessageId }
+      return { status: 'RECOVERY_REQUIRED', result, turn: matched, turnId: matched.id, clientUserMessageId }
+    } catch {
+      return { status: 'RECOVERY_REQUIRED', turnId, clientUserMessageId }
+    }
   }
   interrupt(threadId, turnId) { return this.request('turn/interrupt', { threadId, turnId }) }
   unsubscribe(threadId) { return this.request('thread/unsubscribe', { threadId }) }
@@ -143,7 +152,15 @@ export class AppServerAdapter extends EventEmitter {
     if (frame.method === 'item/agentMessage/delta') { const content = params.delta || params.text || params.content; if (typeof content === 'string' && content) this.emit('delta', { threadId, turnId, content }); return }
     if (frame.method === 'item/agentMessage') { const content = params.text || params.content || params.item?.text; if (typeof content === 'string') this.emit('final', { threadId, turnId, content }); return }
     if (frame.method === 'item/completed') { const item = params.item || {}; if (['agentMessage', 'agent_message'].includes(item.type) && typeof item.text === 'string') this.emit('final', { threadId, turnId, content: item.text }); return }
-    if (terminalMethods.has(frame.method)) { this.emit('terminal', { threadId, turnId, status: frame.method.slice(5) }); return }
+    if (frame.method === 'turn/completed') {
+      const turn = params.turn
+      const status = turn?.status; const completedTurnId = turn?.id
+      if (!id(completedTurnId) || !['completed', 'interrupted', 'failed', 'inProgress'].includes(status)) { this.emit('protocol_error', new Error('APP_SERVER_INVALID_TURN_COMPLETED')); return }
+      if (status !== 'inProgress') this.emit('terminal', { threadId, turnId: completedTurnId, status, error: turn.error || null })
+      else this.emit('event', frame)
+      return
+    }
+    if (terminalMethods.has(frame.method)) { this.emit('terminal', { threadId, turnId, status: frame.method === 'turn/cancelled' ? 'interrupted' : frame.method.slice(5), error: params.error || null }); return }
     this.emit('event', frame)
   }
   _denyServerRequest(frame) {

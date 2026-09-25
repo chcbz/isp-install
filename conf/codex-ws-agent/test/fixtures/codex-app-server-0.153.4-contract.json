@@ -1,0 +1,17 @@
+{
+  "cliVersion": "0.153.4",
+  "generatedWith": "codex app-server generate-json-schema --experimental",
+  "bundleFile": "codex_app_server_protocol.schemas.json",
+  "bundleSha256": "b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978",
+  "schemas": {
+    "v2/TurnStartParams.json": "b36fb37326b1cf69f75c8b306f1f886d53a57c4b1b985e08e298e2407ea2ad02",
+    "v2/ThreadStartParams.json": "25f490368ec6df52a2a3b82a5469d2413307eb93439121b309f415b5648eee7a",
+    "v2/ThreadResumeParams.json": "324e96004c49de35935cade3386958431c93a4fd3997a839f9796772ea4c8072",
+    "v2/TurnCompletedNotification.json": "78af2a37391e8e669a4020cb58593e4d3e378756ced79d5fec72374fa69fb94b",
+    "v2/ThreadReadResponse.json": "de0ec065bbe9c6288d76517cbab64949b544074ed782a314ccea872b70bbfa48"
+  },
+  "turnStart": { "required": ["input", "threadId"], "inputType": "UserInput[]", "textInputRequired": ["type", "text"] },
+  "threadInstructions": ["developerInstructions", "baseInstructions"],
+  "forbiddenThreadFields": ["instructions"],
+  "turnStatuses": ["completed", "interrupted", "failed", "inProgress"]
+}

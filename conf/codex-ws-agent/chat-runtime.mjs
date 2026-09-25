@@ -23,8 +23,21 @@ const visible = (value, max = 512) => typeof value === 'string' && value.length 
   Buffer.byteLength(value) <= max && !/[\x00-\x1f\x7f]/u.test(value)
 const identity = (value, max = 512) => visible(value, max) && !value.includes(':')
 const decimal = value => typeof value === 'string' && /^[1-9][0-9]{0,18}$/.test(value) && BigInt(value) <= MAX_LONG_DECIMAL
+const decimalOrZero = value => typeof value === 'string' && /^(?:0|[1-9][0-9]{0,18})$/.test(value) && BigInt(value) <= MAX_LONG_DECIMAL
 const directoryFsync = path => { const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) } }
-const ensureDirectory = path => { const existed = existsSync(path); mkdirSync(path, { recursive: true, mode: 0o700 }); chmodSync(path, 0o700); directoryFsync(path); if (!existed) directoryFsync(dirname(path)) }
+const ensureDirectory = path => {
+  const target = resolve(path)
+  if (existsSync(target)) { chmodSync(target, 0o700); directoryFsync(target); return }
+  const missing = []; let cursor = target
+  while (!existsSync(cursor)) { missing.push(cursor); const parent = dirname(cursor); if (parent === cursor) break; cursor = parent }
+  for (const directory of missing.reverse()) {
+    const parent = dirname(directory)
+    mkdirSync(directory, { mode: 0o700 })
+    chmodSync(directory, 0o700)
+    directoryFsync(directory)
+    directoryFsync(parent)
+  }
+}
 const atomicJson = (path, value) => {
   ensureDirectory(dirname(path)); const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
@@ -42,7 +55,7 @@ export const canonicalSha256 = value => `sha256:${createHash('sha256').update(ca
 const validateJsonValue = (value, name, depth = 0) => {
   if (depth > 8) throw new Error(`${name}_DEPTH_INVALID`)
   if (value === null || typeof value === 'boolean') return
-  if (typeof value === 'number') { if (!Number.isFinite(value)) throw new Error(`${name}_VALUE_INVALID`); return }
+  if (typeof value === 'number') { if (!Number.isSafeInteger(value)) throw new Error(`${name}_VALUE_INVALID`); return }
   if (typeof value === 'string') { if (Buffer.byteLength(value) > MAX_CONTEXT_FACT_BYTES) throw new Error(`${name}_VALUE_TOO_LARGE`); return }
   if (Array.isArray(value)) {
     if (value.length > MAX_CONTEXT_FACTS || bytes(value) > MAX_CONTEXT_FACT_BYTES) throw new Error(`${name}_VALUE_TOO_LARGE`)
@@ -72,6 +85,8 @@ export function validateContextSnapshot(snapshot) {
   if (!visible(contextSnapshotId) || !visible(contextHash) || !object(sourceVector) || !object(facts)) throw new Error('CONTEXT_SNAPSHOT_INVALID')
   validateBoundedObject(sourceVector, 'CONTEXT_SOURCE_VECTOR')
   validateBoundedObject(facts, 'CONTEXT_FACTS')
+  const expectedHash = canonicalSha256({ sourceVector, facts })
+  if (contextHash !== expectedHash) throw new Error('CONTEXT_HASH_MISMATCH')
   return Object.freeze({ schemaVersion: '1', contextSnapshotId, contextHash, sourceVector, facts })
 }
 
@@ -117,11 +132,17 @@ export function validateChatDispatch(message) {
   if (message.schemaVersion !== 1) throw new Error('CHAT_SCHEMA_UNSUPPORTED')
   const required = ['tenantId', 'clientId', 'targetAgentId', 'conversationId', 'requestId', 'turnId', 'dispatchId', 'messageId']
   if (!required.every(field => visible(message[field], ['tenantId', 'clientId'].includes(field) ? 50 : 512))) throw new Error('CHAT_DURABLE_BINDING_REQUIRED')
-  const generation = String(message.conversationGeneration)
+  const generation = message.conversationGeneration
   if (!decimal(generation)) throw new Error('CHAT_GENERATION_INVALID')
+  if (!decimal(message.requestRevision)) throw new Error('CHAT_REQUEST_REVISION_INVALID')
+  for (const field of ['sentAt', 'timestamp']) if (message[field] !== undefined && !decimalOrZero(message[field])) throw new Error(`CHAT_${field.toUpperCase()}_INVALID`)
   if (message.dispatchAckType !== CHAT_ACK_TYPE || message.ackRequired !== true || message.deliverySemantics !== CHAT_DELIVERY_SEMANTICS) throw new Error('CHAT_DELIVERY_CONTRACT_INVALID')
   const ownerJiacn = deriveOwner(message)
+  if (message.ownerJiacn !== ownerJiacn) throw new Error('CHAT_OWNER_MISMATCH')
   const snapshot = validateContextSnapshot(message.contextSnapshot)
+  const equal = (left, right) => canonical(left) === canonical(right)
+  if (message.contextSnapshotId !== snapshot.contextSnapshotId || message.contextHash !== snapshot.contextHash ||
+      !equal(message.sourceVector, snapshot.sourceVector) || !equal(message.factsManifest, snapshot.facts)) throw new Error('CHAT_CONTEXT_BINDING_MISMATCH')
   return { ...message, schemaVersion: 1, conversationGeneration: generation, ownerJiacn, contextSnapshot: snapshot, legacy: false, durable: true }
 }
 
@@ -133,23 +154,19 @@ export function buildChatDispatchAck(profile, message, extra = {}) {
   }
 }
 
-const fingerprintSource = message => ({
-  tenantId: message.tenantId, ownerJiacn: message.ownerJiacn, clientId: message.clientId,
-  messageId: message.messageId, requestId: message.requestId, requestRevision: message.requestRevision, turnId: message.turnId,
-  dispatchId: message.dispatchId, targetAgentId: message.targetAgentId,
-  conversationId: message.conversationId, conversationGeneration: String(message.conversationGeneration),
-  route: message.route, routing: message.routing, content: message.content,
-  attachments: message.attachments, inputRefs: message.inputRefs, files: message.files,
-  contextSnapshot: message.contextSnapshot,
-  dedupeKey: message.dedupeKey, dispatchAckType: message.dispatchAckType,
-  ackRequired: message.ackRequired, deliverySemantics: message.deliverySemantics
-})
+const fingerprintSource = message => {
+  const source = object(message.rawPayload) ? message.rawPayload : message
+  const copy = { ...source }
+  for (const field of ['rawPayload', 'legacy', 'durable', '__deltaSeq']) delete copy[field]
+  return copy
+}
 export const chatFingerprint = message => canonicalSha256(fingerprintSource(message))
 export const durableChatKey = message => createHash('sha256').update(message.dedupeKey).digest('hex')
 
 export class PersistentChatInbox {
-  constructor({ rootDir, profile }) {
-    this.profile = profile; this.dir = resolve(rootDir, 'chat-inbox', Buffer.from(profile.agentId).toString('hex'))
+  constructor({ rootDir, profile, maxFiles = profile.chatInboxMaxFiles || 1024, maxBytes = profile.chatInboxMaxBytes || 64 * 1024 * 1024 }) {
+    this.profile = profile; this.maxFiles = maxFiles; this.maxBytes = maxBytes
+    this.dir = resolve(rootDir, 'chat-inbox', Buffer.from(profile.agentId).toString('hex'))
     this.pending = resolve(this.dir, 'pending'); this.processing = resolve(this.dir, 'processing'); this.recovery = resolve(this.dir, 'recovery'); this.archive = resolve(this.dir, 'archive')
   }
   initialize() {
@@ -164,6 +181,16 @@ export class PersistentChatInbox {
   }
   path(state, key) { return resolve(this[state], `${key}.json`) }
   findByKey(key) { for (const state of ['pending', 'processing', 'recovery', 'archive']) { const path = this.path(state, key); if (existsSync(path)) return { key, state, path, record: JSON.parse(readFileSync(path, 'utf8')) } } return null }
+  usage() {
+    let files = 0; let totalBytes = 0
+    for (const state of ['pending', 'processing', 'recovery', 'archive']) {
+      const names = readdirSync(this[state]).filter(name => /^[0-9a-f]{64}\.json$/.test(name))
+      if (names.length > this.maxFiles) throw Object.assign(new Error('CHAT_INBOX_CAPACITY_SCAN_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
+      for (const name of names) { files++; totalBytes += statSync(resolve(this[state], name)).size; if (files > this.maxFiles || totalBytes > this.maxBytes) break }
+      if (files > this.maxFiles || totalBytes > this.maxBytes) break
+    }
+    return { files, totalBytes }
+  }
   accept(message) {
     const key = durableChatKey(message); const fingerprint = chatFingerprint(message); const existing = this.findByKey(key)
     if (existing) {
@@ -171,6 +198,9 @@ export class PersistentChatInbox {
       return { accepted: false, duplicate: true, key, item: existing }
     }
     const record = { state: 'RECEIVED', receivedAt: Date.now(), fingerprint, message }
+    const encodedBytes = Buffer.byteLength(`${JSON.stringify(record)}\n`)
+    const usage = this.usage()
+    if (usage.files + 1 > this.maxFiles || usage.totalBytes + encodedBytes > this.maxBytes) throw Object.assign(new Error('CHAT_INBOX_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
     atomicJson(this.path('pending', key), record)
     return { accepted: true, duplicate: false, key, item: { key, state: 'pending', path: this.path('pending', key), record } }
   }
@@ -183,6 +213,7 @@ export class PersistentChatInbox {
   }
   markRunning(item, engine = {}) { const record = { ...item.record, state: 'RUNNING', engine, runningAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item }
   complete(item, result = {}) { const record = { ...item.record, state: 'COMPLETED', completedAt: Date.now(), result }; atomicJson(item.path, record); durableRename(item.path, this.path('archive', item.key)); return record }
+  cancelProcessing(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'processing') return false; const record = { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }; atomicJson(item.path, record); durableRename(item.path, this.path('archive', item.key)); item.record = record; item.state = 'archive'; return true }
   recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { const record = { ...item.record, state, recoveryReason: reason, recoveredAt: Date.now() }; atomicJson(item.path, record); durableRename(item.path, this.path('recovery', item.key)); return record }
   cancelPending(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'pending') return false; const record = { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }; atomicJson(item.path, record); durableRename(item.path, this.path('archive', item.key)); return true }
   findExactTurn(stop) {
@@ -212,7 +243,9 @@ export class ChatAckOutbox {
   enqueue(envelope) {
     const state = JSON.parse(readFileSync(this.sequence, 'utf8')); const sequence = BigInt(state.next)
     if (sequence > MAX_LONG_DECIMAL) throw new Error('CHAT_ACK_SEQUENCE_EXHAUSTED')
-    const name = `${sequence.toString().padStart(19, '0')}-${randomUUID()}.json`; atomicJson(resolve(this.pending, name), envelope); atomicJson(this.sequence, { next: String(sequence + 1n) }); return name
+    const name = `${sequence.toString().padStart(19, '0')}-${randomUUID()}.json`
+    // Reserve and fsync the sequence before materializing the item: a crash may leave a gap, never a duplicate/reordered sequence.
+    atomicJson(this.sequence, { next: String(sequence + 1n) }); atomicJson(resolve(this.pending, name), envelope); return name
   }
   drain(send) { let sent = 0; for (const name of readdirSync(this.pending).filter(name => name.endsWith('.json')).sort()) { const path = resolve(this.pending, name); const envelope = JSON.parse(readFileSync(path, 'utf8')); if (!send(envelope)) break; unlinkSync(path); directoryFsync(this.pending); sent++ } return sent }
   count() { return readdirSync(this.pending).filter(name => name.endsWith('.json')).length }
@@ -225,10 +258,38 @@ export function buildThreadKey({ tenantId, clientId, ownerJiacn, profileId, agen
 }
 
 export class ThreadBindingStore {
-  constructor({ rootDir, profile }) { this.path = resolve(rootDir, 'chat-thread-bindings', `${Buffer.from(profile.agentId).toString('hex')}.json`); this.bindings = {} }
-  initialize() { ensureDirectory(dirname(this.path)); if (existsSync(this.path)) this.bindings = JSON.parse(readFileSync(this.path, 'utf8')); return this }
-  get(key) { return this.bindings[key] || null }
-  put(key, binding) { this.bindings = { ...this.bindings, [key]: binding }; atomicJson(this.path, this.bindings); return binding }
+  constructor({ rootDir, profile, maxBindings = 512, archivedRetentionMs = 30 * 24 * 60 * 60 * 1000 }) {
+    this.profile = profile; this.maxBindings = maxBindings; this.archivedRetentionMs = archivedRetentionMs
+    this.path = resolve(rootDir, 'chat-thread-bindings', `${Buffer.from(profile.agentId).toString('hex')}.json`); this.bindings = {}
+  }
+  initialize() {
+    ensureDirectory(dirname(this.path))
+    if (existsSync(this.path)) {
+      const stored = JSON.parse(readFileSync(this.path, 'utf8'))
+      if (stored.schemaVersion === 1) {
+        if (stored.profileId !== this.profile.profileId || stored.agentId !== this.profile.agentId || !object(stored.bindings)) throw new Error('THREAD_BINDING_STORE_IDENTITY_MISMATCH')
+        this.bindings = stored.bindings
+      } else if (object(stored)) this.bindings = stored // additive migration from the first v1 runtime.
+    }
+    const now = Date.now()
+    for (const [key, binding] of Object.entries(this.bindings)) {
+      if (!object(binding)) throw new Error('THREAD_BINDING_INVALID')
+      if (binding.threadKey && binding.threadKey !== key) throw new Error('THREAD_BINDING_KEY_MISMATCH')
+      if (binding.profileId && binding.profileId !== this.profile.profileId) throw new Error('THREAD_BINDING_PROFILE_MISMATCH')
+      if (binding.agentId && binding.agentId !== this.profile.agentId) throw new Error('THREAD_BINDING_AGENT_MISMATCH')
+      if (binding.state === 'ARCHIVED' && Number.isFinite(binding.updatedAt) && now - binding.updatedAt > this.archivedRetentionMs) delete this.bindings[key]
+      else this.bindings[key] = { ...binding, threadKey: key, profileId: this.profile.profileId, agentId: this.profile.agentId }
+    }
+    if (Object.keys(this.bindings).length > this.maxBindings) throw new Error('THREAD_BINDING_CAPACITY_EXCEEDED')
+    this._persist(); return this
+  }
+  _persist() { atomicJson(this.path, { schemaVersion: 1, profileId: this.profile.profileId, agentId: this.profile.agentId, bindings: this.bindings }) }
+  get(key) { const binding = this.bindings[key]; if (!binding) return null; if (binding.threadKey !== key || binding.profileId !== this.profile.profileId || binding.agentId !== this.profile.agentId) throw new Error('THREAD_BINDING_SELF_BINDING_INVALID'); return binding }
+  put(key, binding) {
+    if (!this.bindings[key] && Object.keys(this.bindings).length >= this.maxBindings) throw new Error('THREAD_BINDING_CAPACITY_EXCEEDED')
+    const stored = { ...binding, threadKey: key, profileId: this.profile.profileId, agentId: this.profile.agentId }
+    this.bindings = { ...this.bindings, [key]: stored }; this._persist(); return stored
+  }
   markRecovery(key, reason) { return this.put(key, { ...(this.get(key) || {}), state: 'RECOVERY_REQUIRED', recoveryReason: reason, updatedAt: Date.now() }) }
   compact(key, value) { return this.put(key, { ...(this.get(key) || {}), compact: value, state: 'COMPACTED', updatedAt: Date.now() }) }
   archive(key) { return this.put(key, { ...(this.get(key) || {}), state: 'ARCHIVED', updatedAt: Date.now() }) }
