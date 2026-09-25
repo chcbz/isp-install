@@ -4026,9 +4026,11 @@ export const runFastChat = async (profile, message, {
     if (fallback) return fallback({ routeUsed: 'CHAT_LEGACY_FALLBACK', fallbackReason: reason, modern, secureBoundaryRequired })
     throw new AgentProtocolError('AGENT_FAST_PATH_UNAVAILABLE', reason)
   }
-  // Explicit old protocol is the only unrestricted compatibility fallback. Modern feature-disabled fallback must stay in the dedicated read-only CHAT boundary.
+  // Only explicit old protocol may use the compatibility runner. Modern durable CHAT never falls through to legacy execution.
   if (message.legacy || !modern) return legacy('LEGACY_CHAT_PROTOCOL', false)
-  if (!profile.fastChatEnabled || !profile.appServerEnabled) return legacy('FAST_CHAT_FEATURE_DISABLED', true)
+  if (!profile.fastChatEnabled || !profile.appServerEnabled) {
+    throw new AgentProtocolError('FAST_CHAT_FEATURE_DISABLED', 'Modern durable CHAT is disabled for this profile; legacy workspace execution is forbidden')
+  }
   if (!message.contextSnapshot) throw new AgentProtocolError('FAST_CHAT_CONTEXT_REQUIRED', 'Modern durable CHAT requires contextSnapshot')
   let selectedAdapter = adapter
   if (!selectedAdapter && adapterPromise) {
@@ -4777,7 +4779,7 @@ const createProfileState = profile => {
         if (!isCurrent()) return null
         const adapter = AppServerAdapter.spawn(profile, { cwd: chatWorkdir, schemaMeasurement })
         state.appServerStartingAdapter = adapter
-        try { await adapter.initialize() } catch (error) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); throw error }
+        try { await adapter.verifySpawnedExecutable(); await adapter.initialize() } catch (error) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); throw error }
         adapter.readback.hostedWireContract = hostedWireContract
         if (!isCurrent()) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); return null }
         state.appServerStartingAdapter = null

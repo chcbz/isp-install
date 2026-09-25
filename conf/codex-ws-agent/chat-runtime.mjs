@@ -204,34 +204,63 @@ export class PersistentChatInbox {
     dedupeMaxEntries = profile.chatDedupeMaxEntries || 100000,
     dedupeMaxBytes = profile.chatDedupeMaxBytes || 128 * 1024 * 1024,
     dedupeRetentionMs = profile.chatDedupeRetentionMs || 30 * 24 * 60 * 60 * 1000,
-    lockTimeoutMs = 2000
+    lockTimeoutMs = 2000, lockDeadGraceMs = 250, lockMalformedGraceMs = 30000
   }) {
     this.profile = profile; this.maxFiles = maxFiles; this.maxBytes = maxBytes
     this.archiveMaxFiles = archiveMaxFiles; this.archiveMaxBytes = archiveMaxBytes; this.archiveRetentionMs = archiveRetentionMs; this.lockTimeoutMs = lockTimeoutMs
+    this.lockDeadGraceMs = lockDeadGraceMs; this.lockMalformedGraceMs = lockMalformedGraceMs
     this.dedupeMaxEntries = dedupeMaxEntries; this.dedupeMaxBytes = dedupeMaxBytes; this.dedupeRetentionMs = dedupeRetentionMs
     this.dir = resolve(rootDir, 'chat-inbox', Buffer.from(profile.agentId).toString('hex'))
     this.pending = resolve(this.dir, 'pending'); this.processing = resolve(this.dir, 'processing'); this.recovery = resolve(this.dir, 'recovery'); this.archive = resolve(this.dir, 'archive')
     this.dedupeDir = resolve(this.dir, 'dedupe-ledger'); this.dedupeUsagePath = resolve(this.dir, 'dedupe-ledger-usage.json')
+    this.turnIndexDir = resolve(this.dir, 'turn-index'); this.turnIndexVersionPath = resolve(this.dir, 'turn-index-version.json')
     this.legacyDedupePath = resolve(this.dir, 'dedupe-index.json'); this.lockPath = resolve(this.dir, '.profile.lock')
   }
   _processStartTime(pid) {
     try { const raw = readFileSync(`/proc/${pid}/stat`, 'utf8'); const fields = raw.slice(raw.lastIndexOf(') ') + 2).trim().split(/\s+/); return fields[19] || '' } catch { return '' }
   }
+  _inspectExistingLock() {
+    const uid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null
+    let before
+    try { before = lstatSync(this.lockPath, { bigint: true }) } catch (error) { if (error.code === 'ENOENT') return { retry: true }; throw error }
+    if (before.isSymbolicLink() || !before.isFile() || (uid !== null && before.uid !== uid) || Number(before.mode & 0o777n) !== 0o600 || before.size > 4096n) {
+      const error = new Error('CHAT_INBOX_LOCK_UNSAFE'); error.code = 'CHAT_INBOX_LOCK_UNSAFE'; throw error
+    }
+    let raw
+    try { raw = readFileSync(this.lockPath, 'utf8') } catch (error) { if (error.code === 'ENOENT') return { retry: true }; throw error }
+    let after
+    try { after = lstatSync(this.lockPath, { bigint: true }) } catch (error) { if (error.code === 'ENOENT') return { retry: true }; throw error }
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs) return { retry: true }
+    const age = Math.max(0, Date.now() - Number(after.mtimeMs)); let owner = null; let valid = false
+    try {
+      owner = JSON.parse(raw)
+      valid = Number.isInteger(owner?.pid) && owner.pid > 0 && typeof owner.startTime === 'string' && owner.startTime.length > 0 && typeof owner.nonce === 'string' && /^[0-9a-f-]{16,64}$/i.test(owner.nonce)
+    } catch {}
+    const alive = valid && this._processStartTime(owner.pid) === owner.startTime
+    const grace = valid ? this.lockDeadGraceMs : this.lockMalformedGraceMs
+    return { retry: false, reclaim: !alive && age >= grace, identity: { dev: after.dev, ino: after.ino, size: after.size, mtimeNs: after.mtimeNs }, alive, valid }
+  }
+  _reclaimExistingLock(inspection) {
+    if (!inspection.reclaim) return false
+    let current
+    try { current = lstatSync(this.lockPath, { bigint: true }) } catch (error) { if (error.code === 'ENOENT') return true; throw error }
+    const expected = inspection.identity
+    if (current.isSymbolicLink() || !current.isFile() || current.dev !== expected.dev || current.ino !== expected.ino || current.size !== expected.size || current.mtimeNs !== expected.mtimeNs) return false
+    unlinkSync(this.lockPath); directoryFsync(this.dir); return true
+  }
   _tryAcquireLock() {
     ensureDirectory(this.dir)
     const nonce = randomUUID(); const owner = { pid: process.pid, startTime: this._processStartTime(process.pid), nonce }
     const bytes = `${JSON.stringify(owner)}\n`
+    let fd
     try {
-      const fd = openSync(this.lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+      fd = openSync(this.lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
       writeFileSync(fd, bytes); fsyncSync(fd); directoryFsync(this.dir); return { fd, bytes }
     } catch (error) {
+      if (fd !== undefined) try { closeSync(fd) } catch {}
       if (error.code !== 'EEXIST') throw error
-      try {
-        const age = Date.now() - statSync(this.lockPath).mtimeMs
-        const existing = JSON.parse(readFileSync(this.lockPath, 'utf8'))
-        const alive = Number.isInteger(existing.pid) && existing.pid > 0 && existing.startTime && this._processStartTime(existing.pid) === existing.startTime
-        if (!alive && age > 30000) { unlinkSync(this.lockPath); directoryFsync(this.dir); return this._tryAcquireLock() }
-      } catch (probe) { if (probe.code === 'ENOENT') return this._tryAcquireLock() }
+      const inspection = this._inspectExistingLock()
+      if (inspection.retry || this._reclaimExistingLock(inspection)) return this._tryAcquireLock()
       return null
     }
   }
@@ -270,36 +299,50 @@ export class PersistentChatInbox {
   }
   _writeDedupeUsage(usage) {
     const stored = {
-      schemaVersion: 1, profileId: this.profile.profileId, agentId: this.profile.agentId,
-      count: usage.count, totalBytes: usage.totalBytes, lastGcAt: usage.lastGcAt
+      schemaVersion: 2, profileId: this.profile.profileId, agentId: this.profile.agentId,
+      count: usage.count, totalBytes: usage.totalBytes, lastGcAt: usage.lastGcAt, gcCursor: usage.gcCursor || '', dirty: usage.dirty === true
     }
     atomicJson(this.dedupeUsagePath, stored); return stored
   }
   _scanDedupeUsage(lastGcAt = Date.now()) {
     const entries = this._listDedupe()
-    return { entries, count: entries.length, totalBytes: entries.reduce((sum, entry) => sum + entry.size, 0), lastGcAt }
+    return { entries, count: entries.length, totalBytes: entries.reduce((sum, entry) => sum + entry.size, 0), lastGcAt, gcCursor: '', dirty: false }
   }
   _readDedupeUsage() {
     if (!existsSync(this.dedupeUsagePath)) return this._writeDedupeUsage(this._scanDedupeUsage())
     const usage = JSON.parse(readFileSync(this.dedupeUsagePath, 'utf8'))
-    if (usage.schemaVersion !== 1 || usage.profileId !== this.profile.profileId || usage.agentId !== this.profile.agentId ||
+    if (![1, 2].includes(usage.schemaVersion) || usage.profileId !== this.profile.profileId || usage.agentId !== this.profile.agentId ||
         !Number.isSafeInteger(usage.count) || usage.count < 0 || !Number.isSafeInteger(usage.totalBytes) || usage.totalBytes < 0 ||
-        !Number.isSafeInteger(usage.lastGcAt) || usage.lastGcAt < 0) throw new Error('CHAT_DEDUPE_USAGE_INVALID')
-    return usage
+        !Number.isSafeInteger(usage.lastGcAt) || usage.lastGcAt < 0 || (usage.schemaVersion === 2 && (typeof usage.gcCursor !== 'string' || !/^(?:|[0-9a-f]{64})$/.test(usage.gcCursor) || typeof usage.dirty !== 'boolean'))) throw new Error('CHAT_DEDUPE_USAGE_INVALID')
+    return { ...usage, gcCursor: usage.gcCursor || '', dirty: usage.dirty === true }
+  }
+  _dedupeBatch(cursor = '', limit = 128) {
+    const entries = []; let lastKey = cursor
+    for (const shard of readdirSync(this.dedupeDir).filter(name => /^[0-9a-f]{2}$/.test(name)).sort()) {
+      const directory = resolve(this.dedupeDir, shard)
+      for (const name of readdirSync(directory).filter(value => /^[0-9a-f]{64}\.json$/.test(value)).sort()) {
+        const key = name.slice(0, -5); if (cursor && key <= cursor) continue
+        const path = resolve(directory, name); const stat = statSync(path); entries.push({ key, path, size: stat.size, mtimeMs: stat.mtimeMs }); lastKey = key
+        if (entries.length >= limit) return { entries, complete: false, nextCursor: lastKey }
+      }
+    }
+    return { entries, complete: true, nextCursor: '' }
   }
   _gcDedupe({ force = false } = {}) {
     const now = Date.now(); const current = this._readDedupeUsage()
     const interval = Math.min(60 * 60 * 1000, Math.max(60 * 1000, Math.floor(this.dedupeRetentionMs / 4)))
-    if (!force && now - current.lastGcAt < interval) return current
-    const cutoff = now - this.dedupeRetentionMs; const scanned = this._scanDedupeUsage(now)
-    let count = scanned.count; let totalBytes = scanned.totalBytes
-    for (const entry of scanned.entries) {
-      let terminalAt = entry.mtimeMs
-      try { terminalAt = Number(JSON.parse(readFileSync(entry.path, 'utf8')).terminalAt || terminalAt) } catch {}
+    if (!force && !current.gcCursor && now - current.lastGcAt < interval) return current
+    const cutoff = now - this.dedupeRetentionMs; const batch = this._dedupeBatch(current.gcCursor)
+    this._writeDedupeUsage({ ...current, dirty: true })
+    let count = current.count; let totalBytes = current.totalBytes
+    for (const entry of batch.entries) {
+      let marker = null; let terminalAt = entry.mtimeMs
+      try { marker = JSON.parse(readFileSync(entry.path, 'utf8')); terminalAt = Number(marker.terminalAt || terminalAt); if (marker.message) this._writeTurnIndex(entry.key, marker) } catch {}
       if (terminalAt >= cutoff) continue
       unlinkSync(entry.path); directoryFsync(dirname(entry.path)); count--; totalBytes -= entry.size
+      if (marker?.message) this._deleteTurnIndex(marker.message, entry.key)
     }
-    const remaining = this._writeDedupeUsage({ count, totalBytes, lastGcAt: now })
+    const remaining = this._writeDedupeUsage({ count, totalBytes, lastGcAt: batch.complete ? now : current.lastGcAt, gcCursor: batch.nextCursor, dirty: false })
     if (remaining.count > this.dedupeMaxEntries || remaining.totalBytes > this.dedupeMaxBytes) throw Object.assign(new Error('CHAT_DEDUPE_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
     return remaining
   }
@@ -310,6 +353,34 @@ export class PersistentChatInbox {
     for (const [key, record] of Object.entries(stored.entries)) if (/^[0-9a-f]{64}$/.test(key) && !this._readDedupe(key)) atomicJson(this._dedupePath(key), record)
     const migrated = resolve(this.dir, 'dedupe-index.migrated.json'); durableRename(this.legacyDedupePath, migrated)
   }
+  _turnIndexBucket(message) {
+    const required = ['requestId', 'turnId', 'dispatchId', 'targetAgentId']
+    if (!required.every(field => typeof message?.[field] === 'string' && message[field])) throw new Error('CHAT_TURN_INDEX_BINDING_INVALID')
+    return resolve(this.turnIndexDir, createHash('sha256').update(required.map(field => message[field]).join('\u001f')).digest('hex'))
+  }
+  _turnIndexPath(message, key) { return resolve(this._turnIndexBucket(message), `${key}.json`) }
+  _writeTurnIndex(key, marker) {
+    const path = this._turnIndexPath(marker.message, key)
+    if (!existsSync(path)) atomicJson(path, { schemaVersion: 1, key, record: marker })
+    return path
+  }
+  _deleteTurnIndex(message, key) {
+    const path = this._turnIndexPath(message, key)
+    try { unlinkSync(path); directoryFsync(dirname(path)) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+  _upgradeDedupeUsageAndTurnIndex() {
+    const usage = this._readDedupeUsage()
+    if (existsSync(this.turnIndexVersionPath)) {
+      const version = JSON.parse(readFileSync(this.turnIndexVersionPath, 'utf8'))
+      if (version.schemaVersion !== 1 || version.profileId !== this.profile.profileId || version.agentId !== this.profile.agentId) throw new Error('CHAT_TURN_INDEX_VERSION_INVALID')
+      if (usage.schemaVersion === 2 && !usage.dirty) return usage
+    }
+    const scanned = this._scanDedupeUsage(usage.lastGcAt)
+    for (const entry of scanned.entries) { const marker = JSON.parse(readFileSync(entry.path, 'utf8')); if (marker.message) this._writeTurnIndex(entry.key, marker) }
+    const upgraded = this._writeDedupeUsage({ ...scanned, dirty: false })
+    atomicJson(this.turnIndexVersionPath, { schemaVersion: 1, profileId: this.profile.profileId, agentId: this.profile.agentId })
+    return upgraded
+  }
   _compactMessage(message) {
     const fields = ['tenantId', 'ownerJiacn', 'clientId', 'messageId', 'requestId', 'requestRevision', 'turnId', 'dispatchId', 'targetAgentId', 'conversationId', 'conversationGeneration', 'contextSnapshotId', 'contextHash', 'dedupeKey']
     return Object.fromEntries(fields.filter(field => message[field] !== undefined).map(field => [field, message[field]]))
@@ -318,7 +389,7 @@ export class PersistentChatInbox {
     const previous = this._readDedupe(key)
     if (previous) {
       if (previous.record.fingerprint !== record.fingerprint) throw new Error('CHAT_DEDUPE_INDEX_CONFLICT')
-      return previous.record
+      this._writeTurnIndex(key, previous.record); return previous.record
     }
     const marker = {
       fingerprint: record.fingerprint, state: record.state, terminalAt: record.completedAt || record.cancelledAt || Date.now(),
@@ -328,10 +399,11 @@ export class PersistentChatInbox {
     let usage = this._readDedupeUsage()
     if (usage.count + 1 > this.dedupeMaxEntries || usage.totalBytes + markerBytes > this.dedupeMaxBytes) usage = this._gcDedupe({ force: true })
     if (usage.count + 1 > this.dedupeMaxEntries || usage.totalBytes + markerBytes > this.dedupeMaxBytes) throw Object.assign(new Error('CHAT_DEDUPE_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
-    // Reserve usage before publishing evidence. A crash can only over-count; initialize rebuilds exact usage.
-    const reserved = { count: usage.count + 1, totalBytes: usage.totalBytes + markerBytes, lastGcAt: usage.lastGcAt }
-    this._writeDedupeUsage(reserved)
-    try { atomicJson(this._dedupePath(key), marker) } catch (error) { try { this._writeDedupeUsage(usage) } catch {} throw error }
+    // Mark the O(1) usage metadata dirty before publishing evidence; restart performs a one-time exact repair only after an interrupted mutation.
+    const reserved = { count: usage.count + 1, totalBytes: usage.totalBytes + markerBytes, lastGcAt: usage.lastGcAt, gcCursor: usage.gcCursor }
+    this._writeDedupeUsage({ ...reserved, dirty: true })
+    try { atomicJson(this._dedupePath(key), marker) } catch (error) { try { this._writeDedupeUsage({ ...usage, dirty: false }) } catch {} throw error }
+    this._writeTurnIndex(key, marker); this._writeDedupeUsage({ ...reserved, dirty: false })
     return marker
   }
   _finalizeTerminal(item, record) {
@@ -355,9 +427,9 @@ export class PersistentChatInbox {
     }
   }
   initialize() {
-    for (const dir of [this.pending, this.processing, this.recovery, this.archive, this.dedupeDir]) ensureDirectory(dir)
+    for (const dir of [this.pending, this.processing, this.recovery, this.archive, this.dedupeDir, this.turnIndexDir]) ensureDirectory(dir)
     return this._withLock(() => {
-      this._migrateLegacyDedupe(); this._writeDedupeUsage(this._scanDedupeUsage(0)); this._gcDedupe({ force: true })
+      this._migrateLegacyDedupe(); this._upgradeDedupeUsageAndTurnIndex(); this._gcDedupe({ force: true })
       let recovered = 0; let settled = 0
       for (const name of readdirSync(this.processing).sort()) {
         if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
@@ -427,13 +499,22 @@ export class PersistentChatInbox {
   findExactTurn(stop) {
     const optionalMatch = (actual, expected) => expected === undefined || expected === null || expected === '' || String(actual) === String(expected)
     const match = record => { const m = record.message; return m && m.requestId === stop.requestId && m.turnId === stop.turnId && m.dispatchId === stop.dispatchId && m.targetAgentId === stop.targetAgentId && optionalMatch(m.tenantId, stop.tenantId) && optionalMatch(m.clientId, stop.clientId) && optionalMatch(m.ownerJiacn, stop.ownerJiacn) && optionalMatch(m.conversationGeneration, stop.conversationGeneration) }
-    const matches = []; const seen = new Set()
-    for (const state of ['pending', 'processing', 'recovery', 'archive']) for (const name of readdirSync(this[state])) {
+    const matches = []
+    for (const state of ['pending', 'processing', 'recovery']) for (const name of readdirSync(this[state])) {
       if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
       const key = name.slice(0, -5); const path = this.path(state, key); const item = { key, state, path, record: JSON.parse(readFileSync(path, 'utf8')) }
-      seen.add(key); if (match(item.record)) matches.push(item)
+      if (match(item.record)) matches.push(item)
     }
-    for (const entry of this._listDedupe()) if (!seen.has(entry.key)) { const record = JSON.parse(readFileSync(entry.path, 'utf8')); if (match(record)) matches.push({ key: entry.key, state: 'ledger', path: entry.path, record }) }
+    const bucket = this._turnIndexBucket(stop)
+    if (existsSync(bucket)) {
+      const names = readdirSync(bucket).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).sort()
+      if (names.length > 1024) { const error = new Error('CHAT_STOP_INDEX_CAPACITY_EXCEEDED'); error.code = 'CHAT_STOP_AMBIGUOUS'; throw error }
+      for (const name of names) {
+        const path = resolve(bucket, name); const indexed = JSON.parse(readFileSync(path, 'utf8'))
+        if (indexed.schemaVersion !== 1 || indexed.key !== name.slice(0, -5) || !indexed.record) throw new Error('CHAT_TURN_INDEX_INVALID')
+        if (match(indexed.record)) matches.push({ key: indexed.key, state: 'ledger', path, record: indexed.record })
+      }
+    }
     if (matches.length > 1) { const error = new Error('CHAT_STOP_AMBIGUOUS'); error.code = 'CHAT_STOP_AMBIGUOUS'; throw error }
     return matches[0] || null
   }

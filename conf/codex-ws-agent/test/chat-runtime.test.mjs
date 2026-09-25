@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, copyFileSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -12,7 +12,7 @@ import {
   buildContextEnvelope, validateChatDispatch, buildChatDispatchAck, PersistentChatInbox,
   ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, verifyHostedWireContract
 } from '../chat-runtime.mjs'
-import { AppServerAdapter, measureCodexAppServerBinary, verifyCodexAppServerBinaryIdentity } from '../app-server-adapter.mjs'
+import { AppServerAdapter, measureCodexAppServerBinary, reclaimStaleCodexAppServerSnapshots, verifyCodexAppServerBinaryIdentity, verifySpawnedAppServerExecutable } from '../app-server-adapter.mjs'
 import { normalizeInboundMessage, runFastChat, runProfileChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
 
 const profile = { profileId: 'profile-A', agentId: 'hosted-a', fastChatEnabled: false, appServerEnabled: false }
@@ -335,6 +335,33 @@ test('cross-process profile lock keeps hot admission within one-file quota', asy
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('profile lock recovers O_EXCL-empty, partial JSON, dead-owner and cross-process crash records after grace', async () => {
+  const cases = [
+    { name: 'empty', write: path => { const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600); closeSync(fd) }, grace: { lockMalformedGraceMs: 0 } },
+    { name: 'partial', write: path => writeFileSync(path, '{"pid":', { mode: 0o600 }), grace: { lockMalformedGraceMs: 0 } },
+    { name: 'start-mismatch', write: path => writeFileSync(path, `${JSON.stringify({ pid: process.pid, startTime: 'wrong', nonce: 'aaaaaaaaaaaaaaaa' })}\n`, { mode: 0o600 }), grace: { lockDeadGraceMs: 0 } }
+  ]
+  for (const item of cases) {
+    const root = mkdtempSync(resolve(tmpdir(), `chat-lock-${item.name}-`))
+    try {
+      const inbox = new PersistentChatInbox({ rootDir: root, profile, ...item.grace }); inbox.initialize(); item.write(inbox.lockPath)
+      const old = new Date(Date.now() - 1000); utimesSync(inbox.lockPath, old, old)
+      const accepted = await inbox.accept(normalizedWire({ messageId: `evt-lock-${item.name}`, dispatchId: `dispatch-lock-${item.name}` }))
+      assert.equal(accepted.accepted, true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-lock-cross-restart-'))
+  try {
+    const inbox = new PersistentChatInbox({ rootDir: root, profile, lockDeadGraceMs: 0 }); inbox.initialize()
+    const code = `import{openSync,writeFileSync,fsyncSync,closeSync,constants,readFileSync}from'node:fs';const p=process.argv[1];const raw=readFileSync('/proc/'+process.pid+'/stat','utf8');const start=raw.slice(raw.lastIndexOf(') ')+2).trim().split(/\\s+/)[19];const fd=openSync(p,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL,0o600);writeFileSync(fd,JSON.stringify({pid:process.pid,startTime:start,nonce:'bbbbbbbbbbbbbbbb'})+'\\n');fsyncSync(fd);closeSync(fd)`
+    await new Promise((resolveChild, rejectChild) => { const child = spawn(process.execPath, ['--input-type=module', '-e', code, inbox.lockPath]); child.on('error', rejectChild); child.on('close', status => status === 0 ? resolveChild() : rejectChild(new Error(`lock child exited ${status}`))) })
+    const old = new Date(Date.now() - 1000); utimesSync(inbox.lockPath, old, old)
+    const accepted = await inbox.accept(normalizedWire({ messageId: 'evt-lock-cross', dispatchId: 'dispatch-lock-cross' }))
+    assert.equal(accepted.accepted, true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('archive has independent quota while compact dedupe evidence permits continuous admission', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'chat-archive-quota-'))
   try {
@@ -366,7 +393,25 @@ test('sharded dedupe admission uses constant-size usage metadata instead of resc
     }
     assert.equal(scans, 0)
     assert.equal(inbox.count('ledger'), 4)
+    inbox._gcDedupe({ force: true }); assert.equal(scans, 0)
+    const terminalMessage = normalizedWire({ messageId: 'evt-ledger-4', dispatchId: 'dispatch-ledger-4' })
+    const stop = Object.fromEntries(['requestId', 'turnId', 'dispatchId', 'targetAgentId'].map(field => [field, terminalMessage[field]]))
+    const found = inbox.findExactTurn(stop); assert.equal(found.state, 'ledger'); assert.equal(found.record.message.dispatchId, 'dispatch-ledger-4')
     assert.equal(scans, 0)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('dirty dedupe usage metadata is exactly repaired once after interrupted mutation', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-dedupe-dirty-repair-'))
+  try {
+    const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+    const message = normalizedWire({ messageId: 'evt-dirty-repair', dispatchId: 'dispatch-dirty-repair' })
+    const accepted = await inbox.accept(message); inbox.complete(inbox.claim(accepted.key), { status: 'completed' })
+    const usage = JSON.parse(readFileSync(inbox.dedupeUsagePath, 'utf8'))
+    writeFileSync(inbox.dedupeUsagePath, `${JSON.stringify({ ...usage, count: usage.count + 7, totalBytes: usage.totalBytes + 7000, dirty: true })}\n`)
+    const restarted = new PersistentChatInbox({ rootDir: root, profile }); restarted.initialize()
+    const repaired = JSON.parse(readFileSync(restarted.dedupeUsagePath, 'utf8'))
+    assert.equal(repaired.dirty, false); assert.equal(repaired.count, 1); assert.equal(restarted.count('ledger'), 1)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -393,6 +438,8 @@ test('actual codex binary version and generated experimental schema are measured
     const expected = { cliVersion: 'test-1', bundleSha256: digest }; const cache = new Map()
     const measured = measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp })
     assert.equal(measured.measured, true); assert.equal(measured.bundleSha256, digest); assert.ok(measured.binaryIdentityDigest)
+    assert.equal(measured.snapshotKind, 'copy'); assert.equal(statSync(measured.snapshotPath).mode & 0o777, 0o500)
+    assert.notEqual(statSync(measured.snapshotPath).ino, statSync(bin).ino)
     assert.strictEqual(measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp }), measured)
     assert.deepEqual(readdirSync(temp), [])
     assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, cliVersion: 'wrong' }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
@@ -449,13 +496,80 @@ test('measured executable identity rejects file and symlink replacement before a
     assert.throws(() => AppServerAdapter.spawn(profileForLink, { cwd: root, schemaMeasurement: measuredLink, spawnFn: () => { spawns++; return fakeChild() } }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
     assert.equal(spawns, 0)
 
-    const direct = resolve(root, 'direct-codex'); const replacement = resolve(root, 'replacement-codex')
-    writeFileSync(direct, script('test-1')); writeFileSync(replacement, script('evil')); chmodSync(direct, 0o700); chmodSync(replacement, 0o700)
+    const direct = resolve(root, 'direct-codex')
+    writeFileSync(direct, script('test-1')); chmodSync(direct, 0o700)
     const directProfile = { codexBin: direct, codexHome: root }
     const measuredDirect = measureCodexAppServerBinary(directProfile, { expected, cache: new Map(), temporaryRoot: temp })
-    renameSync(replacement, direct)
+    const snapshotBytes = readFileSync(measuredDirect.snapshotPath)
+    writeFileSync(direct, script('evil')); chmodSync(direct, 0o700)
+    assert.deepEqual(readFileSync(measuredDirect.snapshotPath), snapshotBytes)
     assert.throws(() => AppServerAdapter.spawn(directProfile, { cwd: root, schemaMeasurement: measuredDirect, spawnFn: () => { spawns++; return fakeChild() } }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
     assert.equal(spawns, 0)
+
+    writeFileSync(direct, script('test-1')); chmodSync(direct, 0o700)
+    const measuredSnapshot = measureCodexAppServerBinary(directProfile, { expected, cache: new Map(), temporaryRoot: temp })
+    const replacement = resolve(root, 'snapshot-replacement'); writeFileSync(replacement, script('evil')); chmodSync(replacement, 0o500); renameSync(replacement, measuredSnapshot.snapshotPath)
+    assert.throws(() => AppServerAdapter.spawn(directProfile, { cwd: root, schemaMeasurement: measuredSnapshot, spawnFn: () => { spawns++; return fakeChild() } }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    assert.equal(spawns, 0)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('spawn probe binds the running native inode and ignores later snapshot pathname replacement', async () => {
+  if (process.platform !== 'linux') return
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-proc-exe-'))
+  try {
+    const source = resolve(root, 'native-codex'); copyFileSync('/bin/cat', source); chmodSync(source, 0o700)
+    const bundle = '{"native":"schema"}\n'; const expected = { cliVersion: 'native-test', bundleSha256: createHash('sha256').update(bundle).digest('hex') }
+    const temp = resolve(root, 'temporary'); mkdirSync(temp)
+    const fakeMeasure = (_file, args) => {
+      if (args[0] === '--version') return { status: 0, signal: null, stdout: 'codex-cli native-test\n', stderr: '' }
+      const out = args[args.indexOf('--out') + 1]; mkdirSync(out, { recursive: true }); writeFileSync(resolve(out, 'codex_app_server_protocol.schemas.json'), bundle)
+      return { status: 0, signal: null, stdout: '', stderr: '' }
+    }
+    const nativeProfile = { codexBin: source, codexHome: root }
+    const measured = measureCodexAppServerBinary(nativeProfile, { expected, cache: new Map(), temporaryRoot: temp, spawnSyncFn: fakeMeasure })
+    const adapter = AppServerAdapter.spawn(nativeProfile, { cwd: root, schemaMeasurement: measured, spawnFn: (file, _args, options) => spawn(file, [], options) })
+    const first = await adapter.verifySpawnedExecutable(); assert.equal(first.sha256, measured.snapshotIdentity.sha256)
+    const replacement = resolve(root, 'replacement-sleep'); copyFileSync('/bin/sleep', replacement); chmodSync(replacement, 0o500); renameSync(replacement, measured.snapshotPath)
+    const second = await verifySpawnedAppServerExecutable(adapter.child, measured); assert.equal(second.ino, measured.snapshotIdentity.ino)
+    await adapter.shutdown({ timeoutMs: 50 })
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('spawn probe kills a child that executes replacement bytes after measurement', async () => {
+  if (process.platform !== 'linux') return
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-proc-mismatch-'))
+  try {
+    const source = resolve(root, 'native-codex'); copyFileSync('/bin/cat', source); chmodSync(source, 0o700)
+    const bundle = '{"native":"schema"}\n'; const expected = { cliVersion: 'native-test', bundleSha256: createHash('sha256').update(bundle).digest('hex') }
+    const temp = resolve(root, 'temporary'); mkdirSync(temp)
+    const fakeMeasure = (_file, args) => {
+      if (args[0] === '--version') return { status: 0, signal: null, stdout: 'codex-cli native-test\n', stderr: '' }
+      const out = args[args.indexOf('--out') + 1]; mkdirSync(out, { recursive: true }); writeFileSync(resolve(out, 'codex_app_server_protocol.schemas.json'), bundle)
+      return { status: 0, signal: null, stdout: '', stderr: '' }
+    }
+    const nativeProfile = { codexBin: source, codexHome: root }
+    const measured = measureCodexAppServerBinary(nativeProfile, { expected, cache: new Map(), temporaryRoot: temp, spawnSyncFn: fakeMeasure })
+    const child = spawn('/bin/sleep', ['10'], { stdio: ['pipe', 'pipe', 'pipe'] })
+    await assert.rejects(() => verifySpawnedAppServerExecutable(child, measured, { timeoutMs: 100 }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    assert.equal(child.killed, true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('stale app-server snapshot cleanup is prefix, owner and live-process constrained', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-stale-snapshot-'))
+  try {
+    const startTime = pid => readFileSync(`/proc/${pid}/stat`, 'utf8').slice(readFileSync(`/proc/${pid}/stat`, 'utf8').lastIndexOf(') ') + 2).trim().split(/\s+/)[19]
+    const make = (name, owner, mode = 0o700) => {
+      const directory = resolve(root, name); mkdirSync(directory, { mode }); chmodSync(directory, mode)
+      writeFileSync(resolve(directory, 'owner.json'), `${JSON.stringify(owner)}\n`, { mode: 0o600 }); chmodSync(resolve(directory, 'owner.json'), 0o600)
+      const old = new Date(Date.now() - 60_000); utimesSync(directory, old, old); return directory
+    }
+    const dead = make('.cyf-app-server-bin-Ab12Cd', { schemaVersion: 1, pid: 99999999, startTime: '1', nonce: 'dead-dead-dead-dead' })
+    const active = make('.cyf-app-server-bin-Ef34Gh', { schemaVersion: 1, pid: process.pid, startTime: startTime(process.pid), nonce: 'live-live-live-live' })
+    const foreign = make('not-runtime-snapshot', { schemaVersion: 1, pid: 99999999, startTime: '1', nonce: 'dead-dead-dead-dead' })
+    assert.equal(reclaimStaleCodexAppServerSnapshots(root, { graceMs: 0 }), 1)
+    assert.equal(readdirSync(root).includes(dead.split('/').at(-1)), false); assert.equal(readdirSync(root).includes(active.split('/').at(-1)), true); assert.equal(readdirSync(root).includes(foreign.split('/').at(-1)), true)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
