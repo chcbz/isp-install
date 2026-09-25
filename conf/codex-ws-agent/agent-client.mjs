@@ -33,9 +33,9 @@ import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallState
 import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
-import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing } from './chat-runtime.mjs'
-import { AppServerAdapter } from './app-server-adapter.mjs'
-export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter }
+import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
+import { AppServerAdapter, measureCodexAppServerBinary } from './app-server-adapter.mjs'
+export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract }
 
 const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
 const WORKSPACE_FILE_TOOLCHAIN_DIR = resolve(AGENT_RELEASE_ROOT, '.toolchain')
@@ -258,6 +258,29 @@ const validateRawDurableLongTokens = text => {
   ws(); if (text[index] === '{') objectValue([])
 }
 
+const semanticLongPath = (path, parent = null) => {
+  const normalized = path[0] === 'payload' ? path.slice(1) : path
+  if (normalized.includes('metadata')) return false // API metadata is non-authoritative DATA and may retain legacy JSON numbers.
+  const field = normalized.at(-1)
+  if (isRawLongPath(path)) return true
+  if (['occurredAt', 'createdAt', 'updatedAt', 'stateVersion', 'lastDeltaSeq', 'fencingToken', 'attemptCount'].includes(field)) return true
+  if (field && field !== 'schemaVersion' && /(?:Generation|Revision|Version|Sequence|Seq)$/.test(field)) return true
+  if (field === 'id' && (['conversation', 'userMessage'].includes(normalized.at(-2)) || parent?.type === 'message')) return true
+  return false
+}
+const validateDurableLongObject = root => {
+  const durable = root?.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED' || root?.payload?.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'
+  if (!durable) return
+  const walk = (value, path = [], parent = null) => {
+    if (semanticLongPath(path, parent) && value !== null && !canonicalLongString(value)) {
+      throw new AgentProtocolError('INVALID_LONG_WIRE_TYPE', `${path.join('.')} must be a canonical decimal string <= Long.MAX_VALUE`)
+    }
+    if (Array.isArray(value)) value.forEach((item, index) => walk(item, [...path, String(index)], value))
+    else if (value && typeof value === 'object') for (const [key, item] of Object.entries(value)) walk(item, [...path, key], value)
+  }
+  walk(root)
+}
+
 const canonicalTypeAlias = type => {
   if (CANONICAL_MESSAGE_TYPES.has(type)) return type
   switch (type) {
@@ -307,6 +330,7 @@ export const normalizeInboundMessage = raw => {
       throw new AgentProtocolError('INVALID_JSON', `Invalid JSON message: ${error.message}`)
     }
   }
+  validateDurableLongObject(outer)
   if (!isObject(outer)) {
     throw new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object')
   }
@@ -541,6 +565,9 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
     chatInboxMaxFiles: parsePositiveInteger(profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles, 1024),
     chatInboxMaxBytes: parsePositiveInteger(profile.chatInboxMaxBytes ?? fallback.chatInboxMaxBytes, 64 * 1024 * 1024),
+    chatArchiveMaxFiles: parsePositiveInteger(profile.chatArchiveMaxFiles ?? fallback.chatArchiveMaxFiles, 256),
+    chatArchiveMaxBytes: parsePositiveInteger(profile.chatArchiveMaxBytes ?? fallback.chatArchiveMaxBytes, 16 * 1024 * 1024),
+    chatArchiveRetentionMs: parsePositiveInteger(profile.chatArchiveRetentionMs ?? fallback.chatArchiveRetentionMs, 7 * 24 * 60 * 60 * 1000),
     abilities: parseStringList(profile.abilities ?? fallback.abilities),
     skills: parseStringList(profile.skills ?? fallback.skills),
     workspacePolicyId: profile.workspacePolicyId || fallback.workspacePolicyId || '',
@@ -581,6 +608,9 @@ const legacyProfile = () => normalizeProfile({
   trueDeltaEnabled: process.env.CODEX_TRUE_DELTA_ENABLED || false,
   chatInboxMaxFiles: process.env.CODEX_CHAT_INBOX_MAX_FILES || 1024,
   chatInboxMaxBytes: process.env.CODEX_CHAT_INBOX_MAX_BYTES || 67108864,
+  chatArchiveMaxFiles: process.env.CODEX_CHAT_ARCHIVE_MAX_FILES || 256,
+  chatArchiveMaxBytes: process.env.CODEX_CHAT_ARCHIVE_MAX_BYTES || 16777216,
+  chatArchiveRetentionMs: process.env.CODEX_CHAT_ARCHIVE_RETENTION_MS || 604800000,
   workspacePolicyId: process.env.CODEX_WORKSPACE_POLICY_ID || '',
   workspaceRole: process.env.CODEX_WORKSPACE_ROLE || 'coder',
   workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
@@ -2239,6 +2269,7 @@ export class AgentMessageProcessor {
     this.chatAckOutbox = chatAckOutbox
     this.lanes = lanes || new FairLaneScheduler()
     this.activeChats = new Map()
+    this.chatAckRetries = new Map()
     this.drainPromise = null
     this.chatActive = false
     this.commandActive = false
@@ -2513,6 +2544,8 @@ export class AgentMessageProcessor {
   stop() {
     this.stopped = true
     this.paused = true
+    for (const retry of this.chatAckRetries.values()) clearTimeout(retry.timer)
+    this.chatAckRetries.clear()
   }
 
   isBusy() {
@@ -2577,6 +2610,23 @@ export class AgentMessageProcessor {
   _chatTurnKey(message) { return [message.tenantId, message.clientId, message.ownerJiacn, message.targetAgentId, message.conversationId, message.conversationGeneration].join(':') }
   _replayChatAcks() { if (!this.chatAckOutbox || !this.sendFn) return 0; try { return this.chatAckOutbox.drain(this.sendFn) } catch (error) { this.onReject(new AgentProtocolError('CHAT_ACK_OUTBOX_ERROR', error.message), {}); return 0 } }
   _emitChatAck(message, extra = {}) { if (!this.chatAckOutbox) return false; this.chatAckOutbox.enqueue(buildChatDispatchAck(this.profile, message, extra)); this._replayChatAcks(); return true }
+  _retryChatAck(message, extra, cause) {
+    const key = `${message.messageId}:${message.dispatchId}:${extra.status || ''}`
+    if (this.chatAckRetries.has(key) || this.stopped) return
+    const retry = { attempt: 0, timer: null }
+    const run = () => {
+      if (this.stopped) { this.chatAckRetries.delete(key); return }
+      try { this._emitChatAck(message, extra); this.chatAckRetries.delete(key) }
+      catch (error) {
+        retry.attempt++
+        const delay = Math.min(5000, 50 * (2 ** Math.min(retry.attempt, 6)))
+        retry.timer = setTimeout(run, delay); retry.timer.unref?.()
+      }
+    }
+    this.chatAckRetries.set(key, retry)
+    this.onReject(new AgentProtocolError('CHAT_ACK_OUTBOX_ERROR', cause.message), message.rawPayload || message)
+    retry.timer = setTimeout(run, 50); retry.timer.unref?.()
+  }
   _schedulePendingChats() { if (!this.chatInbox || this.paused || this.stopped) return; for (const item of this.chatInbox.listPending()) this._scheduleChat(item) }
   _scheduleChat(item) {
     if (!item || this.activeChats.has(item.key)) return
@@ -2716,7 +2766,8 @@ export class AgentMessageProcessor {
           let accepted
           try { accepted = this.chatInbox.accept(message) }
           catch (error) { const protocolError = new AgentProtocolError(error.code || 'CHAT_INBOX_ERROR', error.message); this.onReject(protocolError, raw); return { kind: 'rejected', error: protocolError } }
-          this._emitChatAck(message, { status: accepted.accepted ? 'received' : 'duplicate' })
+          const ack = { status: accepted.accepted ? 'received' : 'duplicate' }
+          try { this._emitChatAck(message, ack) } catch (error) { this._retryChatAck(message, ack, error) }
           if (!accepted.accepted) return { kind: 'chat-duplicate', dispatchId: message.dispatchId }
           this._scheduleChat(accepted.item)
           return { kind: 'chat-accepted', dispatchId: message.dispatchId }
@@ -3948,6 +3999,10 @@ const appServerReadbackSummary = adapter => {
     toolCount: tools.length,
     configDigest: canonicalSha256(readback.config || {}),
     toolCatalogDigest: canonicalSha256(readback.tools || {}),
+    schemaMeasured: readback.schema?.measured === true,
+    schemaBundleSha256: readback.schema?.bundleSha256 || '',
+    binaryIdentityDigest: readback.schema?.binaryIdentityDigest || '',
+    hostedWireContract: readback.hostedWireContract || hostedWireContractReadback() || null,
     policy: 'read-only-constrained; approval-never-is-not-deny-all'
   }
 }
@@ -3966,7 +4021,7 @@ export const runFastChat = async (profile, message, {
   const selectedAdapter = adapter || (adapterPromise ? await adapterPromise.catch(() => null) : null)
   if (!selectedAdapter || !chatWorkdir) return legacy('APP_SERVER_UNAVAILABLE')
   const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
-  const effectiveEnginePolicyHash = enginePolicyHash || canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType })
+  const effectiveEnginePolicyHash = enginePolicyHash || canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {} })
   const effectiveToolPolicyHash = toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
   const effectiveInstructionSourceHash = instructionSourceHash || canonicalSha256({ source: 'runtime-static', instructions: FAST_CHAT_INSTRUCTIONS })
   const effectiveModelConfigHash = modelConfigHash || canonicalSha256({ model: profile.chatModel || profile.codexModel || 'default', effort: profile.chatReasoningEffort || '', models: selectedAdapter.readback?.models || {}, config: selectedAdapter.readback?.config || {} })
@@ -4036,6 +4091,12 @@ const profileConfigurationErrors = profile => {
   const chatInboxMaxBytes = profile.chatInboxMaxBytes ?? 64 * 1024 * 1024
   if (!Number.isSafeInteger(chatInboxMaxFiles) || chatInboxMaxFiles < 1 || chatInboxMaxFiles > 100000) errors.push('chatInboxMaxFiles must be an integer from 1 to 100000')
   if (!Number.isSafeInteger(chatInboxMaxBytes) || chatInboxMaxBytes < 4096 || chatInboxMaxBytes > 10737418240) errors.push('chatInboxMaxBytes must be an integer from 4096 to 10737418240')
+  const chatArchiveMaxFiles = profile.chatArchiveMaxFiles ?? 256
+  const chatArchiveMaxBytes = profile.chatArchiveMaxBytes ?? 16 * 1024 * 1024
+  const chatArchiveRetentionMs = profile.chatArchiveRetentionMs ?? 7 * 24 * 60 * 60 * 1000
+  if (!Number.isSafeInteger(chatArchiveMaxFiles) || chatArchiveMaxFiles < 1 || chatArchiveMaxFiles > 100000) errors.push('chatArchiveMaxFiles must be an integer from 1 to 100000')
+  if (!Number.isSafeInteger(chatArchiveMaxBytes) || chatArchiveMaxBytes < 4096 || chatArchiveMaxBytes > 10737418240) errors.push('chatArchiveMaxBytes must be an integer from 4096 to 10737418240')
+  if (!Number.isSafeInteger(chatArchiveRetentionMs) || chatArchiveRetentionMs < 1000 || chatArchiveRetentionMs > 31536000000) errors.push('chatArchiveRetentionMs must be an integer from 1000 to 31536000000')
   if (!Number.isSafeInteger(profile.codexTimeoutMs) || profile.codexTimeoutMs < 0 || profile.codexTimeoutMs > 2147483647) {
     errors.push('codexTimeoutMs must be an integer from 0 to 2147483647 (0 disables the timeout)')
   }
@@ -4581,6 +4642,7 @@ const createProfileState = profile => {
       forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
     })
     : ''
+  const hostedWireContract = profile.fastChatEnabled && profile.appServerEnabled ? verifyHostedWireContract() : null
   const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 256 })
   const legacyExecutionGate = new SerialExecutionGate()
   const sendAckFn = envelope => sendRaw(envelope, profile)
@@ -4644,43 +4706,68 @@ const createProfileState = profile => {
     managedRegistered: false,
     managedEngine: null,
     appServerAdapter: null,
+    appServerStartingAdapter: null,
     appServerPromise: null,
     appServerRestartTimer: null,
     appServerRestartAttempt: 0,
     appServerNotBefore: 0,
+    appServerExitListener: null,
+    appServerPermanentFailure: null,
+    hostedWireContract,
+    disposed: false,
     ensureAppServer: null
   }
   if (profile.fastChatEnabled && profile.appServerEnabled) {
+    const isCurrent = () => !state.disposed && (!profileStates.has(profile.agentId) || profileStates.get(profile.agentId) === state)
     const scheduleRestart = () => {
-      if (shuttingDown || state.appServerRestartTimer) return
+      if (shuttingDown || !isCurrent() || state.appServerPermanentFailure || state.appServerRestartTimer) return
       const delay = Math.min(30000, 250 * (2 ** Math.min(state.appServerRestartAttempt, 7)))
       state.appServerNotBefore = Date.now() + delay
-      state.appServerRestartTimer = setTimeout(() => { state.appServerRestartTimer = null; void state.ensureAppServer() }, delay)
+      state.appServerRestartTimer = setTimeout(() => {
+        state.appServerRestartTimer = null
+        if (isCurrent()) void state.ensureAppServer()
+      }, delay)
       state.appServerRestartTimer.unref?.()
     }
     state.ensureAppServer = () => {
+      if (!isCurrent() || state.appServerPermanentFailure) return Promise.resolve(null)
       if (state.appServerAdapter && !state.appServerAdapter.closed) return Promise.resolve(state.appServerAdapter)
       if (state.appServerPromise) return state.appServerPromise
       const delay = Math.max(0, state.appServerNotBefore - Date.now())
       state.appServerPromise = new Promise(resolvePromise => setTimeout(resolvePromise, delay)).then(async () => {
-        if (shuttingDown) return null
-        const adapter = AppServerAdapter.spawn(profile, { cwd: chatWorkdir })
-        try { await adapter.initialize() } catch (error) { adapter.close(error); throw error }
-        adapter.once('exit', () => {
+        if (shuttingDown || !isCurrent()) return null
+        const schemaMeasurement = measureCodexAppServerBinary(profile)
+        if (!isCurrent()) return null
+        const adapter = AppServerAdapter.spawn(profile, { cwd: chatWorkdir, schemaMeasurement })
+        state.appServerStartingAdapter = adapter
+        try { await adapter.initialize() } catch (error) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); throw error }
+        adapter.readback.hostedWireContract = hostedWireContract
+        if (!isCurrent()) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); return null }
+        state.appServerStartingAdapter = null
+        const exitListener = () => {
+          if (state.appServerExitListener !== exitListener) return
+          state.appServerExitListener = null
           if (state.appServerAdapter === adapter) state.appServerAdapter = null
-          state.appServerPromise = null; state.appServerRestartAttempt++; scheduleRestart()
-        })
+          state.appServerPromise = null
+          if (!isCurrent()) return
+          state.appServerRestartAttempt++; scheduleRestart()
+        }
+        state.appServerExitListener = exitListener
+        adapter.once('exit', exitListener)
         state.appServerAdapter = adapter; state.appServerRestartAttempt = 0; state.appServerNotBefore = 0
         return adapter
       }).catch(error => {
         state.appServerAdapter = null; state.appServerRestartAttempt++; state.appServerNotBefore = 0
+        if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') state.appServerPermanentFailure = error
         console.warn(`app-server unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
-        scheduleRestart(); return null
+        if (isCurrent() && !state.appServerPermanentFailure) scheduleRestart()
+        return null
       }).finally(() => { if (!state.appServerAdapter) state.appServerPromise = null })
       return state.appServerPromise
     }
     state.appServerPromise = state.ensureAppServer()
   }
+
   state.processor = new AgentMessageProcessor({
     profile,
     inbox,
@@ -4910,14 +4997,30 @@ const connectProfile = profile => {
   })
 }
 
-const disconnectProfile = (profile, reason = 'profile removed') => {
-  const state = getProfileState(profile)
-  if (!state) return
+export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) => {
+  if (!state || state.disposed) return
+  state.disposed = true
+  if (state.appServerRestartTimer) clearTimeout(state.appServerRestartTimer)
+  state.appServerRestartTimer = null
+  state.appServerNotBefore = 0
+  const adapter = state.appServerAdapter
+  const startingAdapter = state.appServerStartingAdapter
+  const exitListener = state.appServerExitListener
+  if (adapter && exitListener) adapter.off('exit', exitListener)
+  state.appServerExitListener = null
+  state.appServerAdapter = null
+  state.appServerStartingAdapter = null
+  state.appServerPromise = null
+  for (const candidate of new Set([adapter, startingAdapter].filter(Boolean))) await candidate.shutdown({ timeoutMs })
+}
+
+export const disposeProfileState = async (state, reason = 'profile removed') => {
+  if (!state || state.disposed) return
+  const profile = state.profile
+  await disposeAppServerState(state, { timeoutMs: 5000 })
   state.processor.pause()
-  state.resultReplayCancel?.()
-  state.resultReplayCancel = null
-  state.executionReportReplayCancel?.()
-  state.executionReportReplayCancel = null
+  state.resultReplayCancel?.(); state.resultReplayCancel = null
+  state.executionReportReplayCancel?.(); state.executionReportReplayCancel = null
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
@@ -4931,11 +5034,15 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
     setTimeout(() => terminateChild(profile, child, 'SIGKILL'), 5000)
   }
   state.processor.stop()
-  state.appServerAdapter?.close()
-  profileStates.delete(profile.agentId)
+  if (profileStates.get(profile.agentId) === state) profileStates.delete(profile.agentId)
 }
 
-const applyProfileConfig = (nextProfiles, nextDefaultProfileId, reason = 'config reload') => {
+const disconnectProfile = async (profile, reason = 'profile removed') => {
+  const state = getProfileState(profile)
+  if (state) await disposeProfileState(state, reason)
+}
+
+const applyProfileConfig = async (nextProfiles, nextDefaultProfileId, reason = 'config reload') => {
   const previousProfiles = config.profiles
   if (managedHostModule) nextProfiles = managedHostModule.preserveManagedProfiles(previousProfiles, nextProfiles)
   const previousByAgentId = new Map(previousProfiles.map(profile => [profile.agentId, profile]))
@@ -4950,7 +5057,7 @@ const applyProfileConfig = (nextProfiles, nextDefaultProfileId, reason = 'config
   }
   for (const previousProfile of previousProfiles) {
     const next = nextByAgentId.get(previousProfile.agentId)
-    if (!next || !sameProfileConfig(previousProfile, next)) disconnectProfile(previousProfile, reason)
+    if (!next || !sameProfileConfig(previousProfile, next)) await disconnectProfile(previousProfile, reason)
   }
   config.profiles = nextProfiles
   config.defaultProfileId = nextDefaultProfileId
@@ -4962,20 +5069,21 @@ const applyProfileConfig = (nextProfiles, nextDefaultProfileId, reason = 'config
       state.profile = nextProfile
       continue
     }
-    profileStates.set(nextProfile.agentId, createProfileState(nextProfile))
+    const created = createProfileState(nextProfile)
+    profileStates.set(nextProfile.agentId, created)
     connectProfile(nextProfile)
   }
   lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
 }
 
-const reloadProfiles = (reason = 'config reload') => {
+const reloadProfiles = async (reason = 'config reload') => {
   if (shuttingDown || shutdownStarted || profileReloadInFlight) return
   profileReloadInFlight = true
   try {
     const next = loadRuntimeConfig({ exitOnError: false })
     ensureProfiles(next.profiles, next.defaultProfileId, config.workspacePolicies, false)
     if (profileSignature(next.profiles, next.defaultProfileId) !== lastProfileSignature) {
-      applyProfileConfig(next.profiles, next.defaultProfileId, reason)
+      await applyProfileConfig(next.profiles, next.defaultProfileId, reason)
     }
   } catch (error) {
     console.warn(`profile config reload skipped | reason=${reason} | ${error.message}`)
@@ -4991,10 +5099,10 @@ const startProfileWatcher = () => {
   if (profilesFile) {
     const resolvedProfilesFile = resolve(profilesFile)
     watchFile(resolvedProfilesFile, { interval: config.profileReloadMs }, (current, previous) => {
-      if (current.mtimeMs !== previous.mtimeMs || current.size !== previous.size) reloadProfiles(`file changed: ${resolvedProfilesFile}`)
+      if (current.mtimeMs !== previous.mtimeMs || current.size !== previous.size) void reloadProfiles(`file changed: ${resolvedProfilesFile}`)
     })
   } else {
-    profileReloadTimer = setInterval(() => reloadProfiles('periodic CODEX_PROFILES check'), config.profileReloadMs)
+    profileReloadTimer = setInterval(() => { void reloadProfiles('periodic CODEX_PROFILES check') }, config.profileReloadMs)
   }
 }
 

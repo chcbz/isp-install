@@ -1,20 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import {
   buildContextEnvelope, validateChatDispatch, buildChatDispatchAck, PersistentChatInbox,
-  ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL
+  ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, verifyHostedWireContract
 } from '../chat-runtime.mjs'
-import { AppServerAdapter } from '../app-server-adapter.mjs'
-import { normalizeInboundMessage, runFastChat, MESSAGE_TYPES } from '../agent-client.mjs'
+import { AppServerAdapter, measureCodexAppServerBinary } from '../app-server-adapter.mjs'
+import { normalizeInboundMessage, runFastChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
 
 const profile = { profileId: 'profile-A', agentId: 'hosted-a', fastChatEnabled: false, appServerEnabled: false }
-const fixturePath = resolve(import.meta.dirname, 'fixtures', 'api-hosted-wire-0e879cc9.json')
+const fixturePath = resolve(import.meta.dirname, '..', 'contracts', 'api-hosted-wire-0e879cc9.json')
 const apiWire = () => JSON.parse(readFileSync(fixturePath, 'utf8'))
 const appContract = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'codex-app-server-0.153.4-contract.json'), 'utf8'))
 const normalizedWire = (extra = {}) => validateChatDispatch({ ...apiWire(), ...extra })
@@ -39,6 +41,10 @@ test('pinned Codex CLI 0.153.4 generated schemas match recorded digests and wire
 })
 
 test('API 0e879cc9 hostedWire golden is accepted exactly as schema v1 additive durable CHAT', () => {
+  const provenance = verifyHostedWireContract()
+  assert.equal(provenance.apiCommit, '0e879cc9dd8ff2927a9a5e56ea8cadc781105cb1')
+  assert.equal(provenance.fixtureSha256, 'b40a3abd3367e1740b14dc823458cb7b46922e2b9d0dd2521004d473e398a9f8')
+  assert.equal(provenance.provenanceStatus, 'PENDING_API_GENERATED_ARTIFACT')
   const raw = readFileSync(fixturePath, 'utf8')
   const message = normalizeInboundMessage(raw)
   assert.equal(message.schemaVersion, 1)
@@ -109,6 +115,8 @@ test('production Fast CHAT path emits only real schema-v1 delta/final with exact
     initialized: true, accountType: 'apiKey', modelCount: 0, toolCount: 0,
     configDigest: 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
     toolCatalogDigest: 'sha256:fe2f3b4ef49492d81cb350fb689bf9f9dff6cfd1817d72d6ff9fe3350e3d5e6a',
+    schemaMeasured: false, schemaBundleSha256: '', binaryIdentityDigest: '',
+    hostedWireContract: verifyHostedWireContract(),
     policy: 'read-only-constrained; approval-never-is-not-deny-all'
   })
 })
@@ -284,6 +292,7 @@ test('durable wire rejects numeric Long tokens, context drift, and non-canonical
   const nestedLong = structuredClone(wire); nestedLong.sourceVector.messageHighWatermark = 101; nestedLong.contextSnapshot.sourceVector.messageHighWatermark = 101
   nestedLong.payload.sourceVector.messageHighWatermark = 101; nestedLong.payload.contextSnapshot.sourceVector.messageHighWatermark = 101
   assert.throws(() => normalizeInboundMessage(JSON.stringify(nestedLong)), error => error.code === 'INVALID_LONG_WIRE_TYPE')
+  assert.throws(() => normalizeInboundMessage(nestedLong), error => error.code === 'INVALID_LONG_WIRE_TYPE')
   assert.throws(() => validateChatDispatch({ ...wire, contextHash: `${wire.contextHash}-drift` }), /CONTEXT_BINDING_MISMATCH/)
   assert.throws(() => validateChatDispatch({ ...wire, contextSnapshot: { ...wire.contextSnapshot, contextHash: 'sha256:' + '0'.repeat(64) } }), /CONTEXT_HASH_MISMATCH/)
 })
@@ -298,6 +307,84 @@ test('durable inbox applies hard file and byte backpressure before acceptance', 
     const tiny = new PersistentChatInbox({ rootDir: resolve(root, 'tiny'), profile, maxFiles: 2, maxBytes: 64 }); tiny.initialize()
     assert.throws(() => tiny.accept(normalizedWire()), error => error.code === 'CHAT_INBOX_CAPACITY_EXCEEDED')
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('cross-process profile lock keeps hot admission within one-file quota', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-cross-process-capacity-'))
+  try {
+    new PersistentChatInbox({ rootDir: root, profile, maxFiles: 1, maxBytes: 1024 * 1024 }).initialize()
+    const barrier = resolve(root, 'go'); const moduleUrl = pathToFileURL(resolve(import.meta.dirname, '..', 'chat-runtime.mjs')).href
+    const code = `import{existsSync,readFileSync}from'node:fs';import{PersistentChatInbox,validateChatDispatch}from ${JSON.stringify(moduleUrl)};const[root,barrier,fixture,id]=process.argv.slice(1);process.stdout.write('ready\\n');while(!existsSync(barrier))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);const wire=JSON.parse(readFileSync(fixture));const message=validateChatDispatch({...wire,messageId:'evt-'+id,dispatchId:'dispatch-'+id,dedupeKey:'tenant-a:owner-a:client-a:dispatch-'+id});try{new PersistentChatInbox({rootDir:root,profile:{profileId:'profile-A',agentId:'hosted-a'},maxFiles:1,maxBytes:1048576}).accept(message);process.stdout.write('accepted\\n')}catch(e){process.stdout.write((e.code||e.message)+'\\n')}`
+    const launch = id => new Promise((resolveResult, rejectResult) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', code, root, barrier, fixturePath, id], { stdio: ['ignore', 'pipe', 'pipe'] })
+      let stdout = ''; let stderr = ''; child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk })
+      child.on('error', rejectResult); child.on('close', status => status === 0 ? resolveResult(stdout.trim().split(/\s+/).at(-1)) : rejectResult(new Error(stderr)))
+    })
+    const one = launch('one'); const two = launch('two'); await new Promise(resolvePromise => setTimeout(resolvePromise, 50)); writeFileSync(barrier, 'go\n')
+    const results = await Promise.all([one, two]); assert.deepEqual(results.sort(), ['CHAT_INBOX_CAPACITY_EXCEEDED', 'accepted'])
+    assert.equal(new PersistentChatInbox({ rootDir: root, profile, maxFiles: 1, maxBytes: 1024 * 1024 }).usage().files, 1)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('archive has independent quota while compact dedupe evidence permits continuous admission', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-archive-quota-'))
+  try {
+    const inbox = new PersistentChatInbox({ rootDir: root, profile, maxFiles: 1, maxBytes: 1024 * 1024, archiveMaxFiles: 1, archiveMaxBytes: 1024 * 1024, archiveRetentionMs: 60_000 })
+    inbox.initialize(); const completed = []
+    for (let index = 1; index <= 4; index++) {
+      const message = normalizedWire({ messageId: `evt-continuous-${index}`, dispatchId: `dispatch-continuous-${index}`, dedupeKey: `tenant-a:owner-a:client-a:dispatch-continuous-${index}` })
+      const accepted = inbox.accept(message); const claimed = inbox.claim(accepted.key)
+      if (index === 4) inbox.cancelProcessing(claimed); else inbox.complete(claimed, { status: 'completed' })
+      completed.push(message)
+      assert.equal(inbox.usage().files, 0)
+    }
+    assert.ok(inbox.count('archive') <= 1)
+    assert.equal(inbox.count('ledger'), 4)
+    for (const message of completed) assert.equal(inbox.accept(message).duplicate, true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('completed processing marker is forward-settled to archive and dedupe ledger after restart', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-forward-settlement-'))
+  try {
+    const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+    const message = normalizedWire({ messageId: 'evt-forward', dispatchId: 'dispatch-forward', dedupeKey: 'tenant-a:owner-a:client-a:dispatch-forward' })
+    const accepted = inbox.accept(message); const claimed = inbox.claim(accepted.key)
+    writeFileSync(claimed.path, `${JSON.stringify({ ...claimed.record, state: 'COMPLETED', completedAt: Date.now(), result: { status: 'completed' } })}\n`)
+    const restarted = new PersistentChatInbox({ rootDir: root, profile }); const recovery = restarted.initialize()
+    assert.equal(recovery.forwardSettled, 1); assert.equal(recovery.recoveryRequired, 0)
+    assert.equal(restarted.findByKey(accepted.key).record.state, 'COMPLETED')
+    assert.equal(restarted.accept(message).duplicate, true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('actual codex binary version and generated experimental schema are measured fail-closed and cached', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-bin-measure-'))
+  try {
+    const bundle = '{"measured":"schema"}\n'; const digest = createHash('sha256').update(bundle).digest('hex')
+    const bin = resolve(root, 'fake-codex'); writeFileSync(bin, `#!/usr/bin/env node\nconst fs=require('fs'),p=require('path');if(process.argv[2]==='--version'){process.stdout.write('codex-cli test-1\\n');process.exit(0)}const i=process.argv.indexOf('--out');if(i<0)process.exit(2);fs.mkdirSync(process.argv[i+1],{recursive:true});fs.writeFileSync(p.join(process.argv[i+1],'codex_app_server_protocol.schemas.json'),${JSON.stringify(bundle)});\n`); chmodSync(bin, 0o700)
+    const temp = resolve(root, 'temporary'); mkdirSync(temp)
+    const expected = { cliVersion: 'test-1', bundleSha256: digest }; const cache = new Map()
+    const measured = measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp })
+    assert.equal(measured.measured, true); assert.equal(measured.bundleSha256, digest); assert.ok(measured.binaryIdentityDigest)
+    assert.strictEqual(measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp }), measured)
+    assert.deepEqual(readdirSync(temp), [])
+    assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, cliVersion: 'wrong' }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, bundleSha256: '0'.repeat(64) }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    assert.deepEqual(readdirSync(temp), [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('disposing an app-server profile clears restart and unbinds exit before shutdown', async () => {
+  let restarted = 0; let shutdown = 0
+  const adapter = new EventEmitter(); adapter.shutdown = async () => { shutdown++; adapter.emit('exit') }
+  const exitListener = () => { restarted++ }
+  adapter.once('exit', exitListener)
+  const state = { disposed: false, appServerRestartTimer: setTimeout(() => { restarted++ }, 20), appServerNotBefore: Date.now(), appServerAdapter: adapter, appServerExitListener: exitListener, appServerPromise: Promise.resolve(adapter) }
+  await disposeAppServerState(state, { timeoutMs: 5 })
+  await new Promise(resolvePromise => setTimeout(resolvePromise, 30))
+  assert.equal(state.disposed, true); assert.equal(shutdown, 1); assert.equal(restarted, 0)
+  assert.equal(state.appServerAdapter, null); assert.equal(state.appServerRestartTimer, null)
 })
 
 test('turn/completed honors real 0.153.4 status and error instead of method name alone', async () => {

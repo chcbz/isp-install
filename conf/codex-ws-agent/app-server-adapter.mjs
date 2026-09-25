@@ -1,24 +1,69 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 
 const id = value => typeof value === 'string' && value.length > 0
 const deniedMethods = /(?:command|file|permission|network|mcp|dynamic.?tool|tool)/i
 const terminalMethods = new Set(['turn/failed', 'turn/cancelled', 'turn/interrupted'])
 export const CODEX_APP_SERVER_SCHEMA = Object.freeze({ cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' })
 
+const binaryMeasurementCache = new Map()
+const failTrust = message => { const error = new Error(message); error.code = 'APP_SERVER_BINARY_UNTRUSTED'; return error }
+export function measureCodexAppServerBinary(profile, {
+  expected = CODEX_APP_SERVER_SCHEMA, spawnSyncFn = spawnSync, cache = binaryMeasurementCache, temporaryRoot = tmpdir()
+} = {}) {
+  let binary; let stat; let binarySha256
+  try {
+    binary = realpathSync(profile.codexBin); stat = statSync(binary)
+    if (!stat.isFile()) throw new Error('not a regular file')
+    binarySha256 = createHash('sha256').update(readFileSync(binary)).digest('hex')
+  } catch (error) { throw failTrust(`CODEX_APP_SERVER_BINARY_MEASUREMENT_FAILED:${error.code || error.message}`) }
+  const cacheKey = [binary, stat.dev, stat.ino, stat.size, stat.mtimeMs, binarySha256, expected.cliVersion, expected.bundleSha256].join(':')
+  if (cache.has(cacheKey)) return cache.get(cacheKey)
+  const version = spawnSyncFn(binary, ['--version'], { encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome || '' } })
+  if (version.error || version.status !== 0 || version.signal) throw failTrust('CODEX_APP_SERVER_VERSION_MEASUREMENT_FAILED')
+  const versionOutput = String(version.stdout || '').trim()
+  if (versionOutput !== `codex-cli ${expected.cliVersion}`) throw failTrust(`CODEX_APP_SERVER_VERSION_MISMATCH:${versionOutput}`)
+  const generated = mkdtempSync(resolve(temporaryRoot, 'codex-app-server-schema-'))
+  try {
+    try {
+      const schema = spawnSyncFn(binary, ['app-server', 'generate-json-schema', '--experimental', '--out', generated], {
+        encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+        env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome || '' }
+      })
+      if (schema.error || schema.status !== 0 || schema.signal) throw failTrust('CODEX_APP_SERVER_SCHEMA_MEASUREMENT_FAILED')
+      const bundle = readFileSync(resolve(generated, 'codex_app_server_protocol.schemas.json'))
+      const bundleSha256 = createHash('sha256').update(bundle).digest('hex')
+      if (bundleSha256 !== expected.bundleSha256) throw failTrust(`CODEX_APP_SERVER_SCHEMA_MISMATCH:${bundleSha256}`)
+      const measurement = Object.freeze({
+        measured: true, cliVersion: expected.cliVersion, versionOutput, bundleSha256,
+        binarySha256, binaryIdentityDigest: createHash('sha256').update(cacheKey).digest('hex'),
+        binaryStat: { size: String(stat.size), mtimeMs: String(Math.trunc(stat.mtimeMs)), dev: String(stat.dev), ino: String(stat.ino) }
+      })
+      cache.set(cacheKey, measurement); return measurement
+    } catch (error) {
+      if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') throw error
+      throw failTrust(`CODEX_APP_SERVER_SCHEMA_MEASUREMENT_FAILED:${error.code || error.message}`)
+    }
+  } finally { rmSync(generated, { recursive: true, force: true }) }
+}
+
 export class AppServerAdapter extends EventEmitter {
-  static spawn(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000 } = {}) {
+  static spawn(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000, schemaMeasurement = null } = {}) {
     const child = spawnFn(profile.codexBin, ['app-server'], {
       cwd, shell: false, stdio: ['pipe', 'pipe', 'pipe'],
       env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome, NO_PROXY: '*', no_proxy: '*' }
     })
-    return new AppServerAdapter({ child, requestTimeoutMs })
+    return new AppServerAdapter({ child, requestTimeoutMs, schemaMeasurement })
   }
-  constructor({ child, send = null, now = Date.now, requestTimeoutMs = 15000, maxStderrBytes = 1024 * 1024 } = {}) {
+  constructor({ child, send = null, now = Date.now, requestTimeoutMs = 15000, maxStderrBytes = 1024 * 1024, schemaMeasurement = null } = {}) {
     super(); if (!child) throw new Error('APP_SERVER_CHILD_REQUIRED')
     this.child = child; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.maxStderrBytes = maxStderrBytes
     this.nextId = 1; this.pending = new Map(); this.buffer = ''; this.stderrBytes = 0; this.closed = false
-    this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [], schema: CODEX_APP_SERVER_SCHEMA }
+    this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [], schema: schemaMeasurement || { ...CODEX_APP_SERVER_SCHEMA, measured: false } }
     this.send = send || (frame => child.stdin.write(`${JSON.stringify(frame)}\n`))
     child.stdout.on('data', chunk => this._onData(chunk.toString('utf8')))
     child.stderr?.on('data', chunk => { this.stderrBytes += chunk.length; if (this.stderrBytes > this.maxStderrBytes) this.close(new Error('APP_SERVER_STDERR_LIMIT')) })
@@ -136,6 +181,21 @@ export class AppServerAdapter extends EventEmitter {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(reason) } this.pending.clear()
     try { if (this.child.exitCode === null && !this.child.killed) this.child.kill('SIGTERM') } catch {}
     this.emit('exit', reason)
+  }
+  async shutdown({ timeoutMs = 5000 } = {}) {
+    const child = this.child
+    this.close(new Error('APP_SERVER_DISPOSED'))
+    if (child.exitCode !== null) return
+    await new Promise(resolveShutdown => {
+      let settled = false
+      const finish = () => { if (settled) return; settled = true; clearTimeout(timer); child.off('exit', finish); resolveShutdown() }
+      child.once('exit', finish)
+      const timer = setTimeout(() => {
+        try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}
+        setTimeout(finish, 100).unref?.()
+      }, timeoutMs)
+      timer.unref?.()
+    })
   }
   _onData(data) {
     this.buffer += data

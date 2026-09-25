@@ -121,7 +121,7 @@ const durableChat = (number = 1, overrides = {}) => {
 const createChatRuntime = (rootDir, options = {}) => {
   const inbox = new PersistentCommandInbox({ rootDir, profile })
   const chatInbox = new PersistentChatInbox({ rootDir, profile })
-  const chatAckOutbox = new ChatAckOutbox({ rootDir, profile })
+  const chatAckOutbox = options.chatAckOutbox || new ChatAckOutbox({ rootDir, profile })
   const sent = []
   const processor = new AgentMessageProcessor({
     profile,
@@ -293,6 +293,27 @@ test('durable CHAT duplicate only re-ACKs while fingerprint conflict neither ACK
   assert.equal(conflict.kind, 'rejected')
   assert.equal(conflict.error.code, 'CHAT_FINGERPRINT_CONFLICT')
   assert.equal(runtime.sent.length, ackCount)
+})
+
+test('CHAT admission still schedules and retries ACK when initial durable ACK enqueue fails', async () => {
+  let attempts = 0; const pending = []
+  const flakyOutbox = {
+    initialize() { return this },
+    enqueue(envelope) { attempts++; if (attempts === 1) throw new Error('injected ACK write failure'); pending.push(envelope) },
+    drain(send) { let count = 0; while (pending.length && send(pending[0])) { pending.shift(); count++ } return count },
+    count() { return pending.length }
+  }
+  const runs = []; const rejected = []; const runtime = createChatRuntime(temporaryDirectory(), {
+    chatAckOutbox: flakyOutbox,
+    runChat: async message => { runs.push(message.dispatchId); return { status: 'completed' } },
+    onReject: error => rejected.push(error.code)
+  })
+  runtime.processor.start()
+  const result = await runtime.processor.handle(durableChat(30))
+  await runtime.processor.waitForIdle(); await new Promise(resolvePromise => setTimeout(resolvePromise, 150))
+  assert.equal(result.kind, 'chat-accepted'); assert.deepEqual(runs, ['chat-dispatch-30'])
+  assert.ok(attempts >= 2); assert.equal(runtime.sent.some(envelope => envelope.status === 'received'), true)
+  assert.deepEqual(rejected, ['CHAT_ACK_OUTBOX_ERROR'])
 })
 
 test('CHAT and COMMAND lanes start independently in both arrival orders and after pending restart', async () => {

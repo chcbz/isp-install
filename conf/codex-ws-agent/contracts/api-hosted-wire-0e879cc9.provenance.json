@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "apiCommit": "0e879cc9dd8ff2927a9a5e56ea8cadc781105cb1",
+  "fixtureFile": "api-hosted-wire-0e879cc9.json",
+  "fixtureSha256": "b40a3abd3367e1740b14dc823458cb7b46922e2b9d0dd2521004d473e398a9f8",
+  "provenanceStatus": "PENDING_API_GENERATED_ARTIFACT",
+  "note": "Temporary byte-preserved runtime contract. Replace only with the API repository artifact generated through ChatDeliberationService.eventPayload and ChatDeliberationOutboxRelay.hostedWire."
+}

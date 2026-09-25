@@ -5,6 +5,7 @@ import {
   readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync
 } from 'node:fs'
 import { dirname, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const CHAT_CONTEXT_ENVELOPE_VERSION = 2
 export const MAX_CONTEXT_SNAPSHOT_BYTES = 256 * 1024
@@ -15,6 +16,7 @@ export const MAX_CHAT_CONTENT_BYTES = 64 * 1024
 export const MAX_LONG_DECIMAL = 9223372036854775807n
 export const CHAT_ACK_TYPE = 'chat.dispatch.ack'
 export const CHAT_DELIVERY_SEMANTICS = 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'
+export const API_HOSTED_WIRE_COMMIT = '0e879cc9dd8ff2927a9a5e56ea8cadc781105cb1'
 const MAX_QUEUE = 256
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -51,6 +53,27 @@ const canonical = value => {
   return JSON.stringify(value)
 }
 export const canonicalSha256 = value => `sha256:${createHash('sha256').update(canonical(value)).digest('hex')}`
+
+const contractRoot = resolve(dirname(fileURLToPath(import.meta.url)), 'contracts')
+let verifiedHostedWireContract = null
+export function verifyHostedWireContract({
+  fixturePath = resolve(contractRoot, 'api-hosted-wire-0e879cc9.json'),
+  provenancePath = resolve(contractRoot, 'api-hosted-wire-0e879cc9.provenance.json')
+} = {}) {
+  const fixture = readFileSync(fixturePath)
+  const provenance = JSON.parse(readFileSync(provenancePath, 'utf8'))
+  const digest = createHash('sha256').update(fixture).digest('hex')
+  if (provenance.schemaVersion !== 1 || provenance.apiCommit !== API_HOSTED_WIRE_COMMIT ||
+      provenance.fixtureFile !== 'api-hosted-wire-0e879cc9.json' || provenance.fixtureSha256 !== digest ||
+      !['PENDING_API_GENERATED_ARTIFACT', 'API_GENERATED'].includes(provenance.provenanceStatus)) {
+    throw new Error('API_HOSTED_WIRE_CONTRACT_PROVENANCE_INVALID')
+  }
+  const wire = JSON.parse(fixture.toString('utf8'))
+  validateChatDispatch(wire)
+  verifiedHostedWireContract = Object.freeze({ apiCommit: provenance.apiCommit, fixtureSha256: digest, provenanceStatus: provenance.provenanceStatus, measured: true })
+  return verifiedHostedWireContract
+}
+export const hostedWireContractReadback = () => verifiedHostedWireContract
 
 const validateJsonValue = (value, name, depth = 0) => {
   if (depth > 8) throw new Error(`${name}_DEPTH_INVALID`)
@@ -164,26 +187,116 @@ export const chatFingerprint = message => canonicalSha256(fingerprintSource(mess
 export const durableChatKey = message => createHash('sha256').update(message.dedupeKey).digest('hex')
 
 export class PersistentChatInbox {
-  constructor({ rootDir, profile, maxFiles = profile.chatInboxMaxFiles || 1024, maxBytes = profile.chatInboxMaxBytes || 64 * 1024 * 1024 }) {
+  constructor({
+    rootDir, profile,
+    maxFiles = profile.chatInboxMaxFiles || 1024,
+    maxBytes = profile.chatInboxMaxBytes || 64 * 1024 * 1024,
+    archiveMaxFiles = profile.chatArchiveMaxFiles || 256,
+    archiveMaxBytes = profile.chatArchiveMaxBytes || 16 * 1024 * 1024,
+    archiveRetentionMs = profile.chatArchiveRetentionMs || 7 * 24 * 60 * 60 * 1000,
+    lockTimeoutMs = 2000
+  }) {
     this.profile = profile; this.maxFiles = maxFiles; this.maxBytes = maxBytes
+    this.archiveMaxFiles = archiveMaxFiles; this.archiveMaxBytes = archiveMaxBytes; this.archiveRetentionMs = archiveRetentionMs; this.lockTimeoutMs = lockTimeoutMs
     this.dir = resolve(rootDir, 'chat-inbox', Buffer.from(profile.agentId).toString('hex'))
     this.pending = resolve(this.dir, 'pending'); this.processing = resolve(this.dir, 'processing'); this.recovery = resolve(this.dir, 'recovery'); this.archive = resolve(this.dir, 'archive')
+    this.dedupePath = resolve(this.dir, 'dedupe-index.json'); this.lockPath = resolve(this.dir, '.profile.lock'); this.dedupe = {}
+  }
+  _sleep(milliseconds) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds) }
+  _withLock(operation) {
+    ensureDirectory(this.dir)
+    const deadline = Date.now() + this.lockTimeoutMs
+    let fd
+    while (fd === undefined) {
+      try {
+        fd = openSync(this.lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+        writeFileSync(fd, `${process.pid}\n`); fsyncSync(fd); directoryFsync(this.dir)
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error
+        try {
+          const age = Date.now() - statSync(this.lockPath).mtimeMs
+          const owner = Number.parseInt(readFileSync(this.lockPath, 'utf8'), 10)
+          let alive = Number.isInteger(owner) && owner > 0
+          if (alive) { try { process.kill(owner, 0) } catch (probe) { if (probe.code === 'ESRCH') alive = false } }
+          if (!alive && age > 30000) { unlinkSync(this.lockPath); directoryFsync(this.dir); continue }
+        } catch (probe) { if (probe.code === 'ENOENT') continue }
+        if (Date.now() >= deadline) { const timeout = new Error('CHAT_INBOX_LOCK_TIMEOUT'); timeout.code = 'CHAT_INBOX_CAPACITY_EXCEEDED'; throw timeout }
+        this._sleep(5)
+      }
+    }
+    try { return operation() } finally {
+      closeSync(fd)
+      try { unlinkSync(this.lockPath); directoryFsync(this.dir) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    }
+  }
+  _loadDedupe() {
+    if (!existsSync(this.dedupePath)) { this.dedupe = {}; return }
+    const stored = JSON.parse(readFileSync(this.dedupePath, 'utf8'))
+    if (stored.schemaVersion !== 1 || stored.profileId !== this.profile.profileId || stored.agentId !== this.profile.agentId || !object(stored.entries)) throw new Error('CHAT_DEDUPE_INDEX_INVALID')
+    this.dedupe = stored.entries
+  }
+  _persistDedupe() { atomicJson(this.dedupePath, { schemaVersion: 1, profileId: this.profile.profileId, agentId: this.profile.agentId, entries: this.dedupe }) }
+  _compactMessage(message) {
+    const fields = ['tenantId', 'ownerJiacn', 'clientId', 'messageId', 'requestId', 'requestRevision', 'turnId', 'dispatchId', 'targetAgentId', 'conversationId', 'conversationGeneration', 'contextSnapshotId', 'contextHash', 'dedupeKey']
+    return Object.fromEntries(fields.filter(field => message[field] !== undefined).map(field => [field, message[field]]))
+  }
+  _recordTerminal(key, record) {
+    this._loadDedupe()
+    const previous = this.dedupe[key]
+    if (previous && previous.fingerprint !== record.fingerprint) throw new Error('CHAT_DEDUPE_INDEX_CONFLICT')
+    this.dedupe = { ...this.dedupe, [key]: {
+      fingerprint: record.fingerprint, state: record.state, terminalAt: record.completedAt || record.cancelledAt || Date.now(),
+      message: this._compactMessage(record.message)
+    } }
+    this._persistDedupe()
+  }
+  _finalizeTerminal(item, record) {
+    atomicJson(item.path, record) // durable forward-settlement marker before archive movement
+    this._recordTerminal(item.key, record)
+    const target = this.path('archive', item.key)
+    durableRename(item.path, target)
+    item.path = target; item.state = 'archive'; item.record = record
+    this._gcArchive()
+    return record
+  }
+  _gcArchive() {
+    const now = Date.now()
+    const entries = readdirSync(this.archive).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).map(name => {
+      const path = resolve(this.archive, name); const stat = statSync(path); return { name, path, size: stat.size, mtimeMs: stat.mtimeMs }
+    }).sort((left, right) => left.mtimeMs - right.mtimeMs || left.name.localeCompare(right.name))
+    let files = entries.length; let totalBytes = entries.reduce((sum, entry) => sum + entry.size, 0)
+    for (const entry of entries) {
+      if (now - entry.mtimeMs <= this.archiveRetentionMs && files <= this.archiveMaxFiles && totalBytes <= this.archiveMaxBytes) continue
+      unlinkSync(entry.path); directoryFsync(this.archive); files--; totalBytes -= entry.size
+    }
   }
   initialize() {
     for (const dir of [this.pending, this.processing, this.recovery, this.archive]) ensureDirectory(dir)
-    let recovered = 0
-    for (const name of readdirSync(this.processing).sort()) {
-      const path = resolve(this.processing, name); const record = JSON.parse(readFileSync(path, 'utf8'))
-      atomicJson(path, { ...record, state: 'ACCEPTANCE_UNKNOWN', recoveryReason: 'PROCESSING_ON_RESTART_REQUIRES_RECONCILIATION', recoveredAt: Date.now() })
-      durableRename(path, resolve(this.recovery, name)); recovered++
-    }
-    return { pending: this.listPending().length, recoveryRequired: recovered }
+    return this._withLock(() => {
+      this._loadDedupe()
+      let recovered = 0; let settled = 0
+      for (const name of readdirSync(this.processing).sort()) {
+        if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
+        const path = resolve(this.processing, name); const record = JSON.parse(readFileSync(path, 'utf8')); const key = name.slice(0, -5)
+        if (['COMPLETED', 'CANCELLED'].includes(record.state)) {
+          this._recordTerminal(key, record); durableRename(path, this.path('archive', key)); settled++; continue
+        }
+        atomicJson(path, { ...record, state: 'ACCEPTANCE_UNKNOWN', recoveryReason: 'PROCESSING_ON_RESTART_REQUIRES_RECONCILIATION', recoveredAt: Date.now() })
+        durableRename(path, resolve(this.recovery, name)); recovered++
+      }
+      this._gcArchive()
+      return { pending: this.listPending().length, recoveryRequired: recovered, forwardSettled: settled }
+    })
   }
   path(state, key) { return resolve(this[state], `${key}.json`) }
-  findByKey(key) { for (const state of ['pending', 'processing', 'recovery', 'archive']) { const path = this.path(state, key); if (existsSync(path)) return { key, state, path, record: JSON.parse(readFileSync(path, 'utf8')) } } return null }
+  findByKey(key) {
+    for (const state of ['pending', 'processing', 'recovery', 'archive']) { const path = this.path(state, key); if (existsSync(path)) return { key, state, path, record: JSON.parse(readFileSync(path, 'utf8')) } }
+    this._loadDedupe(); const marker = this.dedupe[key]
+    return marker ? { key, state: 'ledger', path: this.dedupePath, record: marker } : null
+  }
   usage() {
     let files = 0; let totalBytes = 0
-    for (const state of ['pending', 'processing', 'recovery', 'archive']) {
+    for (const state of ['pending', 'processing', 'recovery']) {
       const names = readdirSync(this[state]).filter(name => /^[0-9a-f]{64}\.json$/.test(name))
       if (names.length > this.maxFiles) throw Object.assign(new Error('CHAT_INBOX_CAPACITY_SCAN_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
       for (const name of names) { files++; totalBytes += statSync(resolve(this[state], name)).size; if (files > this.maxFiles || totalBytes > this.maxBytes) break }
@@ -192,49 +305,48 @@ export class PersistentChatInbox {
     return { files, totalBytes }
   }
   accept(message) {
-    const key = durableChatKey(message); const fingerprint = chatFingerprint(message); const existing = this.findByKey(key)
-    if (existing) {
-      if (existing.record.fingerprint !== fingerprint) { const error = new Error('CHAT_FINGERPRINT_CONFLICT'); error.code = 'CHAT_FINGERPRINT_CONFLICT'; throw error }
-      return { accepted: false, duplicate: true, key, item: existing }
-    }
-    const record = { state: 'RECEIVED', receivedAt: Date.now(), fingerprint, message }
-    const encodedBytes = Buffer.byteLength(`${JSON.stringify(record)}\n`)
-    const usage = this.usage()
-    if (usage.files + 1 > this.maxFiles || usage.totalBytes + encodedBytes > this.maxBytes) throw Object.assign(new Error('CHAT_INBOX_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
-    atomicJson(this.path('pending', key), record)
-    return { accepted: true, duplicate: false, key, item: { key, state: 'pending', path: this.path('pending', key), record } }
+    return this._withLock(() => {
+      const key = durableChatKey(message); const fingerprint = chatFingerprint(message); const existing = this.findByKey(key)
+      if (existing) {
+        if (existing.record.fingerprint !== fingerprint) { const error = new Error('CHAT_FINGERPRINT_CONFLICT'); error.code = 'CHAT_FINGERPRINT_CONFLICT'; throw error }
+        return { accepted: false, duplicate: true, key, item: existing }
+      }
+      const record = { state: 'RECEIVED', receivedAt: Date.now(), fingerprint, message }
+      const encodedBytes = Buffer.byteLength(`${JSON.stringify(record)}\n`); const usage = this.usage()
+      if (usage.files + 1 > this.maxFiles || usage.totalBytes + encodedBytes > this.maxBytes) throw Object.assign(new Error('CHAT_INBOX_CAPACITY_EXCEEDED'), { code: 'CHAT_INBOX_CAPACITY_EXCEEDED' })
+      atomicJson(this.path('pending', key), record)
+      return { accepted: true, duplicate: false, key, item: { key, state: 'pending', path: this.path('pending', key), record } }
+    })
   }
-  listPending() { return readdirSync(this.pending).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).sort().map(name => { const key = name.slice(0, -5); return this.findByKey(key) }).filter(Boolean) }
+  listPending() { return readdirSync(this.pending).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).sort().map(name => { const key = name.slice(0, -5); const path = this.path('pending', key); return existsSync(path) ? { key, state: 'pending', path, record: JSON.parse(readFileSync(path, 'utf8')) } : null }).filter(Boolean) }
   claim(key) {
-    const item = this.findByKey(key); if (!item || item.state !== 'pending') return null
-    const target = this.path('processing', key); durableRename(item.path, target)
-    const record = { ...item.record, state: 'STARTING', claimedAt: Date.now() }; atomicJson(target, record)
-    return { key, state: 'processing', path: target, record }
+    return this._withLock(() => {
+      const path = this.path('pending', key); if (!existsSync(path)) return null
+      const record = JSON.parse(readFileSync(path, 'utf8')); const target = this.path('processing', key); durableRename(path, target)
+      const claimed = { ...record, state: 'STARTING', claimedAt: Date.now() }; atomicJson(target, claimed)
+      return { key, state: 'processing', path: target, record: claimed }
+    })
   }
-  markRunning(item, engine = {}) { const record = { ...item.record, state: 'RUNNING', engine, runningAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item }
-  complete(item, result = {}) { const record = { ...item.record, state: 'COMPLETED', completedAt: Date.now(), result }; atomicJson(item.path, record); durableRename(item.path, this.path('archive', item.key)); return record }
-  cancelProcessing(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'processing') return false; const record = { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }; atomicJson(item.path, record); durableRename(item.path, this.path('archive', item.key)); item.record = record; item.state = 'archive'; return true }
-  recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { const record = { ...item.record, state, recoveryReason: reason, recoveredAt: Date.now() }; atomicJson(item.path, record); durableRename(item.path, this.path('recovery', item.key)); return record }
-  cancelPending(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'pending') return false; const record = { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }; atomicJson(item.path, record); durableRename(item.path, this.path('archive', item.key)); return true }
+  markRunning(item, engine = {}) { return this._withLock(() => { const record = { ...item.record, state: 'RUNNING', engine, runningAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item }) }
+  complete(item, result = {}) { return this._withLock(() => this._finalizeTerminal(item, { ...item.record, state: 'COMPLETED', completedAt: Date.now(), result })) }
+  cancelProcessing(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'processing') return false; return this._withLock(() => { this._finalizeTerminal(item, { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
+  recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { return this._withLock(() => { const record = { ...item.record, state, recoveryReason: reason, recoveredAt: Date.now() }; atomicJson(item.path, record); durableRename(item.path, this.path('recovery', item.key)); item.record = record; item.state = 'recovery'; return record }) }
+  cancelPending(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'pending') return false; return this._withLock(() => { const current = existsSync(item.path) ? JSON.parse(readFileSync(item.path, 'utf8')) : item.record; this._finalizeTerminal(item, { ...current, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
   findExactTurn(stop) {
     const optionalMatch = (actual, expected) => expected === undefined || expected === null || expected === '' || String(actual) === String(expected)
-    const match = record => {
-      const m = record.message
-      return m.requestId === stop.requestId && m.turnId === stop.turnId && m.dispatchId === stop.dispatchId &&
-        m.targetAgentId === stop.targetAgentId && optionalMatch(m.tenantId, stop.tenantId) &&
-        optionalMatch(m.clientId, stop.clientId) && optionalMatch(m.ownerJiacn, stop.ownerJiacn) &&
-        optionalMatch(m.conversationGeneration, stop.conversationGeneration)
-    }
-    const matches = []
+    const match = record => { const m = record.message; return m && m.requestId === stop.requestId && m.turnId === stop.turnId && m.dispatchId === stop.dispatchId && m.targetAgentId === stop.targetAgentId && optionalMatch(m.tenantId, stop.tenantId) && optionalMatch(m.clientId, stop.clientId) && optionalMatch(m.ownerJiacn, stop.ownerJiacn) && optionalMatch(m.conversationGeneration, stop.conversationGeneration) }
+    const matches = []; const seen = new Set()
     for (const state of ['pending', 'processing', 'recovery', 'archive']) for (const name of readdirSync(this[state])) {
-      if (!name.endsWith('.json')) continue
-      const key = name.slice(0, -5); const item = this.findByKey(key)
-      if (item && match(item.record)) matches.push(item)
+      if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
+      const key = name.slice(0, -5); const path = this.path(state, key); const item = { key, state, path, record: JSON.parse(readFileSync(path, 'utf8')) }
+      seen.add(key); if (match(item.record)) matches.push(item)
     }
+    this._loadDedupe()
+    for (const [key, record] of Object.entries(this.dedupe)) if (!seen.has(key) && match(record)) matches.push({ key, state: 'ledger', path: this.dedupePath, record })
     if (matches.length > 1) { const error = new Error('CHAT_STOP_AMBIGUOUS'); error.code = 'CHAT_STOP_AMBIGUOUS'; throw error }
     return matches[0] || null
   }
-  count(state) { return readdirSync(this[state]).filter(name => name.endsWith('.json')).length }
+  count(state) { if (state === 'ledger') { this._loadDedupe(); return Object.keys(this.dedupe).length } return readdirSync(this[state]).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).length }
 }
 
 export class ChatAckOutbox {
