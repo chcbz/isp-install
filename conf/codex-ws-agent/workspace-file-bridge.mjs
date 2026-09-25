@@ -33,6 +33,17 @@ const INPUT_PREFIX = '/internal/agent/tasks'
 const AUTH_MAX_LENGTH = 4096
 const NO_FOLLOW = fsConstants.O_NOFOLLOW || 0
 
+const isUndiciSocketFailure = error => error?.cause?.code === 'UND_ERR_SOCKET'
+
+const fetchReplayableOnce = async (fetchFn, endpoint, buildOptions) => {
+  try {
+    return await fetchFn(endpoint, buildOptions())
+  } catch (error) {
+    if (!isUndiciSocketFailure(error)) throw error
+    return fetchFn(endpoint, buildOptions())
+  }
+}
+
 export class WorkspaceFileBridgeError extends Error {
   constructor(code, message) {
     super(message)
@@ -728,30 +739,30 @@ export class WorkspaceFileBridge {
 
     for (const upload of collected.uploads) {
       const endpoint = new URL(upload.request.url)
-      const form = new FormData()
-      for (const field of upload.request.multipart.fields) form.append(field.name, field.value)
       const bytes = readBoundedRegularFile(upload.path, upload.length)
       assertDeclaredOutputFormat(upload.request.multipart.file.contentType, bytes)
       if (bytes.length !== upload.length || createHash('sha256').update(bytes).digest('hex') !== upload.sha256) {
         fail('OUTPUT_CHANGED', 'declared output changed after collection and before upload')
       }
-      form.append(
-        upload.request.multipart.file.fieldName,
-        new Blob([bytes], { type: upload.request.multipart.file.contentType }),
-        upload.request.multipart.file.fileName
-      )
-      let response
-      try {
-        response = await this.#fetchFn(endpoint, {
+      const idempotencyKey = `pwe-output-${command.taskId}-${command.runId}-${upload.outputId}-${upload.sha256.slice(0, 16)}`
+      const buildUploadOptions = () => {
+        const form = new FormData()
+        for (const field of upload.request.multipart.fields) form.append(field.name, field.value)
+        form.append(
+          upload.request.multipart.file.fieldName,
+          new Blob([bytes], { type: upload.request.multipart.file.contentType }),
+          upload.request.multipart.file.fileName
+        )
+        return {
           method: 'POST',
           redirect: 'error',
-          headers: {
-            Authorization: auth,
-            ...runtimeHeaders,
-            'Idempotency-Key': `pwe-output-${command.taskId}-${command.runId}-${upload.outputId}-${upload.sha256.slice(0, 16)}`
-          },
+          headers: { Authorization: auth, ...runtimeHeaders, 'Idempotency-Key': idempotencyKey },
           body: form
-        })
+        }
+      }
+      let response
+      try {
+        response = await fetchReplayableOnce(this.#fetchFn, endpoint, buildUploadOptions)
       } catch {
         fail('UPLOAD_FAILED', 'declared output upload failed')
       }
@@ -760,9 +771,10 @@ export class WorkspaceFileBridge {
 
     const commit = buildOutputCommit({ taskId: command.taskId, runId: command.runId, uploads: collected.uploads })
     const endpoint = endpointUrl(this.#apiOrigin, commit.path)
+    const commitBody = JSON.stringify(commit.body)
     let response
     try {
-      response = await this.#fetchFn(endpoint, {
+      response = await fetchReplayableOnce(this.#fetchFn, endpoint, () => ({
         method: 'POST',
         redirect: 'error',
         headers: {
@@ -771,8 +783,8 @@ export class WorkspaceFileBridge {
           'Idempotency-Key': commit.idempotencyKey,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(commit.body)
-      })
+        body: commitBody
+      }))
     } catch {
       fail('COMMIT_FAILED', 'output manifest commit failed')
     }

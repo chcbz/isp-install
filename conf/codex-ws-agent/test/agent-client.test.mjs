@@ -2932,6 +2932,44 @@ test('non-opt-in command types do not create execution reports', async () => {
   assert.equal(outbox.pendingReports().length, 0)
 })
 
+test('ACK high-water history is fully verified once and only the durable tip is reread during runtime', () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const writer = new AckOutbox({ rootDir: storageRoot, profile })
+  writer.initialize()
+  for (let index = 0; index < 32; index += 1) {
+    const queued = writer.enqueue(
+      buildAckEnvelope(profile, ACK_STATUS.RECEIVED, { commandId: `cached-history-${index}` }),
+      { kind: 'none' }
+    )
+    writer.dequeue(queued.fileName)
+  }
+
+  let highWaterReads = 0
+  const observer = new AckOutbox({
+    rootDir: storageRoot,
+    profile,
+    fs: {
+      readFileSync: (path, ...args) => {
+        if (String(path).includes('/ack-sequence-high-water/')) highWaterReads += 1
+        return readFileSync(path, ...args)
+      }
+    }
+  })
+  observer.initialize()
+  assert.ok(highWaterReads >= 33, 'startup must verify the complete immutable history')
+
+  highWaterReads = 0
+  const queued = observer.enqueue(
+    buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'cached-runtime-tip' }),
+    { kind: 'none' }
+  )
+  observer.pendingEnvelopes()
+  observer.dequeue(queued.fileName)
+
+  assert.ok(highWaterReads <= 4, `runtime ACK operations must read only the durable tip, got ${highWaterReads} high-water reads`)
+})
+
 test('ACK high-water replay verifies immutable secure markers without fsyncing each file', () => {
   const rootDir = temporaryDirectory()
   const storageRoot = profileStorageRoot(rootDir)

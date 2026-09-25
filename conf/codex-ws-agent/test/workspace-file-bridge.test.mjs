@@ -464,6 +464,106 @@ test('uploads each declared output then commits its canonical output manifest wi
   assert.equal(existsSync(materialized.runDirectory), false)
 })
 
+
+const undiciSocketFailure = () => new TypeError('fetch failed', {
+  cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' })
+})
+
+test('replays output upload and manifest commit once after an undici stale-socket failure', async () => {
+  const input = Buffer.from('trusted input\n')
+  const output = Buffer.from('{"ok":true}\n')
+  const root = temporaryDirectory()
+  const command = commandFor(input)
+  const uploadAttempts = []
+  const commitAttempts = []
+  let uploadFailures = 0
+  let commitFailures = 0
+  const bridge = bridgeFor(root, async (url, options = {}) => {
+    const requestUrl = url.toString()
+    if (options.method === 'GET') return responseFor(input, requestUrl)
+    if (requestUrl.includes('/outputs/result/content')) {
+      const file = options.body.get('file')
+      uploadAttempts.push({
+        body: options.body,
+        idempotencyKey: options.headers['Idempotency-Key'],
+        outputId: options.body.get('outputId'),
+        bytes: Buffer.from(await file.arrayBuffer()),
+        fileName: file.name,
+        contentType: file.type
+      })
+      if (uploadFailures++ === 0) throw undiciSocketFailure()
+      return responseFor(Buffer.from('{"data":{}}'), requestUrl)
+    }
+    commitAttempts.push({
+      idempotencyKey: options.headers['Idempotency-Key'],
+      body: options.body
+    })
+    if (commitFailures++ === 0) throw undiciSocketFailure()
+    return responseFor(Buffer.from('{"data":{}}'), requestUrl)
+  })
+  const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
+  writeFileSync(resolve(materialized.runDirectory, 'outputs/result.json'), output)
+
+  const committed = await bridge.uploadOutputsAndCommit(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+  const expected = buildOutputCommit({
+    taskId: command.taskId,
+    runId: command.runId,
+    uploads: [{ outputId: 'result', sha256: digest(output), length: output.length }]
+  })
+  assert.equal(committed.manifestId, expected.manifestId)
+  assert.equal(uploadAttempts.length, 2)
+  assert.notEqual(uploadAttempts[0].body, uploadAttempts[1].body, 'multipart body must be rebuilt for replay')
+  for (const attempt of uploadAttempts) {
+    assert.equal(attempt.idempotencyKey, `pwe-output-task-1-run-1-result-${digest(output).slice(0, 16)}`)
+    assert.equal(attempt.outputId, 'result')
+    assert.deepEqual(attempt.bytes, output)
+    assert.equal(attempt.fileName, 'result.json')
+    assert.equal(attempt.contentType, 'application/json')
+  }
+  assert.deepEqual(commitAttempts, [
+    { idempotencyKey: expected.idempotencyKey, body: JSON.stringify(expected.body) },
+    { idempotencyKey: expected.idempotencyKey, body: JSON.stringify(expected.body) }
+  ])
+})
+
+test('socket replay is capped at one retry and excludes other transport failures', async t => {
+  const input = Buffer.from('trusted input\n')
+  await t.test('two consecutive undici socket failures stop after the retry', async () => {
+    const root = temporaryDirectory()
+    const command = commandFor(input)
+    let commitAttempts = 0
+    const bridge = bridgeFor(root, async (url, options = {}) => {
+      const requestUrl = url.toString()
+      if (options.method === 'GET') return responseFor(input, requestUrl)
+      if (requestUrl.includes('/outputs/result/content')) return responseFor(Buffer.from('{"data":{}}'), requestUrl)
+      commitAttempts += 1
+      throw undiciSocketFailure()
+    })
+    const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+    mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
+    writeFileSync(resolve(materialized.runDirectory, 'outputs/result.json'), '{}')
+    await assertRejectsCode(() => bridge.uploadOutputsAndCommit(command, { runtimeAuthHeader: 'Bearer runtime-secret' }), 'COMMIT_FAILED')
+    assert.equal(commitAttempts, 2)
+  })
+
+  await t.test('non-undici transport failure is not retried', async () => {
+    const root = temporaryDirectory()
+    const command = commandFor(input)
+    let uploadAttempts = 0
+    const bridge = bridgeFor(root, async (url, options = {}) => {
+      if (options.method === 'GET') return responseFor(input, url.toString())
+      uploadAttempts += 1
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('reset'), { code: 'ECONNRESET' }) })
+    })
+    const materialized = await bridge.materializeInputs(command, { runtimeAuthHeader: 'Bearer runtime-secret' })
+    mkdirSync(resolve(materialized.runDirectory, 'outputs'), { recursive: true })
+    writeFileSync(resolve(materialized.runDirectory, 'outputs/result.json'), '{}')
+    await assertRejectsCode(() => bridge.uploadOutputsAndCommit(command, { runtimeAuthHeader: 'Bearer runtime-secret' }), 'UPLOAD_FAILED')
+    assert.equal(uploadAttempts, 1)
+  })
+})
+
 test('upload or commit failures fail closed without treating the manifest as committed', async t => {
   const bytes = Buffer.from('trusted input\n')
   for (const [name, failedStatus, expectedCode, expectedPostCount] of [

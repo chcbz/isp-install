@@ -1691,6 +1691,7 @@ export class AckOutbox {
     this.highWaterInitializedPath = resolve(this.highWaterDir, 'initialized.json')
     this.lockPath = resolve(this.rootDir, 'ack-sequence.lock')
     this.lockOwnerPath = resolve(this.lockPath, 'owner.json')
+    this.highWaterState = null
     this.corruptions = []
   }
 
@@ -1700,6 +1701,7 @@ export class AckOutbox {
     ensureSecureDirectory(this.fs, this.supersededDir)
     ensureSecureDirectory(this.fs, this.highWaterDir)
     this.corruptions = []
+    this.highWaterState = null
     for (const fileName of this.fs.readdirSync(this.quarantineDir)) {
       if (fileName.endsWith('.json')) this.corruptions.push({ fileName, reason: 'previously quarantined ACK requires reconciliation' })
       if (fileName.endsWith('.json') || fileName.endsWith('.reason.txt')) {
@@ -1720,7 +1722,7 @@ export class AckOutbox {
   _initializeLocked() {
     const records = this._scanPendingRecords({ failOnInvalid: false })
     const state = this._readSequenceState()
-    const highWater = this._readHighWater()
+    const highWater = this._readHighWater({ refresh: true })
 
     if (!highWater.initialized) {
       if (highWater.maximum > 0) {
@@ -1839,43 +1841,69 @@ export class AckOutbox {
     atomicWriteJson(this.fs, this.sequencePath, { formatVersion: 1, lastSequence })
   }
 
-  _readHighWater() {
-    let initialized = false
-    if (this.fs.existsSync(this.highWaterInitializedPath)) {
-      forceSecureFileMode(this.fs, this.highWaterInitializedPath)
-      try {
-        const marker = JSON.parse(this.fs.readFileSync(this.highWaterInitializedPath, 'utf8'))
-        if (!isObject(marker) || marker.formatVersion !== 1 || marker.agentId !== this.profile.agentId) {
-          throw new Error('invalid ACK high-water initialization marker')
-        }
-        initialized = true
-      } catch (error) {
-        this._sequenceCorruption(`Invalid ACK high-water initialization marker: ${error.message}`, this.highWaterInitializedPath)
+  _validateHighWaterInitializedMarker() {
+    if (!this.fs.existsSync(this.highWaterInitializedPath)) return false
+    forceSecureFileMode(this.fs, this.highWaterInitializedPath)
+    try {
+      const marker = JSON.parse(this.fs.readFileSync(this.highWaterInitializedPath, 'utf8'))
+      if (!isObject(marker) || marker.formatVersion !== 1 || marker.agentId !== this.profile.agentId) {
+        throw new Error('invalid ACK high-water initialization marker')
       }
+      return true
+    } catch (error) {
+      this._sequenceCorruption(`Invalid ACK high-water initialization marker: ${error.message}`, this.highWaterInitializedPath)
+    }
+  }
+
+  _validateHighWaterMarker(fileName) {
+    const path = resolve(this.highWaterDir, fileName)
+    forceSecureFileMode(this.fs, path)
+    try {
+      const match = /^(\d{20})\.json$/.exec(fileName)
+      if (!match) throw new Error('invalid ACK high-water marker filename')
+      const queueSequence = Number(match[1])
+      const marker = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+      if (!Number.isSafeInteger(queueSequence) || queueSequence <= 0
+          || !isObject(marker) || marker.formatVersion !== 1
+          || marker.queueSequence !== queueSequence || marker.agentId !== this.profile.agentId) {
+        throw new Error('invalid ACK high-water marker')
+      }
+      return queueSequence
+    } catch (error) {
+      this._sequenceCorruption(`Invalid ACK high-water evidence ${fileName}: ${error.message}`, path)
+    }
+  }
+
+  _readHighWater({ refresh = false } = {}) {
+    if (!refresh && this.highWaterState) {
+      const initialized = this._validateHighWaterInitializedMarker()
+      if (initialized !== this.highWaterState.initialized) {
+        this._sequenceCorruption('ACK high-water initialization marker changed during runtime')
+      }
+      if (this.highWaterState.maximum > 0) {
+        const fileName = `${String(this.highWaterState.maximum).padStart(20, '0')}.json`
+        if (!this.fs.existsSync(resolve(this.highWaterDir, fileName))) {
+          this._sequenceCorruption(`ACK high-water sequence ${this.highWaterState.maximum} disappeared during runtime`)
+        }
+        this._validateHighWaterMarker(fileName)
+      }
+      return { ...this.highWaterState }
     }
 
+    const initialized = this._validateHighWaterInitializedMarker()
     let maximum = 0
     for (const fileName of this.fs.readdirSync(this.highWaterDir)) {
-      if (fileName === 'initialized.json') continue
-      const path = resolve(this.highWaterDir, fileName)
-      if (!fileName.endsWith('.json')) continue
-      forceSecureFileMode(this.fs, path)
-      try {
-        const match = /^(\d{20})\.json$/.exec(fileName)
-        if (!match) throw new Error('invalid ACK high-water marker filename')
-        const queueSequence = Number(match[1])
-        const marker = JSON.parse(this.fs.readFileSync(path, 'utf8'))
-        if (!Number.isSafeInteger(queueSequence) || queueSequence <= 0
-            || !isObject(marker) || marker.formatVersion !== 1
-            || marker.queueSequence !== queueSequence || marker.agentId !== this.profile.agentId) {
-          throw new Error('invalid ACK high-water marker')
-        }
-        maximum = Math.max(maximum, queueSequence)
-      } catch (error) {
-        this._sequenceCorruption(`Invalid ACK high-water evidence ${fileName}: ${error.message}`, path)
-      }
+      if (fileName === 'initialized.json' || !fileName.endsWith('.json')) continue
+      maximum = Math.max(maximum, this._validateHighWaterMarker(fileName))
     }
-    return { initialized, maximum }
+    this.highWaterState = { initialized, maximum }
+    return { ...this.highWaterState }
+  }
+
+  _validatedSequenceState(records) {
+    const state = this._readSequenceState()
+    const refresh = !this.highWaterState || state?.lastSequence !== this.highWaterState.maximum
+    return this._validateSequenceEvidence(state, this._readHighWater({ refresh }), records)
   }
 
   _writeHighWaterInitialized() {
@@ -1887,6 +1915,7 @@ export class AckOutbox {
       agentId: this.profile.agentId,
       initializedAt: this.now()
     })
+    this.highWaterState = { initialized: true, maximum: this.highWaterState?.maximum || 0 }
   }
 
   _writeHighWaterMarker(queueSequence) {
@@ -1900,6 +1929,7 @@ export class AckOutbox {
       queueSequence,
       allocatedAt: this.now()
     })
+    this.highWaterState = { initialized: this.highWaterState?.initialized || false, maximum: queueSequence }
   }
 
   _validateSequenceEvidence(state, highWater, records) {
@@ -2050,7 +2080,7 @@ export class AckOutbox {
 
   _enqueueLocked(ackEnvelope, marker) {
     const records = this._scanPendingRecords({ failOnInvalid: true })
-    const state = this._validateSequenceEvidence(this._readSequenceState(), this._readHighWater(), records)
+    const state = this._validatedSequenceState(records)
     if (state.lastSequence >= Number.MAX_SAFE_INTEGER) throw new Error('ACK outbox sequence exhausted')
     const queueSequence = state.lastSequence + 1
     const now = this.now()
@@ -2098,7 +2128,7 @@ export class AckOutbox {
 
   _pendingEnvelopesLocked() {
     const records = this._scanPendingRecords({ failOnInvalid: true })
-    this._validateSequenceEvidence(this._readSequenceState(), this._readHighWater(), records)
+    this._validatedSequenceState(records)
     return records
       .sort((left, right) => left.record.queueSequence - right.record.queueSequence)
       .map(item => ({
