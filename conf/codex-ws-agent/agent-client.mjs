@@ -4405,6 +4405,15 @@ const terminateAllRuns = () => {
   }
 }
 
+export const inheritManagedRuntimeCapabilities = (profile, source = {}) => ({
+  ...profile,
+  workspaceFileApiOrigin: source.workspaceFileApiOrigin || '',
+  workspaceFileRootDir: source.workspaceFileRootDir || '',
+  executionReportCommandTypes: Array.isArray(source.executionReportCommandTypes)
+    ? [...source.executionReportCommandTypes]
+    : []
+})
+
 const createProfileState = profile => {
   const workspacePolicy = profile.workspacePolicyId
     ? config.workspacePolicies.get(profile.workspacePolicyId)
@@ -4922,6 +4931,7 @@ export const main = async () => {
             runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
         },
         attachProfile: async (profile, engine) => {
+          profile = inheritManagedRuntimeCapabilities(profile, defaultProfile)
           let state = profileStates.get(profile.agentId)
           if (state && (state.profile.managedOwnerJiacn !== profile.managedOwnerJiacn ||
               state.profile.managedGeneration !== profile.managedGeneration)) throw new Error('Managed profile collision')
@@ -4938,6 +4948,8 @@ export const main = async () => {
           // Registration normally arrives on a later poll; never manufacture synchronous online proof.
         }
       })
+      const recovery = await host.restore()
+      if (recovery.restored || recovery.skipped) console.log(`managed hosting recovery | restored=${recovery.restored} | skipped=${recovery.skipped}`)
       managedHostChannel = await startManagedHostSocket({ socketPath: required('AGENT_MANAGED_HOST_SOCKET'), host })
     } catch (error) {
       console.warn(`managed hosting channel unavailable; legacy profiles unchanged (${error.code || error.name || 'configuration error'})`)

@@ -3,7 +3,7 @@ import { createServer } from 'node:net'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants, openSync, closeSync, readFileSync, writeFileSync, fsyncSync, mkdirSync, lstatSync,
-  realpathSync, renameSync, chmodSync, unlinkSync } from 'node:fs'
+  realpathSync, renameSync, chmodSync, unlinkSync, readdirSync } from 'node:fs'
 import { resolve, dirname, isAbsolute } from 'node:path'
 
 export const MAX_HOST_FRAME = 16384
@@ -187,7 +187,8 @@ export class ManagedHost {
     const generationRoot = resolve(agentRoot, request.intentId)
     return { ownersRoot, ownerRoot, agentRoot, generationRoot, claimsRoot: resolve(this.root, '.agent-claims'),
       claim: resolve(this.root, '.agent-claims', `${request.agentId}.json`),
-      manifest: resolve(generationRoot, 'association.json'), journal: resolve(generationRoot, `${request.operationId}.json`),
+      manifest: resolve(generationRoot, 'association.json'), credential: resolve(generationRoot, 'credential.json'),
+      journal: resolve(generationRoot, `${request.operationId}.json`),
       home: resolve(generationRoot, 'home'), workdir: resolve(generationRoot, 'work') }
   }
   claimAgent(request, paths) {
@@ -217,6 +218,101 @@ export class ManagedHost {
     return Boolean(engine?.ready && state?.registered && state.ownerJiacn === request.ownerJiacn &&
       state.generation === request.intentId && state.runtimeInstanceId === this.runtimeInstanceId)
   }
+  profileFor(request, paths = this.paths(request)) {
+    return { profileId: this.multiOwner
+        ? `managed:${ownerSegment(request.ownerJiacn)}:${request.agentId}:${request.intentId}`
+        : `managed:${request.agentId}:${request.intentId}`, agentId: request.agentId,
+      agentName: request.agentId, personaName: request.agentId, apiKey: request.apiKey, codexBin: this.codexBin,
+      codexHome: paths.home, codexWorkdir: paths.workdir, codexSandbox: 'workspace-write', codexApproval: 'never',
+      codexSessionMode: 'new', codexTimeoutMs: 900000, abilities: [], skills: [], enabled: true,
+      managedGeneration: request.intentId, managedOwnerJiacn: request.ownerJiacn,
+      managedScopeKey: this.identityKey(request), managedProfileRef: `${request.agentId}/${request.intentId}`,
+      workspacePolicyId: this.workspacePolicyId, workspaceRole: 'coder', workspaceNoTaskPolicy: 'reject', workspaceNonCodingCommandTypes: [] }
+  }
+  ensureRecoveryCredential(request, paths, manifest) {
+    const credential = { formatVersion: 1, associationHash: digest(manifest.association), apiKey: request.apiKey }
+    if (!exists(paths.credential)) {
+      try { atomicCreate(paths.credential, JSON.stringify(credential)) } catch (error) { if (error.code !== 'EEXIST') throw error }
+    }
+    const stored = JSON.parse(readPrivate(paths.credential))
+    if (Object.keys(stored).length !== 3 || stored.formatVersion !== 1 ||
+        stored.associationHash !== credential.associationHash || stored.apiKey !== request.apiKey ||
+        digest(stored.apiKey) !== manifest.apiKeyHash) throw new Error('Managed recovery credential mismatch')
+  }
+  recoveryCandidates() {
+    requirePrivateDirectory(this.root)
+    const ownerRoots = []
+    if (this.multiOwner) {
+      const ownersRoot = resolve(this.root, 'owners')
+      if (!exists(ownersRoot)) return []
+      requirePrivateDirectory(ownersRoot)
+      for (const entry of readdirSync(ownersRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.startsWith('owner-')) continue
+        const ownerRoot = resolve(ownersRoot, entry.name)
+        requirePrivateDirectory(ownerRoot)
+        ownerRoots.push({ ownerRoot, ownerSegmentName: entry.name })
+      }
+    } else ownerRoots.push({ ownerRoot: this.root, ownerSegmentName: ownerSegment(this.ownerJiacn) })
+    const candidates = []
+    for (const { ownerRoot, ownerSegmentName } of ownerRoots) {
+      for (const agentEntry of readdirSync(ownerRoot, { withFileTypes: true })) {
+        if (!agentEntry.isDirectory() || !/^agt_[0-9a-f]{32}$/.test(agentEntry.name)) continue
+        const agentRoot = resolve(ownerRoot, agentEntry.name)
+        requirePrivateDirectory(agentRoot)
+        for (const generationEntry of readdirSync(agentRoot, { withFileTypes: true })) {
+          if (!generationEntry.isDirectory() || !/^hri_[0-9a-f-]{36}$/.test(generationEntry.name)) continue
+          try {
+            const generationRoot = resolve(agentRoot, generationEntry.name)
+            requirePrivateDirectory(generationRoot)
+            const manifest = JSON.parse(readPrivate(resolve(generationRoot, 'association.json')))
+            if (!manifest || Object.keys(manifest).length !== 2 || !manifest.association ||
+                typeof manifest.apiKeyHash !== 'string' || !/^[0-9a-f]{64}$/.test(manifest.apiKeyHash)) throw new Error('Invalid managed manifest')
+            const stored = JSON.parse(readPrivate(resolve(generationRoot, 'credential.json')))
+            const request = validateHostingRequest({ protocol: '1', method: 'ensure', ...manifest.association,
+              operationId: manifest.association.intentId, requestedAt: manifest.association.reservedAt,
+              validUntil: null, apiKey: stored.apiKey })
+            if (request.tenantId !== this.tenantId || request.clientId !== this.clientId ||
+                (!this.multiOwner && request.ownerJiacn !== this.ownerJiacn) ||
+                ownerSegment(request.ownerJiacn) !== ownerSegmentName || request.agentId !== agentEntry.name ||
+                request.intentId !== generationEntry.name) throw new Error('Managed recovery identity mismatch')
+            const { paths, journal } = this.read(request)
+            this.ensureRecoveryCredential(request, paths, manifest)
+            if (!journal || journal.result?.outcome === 'FAILED_NO_EFFECT' ||
+                (journal.result && journal.result.outcome !== 'SERVICE_READY')) throw new Error('Managed generation is not recoverable')
+            for (const dir of [paths.home, paths.workdir]) requirePrivateDirectory(dir)
+            for (const name of ['config.toml', 'auth.json']) readPrivate(resolve(paths.home, name))
+            candidates.push({ request, paths })
+          } catch {}
+        }
+      }
+    }
+    const counts = new Map()
+    for (const candidate of candidates) counts.set(candidate.request.agentId, (counts.get(candidate.request.agentId) || 0) + 1)
+    return candidates.filter(candidate => counts.get(candidate.request.agentId) === 1)
+  }
+  async restore() {
+    const candidates = this.recoveryCandidates()
+    let restored = 0; let skipped = 0
+    for (const { request, paths } of candidates) {
+      const engineKey = this.identityKey(request)
+      if (this.closed || this.conflicts(request.ownerJiacn, request.agentId, request.intentId) ||
+          this.engines.has(engineKey) || this.engines.size >= this.maxProfiles) { skipped++; continue }
+      const profile = this.profileFor(request, paths)
+      let engine
+      try {
+        engine = await this.initializeEngine(profile)
+        if (this.closed || !engine?.ready) throw new Error('Managed recovery engine is not ready')
+        this.engines.set(engineKey, engine)
+        await this.attachProfile(profile, engine)
+        restored++
+      } catch (error) {
+        if (error.engine) this.engines.set(engineKey, error.engine)
+        else if (engine) { engine.close(); this.engines.delete(engineKey) }
+        skipped++
+      }
+    }
+    return { restored, skipped }
+  }
   observe(request) {
     try {
       const { journal } = this.read(request)
@@ -235,6 +331,7 @@ export class ManagedHost {
     if (existingGeneration) {
       const prior = this.read(request)
       if (prior.journal?.result?.outcome === 'FAILED_NO_EFFECT') return prior.journal.result
+      this.ensureRecoveryCredential(request, prior.paths, prior.manifest)
       if (prior.journal?.result?.runtimeInstanceId === this.runtimeInstanceId && this.currentReady(request)) return prior.journal.result
     }
     // Expiry does not imply no-effect: an earlier attempt may have taken effect.
@@ -260,6 +357,8 @@ export class ManagedHost {
       journal = { operation: operation(request), state: 'STARTED' }
       atomic(paths.journal, JSON.stringify(journal)) // MUST be durable before profile/engine/socket effects.
     }
+    const { manifest } = this.read(request)
+    this.ensureRecoveryCredential(request, paths, manifest)
     directory(paths.home); directory(paths.workdir)
     for (const name of ['config.toml', 'auth.json']) {
       const target = resolve(paths.home, name)
@@ -267,15 +366,7 @@ export class ManagedHost {
       if (!exists(target)) atomic(target, readPrivate(resolve(this.templateHome, name)))
       else readPrivate(target)
     }
-    const profile = { profileId: this.multiOwner
-        ? `managed:${ownerSegment(request.ownerJiacn)}:${request.agentId}:${request.intentId}`
-        : `managed:${request.agentId}:${request.intentId}`, agentId: request.agentId,
-      agentName: request.agentId, personaName: request.agentId, apiKey: request.apiKey, codexBin: this.codexBin,
-      codexHome: paths.home, codexWorkdir: paths.workdir, codexSandbox: 'workspace-write', codexApproval: 'never',
-      codexSessionMode: 'new', codexTimeoutMs: 900000, abilities: [], skills: [], enabled: true,
-      managedGeneration: request.intentId, managedOwnerJiacn: request.ownerJiacn,
-      managedScopeKey: this.identityKey(request), managedProfileRef: `${request.agentId}/${request.intentId}`,
-      workspacePolicyId: this.workspacePolicyId, workspaceRole: 'coder', workspaceNoTaskPolicy: 'reject', workspaceNonCodingCommandTypes: [] }
+    const profile = this.profileFor(request, paths)
     const engineKey = this.identityKey(request)
     let engine = this.engines.get(engineKey)
     if (!engine?.ready) {

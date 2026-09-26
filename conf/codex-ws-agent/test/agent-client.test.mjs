@@ -29,6 +29,7 @@ import {
   discoverCodexSkills,
   discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
+  inheritManagedRuntimeCapabilities,
   loadWebSocketClient,
   normalizeInboundMessage,
   pollWorkspaceFileCommands,
@@ -67,6 +68,22 @@ const profile = {
   codexSessionMode: 'new',
   codexTimeoutMs: 1000
 }
+
+test('managed profiles inherit only trusted runtime delivery capabilities', () => {
+  const managed = inheritManagedRuntimeCapabilities(
+    { profileId: 'managed:a', agentId: 'agt_0123456789abcdef0123456789abcdef', apiKey: 'managed-key' },
+    {
+      apiKey: 'must-not-inherit',
+      workspaceFileApiOrigin: 'http://127.0.0.1:10018',
+      workspaceFileRootDir: '/srv/private-runs',
+      executionReportCommandTypes: ['WORKSPACE_FILE_EXECUTE']
+    }
+  )
+  assert.equal(managed.apiKey, 'managed-key')
+  assert.equal(managed.workspaceFileApiOrigin, 'http://127.0.0.1:10018')
+  assert.equal(managed.workspaceFileRootDir, '/srv/private-runs')
+  assert.deepEqual(managed.executionReportCommandTypes, ['WORKSPACE_FILE_EXECUTE'])
+})
 
 const command = number => ({
   type: 'agent_direct_message',

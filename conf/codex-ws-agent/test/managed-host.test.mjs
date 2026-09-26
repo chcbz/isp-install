@@ -73,6 +73,79 @@ test('actual engine and exact authenticated registration are both necessary befo
   assert.equal(f.calls(), 1); assert.notEqual(reprovision.evidenceRef, success.evidenceRef)
   assert.deepEqual(await f.host.handle(request()), success)
   assert.equal(readFileSync(resolve(f.root, AGENT, GENERATION, 'association.json'), 'utf8').includes('fixture-only-key'), false)
+  const credential = resolve(f.root, AGENT, GENERATION, 'credential.json')
+  assert.equal(lstatSync(credential).mode & 0o777, 0o600)
+  assert.equal(JSON.parse(readFileSync(credential, 'utf8')).apiKey, 'fixture-only-key')
+})
+
+test('restart restores an exact managed profile and engine from a private durable credential', async t => {
+  const f = fixture(t)
+  await f.host.handle(request())
+  f.register()
+  assert.equal((await f.host.handle(request())).outcome, 'SERVICE_READY')
+  f.host.close()
+
+  const profiles = new Map(); let engineCalls = 0
+  const restarted = new ManagedHost({ root: f.root, templateHome: f.seed,
+    codexBin: resolve(f.dir, 'fake-codex'), runtimeInstanceId: '00000000-0000-0000-0000-000000000010',
+    tenantId: 'Tenant-A', clientId: 'Client-A', ownerJiacn: 'Tenant-A', workspacePolicyId: 'fixture-policy',
+    conflicts: () => false, profileState: () => null,
+    initializeEngine: async profile => {
+      engineCalls++
+      assert.equal(profile.apiKey, 'fixture-only-key')
+      return { ready: true, closed: false, threadId: 'thread-restored', close() { this.ready = false; this.closed = true } }
+    },
+    attachProfile: async (profile, engine) => {
+      assert.equal(engine.ready, true)
+      profiles.set(profile.agentId, profile)
+    }
+  })
+  t.after(() => restarted.close())
+  assert.deepEqual(await restarted.restore(), { restored: 1, skipped: 0 })
+  assert.equal(engineCalls, 1)
+  assert.equal(profiles.get(AGENT).managedGeneration, GENERATION)
+  assert.equal(profiles.get(AGENT).codexHome, resolve(f.root, AGENT, GENERATION, 'home'))
+})
+
+test('wildcard restart restores each owner-scoped managed profile independently', async t => {
+  const f = fixture(t, { ownerJiacn: '*' })
+  const a = request({ ownerJiacn: 'Owner-A' }); const b = requestB()
+  await f.host.handle(a); await f.host.handle(b)
+  f.register('Owner-A', AGENT); f.register('Owner-B', AGENT_B)
+  assert.equal((await f.host.handle(a)).outcome, 'SERVICE_READY')
+  assert.equal((await f.host.handle(b)).outcome, 'SERVICE_READY')
+  f.host.close()
+
+  const restoredProfiles = new Map()
+  const restarted = new ManagedHost({ root: f.root, templateHome: f.seed,
+    codexBin: resolve(f.dir, 'fake-codex'), runtimeInstanceId: '00000000-0000-0000-0000-000000000010',
+    tenantId: 'Tenant-A', clientId: 'Client-A', ownerJiacn: '*', workspacePolicyId: 'fixture-policy',
+    conflicts: () => false, profileState: () => null,
+    initializeEngine: async profile => ({ ready: true, closed: false, threadId: `thread-${profile.agentId}`,
+      close() { this.ready = false; this.closed = true } }),
+    attachProfile: async profile => restoredProfiles.set(profile.agentId, profile)
+  })
+  t.after(() => restarted.close())
+  assert.deepEqual(await restarted.restore(), { restored: 2, skipped: 0 })
+  assert.equal(restoredProfiles.get(AGENT).managedOwnerJiacn, 'Owner-A')
+  assert.equal(restoredProfiles.get(AGENT_B).managedOwnerJiacn, 'Owner-B')
+  assert.notEqual(restoredProfiles.get(AGENT).codexHome, restoredProfiles.get(AGENT_B).codexHome)
+})
+
+test('restart fails closed when the durable recovery credential is changed', async t => {
+  const f = fixture(t)
+  await f.host.handle(request())
+  const credential = resolve(f.root, AGENT, GENERATION, 'credential.json')
+  const stored = JSON.parse(readFileSync(credential, 'utf8'))
+  writeFileSync(credential, JSON.stringify({ ...stored, apiKey: 'changed-key' }), { mode: 0o600 })
+  const restarted = new ManagedHost({ root: f.root, templateHome: f.seed,
+    codexBin: resolve(f.dir, 'fake-codex'), runtimeInstanceId: '00000000-0000-0000-0000-000000000010',
+    tenantId: 'Tenant-A', clientId: 'Client-A', ownerJiacn: 'Tenant-A', workspacePolicyId: 'fixture-policy',
+    conflicts: () => false, profileState: () => null,
+    initializeEngine: async () => { throw new Error('must not initialize') }, attachProfile: async () => {}
+  })
+  t.after(() => restarted.close())
+  assert.deepEqual(await restarted.restore(), { restored: 0, skipped: 0 })
 })
 
 test('trusted registration is current authenticated Agent/process acknowledgement, not an online flag', () => {

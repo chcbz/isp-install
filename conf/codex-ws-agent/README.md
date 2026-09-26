@@ -466,7 +466,13 @@ and engine identity. A canonical Agent ID claimed by one owner is never reused b
 A managed Agent is not ready merely because provisioning files exist. The runner initializes the
 execution engine, sends authenticated `agent.register`, waits for the exact current-process
 `agent_registered` acknowledgement, and only then publishes `ONLINE` and returns `SERVICE_READY`.
-Historical readiness is not replayed while that exact managed profile is offline.
+Historical readiness is not replayed while that exact managed profile is offline. After a successful
+initial ensure reaches `STARTED`, the runner stores the exact managed API credential in a generation-local
+`0600` recovery file below the already private `0700` managed root. On process restart it accepts only an
+exact tenant/client/owner/Agent/intent/lease/binding association whose credential hash, owner claim, initial
+journal, Codex Home, and work directory all still match, then initializes a fresh engine and registers the
+same profile. Recovery never creates another hosting intent or lease and does not reuse `FAILED_NO_EFFECT`
+generations.
 
 Production systemd source uses `User=root` and `Group=isp`. Create the socket parent as canonical
 `root:isp` mode `0750`; the runner creates the socket as `root:isp` mode `0660`. The API service user
