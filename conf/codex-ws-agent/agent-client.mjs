@@ -2766,7 +2766,7 @@ export class AgentMessageProcessor {
             outcome: entry.outcome
           })
         }
-        if (this.executionReportOutbox?.profile.executionReportCommandTypes.includes(validated.normalized.commandType)) {
+        if (this.executionReportOutbox?.profile.executionReportCommandTypes?.includes(validated.normalized.commandType)) {
           this.executionReportOutbox.enqueueAndSend(validated.normalized, durableOutcome, this.sendFn)
         }
         this.inbox.settleCompletedFile(item.path, item.fileName, completed)
