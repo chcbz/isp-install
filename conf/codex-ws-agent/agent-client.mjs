@@ -3616,12 +3616,71 @@ export const discoverWorkspaceAbilities = profile => {
 
 export const resolveProfileAbilities = profile => discoverWorkspaceAbilities(profile)
 
+/**
+ * A configured Fast CHAT profile is the only currently executable v1 interaction profile.
+ * `approval=never` is not a tool denial, so the declaration intentionally remains
+ * read-only-constrained rather than claiming a strict no-tools Provider guarantee.
+ */
+export const hasReadOnlyConstrainedChatProfile = profile => Boolean(
+  profile?.fastChatEnabled
+  && profile?.appServerEnabled
+  && profile?.chatEngine === 'app-server'
+  && profile?.chatSandbox === 'read-only'
+  && profile?.chatToolPolicy === 'read-only-constrained'
+)
+
+/**
+ * Runtime capability contract v1. This is deliberately narrower than legacy transport support:
+ * unsupported INSPECT/EXECUTE must never be advertised merely because CHAT exists.
+ */
+export const buildRuntimeCapabilities = profile => {
+  const chatEnabled = hasReadOnlyConstrainedChatProfile(profile)
+  const nativeStartEnabled = Boolean(profile?.workspaceFileApiOrigin && profile?.workspaceFileRootDir)
+  const chat = {
+    supported: true,
+    enabled: chatEnabled,
+    strictNoToolsVerified: false
+  }
+  if (chatEnabled) chat.toolPolicy = 'read-only-constrained'
+
+  return Object.freeze({
+    capabilityContractVersion: 1,
+    runtimeVersion: 'juyiting-fast-context-runtime-v2',
+    protocolVersions: [1],
+    chatProtocolVersions: [1],
+    contextSnapshotVersions: [1],
+    contextEnvelopeVersions: [2],
+    deltaVersions: [1],
+    dispatchAckTypes: ['chat.dispatch.ack'],
+    deliverySemantics: ['AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'],
+    // Retained for v1 readers. It is derived from profiles and never lists disabled modes.
+    interactionModes: chatEnabled ? ['CHAT'] : [],
+    profiles: Object.freeze({
+      CHAT: Object.freeze(chat),
+      // The runtime has no independently verified fixed-manifest Provider execution yet.
+      INSPECT: Object.freeze({ supported: false, enabled: false, strictNoToolsVerified: false, unavailableReason: 'fixed-manifest-provider-isolation-not-verified' }),
+      // Existing command paths are legacy compatibility, not new execution-orchestration admission.
+      EXECUTE: Object.freeze({ supported: false, enabled: false })
+    }),
+    legacyCompatibility: Object.freeze({
+      PRIVATE: true,
+      TASK: true,
+      nativeStart: nativeStartEnabled,
+      dispatchAckTypes: ['chat.dispatch.ack']
+    }),
+    fastChatEnabled: Boolean(profile?.fastChatEnabled),
+    appServerEnabled: Boolean(profile?.appServerEnabled),
+    trueDeltaEnabled: Boolean(profile?.trueDeltaEnabled)
+  })
+}
+
 export const buildAgentPresencePayload = (profile, status, extra = {}) => ({
   status,
   currentTaskId: extra.taskId || '',
   currentTaskTitle: extra.title || '',
   errorMessage: extra.errorMessage || '',
-  abilities: resolveProfileAbilities(profile)
+  abilities: resolveProfileAbilities(profile),
+  runtimeCapabilities: buildRuntimeCapabilities(profile)
 })
 
 export const buildAgentRegistrationPayload = profile => ({
@@ -3629,14 +3688,7 @@ export const buildAgentRegistrationPayload = profile => ({
   personaName: profile.personaName,
   endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
   abilities: resolveProfileAbilities(profile),
-  runtimeCapabilities: {
-    runtimeVersion: 'juyiting-fast-context-runtime-v2', protocolVersions: [1], chatProtocolVersions: [1], contextSnapshotVersions: [1], contextEnvelopeVersions: [2],
-    deltaVersions: [1], dispatchAckTypes: ['chat.dispatch.ack'], deliverySemantics: ['AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'],
-    interactionModes: ['CHAT', 'INSPECT', 'EXECUTE'], engineKinds: ['legacy-codex', 'app-server'],
-    toolPolicyKinds: ['read-only-constrained'], appServerPolicy: 'server-requests-deny-and-interrupt',
-    fastChatEnabled: Boolean(profile.fastChatEnabled), appServerEnabled: Boolean(profile.appServerEnabled),
-    trueDeltaEnabled: Boolean(profile.trueDeltaEnabled)
-  }
+  runtimeCapabilities: buildRuntimeCapabilities(profile)
 })
 
 const sendStatus = (profile, status, extra = {}) => sendProtocol(

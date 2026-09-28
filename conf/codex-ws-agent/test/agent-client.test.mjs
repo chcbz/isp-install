@@ -422,15 +422,57 @@ test('production chat runner takes disabled and legacy messages directly to seri
   assert.equal(result.status, 'completed')
 })
 
-test('registration advertises only implemented v1 durable CHAT, Context Envelope v2, ACK and app-server policy', () => {
-  const capabilities = buildAgentRegistrationPayload({ ...profile, fastChatEnabled: true, appServerEnabled: true, trueDeltaEnabled: true }).runtimeCapabilities
-  assert.deepEqual(capabilities.protocolVersions, [1])
-  assert.deepEqual(capabilities.chatProtocolVersions, [1])
-  assert.deepEqual(capabilities.contextSnapshotVersions, [1])
-  assert.deepEqual(capabilities.contextEnvelopeVersions, [2])
-  assert.deepEqual(capabilities.dispatchAckTypes, ['chat.dispatch.ack'])
-  assert.deepEqual(capabilities.deliverySemantics, ['AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'])
-  assert.equal(capabilities.appServerPolicy, 'server-requests-deny-and-interrupt')
+test('registration and presence truthfully advertise capability contract v1 with Fast CHAT disabled by default', () => {
+  const registration = buildAgentRegistrationPayload(profile).runtimeCapabilities
+  const presence = buildAgentPresencePayload(profile, 'online').runtimeCapabilities
+  assert.deepEqual(presence, registration)
+  assert.deepEqual(
+    registration,
+    JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'u0-runtime-capabilities-v1.json'), 'utf8'))
+  )
+})
+
+test('capability contract advertises CHAT only after its read-only-constrained profile is configured', () => {
+  const configured = {
+    ...profile,
+    fastChatEnabled: true,
+    appServerEnabled: true,
+    chatEngine: 'app-server',
+    chatSandbox: 'read-only',
+    chatToolPolicy: 'read-only-constrained',
+    workspaceFileApiOrigin: 'https://api.example.test',
+    workspaceFileRootDir: '/private/runs'
+  }
+  const capabilities = buildAgentRegistrationPayload(configured).runtimeCapabilities
+  assert.deepEqual(capabilities.interactionModes, ['CHAT'])
+  assert.deepEqual(capabilities.profiles.CHAT, {
+    supported: true,
+    enabled: true,
+    strictNoToolsVerified: false,
+    toolPolicy: 'read-only-constrained'
+  })
+  assert.equal(capabilities.profiles.INSPECT.enabled, false)
+  assert.equal(capabilities.profiles.EXECUTE.enabled, false)
+  assert.deepEqual(capabilities.legacyCompatibility, {
+    PRIVATE: true,
+    TASK: true,
+    nativeStart: true,
+    dispatchAckTypes: ['chat.dispatch.ack']
+  })
+})
+
+test('capability contract refuses to advertise CHAT policy for a non-constrained Fast configuration', () => {
+  const capabilities = buildAgentRegistrationPayload({
+    ...profile,
+    fastChatEnabled: true,
+    appServerEnabled: true,
+    chatEngine: 'app-server',
+    chatSandbox: 'workspace-write',
+    chatToolPolicy: 'read-only-constrained'
+  }).runtimeCapabilities
+  assert.equal(capabilities.profiles.CHAT.enabled, false)
+  assert.equal('toolPolicy' in capabilities.profiles.CHAT, false)
+  assert.deepEqual(capabilities.interactionModes, [])
 })
 
 test('legacy chat run emits final only and never fabricates delta', async () => {
