@@ -49,11 +49,11 @@ test('pinned Codex CLI 0.153.4 generated schemas match recorded digests and wire
 
 test('API-generated hostedWire golden is byte-exact and accepted as schema v1 additive durable CHAT', () => {
   const fixtureBytes = readFileSync(fixturePath)
-  assert.equal(createHash('sha256').update(fixtureBytes).digest('hex'), '5ffd3ce6fd11dd1141f850409d6024abd0666443df9330b2bbf7df61a83edf86')
+  assert.equal(createHash('sha256').update(fixtureBytes).digest('hex'), 'db50396c2522f7fe8c32af8027abc253782c16eee8354119b2eac643140ce6ee')
   assert.equal(fixtureBytes.at(-1), 0x0a)
   const provenance = verifyHostedWireContract()
-  assert.equal(provenance.apiCommit, 'caee54fc27a08146f9cc57219cf86c763e41c531')
-  assert.equal(provenance.fixtureSha256, '5ffd3ce6fd11dd1141f850409d6024abd0666443df9330b2bbf7df61a83edf86')
+  assert.equal(provenance.apiCommit, 'bc4bd8b15cc06ed29bc591ad01258d1533711f2a')
+  assert.equal(provenance.fixtureSha256, 'db50396c2522f7fe8c32af8027abc253782c16eee8354119b2eac643140ce6ee')
   assert.equal(provenance.provenanceStatus, 'API_GENERATED_VERIFIED')
   assert.equal(provenance.apiSourcePath, 'api/chat/jia-chat-service/src/chatDeliberationTest/resources/contracts/api-hosted-wire-v1.json')
   assert.equal(provenance.generatorClass, 'cn.jia.chat.service.ApiHostedWireV1ContractTest')
@@ -64,7 +64,7 @@ test('API-generated hostedWire golden is byte-exact and accepted as schema v1 ad
   assert.equal(message.ownerJiacn, 'owner-contract')
   assert.equal(message.durable, true)
   assert.equal(message.contextSnapshot.facts.conversation.id, '42')
-  assert.equal(message.contextHash, 'sha256:3ccc380e425ec1cb4637342da5ddc3c6353419ae1463580e25310f94f0d42186')
+  assert.equal(message.contextHash, 'sha256:206becfe153b2672ddabf73e46939b2726a790a8a39f0b9f1b899bb5c2a43d8b')
   assert.equal(buildChatDispatchAck(profile, message).schemaVersion, 1)
 })
 
