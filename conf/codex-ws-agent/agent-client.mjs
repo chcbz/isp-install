@@ -33,6 +33,7 @@ import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallState
 import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
+import { NativeConversationLane } from './conversation-native.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import { AppServerAdapter, cleanupCodexAppServerSnapshots, measureCodexAppServerBinary } from './app-server-adapter.mjs'
 export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract }
@@ -4625,6 +4626,29 @@ const startWorkspaceFilePoller = (profile, state) => {
   state.workspaceFilePollTimer = setInterval(() => { void tick() }, 3000)
 }
 
+// Independent timer and in-flight guard: a blocked legacy file queue must never starve
+// native CONVERSATION. Neither timer dispatches through ordinary WS/chat tooling.
+const stopNativeConversationPoller = state => {
+  if (!state) return
+  clearInterval(state.conversationNativePollTimer)
+  state.conversationNativePollTimer = null
+}
+const startNativeConversationPoller = (profile, state) => {
+  stopNativeConversationPoller(state)
+  if (!state?.conversationNativeLane || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
+  const tick = async () => {
+    if (state.conversationNativePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
+    state.conversationNativePollInFlight = true
+    try { await state.conversationNativeLane.poll() } catch (error) {
+      const code = typeof error?.code === 'string' && /^CONVERSATION_[A-Z_]{1,80}$/.test(error.code)
+        ? error.code : 'CONVERSATION_UNAVAILABLE'
+      console.warn(`native conversation poll unavailable | profile=${profile.profileId} | code=${code}`)
+    } finally { state.conversationNativePollInFlight = false }
+  }
+  void tick()
+  state.conversationNativePollTimer = setInterval(() => { void tick() }, 3000)
+}
+
 const canonicalizeConfiguredPath = configuredPath => {
   let existingPrefix = resolve(configuredPath)
   const missingSegments = []
@@ -4760,6 +4784,13 @@ const createProfileState = profile => {
       validateOutput: validateWorkspaceFileOutput
     })
     : null
+  const conversationNativeLane = workspaceFileBridge ? new NativeConversationLane({
+    apiOrigin: profile.workspaceFileApiOrigin, rootDir: profile.workspaceFileRootDir,
+    agentId: profile.agentId, runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+    getAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || ''
+    // No execute adapter: current API exposes no input manifest or verified no-reference marker.
+    // In particular do not invoke Codex/imagegen (paid) merely because a claim succeeded.
+  }) : null
   const inbox = new PersistentCommandInbox({
     rootDir: config.commandInboxDir,
     profile,
@@ -4814,6 +4845,8 @@ const createProfileState = profile => {
     heartbeatTimer: null,
     workspaceFilePollTimer: null,
     workspaceFilePollInFlight: false,
+    conversationNativePollTimer: null,
+    conversationNativePollInFlight: false,
     reconnectTimer: null,
     reconnectAttempt: 0,
     reconnectStartedAt: 0,
@@ -4834,6 +4867,7 @@ const createProfileState = profile => {
     skillInstallManager,
     workspaceManager,
     workspaceFileBridge,
+    conversationNativeLane,
     workspaceFileRuntimeAuthHeader: '',
     processor: null,
     registration: new RegistrationAckObserver({
@@ -4982,6 +5016,7 @@ const handleMessage = async (profile, raw) => {
     // The API rotates this registration token. Keep it only in memory for this live socket binding.
     state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
     startWorkspaceFilePoller(profile, state)
+    startNativeConversationPoller(profile, state)
   }
   if (isLegacyInboundControlFrame(parsed)) {
     if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
@@ -5082,6 +5117,7 @@ const resumeRegisteredProfile = (profile, state) => {
   if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
   state.processor.resume()
   startWorkspaceFilePoller(profile, state)
+  startNativeConversationPoller(profile, state)
   state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
 }
 
@@ -5091,6 +5127,7 @@ const connectProfile = profile => {
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
+  stopNativeConversationPoller(state)
   state.registration.disconnect()
   state.workspaceFileRuntimeAuthHeader = ''
   if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
@@ -5127,6 +5164,7 @@ const connectProfile = profile => {
     state.executionReportReplayCancel = null
     clearInterval(state.heartbeatTimer)
     stopWorkspaceFilePoller(state)
+    stopNativeConversationPoller(state)
     state.processor.pause()
     if (!shuttingDown) doReconnect(profile)
   })
@@ -5169,6 +5207,7 @@ export const disposeProfileState = async (state, reason = 'profile removed') => 
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
+  stopNativeConversationPoller(state)
   state.registration.disconnect()
   state.workspaceFileRuntimeAuthHeader = ''
   sendStatus(profile, 'offline', { errorMessage: reason })
@@ -5272,6 +5311,7 @@ const shutdown = (exitCode = 0, reason = '') => {
       clearReconnectState(state)
       clearInterval(state?.heartbeatTimer)
       stopWorkspaceFilePoller(state)
+      stopNativeConversationPoller(state)
       state?.registration.disconnect()
       if (state) adapterShutdowns.push(disposeAppServerState(state, { timeoutMs: 5000 }).catch(error => console.error(`app-server shutdown failed | profile=${profile.profileId} | ${error.message}`)))
       sendStatus(profile, 'offline')
