@@ -8,6 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
+import { materializeNativeConversationInputs, parseNativeConversationInputs } from './conversation-reference-inputs.mjs'
 
 const BASE = '/internal/agent/tasks'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/
@@ -78,6 +79,40 @@ export class NativeConversationLane {
     checkDirect(reply, endpoint, status)
     try { return await reply.json() } catch { deny('CONVERSATION_RESPONSE_UNAVAILABLE') }
   }
+  async #readInput(path, fence, input) {
+    const endpoint = new URL(`${path}/inputs/${input.inputRef}/content`, `${this.#origin}/`)
+    const headers = { ...this.#headers(), Accept: 'application/octet-stream', 'Content-Type': 'application/json' }
+    let reply
+    try { reply = await this.#fetch(endpoint, { method: 'POST', redirect: 'error', headers,
+      body: JSON.stringify(fence) }) } catch { deny('CONVERSATION_INPUT_READ_UNCERTAIN') }
+    if (reply?.status !== 200 || reply.redirected || reply.url !== endpoint.href ||
+        reply.headers?.get?.('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/octet-stream' ||
+        reply.headers?.get?.('content-length') !== String(input.byteLength))
+      deny('CONVERSATION_INPUT_READ_UNCERTAIN')
+    const chunks = []; let length = 0
+    try {
+      if (reply.body && typeof reply.body.getReader === 'function') {
+        const reader = reply.body.getReader()
+        try {
+          while (true) {
+            const { value, done } = await reader.read()
+            if (done) break
+            if (!(value instanceof Uint8Array)) deny('CONVERSATION_INPUT_READ_UNCERTAIN')
+            length += value.length
+            if (length > input.byteLength) deny('CONVERSATION_INPUT_READ_UNCERTAIN')
+            chunks.push(Buffer.from(value))
+          }
+        } finally { reader.releaseLock() }
+      } else {
+        const bytes = Buffer.from(await reply.arrayBuffer())
+        length = bytes.length
+        if (length > input.byteLength) deny('CONVERSATION_INPUT_READ_UNCERTAIN')
+        chunks.push(bytes)
+      }
+    } catch { deny('CONVERSATION_INPUT_READ_UNCERTAIN') }
+    if (length !== input.byteLength) deny('CONVERSATION_INPUT_READ_UNCERTAIN')
+    return Buffer.concat(chunks, length)
+  }
   async poll() {
     if (this.#active) return { processed: 0, busy: true }
     this.#active = true
@@ -114,15 +149,10 @@ export class NativeConversationLane {
     }
     let runDirectory
     try {
-      // A claimed lease alone does not attest that the execution has no materials.
-      // Refuse unknown, mismatched or reference-bearing manifests; never fall back to
-      // the legacy unfenced /inputs endpoint or infer absence from the queue payload.
+      // A claimed lease alone does not attest the exact grant materials. Refuse
+      // unknown/foreign manifests; never fall back to the old unfenced /inputs.
       const inputSnapshot = await this.#request(`${path}/inputs`, 'POST', fence)
-      if (!object(inputSnapshot) || Object.keys(inputSnapshot).sort().join() !==
-          ['executionId', 'inputs', 'leaseVersion', 'noReferencedMaterials'].sort().join() ||
-          inputSnapshot.executionId !== lease.executionId || inputSnapshot.leaseVersion !== fence.version ||
-          inputSnapshot.noReferencedMaterials !== true || !Array.isArray(inputSnapshot.inputs) ||
-          inputSnapshot.inputs.length !== 0) deny('CONVERSATION_INPUTS_UNAVAILABLE')
+      const grantedInputs = parseNativeConversationInputs(inputSnapshot, lease.executionId, fence.version)
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       // Separate run tree; never use CHAT workdir or existing file-command roots.
       mkdirSync(this.#root, { recursive: true, mode: 0o700 })
@@ -130,10 +160,15 @@ export class NativeConversationLane {
       runDirectory = mkdtempSync(resolve(this.#root, `${command.runId}-${randomUUID()}-`))
       for (const part of ['inputs', 'outputs', 'scratch']) mkdirSync(resolve(runDirectory, part), { mode: 0o700 })
       timer = setTimeout(() => { void renew() }, Math.max(1, Math.floor((lease.expiresAt - Date.now()) / 2)))
-      // Reference manifests and paid execution are still unsupported. The production
-      // runtime deliberately has NO executor: no model call, fake image or unknown-cost billing.
+      // The production runtime still has NO executor by default; do not download
+      // private references if this capability was not explicitly enabled.
       if (typeof this.#execute !== 'function') deny('CONVERSATION_EXECUTOR_NOT_AUTHORIZED')
-      const output = await this.#execute(Object.freeze({ command, runDirectory, inputs: Object.freeze([]) }))
+      // Every byte is reauthorized by the current grant/fence and verified against
+      // the immutable manifest before any executor sees a reference path.
+      const inputs = await materializeNativeConversationInputs({ inputs: grantedInputs, runDirectory,
+        readInput: input => this.#readInput(path, fence, input) })
+      if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
+      const output = await this.#execute(Object.freeze({ command, runDirectory, inputs }))
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       if (!object(output) || output.outputId !== command.outputId || output.contentType !== command.outputContentMimeType
           || !Buffer.isBuffer(output.bytes) || output.bytes.length < 16 || output.bytes.length > 16 * 1024 * 1024
@@ -161,7 +196,8 @@ export class NativeConversationLane {
         deny('CONVERSATION_COMMIT_UNCERTAIN')
       return { committed: true }
     } catch (error) {
-      const code = error instanceof NativeConversationError ? error.code : 'CONVERSATION_EXECUTION_FAILED'
+      const code = typeof error?.code === 'string' && error.code.startsWith('CONVERSATION_')
+        ? error.code : 'CONVERSATION_EXECUTION_FAILED'
       // Never turn an ambiguous write/lease expiry into a success or a misleading terminal fail.
       if (code.includes('UNCERTAIN') || code === 'CONVERSATION_OUTCOME_UNKNOWN' || renewalError) throw error
       const failed = await this.#request(`${path}/failure`, 'POST', { fence, code })
