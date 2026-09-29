@@ -2,8 +2,8 @@
  * Native CONVERSATION lane, API d713abd4. Never share CHAT/command dispatch or the
  * unfenced workspace file bridge. API owns root -> grant -> execution transactions.
  * Only scoped inbox -> lease -> renew -> fenced stage/commit/fail are permitted.
- * No reference inputs endpoint or explicit engine authorization exists on this wire:
- * without a separately supplied, local, no-charge verified executor we fail closed.
+ * A fenced input snapshot is required; reference materials still have no approved resolver.
+ * Without a separately supplied, local, no-charge verified executor we fail closed.
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
@@ -114,13 +114,23 @@ export class NativeConversationLane {
     }
     let runDirectory
     try {
+      // A claimed lease alone does not attest that the execution has no materials.
+      // Refuse unknown, mismatched or reference-bearing manifests; never fall back to
+      // the legacy unfenced /inputs endpoint or infer absence from the queue payload.
+      const inputSnapshot = await this.#request(`${path}/inputs`, 'POST', fence)
+      if (!object(inputSnapshot) || Object.keys(inputSnapshot).sort().join() !==
+          ['executionId', 'inputs', 'leaseVersion', 'noReferencedMaterials'].sort().join() ||
+          inputSnapshot.executionId !== lease.executionId || inputSnapshot.leaseVersion !== fence.version ||
+          inputSnapshot.noReferencedMaterials !== true || !Array.isArray(inputSnapshot.inputs) ||
+          inputSnapshot.inputs.length !== 0) deny('CONVERSATION_INPUTS_UNAVAILABLE')
+      if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       // Separate run tree; never use CHAT workdir or existing file-command roots.
       mkdirSync(this.#root, { recursive: true, mode: 0o700 })
       if (realpathSync(this.#root) !== this.#root) deny('CONVERSATION_RUN_ROOT_UNSAFE')
       runDirectory = mkdtempSync(resolve(this.#root, `${command.runId}-${randomUUID()}-`))
       for (const part of ['inputs', 'outputs', 'scratch']) mkdirSync(resolve(runDirectory, part), { mode: 0o700 })
       timer = setTimeout(() => { void renew() }, Math.max(1, Math.floor((lease.expiresAt - Date.now()) / 2)))
-      // No input manifest or trusted reference-free flag in the current API. The production
+      // Reference manifests and paid execution are still unsupported. The production
       // runtime deliberately has NO executor: no model call, fake image or unknown-cost billing.
       if (typeof this.#execute !== 'function') deny('CONVERSATION_EXECUTOR_NOT_AUTHORIZED')
       const output = await this.#execute(Object.freeze({ command, runDirectory, inputs: Object.freeze([]) }))

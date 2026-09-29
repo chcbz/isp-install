@@ -31,6 +31,10 @@ const setup = ({ execute, response, auth = `AgentRuntime ${'a'.repeat(32)}` } = 
       return json(url, { executionId: 'exec-1', version: 1, token, expiresAt: Date.now() + 900000 })
     }
     if (path.endsWith('/lease/renew')) return json(url, { executionId: 'exec-1', version: 1, token, expiresAt: Date.now() + 900000 })
+    if (path.endsWith('/conversation/inputs')) {
+      assert.deepEqual(JSON.parse(init.body), { version: 1, token })
+      return json(url, { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
+    }
     if (path.endsWith('/failure')) return json(url, { executionId: 'exec-1', state: 'FAILED' })
     if (path.endsWith('/content')) return json(url, { outputId: 'output_1', state: 'STAGED', sha256: digest, byteLength: bytes.length }, 201)
     if (path.includes('/output-commits/')) return json(url, { manifestId: path.split('/').at(-1), state: 'COMMITTED',
@@ -53,8 +57,8 @@ test('default native client claims then reports true failure; no paid/model call
   const s = setup()
   try {
     assert.deepEqual(await s.lane.poll(), { processed: 1 })
-    assert.equal(s.calls.length, 3)
-    assert.deepEqual(JSON.parse(s.calls[2].body), { fence: { version: 1, token }, code: 'CONVERSATION_EXECUTOR_NOT_AUTHORIZED' })
+    assert.equal(s.calls.length, 4)
+    assert.deepEqual(JSON.parse(s.calls[3].body), { fence: { version: 1, token }, code: 'CONVERSATION_EXECUTOR_NOT_AUTHORIZED' })
     assert.ok(s.calls.every(c => c.path.includes('/conversation') && !c.path.includes('/workspace-executions')))
     assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
   } finally { s.cleanup() }
@@ -67,11 +71,11 @@ test('separately supplied no-charge executor stays inside scoped dirs and only e
     return { outputId: 'output_1', contentType: 'image/png', bytes }
   } })
   try { assert.deepEqual(await s.lane.poll(), { processed: 1 })
-    assert.equal(s.calls.length, 4)
-    assert.deepEqual(s.calls.map(x => x.method), ['GET', 'POST', 'POST', 'POST'])
-    assert.ok(s.calls[2].body instanceof FormData)
-    assert.equal(s.calls[2].body.get('sha256'), digest)
-    assert.deepEqual(JSON.parse(s.calls[3].body).outputs, [{ outputId: 'output_1', sha256: digest, length: bytes.length }])
+    assert.equal(s.calls.length, 5)
+    assert.deepEqual(s.calls.map(x => x.method), ['GET', 'POST', 'POST', 'POST', 'POST'])
+    assert.ok(s.calls[3].body instanceof FormData)
+    assert.equal(s.calls[3].body.get('sha256'), digest)
+    assert.deepEqual(JSON.parse(s.calls[4].body).outputs, [{ outputId: 'output_1', sha256: digest, length: bytes.length }])
     assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
   } finally { s.cleanup() }
 })
@@ -91,6 +95,32 @@ test('redirected response is rejected before claiming a command', async () => {
     assert.equal(s.calls.length, 1)
   } finally { s.cleanup() }
 })
+test('missing or reference-bearing input snapshot fails closed before any executor or staged output', async () => {
+  for (const snapshot of [
+    { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: false, inputs: [] },
+    { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [{ inputId: 'reference-1' }] },
+    { executionId: 'foreign', leaseVersion: 1, noReferencedMaterials: true, inputs: [] },
+    { executionId: 'exec-1', leaseVersion: 2, noReferencedMaterials: true, inputs: [] },
+    { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [], extra: 'unknown' }
+  ]) {
+    let executed = false
+    const s = setup({ execute: async () => { executed = true }, response: url => {
+      if (url.pathname.endsWith('/commands')) return json(url, { items: [command] })
+      if (url.pathname.endsWith('/lease')) return json(url, { executionId: 'exec-1', version: 1, token,
+        expiresAt: Date.now() + 900000 })
+      if (url.pathname.endsWith('/conversation/inputs')) return json(url, snapshot)
+      if (url.pathname.endsWith('/failure')) return json(url, { executionId: 'exec-1', state: 'FAILED' })
+      throw Error('no legacy or output endpoints')
+    } })
+    try {
+      assert.deepEqual(await s.lane.poll(), { processed: 1 })
+      assert.equal(executed, false)
+      assert.deepEqual(JSON.parse(s.calls.at(-1).body).code, 'CONVERSATION_INPUTS_UNAVAILABLE')
+      assert.equal(s.calls.length, 4)
+    } finally { s.cleanup() }
+  }
+})
+
 test('invalid artifact triggers fenced failure, not a completion receipt', async () => {
   const s = setup({ execute: async () => ({ outputId: 'output_1', contentType: 'image/png', bytes: Buffer.alloc(20) }) })
   try { assert.deepEqual(await s.lane.poll(), { processed: 1 })
@@ -115,12 +145,13 @@ test('unknown commit outcome is not treated as failed or completed; no unsafe re
       if (url.pathname.endsWith('/commands')) return json(url, { items: [command] })
       if (url.pathname.endsWith('/lease')) return json(url, { executionId: 'exec-1', version: 1,
         token, expiresAt: Date.now() + 900000 })
+      if (url.pathname.endsWith('/conversation/inputs')) return json(url, { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
       if (url.pathname.endsWith('/content')) return json(url, { outputId: 'output_1', state: 'STAGED',
         sha256: digest, byteLength: bytes.length }, 201)
       if (url.pathname.includes('/output-commits/')) throw new Error('response lost after commit')
       throw new Error('Never report failure after ambiguous commit')
     } })
   try { await assert.rejects(s.lane.poll(), /CONVERSATION_OUTCOME_UNKNOWN/)
-    assert.equal(s.calls.length, 4)
+    assert.equal(s.calls.length, 5)
   } finally { s.cleanup() }
 })
