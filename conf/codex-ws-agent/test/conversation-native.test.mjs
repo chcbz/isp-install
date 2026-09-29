@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -14,7 +14,10 @@ const bytes = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buf
 const digest = createHash('sha256').update(bytes).digest('hex')
 const json = (url, body, status = 200) => ({ status, url: url.href, redirected: false,
   headers: { get: () => 'application/json' }, json: async () => body })
-const setup = ({ execute, response, auth = `AgentRuntime ${'a'.repeat(32)}` } = {}) => {
+const reference = Object.freeze({ inputRef: 'input_1', fileId: 'ref-1', version: 2,
+  originalFilename: '../do-not-use.png', contentMimeType: 'image/png', byteLength: bytes.length, sha256: digest })
+const setup = ({ execute, response, inputSnapshot, referenceBytes = bytes,
+  auth = `AgentRuntime ${'a'.repeat(32)}` } = {}) => {
   const root = mkdtempSync(resolve(tmpdir(), 'mmd-native-test-'))
   const calls = []
   const fetchFn = async (url, init) => {
@@ -33,7 +36,14 @@ const setup = ({ execute, response, auth = `AgentRuntime ${'a'.repeat(32)}` } = 
     if (path.endsWith('/lease/renew')) return json(url, { executionId: 'exec-1', version: 1, token, expiresAt: Date.now() + 900000 })
     if (path.endsWith('/conversation/inputs')) {
       assert.deepEqual(JSON.parse(init.body), { version: 1, token })
-      return json(url, { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
+      return json(url, inputSnapshot || { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
+    }
+    if (path.endsWith('/inputs/input_1/content')) {
+      assert.deepEqual(JSON.parse(init.body), { version: 1, token })
+      return { status: 200, url: url.href, redirected: false,
+        headers: { get: key => ({ 'content-type': 'application/octet-stream',
+          'content-length': String(reference.byteLength) })[key] || null },
+        arrayBuffer: async () => referenceBytes }
     }
     if (path.endsWith('/provider-start')) {
       assert.deepEqual(JSON.parse(init.body), { version: 1, token })
@@ -184,4 +194,52 @@ test('ambiguous Provider START never invokes engine, retries, uploads, or report
       assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
     } finally { s.cleanup() }
   }
+})
+test('fenced exact reference bytes materialize in private input path and reach executor, never user filename', async () => {
+  const s = setup({ inputSnapshot: { executionId: 'exec-1', leaseVersion: 1,
+    noReferencedMaterials: false, inputs: [reference] },
+  execute: async ({ inputs, runDirectory }) => {
+    assert.deepEqual(inputs.map(x => x.relativePath), ['inputs/input_1.png'])
+    assert.deepEqual(readFileSync(resolve(runDirectory, inputs[0].relativePath)), bytes)
+    assert.ok(!JSON.stringify(inputs).includes('do-not-use'))
+    return { outputId: 'output_1', contentType: 'image/png', bytes }
+  } })
+  try { assert.deepEqual(await s.lane.poll(), { processed: 1 })
+    assert.ok(s.calls.some(x => x.path.endsWith('/inputs/input_1/content')))
+    assert.ok(s.calls.findIndex(x => x.path.endsWith('/provider-start')) >
+      s.calls.findIndex(x => x.path.endsWith('/inputs/input_1/content')))
+    assert.ok(s.calls.every(x => !x.path.includes('/workspace-executions')))
+    assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
+  } finally { s.cleanup() }
+})
+
+test('invalid, foreign or tampered references never reach executor or output upload', async () => {
+  for (const [inputSnapshot, referenceBytes, expected] of [
+    [{ executionId: 'foreign', leaseVersion: 1, noReferencedMaterials: false, inputs: [reference] }, bytes, 'CONVERSATION_INPUTS_UNAVAILABLE'],
+    [{ executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: false, inputs: [{ ...reference, inputRef: '../escape' }] }, bytes, 'CONVERSATION_INPUTS_UNAVAILABLE'],
+    [{ executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: false, inputs: [{ ...reference, fileId: 'other', sha256: '0'.repeat(64) }] }, bytes, 'CONVERSATION_INPUTS_UNAVAILABLE'],
+    [{ executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: false, inputs: [reference] }, bytes.subarray(0, 8), 'CONVERSATION_INPUT_READ_UNCERTAIN']
+  ]) {
+    let executed = false
+    const s = setup({ inputSnapshot, referenceBytes, execute: async () => { executed = true } })
+    try {
+      if (expected.includes('UNCERTAIN')) await assert.rejects(s.lane.poll(), new RegExp(expected))
+      else { assert.deepEqual(await s.lane.poll(), { processed: 1 })
+        assert.equal(JSON.parse(s.calls.at(-1).body).code, expected) }
+      assert.equal(executed, false)
+      assert.ok(s.calls.every(x => !x.path.includes('/output-commits/') &&
+        !x.path.endsWith('/output_1/content') && !x.path.endsWith('/provider-start')))
+      const root = resolve(s.root, 'conversation-runs', 'agent-1')
+      if (existsSync(root)) assert.deepEqual(readdirSync(root), [])
+    } finally { s.cleanup() }
+  }
+})
+
+test('disabled runtime does not fetch private reference bytes or invoke a model', async () => {
+  const s = setup({ inputSnapshot: { executionId: 'exec-1', leaseVersion: 1,
+    noReferencedMaterials: false, inputs: [reference] } })
+  try { assert.deepEqual(await s.lane.poll(), { processed: 1 })
+    assert.ok(s.calls.every(x => !x.path.endsWith('/inputs/input_1/content')))
+    assert.equal(JSON.parse(s.calls.at(-1).body).code, 'CONVERSATION_EXECUTOR_NOT_AUTHORIZED')
+  } finally { s.cleanup() }
 })
