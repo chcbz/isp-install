@@ -133,6 +133,14 @@ export class NativeConversationLane {
       // Reference manifests and paid execution are still unsupported. The production
       // runtime deliberately has NO executor: no model call, fake image or unknown-cost billing.
       if (typeof this.#execute !== 'function') deny('CONVERSATION_EXECUTOR_NOT_AUTHORIZED')
+      // A paid Provider call is forbidden until the durable, single-use admission is
+      // acknowledged by the API. An ambiguous ACK can mean it committed: never retry.
+      let providerReceipt
+      try { providerReceipt = await this.#request(`${path}/provider-start`, 'POST', fence) }
+      catch { deny('CONVERSATION_PROVIDER_START_UNCERTAIN') }
+      if (!object(providerReceipt) || Object.keys(providerReceipt).join() !== 'started'
+          || providerReceipt.started !== true) deny('CONVERSATION_PROVIDER_START_UNCERTAIN')
+      if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       const output = await this.#execute(Object.freeze({ command, runDirectory, inputs: Object.freeze([]) }))
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       if (!object(output) || output.outputId !== command.outputId || output.contentType !== command.outputContentMimeType

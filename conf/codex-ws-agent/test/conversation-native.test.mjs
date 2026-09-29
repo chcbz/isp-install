@@ -35,6 +35,10 @@ const setup = ({ execute, response, auth = `AgentRuntime ${'a'.repeat(32)}` } = 
       assert.deepEqual(JSON.parse(init.body), { version: 1, token })
       return json(url, { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
     }
+    if (path.endsWith('/provider-start')) {
+      assert.deepEqual(JSON.parse(init.body), { version: 1, token })
+      return json(url, { started: true })
+    }
     if (path.endsWith('/failure')) return json(url, { executionId: 'exec-1', state: 'FAILED' })
     if (path.endsWith('/content')) return json(url, { outputId: 'output_1', state: 'STAGED', sha256: digest, byteLength: bytes.length }, 201)
     if (path.includes('/output-commits/')) return json(url, { manifestId: path.split('/').at(-1), state: 'COMMITTED',
@@ -71,11 +75,12 @@ test('separately supplied no-charge executor stays inside scoped dirs and only e
     return { outputId: 'output_1', contentType: 'image/png', bytes }
   } })
   try { assert.deepEqual(await s.lane.poll(), { processed: 1 })
-    assert.equal(s.calls.length, 5)
-    assert.deepEqual(s.calls.map(x => x.method), ['GET', 'POST', 'POST', 'POST', 'POST'])
-    assert.ok(s.calls[3].body instanceof FormData)
-    assert.equal(s.calls[3].body.get('sha256'), digest)
-    assert.deepEqual(JSON.parse(s.calls[4].body).outputs, [{ outputId: 'output_1', sha256: digest, length: bytes.length }])
+    assert.equal(s.calls.length, 6)
+    assert.deepEqual(s.calls.map(x => x.method), ['GET', 'POST', 'POST', 'POST', 'POST', 'POST'])
+    assert.equal(s.calls[3].path.endsWith('/provider-start'), true)
+    assert.ok(s.calls[4].body instanceof FormData)
+    assert.equal(s.calls[4].body.get('sha256'), digest)
+    assert.deepEqual(JSON.parse(s.calls[5].body).outputs, [{ outputId: 'output_1', sha256: digest, length: bytes.length }])
     assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
   } finally { s.cleanup() }
 })
@@ -146,12 +151,37 @@ test('unknown commit outcome is not treated as failed or completed; no unsafe re
       if (url.pathname.endsWith('/lease')) return json(url, { executionId: 'exec-1', version: 1,
         token, expiresAt: Date.now() + 900000 })
       if (url.pathname.endsWith('/conversation/inputs')) return json(url, { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
+      if (url.pathname.endsWith('/provider-start')) return json(url, { started: true })
       if (url.pathname.endsWith('/content')) return json(url, { outputId: 'output_1', state: 'STAGED',
         sha256: digest, byteLength: bytes.length }, 201)
       if (url.pathname.includes('/output-commits/')) throw new Error('response lost after commit')
       throw new Error('Never report failure after ambiguous commit')
     } })
   try { await assert.rejects(s.lane.poll(), /CONVERSATION_OUTCOME_UNKNOWN/)
-    assert.equal(s.calls.length, 5)
+    assert.equal(s.calls.length, 6)
   } finally { s.cleanup() }
+})
+
+test('ambiguous Provider START never invokes engine, retries, uploads, or reports speculative failure', async () => {
+  for (const replyMode of ['lost', 'malformed', 'rejected']) {
+    let executed = false
+    const s = setup({ execute: async () => { executed = true }, response: (url) => {
+      if (url.pathname.endsWith('/commands')) return json(url, { items: [command] })
+      if (url.pathname.endsWith('/lease')) return json(url, { executionId: 'exec-1', version: 1,
+        token, expiresAt: Date.now() + 900000 })
+      if (url.pathname.endsWith('/conversation/inputs')) return json(url, { executionId: 'exec-1',
+        leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
+      if (url.pathname.endsWith('/provider-start')) {
+        if (replyMode === 'lost') throw Error('response lost after durable marker')
+        if (replyMode === 'malformed') return json(url, { started: 'true' })
+        return json(url, { error: 'conflict' }, 409)
+      }
+      throw Error('must not upload or report failure on uncertain Provider START')
+    } })
+    try { await assert.rejects(s.lane.poll(), /CONVERSATION_PROVIDER_START_UNCERTAIN/)
+      assert.equal(executed, false)
+      assert.equal(s.calls.length, 4)
+      assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
+    } finally { s.cleanup() }
+  }
 })
