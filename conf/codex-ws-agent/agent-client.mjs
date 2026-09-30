@@ -34,9 +34,10 @@ import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 import { NativeConversationLane } from './conversation-native.mjs'
+import { buildNativeBountyExecutionDeclaration } from './native-bounty-capability.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import { AppServerAdapter, cleanupCodexAppServerSnapshots, measureCodexAppServerBinary } from './app-server-adapter.mjs'
-export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract }
+export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration }
 
 const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
 const WORKSPACE_FILE_TOOLCHAIN_DIR = resolve(AGENT_RELEASE_ROOT, '.toolchain')
@@ -538,7 +539,7 @@ const parseCodexTimeoutMs = (value, fallback = 900000) => {
   return typeof selected === 'number' || typeof selected === 'string' ? Number(selected) : NaN
 }
 
-const normalizeProfile = (profile, fallback = {}, index = 0) => {
+export const normalizeProfile = (profile, fallback = {}, index = 0) => {
   const agentId = profile.agentId || fallback.agentId || `local-codex-${index + 1}`
   const status = String(profile.status || fallback.status || '').trim().toLowerCase()
   return {
@@ -587,6 +588,12 @@ const normalizeProfile = (profile, fallback = {}, index = 0) => {
     workspaceFileApiOrigin: profile.workspaceFileApiOrigin || fallback.workspaceFileApiOrigin || '',
     workspaceFileRootDir: profile.workspaceFileRootDir || fallback.workspaceFileRootDir || '',
     workspaceFileRuntimeAuthHeader: profile.workspaceFileRuntimeAuthHeader || fallback.workspaceFileRuntimeAuthHeader || '',
+    nativeConversationHttpPollEnabled: parseEnabledFlag(
+      profile.nativeConversationHttpPollEnabled ?? fallback.nativeConversationHttpPollEnabled
+    ),
+    nativeConversationImageGenerationEnabled: parseEnabledFlag(
+      profile.nativeConversationImageGenerationEnabled ?? fallback.nativeConversationImageGenerationEnabled
+    ),
     enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
@@ -627,6 +634,12 @@ const legacyProfile = () => normalizeProfile({
   workspaceFileApiOrigin: process.env.CODEX_WORKSPACE_FILE_API_ORIGIN || '',
   workspaceFileRootDir: process.env.CODEX_WORKSPACE_FILE_ROOT_DIR || '',
   workspaceFileRuntimeAuthHeader: process.env.CODEX_WORKSPACE_FILE_RUNTIME_AUTH_HEADER || '',
+  nativeConversationHttpPollEnabled: ['1', 'true'].includes(
+    String(process.env.CYF_CONVERSATION_HTTP_POLL_ENABLED || '').trim().toLowerCase()
+  ),
+  nativeConversationImageGenerationEnabled: ['1', 'true'].includes(
+    String(process.env.CYF_CONVERSATION_IMAGEGEN_ENABLED || '').trim().toLowerCase()
+  ),
   isDefault: true
 })
 
@@ -3684,12 +3697,13 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => ({
   runtimeCapabilities: buildRuntimeCapabilities(profile)
 })
 
-export const buildAgentRegistrationPayload = profile => ({
+export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false) => ({
   name: profile.agentName,
   personaName: profile.personaName,
   endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
   abilities: resolveProfileAbilities(profile),
-  runtimeCapabilities: buildRuntimeCapabilities(profile)
+  runtimeCapabilities: buildRuntimeCapabilities(profile),
+  nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online })
 })
 
 const sendStatus = (profile, status, extra = {}) => sendProtocol(
@@ -3699,7 +3713,9 @@ const sendStatus = (profile, status, extra = {}) => sendProtocol(
 const registerAgent = profile => {
   const state = getProfileState(profile)
   const envelope = buildProtocolEnvelope(
-    MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(profile), profile
+    MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(
+      profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN
+    ), profile
   )
   return sendRegistrationWithAckObservation({
     observer: state.registration,
@@ -4234,6 +4250,13 @@ const profileConfigurationErrors = profile => {
   if (workspaceFileControls.every(value => Boolean(value)) && !workspaceFileToolchain().ready) {
     errors.push('release-local workspace delivery toolchain is missing or incomplete')
   }
+  if (profile.nativeConversationImageGenerationEnabled && !profile.nativeConversationHttpPollEnabled) {
+    errors.push('nativeConversationImageGenerationEnabled requires nativeConversationHttpPollEnabled=true')
+  }
+  if ((profile.nativeConversationHttpPollEnabled || profile.nativeConversationImageGenerationEnabled)
+      && !workspaceFileControls.every(value => Boolean(value))) {
+    errors.push('native conversation HTTP poll/executor requires workspaceFileApiOrigin and workspaceFileRootDir')
+  }
   return errors
 }
 
@@ -4270,6 +4293,10 @@ export const buildConfigurationReport = runtimeConfig => ({
       workspacePolicyId: profile.workspacePolicyId || null,
       workspaceFileRuntime: profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
         ? 'awaiting-current-registration' : 'disabled',
+      nativeBountyExecution: profile.nativeConversationHttpPollEnabled
+        && profile.nativeConversationImageGenerationEnabled
+        ? 'configured; enabled declaration still requires live socket, local toolchain, executor, and poll protocol'
+        : 'disabled',
       commandReadiness: policyConfigured ? 'policy-configured; requires --validate' : 'blocked-no-workspace-policy',
       schedulingAbilities: resolveProfileAbilities(profile),
       errors: profileConfigurationErrors(profile),
@@ -4816,10 +4843,50 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}) => ({
   ...profile,
   workspaceFileApiOrigin: source.workspaceFileApiOrigin || '',
   workspaceFileRootDir: source.workspaceFileRootDir || '',
+  nativeConversationHttpPollEnabled: source.nativeConversationHttpPollEnabled === true,
+  nativeConversationImageGenerationEnabled: source.nativeConversationImageGenerationEnabled === true,
   executionReportCommandTypes: Array.isArray(source.executionReportCommandTypes)
     ? [...source.executionReportCommandTypes]
     : []
 })
+
+export const createNativeBountyExecutionRuntime = ({
+  profile,
+  workspaceFileBridge,
+  getAuth = () => '',
+  toolchainReady = workspaceFileToolchain().ready,
+  createPollProtocol = options => new NativeConversationLane(options),
+  executeImage = args => runNativeConversationImage({ profile, ...args })
+} = {}) => {
+  const httpPollEnabled = profile?.nativeConversationHttpPollEnabled === true
+  const executorEnabled = profile?.nativeConversationImageGenerationEnabled === true
+  const configReady = Boolean(
+    profile?.enabled !== false
+    && httpPollEnabled
+    && executorEnabled
+    && profile?.workspaceFileApiOrigin
+    && profile?.workspaceFileRootDir
+    && workspaceFileBridge
+    && toolchainReady === true
+    && typeof getAuth === 'function'
+    && typeof createPollProtocol === 'function'
+    && typeof executeImage === 'function'
+  )
+  if (!configReady) return Object.freeze({ configReady: false, httpPollEnabled, executor: null, pollProtocol: null })
+  const executor = args => executeImage(args)
+  const pollProtocol = createPollProtocol({
+    apiOrigin: profile.workspaceFileApiOrigin,
+    rootDir: profile.workspaceFileRootDir,
+    agentId: profile.agentId,
+    runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+    getAuth,
+    execute: executor
+  })
+  if (typeof pollProtocol?.poll !== 'function') {
+    return Object.freeze({ configReady: false, httpPollEnabled, executor: null, pollProtocol: null })
+  }
+  return Object.freeze({ configReady: true, httpPollEnabled: true, executor, pollProtocol })
+}
 
 const createProfileState = profile => {
   const workspacePolicy = profile.workspacePolicyId
@@ -4836,15 +4903,12 @@ const createProfileState = profile => {
       validateOutput: validateWorkspaceFileOutput
     })
     : null
-  const conversationNativeLane = workspaceFileBridge ? new NativeConversationLane({
-    apiOrigin: profile.workspaceFileApiOrigin, rootDir: profile.workspaceFileRootDir,
-    agentId: profile.agentId, runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
-    getAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || '',
-    // No imagegen call is possible unless the server verified a grant, claim, live lease,
-    // and exact inputs. Deployment must opt in explicitly after paid-cost authorization is wired.
-    execute: process.env.CYF_CONVERSATION_IMAGEGEN_ENABLED === '1' && workspaceFileToolchain().ready
-      ? args => runNativeConversationImage({ profile, ...args }) : null
-  }) : null
+  const nativeBountyExecutionRuntime = createNativeBountyExecutionRuntime({
+    profile,
+    workspaceFileBridge,
+    getAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || ''
+  })
+  const conversationNativeLane = nativeBountyExecutionRuntime.pollProtocol
   const inbox = new PersistentCommandInbox({
     rootDir: config.commandInboxDir,
     profile,
@@ -4922,6 +4986,7 @@ const createProfileState = profile => {
     workspaceManager,
     workspaceFileBridge,
     conversationNativeLane,
+    nativeBountyExecutionRuntime,
     workspaceFileRuntimeAuthHeader: '',
     processor: null,
     registration: new RegistrationAckObserver({

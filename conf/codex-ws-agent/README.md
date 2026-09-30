@@ -61,6 +61,8 @@ Each profile can define:
 - `workspaceNoTaskPolicy`
 - `workspaceNonCodingCommandTypes`
 - `workspaceFallbackWorkdir`
+- `nativeConversationHttpPollEnabled` (explicit opt-in to the authenticated native conversation poll wire)
+- `nativeConversationImageGenerationEnabled` (explicit opt-in to the local `GENERATE_IMAGE` executor)
 - `isDefault`
 
 Recommended `.env`:
@@ -110,6 +112,8 @@ At registration and every presence heartbeat, the client rebuilds `agent_runtime
 Workspace discovery scans only the workdir root plus one level inside recognized project containers, with a shared 512-entry cap and descriptor-scoped no-follow access. CYF aggregate modules require a Gradle settings file plus the project signature modules `agent/chat/task/oauth/user/kefu/point`; module-local workspaces require an allowlisted `jia-*` module name. It reports a fixed Chinese allowlist including `聚义厅协作`, `智能体管理`, `智能体调度`, `会话消息`, `多智能体协作`, `任务协作`, `身份认证`, `用户体系`, `客服系统`, `积分体系`, `微信生态`, `短信服务`, `域名与主机管理`, `内容管理`, `工作流编排`, `短链接服务`, and `天气查询`. Unknown directory names, paths, dependency versions, file contents, and technology labels are never reported. Broad home/host directories without direct project evidence produce no inferred abilities.
 
 Set `enabled=false` on an `[agent.*]` section to take that profile out of service without deleting it. Hot reload closes the profile connection and skips registration; changing it back to `enabled=true` reconnects it. `active=false` and `status=disabled|inactive|unavailable` are also treated as disabled.
+
+Native bounty execution is a separate registration declaration from fast-v1 `runtimeCapabilities`. It is enabled only when both native conversation flags are true, the private API origin/root and release-local validation toolchain are usable, the concrete `GENERATE_IMAGE` executor exists, the HTTP-poll lane is constructed, and the registration socket is open. Missing/disabled/offline configurations declare `enabled=false` with no operations. Installed skill/profile names are never evidence of support, no Provider probe is performed during declaration, and fast-v1 `EXECUTE.supported/enabled` remains false. Regular server profiles and managed-local profiles use the same `PERSONAL_WORKSPACE_CONVERSATION_HTTP_V1` wire; this declaration does not promise installation, cost authorization, Provider availability, or successful execution.
 
 If a profile is bound to a different user than the global `OPENCLAW_API_KEY`, set `apiKey` on that profile. Profile-level keys override the global key for that WebSocket connection.
 
