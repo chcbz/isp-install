@@ -13,6 +13,8 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/
 const TOKEN = /^[0-9a-fA-F-]{36}$/
 const AUTH = /^AgentRuntime [0-9a-f]{32}$/
 const PROVIDER_LANE = 'CONTROLLED_IMAGE_HTTP_V1'
+const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
+const LONG_MAX = 9223372036854775807n
 const PROVIDER_FIELDS = ['providerLane', 'consentId', 'bindingId', 'bindingEpoch', 'modelId', 'maxInputItems', 'maxOutboundRequestAttempts', 'precallFenceVersion'].sort().join(',')
 const COMMAND_FIELDS = ['commandId', 'conversationId', 'instruction', 'messageId', 'outputContentMimeType', 'outputId', 'providerExecution', 'runId', 'schemaVersion', 'taskId'].sort().join(',')
 const RECEIPT_FIELDS = ['commandId', 'executionId', 'leaseVersion', 'messageId', 'providerExecution', 'runId', 'schemaVersion', 'started', 'taskId'].sort().join(',')
@@ -23,11 +25,15 @@ const deny = code => { throw new NativeConversationError(code) }
 const isFence = value => object(value) && Number.isSafeInteger(value.version) && value.version > 0 && TOKEN.test(value.token || '')
 const isLease = value => object(value) && id(value.executionId) && isFence(value)
   && Number.isSafeInteger(value.expiresAt) && value.expiresAt > Date.now()
+const canonicalEpoch = value => {
+  if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return false
+  try { return BigInt(value) <= LONG_MAX } catch { return false }
+}
 
 const parseProviderExecution = value => {
   if (!object(value) || Object.keys(value).sort().join(',') !== PROVIDER_FIELDS
-      || value.providerLane !== PROVIDER_LANE || !id(value.consentId) || !id(value.bindingId)
-      || !/^[1-9][0-9]*$/.test(value.bindingEpoch || '') || !id(value.modelId)
+      || value.providerLane !== PROVIDER_LANE || !id(value.consentId) || !PROVIDER_ID.test(value.bindingId || '')
+      || !canonicalEpoch(value.bindingEpoch) || !PROVIDER_ID.test(value.modelId || '')
       || value.maxInputItems !== 16 || value.maxOutboundRequestAttempts !== 1 || value.precallFenceVersion !== 1) {
     deny('CONTROLLED_IMAGE_COMMAND_INVALID')
   }
@@ -219,7 +225,9 @@ export class ControlledImageConversationLane {
       return { committed: true }
     } catch (error) {
       const code = typeof error?.code === 'string' && (error.code.startsWith('CONVERSATION_') || error.code.startsWith('CONTROLLED_IMAGE_')) ? error.code : 'CONVERSATION_EXECUTION_FAILED'
-      if (code.includes('UNCERTAIN') || code === 'CONVERSATION_OUTCOME_UNKNOWN' || renewalError) throw error
+      if (code.includes('UNCERTAIN') || code === 'CONVERSATION_OUTCOME_UNKNOWN'
+          || code === 'CONTROLLED_IMAGE_OUTCOME_UNKNOWN' || code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED'
+          || code === 'CONTROLLED_IMAGE_CLAIM_CORRUPT' || code === 'CONTROLLED_IMAGE_CLAIM_IO_FAILED' || renewalError) throw error
       const failed = await this.#request(`${path}/failure`, 'POST', { fence, code })
       if (!object(failed) || failed.state !== 'FAILED' || failed.executionId !== lease.executionId) deny('CONVERSATION_FAILURE_UNCERTAIN')
       return { failed: true, code }
