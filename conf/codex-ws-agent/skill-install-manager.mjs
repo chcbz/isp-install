@@ -139,11 +139,18 @@ const LINUX_ATOMIC_HELPER = String.raw`
 import ctypes, errno, hashlib, json, os, stat, sys
 libc = ctypes.CDLL(None, use_errno=True)
 renameat2 = getattr(libc, 'renameat2', None)
-if renameat2 is None:
-    print(json.dumps({'ok': False, 'code': 'UNSUPPORTED', 'message': 'renameat2 unavailable'}))
-    sys.exit(3)
-renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-renameat2.restype = ctypes.c_int
+syscall = getattr(libc, 'syscall', None)
+if renameat2 is not None:
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    renameat2_syscall = None
+else:
+    machine = os.uname().machine.lower()
+    renameat2_syscall = {'x86_64': 316, 'amd64': 316, 'aarch64': 276, 'arm64': 276}.get(machine)
+    if syscall is None or renameat2_syscall is None:
+        print(json.dumps({'ok': False, 'code': 'UNSUPPORTED', 'message': 'renameat2 unavailable for architecture %s' % machine}))
+        sys.exit(3)
+    syscall.restype = ctypes.c_long
 RENAME_NOREPLACE = 1
 RENAME_EXCHANGE = 2
 O_DIRECTORY = getattr(os, 'O_DIRECTORY', 0)
@@ -153,7 +160,14 @@ def emit(ok, code='OK', message='', **extra):
     print(json.dumps(dict(ok=ok, code=code, message=message, **extra), sort_keys=True))
 
 def call_rename(srcfd, src, dstfd, dst, flags):
-    if renameat2(srcfd, os.fsencode(src), dstfd, os.fsencode(dst), flags) != 0:
+    source = os.fsencode(src)
+    target = os.fsencode(dst)
+    if renameat2 is not None:
+        result = renameat2(srcfd, source, dstfd, target, flags)
+    else:
+        result = syscall(ctypes.c_long(renameat2_syscall), ctypes.c_int(srcfd), ctypes.c_char_p(source),
+                         ctypes.c_int(dstfd), ctypes.c_char_p(target), ctypes.c_uint(flags))
+    if result != 0:
         value = ctypes.get_errno()
         raise OSError(value, os.strerror(value))
 
@@ -731,7 +745,7 @@ const validateNoFilePrefixConflict = entries => {
   }
 }
 
-const extractArchive = async (buffer, stagingPath, command, limits) => {
+export const extractSkillArchive = async (buffer, stagingPath, command, limits) => {
   let zipFile
   try {
     zipFile = await openZip(buffer)
@@ -1739,7 +1753,7 @@ export class SkillInstallManager {
         chmodSync(stagingPath, 0o700)
         fsyncDirectory(this.stagingDir)
         try {
-          await extractArchive(packageBytes, stagingPath, command, {
+          await extractSkillArchive(packageBytes, stagingPath, command, {
             maxEntries: this.maxEntries,
             maxEntryBytes: this.maxEntryBytes,
             maxExtractedBytes: this.maxExtractedBytes
