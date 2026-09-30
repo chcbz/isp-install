@@ -14,8 +14,13 @@ import {
 const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(24, 5)])
 const digest = createHash('sha256').update(png).digest('hex')
 const token = '12345678-1234-1234-1234-123456789abc'
+const providerExecution = Object.freeze({
+  providerLane: 'CONTROLLED_IMAGE_HTTP_V1', consentId: 'consent_1234567890abcdef1234567890abcdef',
+  bindingId: 'binding-1', bindingEpoch: '7', modelId: 'operator-model', maxInputItems: 16,
+  maxOutboundRequestAttempts: 1, precallFenceVersion: 1
+})
 const command = Object.freeze({
-  schemaVersion: 1,
+  schemaVersion: 2,
   taskId: 'task-1',
   runId: 'run-1',
   conversationId: 'conversation-1',
@@ -23,7 +28,8 @@ const command = Object.freeze({
   messageId: 'message-1',
   instruction: '生成一幅受控图像',
   outputContentMimeType: 'image/png',
-  outputId: 'output_1'
+  outputId: 'output_1',
+  providerExecution
 })
 const json = (url, payload, status = 200) => ({
   status,
@@ -79,11 +85,13 @@ const setup = (t, { startMode = 'success' } = {}) => {
     if (url.pathname.endsWith('/conversation/inputs')) return json(url, {
       executionId: 'execution-1', leaseVersion: 1, noReferencedMaterials: true, inputs: []
     })
-    if (url.pathname.endsWith('/provider-start')) {
+    if (url.pathname.endsWith('/provider-start-controlled-image')) {
       if (startMode === 'lost') throw new Error('response lost after durable START')
       if (startMode === 'malformed') return json(url, { started: 'true' })
       if (startMode === 'rejected') return json(url, { error: 'not started' }, 409)
-      return json(url, { started: true })
+      return json(url, { schemaVersion: 2, started: true, taskId: command.taskId, runId: command.runId,
+        executionId: 'execution-1', commandId: command.commandId, messageId: command.messageId,
+        providerExecution, leaseVersion: 1 })
     }
     if (url.pathname.endsWith('/outputs/output_1/content')) {
       assert.ok(init.body instanceof FormData)
@@ -100,7 +108,7 @@ const setup = (t, { startMode = 'success' } = {}) => {
   const providerFetchFn = async (url, init) => {
     providerCalls++
     events.push(`provider:${url.pathname}`)
-    assert.equal(events.at(-2), 'native:/internal/agent/tasks/task-1/runs/run-1/conversation/provider-start')
+    assert.equal(events.at(-2), 'native:/internal/agent/tasks/task-1/runs/run-1/conversation/provider-start-controlled-image')
     assert.equal(url.href, 'https://images.example.test/v1/images/generations')
     assert.equal(init.method, 'POST')
     assert.equal(init.redirect, 'error')
@@ -140,11 +148,17 @@ test('real controlled runtime registers only its sibling and fetches once after 
   })
   assert.equal(registration.nativeBountyExecution.enabled, false)
   assert.deepEqual(registration.nativeBountyExecution.operations, [])
+  assert.deepEqual(registration.controlledImageBountyExecution, {
+    schemaVersion: 1, enabled: true, transport: 'PERSONAL_WORKSPACE_CONTROLLED_IMAGE_HTTP_V2',
+    commandSchemaVersions: [2], leaseProtocolVersions: [1], providerStartFenceVersions: [2], resultCommitProtocolVersions: [1],
+    operations: [{ operation: 'GENERATE_IMAGE', inputManifest: { schemaVersion: 1, minItems: 0, maxItems: 16, mimeTypes: ['image/jpeg', 'image/png'] },
+      resultManifest: { schemaVersion: 1, minItems: 1, maxItems: 1, outputId: 'output_1', mimeTypes: ['image/png'] } }]
+  })
 
   assert.deepEqual(await fixture.runtime.pollProtocol.poll(), { processed: 1 })
   assert.equal(fixture.providerCalls(), 1)
   assert.ok(fixture.events.indexOf('provider:/v1/images/generations')
-    > fixture.events.indexOf('native:/internal/agent/tasks/task-1/runs/run-1/conversation/provider-start'))
+    > fixture.events.indexOf('native:/internal/agent/tasks/task-1/runs/run-1/conversation/provider-start-controlled-image'))
   assert.equal(filesBelow(resolve(fixture.root, 'ledger')).filter(path => path.endsWith('.json')).length, 1)
 })
 

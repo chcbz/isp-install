@@ -34,7 +34,9 @@ import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 import { NativeConversationLane } from './conversation-native.mjs'
+import { ControlledImageConversationLane } from './conversation-controlled-image.mjs'
 import { buildNativeBountyExecutionDeclaration } from './native-bounty-capability.mjs'
+import { buildControlledImageBountyExecutionDeclaration } from './controlled-image-bounty-capability.mjs'
 import {
   assertDistinctControlledImageLedgerRoots,
   controlledImageHttpConfigurationErrors,
@@ -3715,6 +3717,7 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
   abilities: resolveProfileAbilities(profile),
   runtimeCapabilities: buildRuntimeCapabilities(profile),
   nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
+  controlledImageBountyExecution: buildControlledImageBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
   nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: nativeRuntime, online })
 })
 
@@ -4882,6 +4885,7 @@ export const createNativeBountyExecutionRuntime = ({
   getAuth = () => '',
   toolchainReady = workspaceFileToolchain().ready,
   createPollProtocol = options => new NativeConversationLane(options),
+  createControlledPollProtocol = options => new ControlledImageConversationLane(options),
   executeImage = args => runNativeConversationImage({ profile, ...args }),
   controlledEnv = process.env,
   providerFetchFn = globalThis.fetch,
@@ -4898,6 +4902,7 @@ export const createNativeBountyExecutionRuntime = ({
     pollProtocol: null,
     adapterKind,
     nativeBountyV1Ready: false,
+    controlledImageV2Ready: false,
     credentialReady,
     controlledConfig
   })
@@ -4907,7 +4912,6 @@ export const createNativeBountyExecutionRuntime = ({
     && profile?.workspaceFileApiOrigin
     && profile?.workspaceFileRootDir
     && typeof getAuth === 'function'
-    && typeof createPollProtocol === 'function'
   )
 
   if (controlledSelected) {
@@ -4921,6 +4925,7 @@ export const createNativeBountyExecutionRuntime = ({
       && typeof nativeFetchFn === 'function'
       && typeof createControlledLedger === 'function'
       && typeof createControlledExecutor === 'function'
+      && typeof createControlledPollProtocol === 'function'
     if (!controlledReady) return unavailable({ adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
       controlledConfig, credentialReady: false })
     let ledger
@@ -4947,14 +4952,15 @@ export const createNativeBountyExecutionRuntime = ({
         controlledConfig, credentialReady: true })
     }
     const executor = args => controlledExecutor.execute(args)
-    const pollProtocol = createPollProtocol({
+    const pollProtocol = createControlledPollProtocol({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir,
       agentId: profile.agentId,
       runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
       getAuth,
       fetchFn: nativeFetchFn,
-      execute: executor
+      execute: executor,
+      controlledConfig
     })
     if (typeof pollProtocol?.poll !== 'function') {
       return unavailable({ adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
@@ -4967,6 +4973,7 @@ export const createNativeBountyExecutionRuntime = ({
       pollProtocol,
       adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
       nativeBountyV1Ready: false,
+      controlledImageV2Ready: true,
       credentialReady: true,
       controlledConfig
     })
@@ -4979,6 +4986,7 @@ export const createNativeBountyExecutionRuntime = ({
     && workspaceFileBridge
     && toolchainReady === true
     && typeof executeImage === 'function'
+    && typeof createPollProtocol === 'function'
   )
   if (!configReady) return unavailable({ adapterKind: 'CODEX_IMAGEGEN_NATIVE_V1' })
   const executor = args => executeImage(args)
@@ -4999,6 +5007,7 @@ export const createNativeBountyExecutionRuntime = ({
     pollProtocol,
     adapterKind: 'CODEX_IMAGEGEN_NATIVE_V1',
     nativeBountyV1Ready: true,
+    controlledImageV2Ready: false,
     credentialReady: false,
     controlledConfig: null
   })
