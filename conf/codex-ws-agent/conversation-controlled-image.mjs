@@ -32,8 +32,9 @@ const canonicalEpoch = value => {
 
 const parseProviderExecution = value => {
   if (!object(value) || Object.keys(value).sort().join(',') !== PROVIDER_FIELDS
-      || value.providerLane !== PROVIDER_LANE || !id(value.consentId) || !PROVIDER_ID.test(value.bindingId || '')
-      || !canonicalEpoch(value.bindingEpoch) || !PROVIDER_ID.test(value.modelId || '')
+      || value.providerLane !== PROVIDER_LANE || !id(value.consentId)
+      || typeof value.bindingId !== 'string' || !PROVIDER_ID.test(value.bindingId)
+      || !canonicalEpoch(value.bindingEpoch) || typeof value.modelId !== 'string' || !PROVIDER_ID.test(value.modelId)
       || value.maxInputItems !== 16 || value.maxOutboundRequestAttempts !== 1 || value.precallFenceVersion !== 1) {
     deny('CONTROLLED_IMAGE_COMMAND_INVALID')
   }

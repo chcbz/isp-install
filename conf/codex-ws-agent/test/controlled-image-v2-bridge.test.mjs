@@ -79,6 +79,10 @@ test('provider descriptor accepts core binding/model grammar and only canonical 
     const bad = clone(grammar); bad.providerExecution.bindingEpoch = epoch
     assert.throws(() => parseControlledImageConversationCommand(bad), /CONTROLLED_IMAGE_COMMAND_INVALID/)
   }
+  for (const field of ['bindingId', 'modelId']) for (const value of [123, ['binding:one'], { value: 'binding:one' }, null]) {
+    const bad = clone(grammar); bad.providerExecution[field] = value
+    assert.throws(() => parseControlledImageConversationCommand(bad), /CONTROLLED_IMAGE_COMMAND_INVALID/, `${field}:${JSON.stringify(value)}`)
+  }
 })
 
 test('v2 command requires the exact current operator config before lease, inputs, download, or START', async () => {
