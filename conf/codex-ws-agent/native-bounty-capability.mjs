@@ -35,6 +35,8 @@ export const nativeBountyExecutionEnabled = ({ profile, runtime, online } = {}) 
     && profile?.nativeConversationImageGenerationEnabled === true
     && runtime?.configReady === true
     && runtime?.httpPollEnabled === true
+    && runtime?.nativeBountyV1Ready === true
+    && runtime?.adapterKind === 'CODEX_IMAGEGEN_NATIVE_V1'
     && typeof runtime?.executor === 'function'
     && typeof runtime?.pollProtocol?.poll === 'function'
   )

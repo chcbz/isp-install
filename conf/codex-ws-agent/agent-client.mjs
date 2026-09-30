@@ -35,6 +35,16 @@ import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './r
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 import { NativeConversationLane } from './conversation-native.mjs'
 import { buildNativeBountyExecutionDeclaration } from './native-bounty-capability.mjs'
+import {
+  assertDistinctControlledImageLedgerRoots,
+  controlledImageHttpConfigurationErrors,
+  normalizeControlledImageHttpProfile,
+  resolveControlledImageHttpConfig,
+  CONTROLLED_IMAGE_PROVIDER_LANE
+} from './controlled-image-http-config.mjs'
+import { ControlledImageHttpLedger } from './controlled-image-http-ledger.mjs'
+import { ControlledImageHttpExecutor } from './controlled-image-http-executor.mjs'
+import { buildNativeProviderCredentialBinding } from './controlled-image-http-provider-binding.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import { AppServerAdapter, cleanupCodexAppServerSnapshots, measureCodexAppServerBinary } from './app-server-adapter.mjs'
 export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration }
@@ -594,6 +604,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     nativeConversationImageGenerationEnabled: parseEnabledFlag(
       profile.nativeConversationImageGenerationEnabled ?? fallback.nativeConversationImageGenerationEnabled
     ),
+    ...normalizeControlledImageHttpProfile(profile, fallback),
     enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
@@ -3703,7 +3714,8 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
   endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
   abilities: resolveProfileAbilities(profile),
   runtimeCapabilities: buildRuntimeCapabilities(profile),
-  nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online })
+  nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
+  nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: nativeRuntime, online })
 })
 
 const sendStatus = (profile, status, extra = {}) => sendProtocol(
@@ -4253,10 +4265,11 @@ const profileConfigurationErrors = profile => {
   if (profile.nativeConversationImageGenerationEnabled && !profile.nativeConversationHttpPollEnabled) {
     errors.push('nativeConversationImageGenerationEnabled requires nativeConversationHttpPollEnabled=true')
   }
-  if ((profile.nativeConversationHttpPollEnabled || profile.nativeConversationImageGenerationEnabled)
-      && !workspaceFileControls.every(value => Boolean(value))) {
+  if ((profile.nativeConversationHttpPollEnabled || profile.nativeConversationImageGenerationEnabled
+      || profile.controlledImageHttpEnabled) && !workspaceFileControls.every(value => Boolean(value))) {
     errors.push('native conversation HTTP poll/executor requires workspaceFileApiOrigin and workspaceFileRootDir')
   }
+  errors.push(...controlledImageHttpConfigurationErrors(profile, { env: process.env }))
   return errors
 }
 
@@ -4293,9 +4306,13 @@ export const buildConfigurationReport = runtimeConfig => ({
       workspacePolicyId: profile.workspacePolicyId || null,
       workspaceFileRuntime: profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
         ? 'awaiting-current-registration' : 'disabled',
-      nativeBountyExecution: profile.nativeConversationHttpPollEnabled
-        && profile.nativeConversationImageGenerationEnabled
-        ? 'configured; enabled declaration still requires live socket, local toolchain, executor, and poll protocol'
+      nativeBountyExecution: profile.controlledImageHttpEnabled
+        ? 'disabled for controlled adapter until a versioned <=16-input native contract exists'
+        : profile.nativeConversationHttpPollEnabled && profile.nativeConversationImageGenerationEnabled
+          ? 'configured; enabled declaration still requires live socket, local toolchain, executor, and poll protocol'
+          : 'disabled',
+      nativeProviderCredentialBinding: profile.controlledImageHttpEnabled
+        ? 'configured; enabled declaration still requires explicit credential, live socket, and native HTTP poll readiness'
         : 'disabled',
       commandReadiness: policyConfigured ? 'policy-configured; requires --validate' : 'blocked-no-workspace-policy',
       schedulingAbilities: resolveProfileAbilities(profile),
@@ -4807,6 +4824,8 @@ export const ensureProfiles = (profiles, defaultProfileId, workspacePolicies = n
       }
     }
   }
+  try { assertDistinctControlledImageLedgerRoots(profiles) }
+  catch (error) { configError(error.message, exitOnError) }
   if (!profiles.find(profile => profile.profileId === defaultProfileId || profile.agentId === defaultProfileId)) {
     configError(`DEFAULT_CODEX_PROFILE not found: ${defaultProfileId}`, exitOnError)
   }
@@ -4845,6 +4864,13 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}) => ({
   workspaceFileRootDir: source.workspaceFileRootDir || '',
   nativeConversationHttpPollEnabled: source.nativeConversationHttpPollEnabled === true,
   nativeConversationImageGenerationEnabled: source.nativeConversationImageGenerationEnabled === true,
+  controlledImageHttpEnabled: false,
+  controlledImageHttpEndpoint: '',
+  controlledImageHttpApiKeyEnv: '',
+  controlledImageHttpModelId: '',
+  controlledImageHttpBindingId: '',
+  controlledImageHttpBindingEpoch: '',
+  controlledImageHttpLedgerRoot: '',
   executionReportCommandTypes: Array.isArray(source.executionReportCommandTypes)
     ? [...source.executionReportCommandTypes]
     : []
@@ -4856,23 +4882,105 @@ export const createNativeBountyExecutionRuntime = ({
   getAuth = () => '',
   toolchainReady = workspaceFileToolchain().ready,
   createPollProtocol = options => new NativeConversationLane(options),
-  executeImage = args => runNativeConversationImage({ profile, ...args })
+  executeImage = args => runNativeConversationImage({ profile, ...args }),
+  controlledEnv = process.env,
+  providerFetchFn = globalThis.fetch,
+  nativeFetchFn = globalThis.fetch,
+  createControlledLedger = options => new ControlledImageHttpLedger(options),
+  createControlledExecutor = options => new ControlledImageHttpExecutor(options)
 } = {}) => {
   const httpPollEnabled = profile?.nativeConversationHttpPollEnabled === true
-  const executorEnabled = profile?.nativeConversationImageGenerationEnabled === true
-  const configReady = Boolean(
+  const controlledSelected = profile?.controlledImageHttpEnabled === true
+  const unavailable = ({ adapterKind = '', controlledConfig = null, credentialReady = false } = {}) => Object.freeze({
+    configReady: false,
+    httpPollEnabled,
+    executor: null,
+    pollProtocol: null,
+    adapterKind,
+    nativeBountyV1Ready: false,
+    credentialReady,
+    controlledConfig
+  })
+  const baseReady = Boolean(
     profile?.enabled !== false
     && httpPollEnabled
-    && executorEnabled
     && profile?.workspaceFileApiOrigin
     && profile?.workspaceFileRootDir
-    && workspaceFileBridge
-    && toolchainReady === true
     && typeof getAuth === 'function'
     && typeof createPollProtocol === 'function'
+  )
+
+  if (controlledSelected) {
+    let controlledConfig
+    try { controlledConfig = resolveControlledImageHttpConfig(profile, { env: controlledEnv }) }
+    catch { return unavailable({ adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE }) }
+    const credential = controlledEnv?.[controlledConfig.apiKeyEnv]
+    const controlledReady = baseReady
+      && typeof credential === 'string' && credential.length > 0
+      && typeof providerFetchFn === 'function'
+      && typeof nativeFetchFn === 'function'
+      && typeof createControlledLedger === 'function'
+      && typeof createControlledExecutor === 'function'
+    if (!controlledReady) return unavailable({ adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+      controlledConfig, credentialReady: false })
+    let ledger
+    let controlledExecutor
+    try {
+      ledger = createControlledLedger({
+        rootDir: controlledConfig.ledgerRoot,
+        profileId: profile.profileId,
+        agentId: profile.agentId
+      })
+      controlledExecutor = createControlledExecutor({
+        profile,
+        config: controlledConfig,
+        credential,
+        fetchFn: providerFetchFn,
+        ledger
+      })
+    } catch {
+      return unavailable({ adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+        controlledConfig, credentialReady: true })
+    }
+    if (typeof controlledExecutor?.execute !== 'function') {
+      return unavailable({ adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+        controlledConfig, credentialReady: true })
+    }
+    const executor = args => controlledExecutor.execute(args)
+    const pollProtocol = createPollProtocol({
+      apiOrigin: profile.workspaceFileApiOrigin,
+      rootDir: profile.workspaceFileRootDir,
+      agentId: profile.agentId,
+      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+      getAuth,
+      fetchFn: nativeFetchFn,
+      execute: executor
+    })
+    if (typeof pollProtocol?.poll !== 'function') {
+      return unavailable({ adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+        controlledConfig, credentialReady: true })
+    }
+    return Object.freeze({
+      configReady: true,
+      httpPollEnabled: true,
+      executor,
+      pollProtocol,
+      adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+      nativeBountyV1Ready: false,
+      credentialReady: true,
+      controlledConfig
+    })
+  }
+
+  const executorEnabled = profile?.nativeConversationImageGenerationEnabled === true
+  const configReady = Boolean(
+    baseReady
+    && executorEnabled
+    && workspaceFileBridge
+    && toolchainReady === true
     && typeof executeImage === 'function'
   )
-  if (!configReady) return Object.freeze({ configReady: false, httpPollEnabled, executor: null, pollProtocol: null })
+  if (!configReady) return unavailable({ adapterKind: 'CODEX_IMAGEGEN_NATIVE_V1' })
   const executor = args => executeImage(args)
   const pollProtocol = createPollProtocol({
     apiOrigin: profile.workspaceFileApiOrigin,
@@ -4880,13 +4988,22 @@ export const createNativeBountyExecutionRuntime = ({
     agentId: profile.agentId,
     runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
     getAuth,
+    fetchFn: nativeFetchFn,
     execute: executor
   })
-  if (typeof pollProtocol?.poll !== 'function') {
-    return Object.freeze({ configReady: false, httpPollEnabled, executor: null, pollProtocol: null })
-  }
-  return Object.freeze({ configReady: true, httpPollEnabled: true, executor, pollProtocol })
+  if (typeof pollProtocol?.poll !== 'function') return unavailable({ adapterKind: 'CODEX_IMAGEGEN_NATIVE_V1' })
+  return Object.freeze({
+    configReady: true,
+    httpPollEnabled: true,
+    executor,
+    pollProtocol,
+    adapterKind: 'CODEX_IMAGEGEN_NATIVE_V1',
+    nativeBountyV1Ready: true,
+    credentialReady: false,
+    controlledConfig: null
+  })
 }
+
 
 const createProfileState = profile => {
   const workspacePolicy = profile.workspacePolicyId
