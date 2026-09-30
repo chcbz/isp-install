@@ -14,8 +14,25 @@ const BASE = '/internal/agent/tasks'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/
 const TOKEN = /^[0-9a-fA-F-]{36}$/
 const AUTH = /^AgentRuntime [0-9a-f]{32}$/
-const MIME = new Set(['image/png', 'image/jpeg'])
+const MIME = new Map([['image/png','png'],['image/jpeg','jpg'],['image/webp','webp'],['image/gif','gif'],['audio/mpeg','mp3'],['audio/wav','wav'],['audio/ogg','ogg'],['audio/webm','webm'],['text/plain','txt'],['text/markdown','md'],['application/json','json'],['application/octet-stream','bin']])
 const SHA = bytes => createHash('sha256').update(bytes).digest('hex')
+const ascii = (bytes, offset, text) => bytes.length >= offset + text.length && Buffer.from(text).equals(bytes.subarray(offset, offset + text.length))
+const validUtf8 = bytes => { try { const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); return !text.includes('\0') } catch { return false } }
+export const validateNativeConversationOutput = (mime, bytes) => {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 16 * 1024 * 1024) return false
+  if (mime === 'image/png') return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
+  if (mime === 'image/jpeg') return bytes.length >= 3 && bytes.subarray(0, 3).equals(Buffer.from([255,216,255]))
+  if (mime === 'image/webp') return ascii(bytes,0,'RIFF') && ascii(bytes,8,'WEBP')
+  if (mime === 'image/gif') return ascii(bytes,0,'GIF87a') || ascii(bytes,0,'GIF89a')
+  if (mime === 'audio/mpeg') return ascii(bytes,0,'ID3') || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)
+  if (mime === 'audio/wav') return ascii(bytes,0,'RIFF') && ascii(bytes,8,'WAVE')
+  if (mime === 'audio/ogg') return ascii(bytes,0,'OggS')
+  if (mime === 'audio/webm') return bytes.length >= 4 && bytes.subarray(0,4).equals(Buffer.from([0x1a,0x45,0xdf,0xa3]))
+  if (mime === 'text/plain' || mime === 'text/markdown') return validUtf8(bytes)
+  if (mime === 'application/json') { if (!validUtf8(bytes)) return false; try { JSON.parse(bytes.toString('utf8')); return true } catch { return false } }
+  return mime === 'application/octet-stream'
+}
+
 export class NativeConversationError extends Error {
   constructor(code) { super(code); this.code = code }
 }
@@ -178,15 +195,12 @@ export class NativeConversationLane {
       const output = await this.#execute(Object.freeze({ command, runDirectory, inputs }))
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       if (!object(output) || output.outputId !== command.outputId || output.contentType !== command.outputContentMimeType
-          || !Buffer.isBuffer(output.bytes) || output.bytes.length < 16 || output.bytes.length > 16 * 1024 * 1024
-          || !(command.outputContentMimeType === 'image/png'
-            ? output.bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-            : output.bytes.subarray(0, 3).equals(Buffer.from([255, 216, 255])))) deny('CONVERSATION_OUTPUT_INVALID')
+          || !validateNativeConversationOutput(command.outputContentMimeType, output.bytes)) deny('CONVERSATION_OUTPUT_INVALID')
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       const sha256 = SHA(output.bytes)
       const form = new FormData()
       form.set('file', new Blob([output.bytes], { type: output.contentType }),
-        output.contentType === 'image/png' ? 'output.png' : 'output.jpg')
+        `output.${MIME.get(output.contentType)}`)
       for (const [k, v] of Object.entries({ version: String(fence.version), token: fence.token,
         sha256, length: String(output.bytes.length) })) form.set(k, v)
       const staged = await this.#request(`${path}/outputs/${command.outputId}/content`, 'POST', form, 201)

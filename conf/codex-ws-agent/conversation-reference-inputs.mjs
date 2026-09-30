@@ -13,7 +13,7 @@ const deny = () => { throw new ConversationInputError('CONVERSATION_INPUTS_UNAVA
 const obj = x => x !== null && typeof x === 'object' && !Array.isArray(x)
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const HASH = /^[a-f0-9]{64}$/
-const MIME = new Map([['image/png', 'png'], ['image/jpeg', 'jpg']])
+const MIME = new Map([['image/png','png'],['image/jpeg','jpg'],['image/webp','webp'],['image/gif','gif'],['audio/mpeg','mp3'],['audio/wav','wav'],['audio/ogg','ogg'],['audio/webm','webm'],['text/plain','txt'],['text/markdown','md'],['application/json','json'],['application/octet-stream','bin'],['application/pdf','pdf'],['application/vnd.openxmlformats-officedocument.wordprocessingml.document','docx'],['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','xlsx'],['application/vnd.openxmlformats-officedocument.presentationml.presentation','pptx']])
 const FIELDS = ['inputRef', 'fileId', 'version', 'originalFilename', 'contentMimeType', 'byteLength', 'sha256'].sort().join(',')
 
 export const parseNativeConversationInputs = (snapshot, executionId, leaseVersion) => {

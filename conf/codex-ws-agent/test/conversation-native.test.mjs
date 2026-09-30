@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import { NativeConversationLane, parseNativeConversationCommand } from '../conversation-native.mjs'
+import { NativeConversationLane, parseNativeConversationCommand, validateNativeConversationOutput } from '../conversation-native.mjs'
 
 const command = Object.freeze({ schemaVersion: 1, taskId: 'task-1', runId: 'run-1', conversationId: 'conv-1',
   commandId: 'cmd-1', messageId: 'msg-1', instruction: 'Create an authorized image with no referenced materials',
@@ -242,4 +242,25 @@ test('disabled runtime does not fetch private reference bytes or invoke a model'
     assert.ok(s.calls.every(x => !x.path.endsWith('/inputs/input_1/content')))
     assert.equal(JSON.parse(s.calls.at(-1).body).code, 'CONVERSATION_EXECUTOR_NOT_AUTHORIZED')
   } finally { s.cleanup() }
+})
+
+
+test('multimedia output validator checks bytes rather than filename or declared MIME alone', () => {
+  const cases = [
+    ['image/webp', Buffer.from('RIFF0000WEBPpayload')],
+    ['image/gif', Buffer.from('GIF89a0000')],
+    ['audio/mpeg', Buffer.from([0x49, 0x44, 0x33, 4])],
+    ['audio/wav', Buffer.from('RIFF0000WAVE')],
+    ['audio/ogg', Buffer.from('OggS')],
+    ['audio/webm', Buffer.from([0x1a, 0x45, 0xdf, 0xa3])],
+    ['text/plain', Buffer.from('你好')],
+    ['text/markdown', Buffer.from('# title')],
+    ['application/json', Buffer.from('{"ok":true}')],
+    ['application/octet-stream', Buffer.from([0, 1, 2])]
+  ]
+  for (const [mime, content] of cases) assert.equal(validateNativeConversationOutput(mime, content), true, mime)
+  assert.equal(validateNativeConversationOutput('application/json', Buffer.from('{bad}')), false)
+  assert.equal(validateNativeConversationOutput('text/plain', Buffer.from([0xc3, 0x28])), false)
+  assert.equal(validateNativeConversationOutput('audio/wav', Buffer.from('RIFF0000WEBP')), false)
+  assert.equal(validateNativeConversationOutput('image/svg+xml', Buffer.from('<svg/>')), false)
 })
