@@ -2785,7 +2785,10 @@ export class AgentMessageProcessor {
     const task = async () => {
       let retry = false
       try {
-        const recoveryControls = { markFinalPublication: publication => this.chatInbox.markFinalPublication(item, publication) }
+        const recoveryControls = {
+          markFinalPrepared: finalPrepared => this.chatInbox.markFinalPrepared(item, finalPrepared),
+          markFinalPublication: publication => this.chatInbox.markFinalPublication(item, publication)
+        }
         const result = await this.recoverChat(message, item.record, recoveryControls)
         if (result?.status === 'completed') { this.chatInbox.complete(item, result); this._clearChatRecoveryRetry(item.key) }
         else if (result?.status === 'recovery_required') retry = true

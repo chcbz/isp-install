@@ -456,6 +456,33 @@ test('processor sends INSPECT through its isolated lane and reconciles unknown a
 })
 
 
+
+test('processor recovery controls durably prepare a final produced by native readback before replay', async () => {
+  const root = temporaryDirectory(); let starts = 0; let recoveries = 0
+  const outboundMessageId = 'inspection_final_' + 'c'.repeat(64)
+  const runtime = createChatRuntime(root, {
+    runChat: async (_message, controls) => {
+      starts++; controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', inputDigest: 'sha256:' + 'a'.repeat(64) })
+      controls.markRunning(() => {}, { threadId: 'engine-thread-readback', turnId: 'engine-turn-readback' })
+      throw Object.assign(new Error('opaque response loss'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+    },
+    recoverChat: async (_message, record, controls) => {
+      recoveries++; assert.equal(record.finalPrepared, undefined); assert.equal(typeof controls.markFinalPrepared, 'function')
+      controls.markFinalPrepared({ schemaVersion: 1, outboundMessageId, finalDigest: 'sha256:' + 'd'.repeat(64) })
+      controls.markFinalPublication({ schemaVersion: 1, outboundMessageId, state: 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED', errorCode: null })
+      return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED', computationStatus: 'completed', serverPersistence: 'unconfirmed' }
+    },
+    onReject: () => {}
+  })
+  runtime.processor.start(); const message = durableChat(90, { route: 'INSPECT' }); await runtime.processor.handle(message)
+  for (let attempt = 0; attempt < 50 && recoveries === 0; attempt++) await new Promise(resolveWait => setTimeout(resolveWait, 10))
+  await runtime.processor.waitForIdle(); runtime.processor.stop()
+  const normalized = normalizeInboundMessage(message); const item = runtime.chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(starts, 1); assert.equal(recoveries, 1); assert.equal(item.state, 'recovery'); assert.equal(item.record.state, 'ACCEPTANCE_UNKNOWN')
+  assert.equal(item.record.finalPrepared.outboundMessageId, outboundMessageId)
+  assert.equal(item.record.finalPublication.state, 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED')
+})
+
 test('processor retains a durably prepared INSPECT final in recovery instead of archiving local computation as completed', async () => {
   const root = temporaryDirectory(); let runs = 0; let recoveries = 0
   const runtime = createChatRuntime(root, {

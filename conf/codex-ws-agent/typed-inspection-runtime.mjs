@@ -483,6 +483,9 @@ export const recoverTypedInspection = async (profile, message, record, {
     if (resultThreadId !== engineThreadId || !nonblank(engineTurnId) || (expectedTurnId && engineTurnId !== expectedTurnId)) fail('TYPED_INSPECTION_ENGINE_BINDING_MISMATCH')
     return await publishInspectionFinal({ profile, message, typed, rawOutcome: finalAgentText(reconciliation.turn),
       receiptDraft: preparation.inspectionInputReceiptDraft, engineThreadId, engineTurnId, threadKey: preparation.threadKey, controls, sendFinal })
+  } catch (error) {
+    preserveAdapter = error?.preserveEngineState === true
+    throw error
   } finally {
     if (profileRuntime && !preserveAdapter) await profileRuntime.releaseAdapter(requestKey)
   }

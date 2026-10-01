@@ -225,6 +225,28 @@ test('unknown acceptance recovery performs only thread/read reconciliation and f
 })
 
 
+
+test('recovery preserves request engine state when durable final persistence itself fails', async () => {
+  const message = messageFor(); const typed = resolveTypedInspectionRequest(profile, message); const source = sourceFor()
+  const receiptSources = [{ sourceRefId: source.sourceRefId, sha256: source.sha256, byteLength: source.byteLength, carrier: source.carrier, contributionDigest: prefixed('recovery-preserve') }]
+  const inputDigest = canonicalSha256({ schemaVersion: 1, authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest, sources: receiptSources })
+  const preparation = {
+    schemaVersion: 1, contract: typed.contract, authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest,
+    inputPolicyDigest: typed.manifest.profile.inputPolicyDigest, inputDigest, threadKey: 'thk:recovery-preserve', engineThreadId: 'engine-thread-preserve', inputDirectory: '/private/request-preserve',
+    inspectionInputReceiptDraft: { schemaVersion: 1, authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest, inputDigest, sources: receiptSources }
+  }
+  let releases = 0
+  const adapter = { closed: false, readback: adapterReadback(), reconcileTurn: async () => ({
+    status: 'TERMINAL', terminalStatus: 'completed', turnId: 'engine-turn-preserve', result: { thread: { id: 'engine-thread-preserve' } },
+    turn: { id: 'engine-turn-preserve', status: 'completed', items: [{ type: 'agentMessage', text: JSON.stringify({ schemaVersion: 2, kind: 'ANSWER', text: 'Recovered durable result.', clarification: null, proposal: null }) }] }
+  }) }
+  await assert.rejects(() => recoverTypedInspection(profile, message, { preparation }, {
+    adapter, profileRuntime: { releaseAdapter: async () => { releases++ } }, isolationReadback: readback(typed),
+    controls: { markFinalPrepared: () => { throw new Error('SIMULATED_FINAL_FSYNC_FAILURE') } }, sendFinal: () => assert.fail('must not publish without durable final')
+  }), error => error.code === 'TYPED_INSPECTION_FINAL_DURABILITY_FAILED' && error.preserveEngineState === true)
+  assert.equal(releases, 0)
+})
+
 test('durable final survives false, throw and unconfirmed write publication, replays after restart with one fixed identity, and never restarts the engine', async () => {
   for (const mode of ['false', 'throw', 'true-unconfirmed']) {
     const root = mkdtempSync(resolve(tmpdir(), `typed-inspection-final-${mode}-`)); chmodSync(root, 0o700)
