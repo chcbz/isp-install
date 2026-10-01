@@ -5,8 +5,9 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { buildTypedInspectionNativeInputs, finalizeTypedInspectionInputReceipt, TypedInspectionInputCarrierError } from '../typed-inspection-input-carriers.mjs'
 
+// Default fixture is byte-exact from SDD da540050e1506d31dbfc27e7f82cd53443a93765; SHA-256 79941aa53a5b8822d39765e7ae12e5ba5e7fd18b53333af08e8caf637c088a00.
 const fixturePath = process.env.CYF_TYPED_INSPECTION_DIGEST_FIXTURE
-  || resolve(import.meta.dirname, '../../../../sdd/specs/juyiting-multimedia-deliberation/fixtures/typed-inspection-input-digests-v1.json')
+  || resolve(import.meta.dirname, 'fixtures/typed-inspection-input-digests-v1.json')
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'))
 const hash = value => createHash('sha256').update(value).digest('hex')
 const code = expected => error => error instanceof TypedInspectionInputCarrierError && error.code === expected
@@ -45,7 +46,14 @@ test('receipt finalizer only appends actual IDs after preparation and preserves 
   const receipt = finalizeTypedInspectionInputReceipt({ receiptDraft: built.inspectionInputReceiptDraft, engineThreadId: 'thread-1', engineTurnId: 'turn-1' })
   assert.deepEqual(receipt, { ...built.inspectionInputReceiptDraft, engineThreadId: 'thread-1', engineTurnId: 'turn-1' })
   assert.equal(built.inputDigest, fixture.inputDigest)
-  assert.throws(() => finalizeTypedInspectionInputReceipt({ receiptDraft: { ...built.inspectionInputReceiptDraft, schemaVersion: 2 }, engineThreadId: 'thread-1', engineTurnId: 'turn-1' }), code('TYPED_INSPECTION_RECEIPT_INVALID'))
+  const invalidDrafts = [
+    { ...built.inspectionInputReceiptDraft, schemaVersion: 2 },
+    { ...built.inspectionInputReceiptDraft, inputDigest: `sha256:${'0'.repeat(64)}` },
+    { ...built.inspectionInputReceiptDraft, sources: [{ ...built.inspectionInputReceiptDraft.sources[0], sha256: '0'.repeat(64) }, ...built.inspectionInputReceiptDraft.sources.slice(1)] },
+    { ...built.inspectionInputReceiptDraft, sources: [...built.inspectionInputReceiptDraft.sources].reverse() },
+    { ...built.inspectionInputReceiptDraft, sources: [{ ...built.inspectionInputReceiptDraft.sources[0], extra: true }, ...built.inspectionInputReceiptDraft.sources.slice(1)] }
+  ]
+  for (const receiptDraft of invalidDrafts) assert.throws(() => finalizeTypedInspectionInputReceipt({ receiptDraft, engineThreadId: 'thread-1', engineTurnId: 'turn-1' }), code('TYPED_INSPECTION_RECEIPT_INVALID'))
 })
 
 test('sourceRefId order is strict, source alias and duplicate injection are rejected rather than reordered', () => {

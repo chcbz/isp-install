@@ -130,5 +130,17 @@ export const finalizeTypedInspectionInputReceipt = ({ receiptDraft, engineThread
       || receiptDraft.schemaVersion !== 1 || !validString(receiptDraft.authorizationId) || !validDigest(receiptDraft.manifestDigest)
       || !validDigest(receiptDraft.inputDigest) || !Array.isArray(receiptDraft.sources) || receiptDraft.sources.length === 0
       || !validString(engineThreadId) || !validString(engineTurnId)) fail('TYPED_INSPECTION_RECEIPT_INVALID')
+  let previousSourceRefId = null
+  for (const source of receiptDraft.sources) {
+    if (!exactKeys(source, ['sourceRefId', 'sha256', 'byteLength', 'carrier', 'contributionDigest'])
+        || !validString(source.sourceRefId) || !validHash(source.sha256) || !validLength(source.byteLength)
+        || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT'].includes(source.carrier)
+        || !validDigest(source.contributionDigest)
+        || (previousSourceRefId !== null && source.sourceRefId <= previousSourceRefId)) fail('TYPED_INSPECTION_RECEIPT_INVALID')
+    previousSourceRefId = source.sourceRefId
+  }
+  const expectedInputDigest = canonicalDigest({ schemaVersion: 1, authorizationId: receiptDraft.authorizationId,
+    manifestDigest: receiptDraft.manifestDigest, sources: receiptDraft.sources })
+  if (receiptDraft.inputDigest !== expectedInputDigest) fail('TYPED_INSPECTION_RECEIPT_INVALID')
   return freeze({ ...receiptDraft, engineThreadId, engineTurnId })
 }
