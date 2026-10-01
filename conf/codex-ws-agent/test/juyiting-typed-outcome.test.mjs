@@ -14,7 +14,7 @@ import {
 const fixture = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'typed-deliberation-client-result-v1.json'), 'utf8'))
 const facts = () => structuredClone(fixture.dispatchFacts)
 const profile = { profileId: 'p', agentId: 'agent-1', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true, chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained' }
-const readyAdapter = () => ({ closed: false, readback: { initialize: { capabilities: {} }, schema: { measured: true, cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' } } })
+const readyAdapter = () => ({ closed: false, readback: { initialize: { capabilities: {} }, schema: { measured: true, schemaContractId: 'codex-cli-0.153.4', cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' } } })
 const message = typed => ({
   durable: true, route: 'CHAT', taskId: 'task-1', conversationId: 'conversation-1', conversationGeneration: '7', targetAgentId: 'agent-1',
   contextSnapshot: { facts: { targetAgentId: 'agent-1', task: { id: 'task-1' }, conversation: { id: 'conversation-1', generation: '7', scopeType: 'bounty' }, ...(typed === undefined ? {} : { typedDeliberation: typed }) } }

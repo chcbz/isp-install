@@ -60,7 +60,8 @@ import {
   buildTypedDeliberationDeclaration, resolveTypedDeliberationRequest, typedDeliberationAdapterReady, validateTypedInteractionOutcome
 } from './juyiting-typed-outcome.mjs'
 import { TypedOutcomeTextStreamDecoder } from './juyiting-typed-outcome-stream.mjs'
-export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration }
+import { TypedInspectionMaterializer, recoverTypedInspection, resolveTypedInspectionRequest, runTypedInspection } from './typed-inspection-runtime.mjs'
+export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration, TypedInspectionMaterializer, resolveTypedInspectionRequest }
 
 const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
 const WORKSPACE_FILE_TOOLCHAIN_DIR = resolve(AGENT_RELEASE_ROOT, '.toolchain')
@@ -590,6 +591,9 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     appServerSchemaContractId: String(profile.appServerSchemaContractId ?? fallback.appServerSchemaContractId ?? DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID).trim() || DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
     trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
     typedDeliberationEnabled: parseEnabledFlag(profile.typedDeliberationEnabled ?? fallback.typedDeliberationEnabled),
+    typedInspectionEnabled: parseEnabledFlag(profile.typedInspectionEnabled ?? fallback.typedInspectionEnabled),
+    typedInspectionApiOrigin: String(profile.typedInspectionApiOrigin ?? fallback.typedInspectionApiOrigin ?? '').trim(),
+    typedInspectionRootDir: String(profile.typedInspectionRootDir ?? fallback.typedInspectionRootDir ?? '').trim(),
     chatInboxMaxFiles: parsePositiveInteger(profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles, 1024),
     chatInboxMaxBytes: parsePositiveInteger(profile.chatInboxMaxBytes ?? fallback.chatInboxMaxBytes, 64 * 1024 * 1024),
     chatArchiveMaxFiles: parsePositiveInteger(profile.chatArchiveMaxFiles ?? fallback.chatArchiveMaxFiles, 256),
@@ -644,6 +648,9 @@ const legacyProfile = () => normalizeProfile({
   appServerEnabled: process.env.CODEX_APP_SERVER_ENABLED || false,
   trueDeltaEnabled: process.env.CODEX_TRUE_DELTA_ENABLED || false,
   typedDeliberationEnabled: process.env.CODEX_TYPED_DELIBERATION_ENABLED || false,
+  typedInspectionEnabled: process.env.CODEX_TYPED_INSPECTION_ENABLED || false,
+  typedInspectionApiOrigin: process.env.CODEX_TYPED_INSPECTION_API_ORIGIN || '',
+  typedInspectionRootDir: process.env.CODEX_TYPED_INSPECTION_ROOT_DIR || '',
   chatInboxMaxFiles: process.env.CODEX_CHAT_INBOX_MAX_FILES || 1024,
   chatInboxMaxBytes: process.env.CODEX_CHAT_INBOX_MAX_BYTES || 67108864,
   chatArchiveMaxFiles: process.env.CODEX_CHAT_ARCHIVE_MAX_FILES || 256,
@@ -2326,7 +2333,7 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = P
 
 export class AgentMessageProcessor {
   constructor({
-    profile, inbox, runCommand, runChat, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
+    profile, inbox, runCommand, runChat, recoverChat = null, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
     recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
     ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null, chatInbox = null, chatAckOutbox = null, lanes = null
   }) {
@@ -2334,6 +2341,7 @@ export class AgentMessageProcessor {
     this.inbox = inbox
     this.runCommand = runCommand
     this.runChat = runChat
+    this.recoverChat = recoverChat
     this.onTaskEvent = onTaskEvent
     this.onWorkResultReceipt = onWorkResultReceipt
     this.recoverCommandOutcome = recoverCommandOutcome
@@ -2383,7 +2391,7 @@ export class AgentMessageProcessor {
     }
     this.paused = !drain || Boolean(this.failClosedError)
     this._replayChatAcks()
-    if (drain && !this.failClosedError) { void this.drain(); this._schedulePendingChats() }
+    if (drain && !this.failClosedError) { void this.drain(); this._schedulePendingChats(); this._scheduleRecoveryChats() }
     return { ...recovery, chatPending: chatRecovery.pending, chatRecoveryRequired: chatRecovery.recoveryRequired, paused: this.paused, failClosedCode: this.failClosedError?.code || '' }
   }
 
@@ -2617,6 +2625,7 @@ export class AgentMessageProcessor {
     this._replayChatAcks()
     void this.drain()
     this._schedulePendingChats()
+    this._scheduleRecoveryChats()
   }
 
   stop() {
@@ -2706,6 +2715,25 @@ export class AgentMessageProcessor {
     retry.timer = setTimeout(run, 50); retry.timer.unref?.()
   }
   _schedulePendingChats() { if (!this.chatInbox || this.paused || this.stopped) return; for (const item of this.chatInbox.listPending()) this._scheduleChat(item) }
+  _scheduleRecoveryChats() {
+    if (!this.chatInbox || !this.recoverChat || this.paused || this.stopped) return
+    for (const item of this.chatInbox.listRecovery()) if ((item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' && item.record.preparation) this._scheduleChatRecovery(item)
+  }
+  _scheduleChatRecovery(item) {
+    if (!item || this.activeChats.has(item.key)) return
+    const message = item.record.message; const active = { key: item.key, state: 'RECONCILING', message, cancelRequested: false, cancel: null }
+    this.activeChats.set(item.key, active)
+    const task = async () => {
+      try {
+        const result = await this.recoverChat(message, item.record)
+        if (result?.status === 'completed') this.chatInbox.complete(item, result)
+      } catch (error) {
+        this.onReject(new AgentProtocolError(error?.code || 'TYPED_INSPECTION_RECOVERY_ERROR', error?.message || 'Typed inspection readback failed'), message.rawPayload)
+      } finally { this.activeChats.delete(item.key) }
+    }
+    try { void this.lanes.enqueue('inspect', this._chatFairness(message), task, `recovery:${this._chatTurnKey(message)}`).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_ERROR', error.message), message.rawPayload) }) }
+    catch (error) { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_FULL', error.message), message.rawPayload) }
+  }
   _scheduleChat(item) {
     if (!item || this.activeChats.has(item.key)) return
     const message = item.record.message; const active = { key: item.key, state: 'QUEUED', message, cancelRequested: false, cancel: null }
@@ -2715,9 +2743,11 @@ export class AgentMessageProcessor {
       const claimed = this.chatInbox.claim(item.key); if (!claimed) { this.activeChats.delete(item.key); return }
       active.state = 'STARTING'; active.item = claimed; this.chatActive = true
       const controls = {
+        markPrepared: preparation => { active.state = 'PREPARED'; this.chatInbox.markPrepared(claimed, preparation) },
         markRunning: (cancel, engine = {}) => { active.state = 'RUNNING'; active.cancel = cancel; this.chatInbox.markRunning(claimed, engine); if (active.cancelRequested && cancel) void Promise.resolve(cancel()).catch(() => {}) },
         isCancelled: () => active.cancelRequested
       }
+      let reconcileInspection = false
       try {
         const result = await this.runChat(claimed.record.message, controls)
         if (active.cancelRequested || result?.status === 'cancelled') this.chatInbox.cancelProcessing(claimed)
@@ -2725,12 +2755,17 @@ export class AgentMessageProcessor {
       } catch (error) {
         const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
         this.chatInbox.recoveryRequired(claimed, `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`, unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED')
+        reconcileInspection = unknown && (claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT'
         const recoveryAck = { status: 'recovery_required', errorCode: error?.code || 'CHAT_RUNTIME_ERROR', reason: String(error.message || 'CHAT runtime failure').slice(0, 512) }
         try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
         this.onReject(new AgentProtocolError(unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : (error?.code || 'CHAT_RUNTIME_ERROR'), error.message), claimed.record.message.rawPayload)
-      } finally { this.chatActive = false; this.activeChats.delete(item.key); void this.drain(); this._schedulePendingChats() }
+      } finally {
+        this.chatActive = false; this.activeChats.delete(item.key); void this.drain(); this._schedulePendingChats()
+        if (reconcileInspection) queueMicrotask(() => this._scheduleChatRecovery(claimed))
+      }
     }
-    try { void this.lanes.enqueue('chat', this._chatFairness(message), task, this._chatTurnKey(message)).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_LANE_ERROR', error.message), message.rawPayload); this._schedulePendingChats() }) }
+    const lane = (message.route || message.routing?.interactionMode) === 'INSPECT' ? 'inspect' : 'chat'
+    try { void this.lanes.enqueue(lane, this._chatFairness(message), task, this._chatTurnKey(message)).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_LANE_ERROR', error.message), message.rawPayload); this._schedulePendingChats() }) }
     catch (error) { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_LANE_FULL', error.message), message.rawPayload) }
   }
   async _stopChat(message) {
@@ -4166,6 +4201,9 @@ export const runFastChat = async (profile, message, {
   }
   // Only explicit old protocol may use the compatibility runner. Modern durable CHAT never falls through to legacy execution.
   if (message.legacy || !modern) return legacy('LEGACY_CHAT_PROTOCOL', false)
+  const requestedRoute = message.route === undefined ? (message.routing?.interactionMode || 'CHAT') : message.route
+  if (requestedRoute !== 'CHAT') throw new AgentProtocolError('FAST_CHAT_ROUTE_INVALID', 'Modern Fast CHAT accepts only route=CHAT')
+  if (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedInspection')) throw new AgentProtocolError('TYPED_INSPECTION_WRONG_RUNTIME', 'Typed inspection must use the isolated INSPECT runtime')
   if (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedDeliberation')) {
     try { validateChatDispatch(message) } catch (error) { throw new AgentProtocolError(error.code || 'TYPED_DELIBERATION_BINDING_INVALID', error.message || 'Invalid typed deliberation dispatch binding') }
   }
@@ -4277,8 +4315,17 @@ export const runProfileChat = (profile, message, {
   }
 })
 
-export const runReadOnlyInspection = async (_profile, _message, _snapshot, _manifest) => {
-  throw new AgentProtocolError('INSPECT_NOT_ENABLED', 'Inspection requires a fixed manifest and independently proven filesystem sandbox')
+export const isTypedInspectionDispatch = message => Boolean(
+  (message?.route || message?.routing?.interactionMode) === 'INSPECT' ||
+  (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedInspection'))
+)
+
+export const runReadOnlyInspection = async (profile, message, options = {}) => {
+  try { return await runTypedInspection(profile, message, options) }
+  catch (error) {
+    if (error instanceof AgentProtocolError) throw error
+    throw new AgentProtocolError(error?.code || 'TYPED_INSPECTION_RUNTIME_ERROR', error?.message || 'Typed inspection runtime failed closed')
+  }
 }
 export const runConfirmedCommand = (profile, message, options = {}) => runCodex(profile, message, 'command', options)
 
@@ -4300,6 +4347,9 @@ const profileConfigurationErrors = profile => {
   if (profile.fastChatEnabled && (profile.chatSandbox !== 'read-only' || profile.chatToolPolicy !== 'read-only-constrained')) {
     errors.push('Fast CHAT requires chatSandbox=read-only and chatToolPolicy=read-only-constrained; approval never is not deny-all')
   }
+  const typedInspectionControls = [profile.typedInspectionApiOrigin, profile.typedInspectionRootDir]
+  if (typedInspectionControls.some(value => Boolean(value)) && typedInspectionControls.some(value => !value)) errors.push('typedInspectionApiOrigin and typedInspectionRootDir must be configured together')
+  if (profile.typedInspectionEnabled && (!profile.fastChatEnabled || !profile.appServerEnabled || !typedInspectionControls.every(Boolean))) errors.push('typedInspectionEnabled requires Fast CHAT app-server plus fixed API origin and private root; runtime remains unavailable until isolation measurement is attached')
   try { resolveCodexAppServerSchemaContract(profile) } catch (error) { errors.push(error.message) }
   const chatInboxMaxFiles = profile.chatInboxMaxFiles ?? 1024
   const chatInboxMaxBytes = profile.chatInboxMaxBytes ?? 64 * 1024 * 1024
@@ -5184,6 +5234,23 @@ const createProfileState = profile => {
     rootDir: resolve(config.commandInboxDir, 'chat-workdirs'), profile,
     forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
   })
+  const typedInspectionMaterializer = profile.typedInspectionApiOrigin && profile.typedInspectionRootDir
+    ? new TypedInspectionMaterializer({
+      apiOrigin: profile.typedInspectionApiOrigin,
+      rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
+      fetchFn: globalThis.fetch,
+      getRuntimeAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || '',
+      agentId: profile.agentId,
+      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+      forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
+    })
+    : null
+  // This is populated only by a separately measured native isolation profile. Source/config flags alone never make INSPECT ready.
+  const typedInspectionIsolationReadback = null
+  const typedInspectionNativeInputAdapters = {
+    localImage: { supportedMimeTypes: ['image/png'], toNativeInput: ({ path }) => ({ type: 'localImage', path }) },
+    localAudio: { supportedMimeTypes: ['audio/wav'], toNativeInput: ({ path }) => ({ type: 'localAudio', path }) }
+  }
   const hostedWireContract = profile.fastChatEnabled && profile.appServerEnabled ? verifyHostedWireContract() : null
   const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 256 })
   const legacyExecutionGate = new SerialExecutionGate()
@@ -5234,6 +5301,9 @@ const createProfileState = profile => {
     chatAckOutbox,
     threadBindingStore,
     chatWorkdir,
+    typedInspectionMaterializer,
+    typedInspectionIsolationReadback,
+    typedInspectionNativeInputAdapters,
     lanes,
     legacyExecutionGate,
     executionReportOutbox,
@@ -5323,12 +5393,33 @@ const createProfileState = profile => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
       return legacyExecutionGate.run(() => runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader }))
     },
-    runChat: (message, controls) => {
+    runChat: async (message, controls) => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
+      if (isTypedInspectionDispatch(message)) {
+        const adapter = state.appServerAdapter || (state.ensureAppServer ? await state.ensureAppServer() : await state.appServerPromise)
+        return runReadOnlyInspection(profile, message, {
+          adapter, bindingStore: threadBindingStore, controls, materializer: state.typedInspectionMaterializer,
+          isolationReadback: state.typedInspectionIsolationReadback, nativeInputAdapters: state.typedInspectionNativeInputAdapters,
+          sendFinal: (selectedProfile, selectedMessage, content, extra) => sendChatFinal(selectedProfile, selectedMessage, content, extra)
+        })
+      }
       return runProfileChat(profile, message, {
         adapter: state.appServerAdapter, adapterPromise: state.ensureAppServer ? state.ensureAppServer() : state.appServerPromise, bindingStore: threadBindingStore,
         controls, chatWorkdir, legacyGate: legacyExecutionGate, getAppServerFailure: () => state.appServerPermanentFailure
       })
+    },
+    recoverChat: async (message, record) => {
+      const route = message.route || message.routing?.interactionMode
+      if (route !== 'INSPECT') return { status: 'recovery_required', reconciliationStatus: 'UNSUPPORTED_ROUTE' }
+      const adapter = state.appServerAdapter || (state.ensureAppServer ? await state.ensureAppServer() : await state.appServerPromise)
+      try {
+        return await recoverTypedInspection(profile, message, record, {
+          adapter, isolationReadback: state.typedInspectionIsolationReadback,
+          sendFinal: (selectedProfile, selectedMessage, content, extra) => sendChatFinal(selectedProfile, selectedMessage, content, extra)
+        })
+      } catch (error) {
+        throw new AgentProtocolError(error?.code || 'TYPED_INSPECTION_RECOVERY_ERROR', error?.message || 'Typed inspection recovery failed closed')
+      }
     },
     onTaskEvent: message => {
       const key = message.workItemId || message.taskId || message.messageId

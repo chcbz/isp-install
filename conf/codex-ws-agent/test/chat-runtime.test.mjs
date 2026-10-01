@@ -128,7 +128,7 @@ test('runFastChat checks feature and legacy fallback before building Context Env
 })
 
 test('production Fast CHAT path emits only real schema-v1 delta/final with exact durable binding', async () => {
-  const message = normalizedWire(); const frames = []; const bindings = new Map()
+  const message = normalizedWire({ route: 'CHAT' }); const frames = []; const bindings = new Map()
   const adapter = {
     readback: { initialize: { capabilities: {} }, account: { account: { type: 'apiKey' } }, models: { data: [] }, config: {}, tools: { tools: [] } },
     startOrResumeThread: async () => ({ threadId: 'thread-production', state: 'HOT' }),
@@ -164,7 +164,7 @@ test('production Fast CHAT path emits only real schema-v1 delta/final with exact
 })
 
 test('Fast CHAT persists unknown turn acceptance as recovery-required after readback', async () => {
-  const message = normalizedWire(); const recovered = []
+  const message = normalizedWire({ route: 'CHAT' }); const recovered = []
   const adapter = {
     readback: { initialize: {}, account: {}, models: {}, config: {}, tools: {} },
     startOrResumeThread: async () => ({ threadId: 'thread-unknown', state: 'HOT' }),
@@ -708,7 +708,7 @@ test('modern durable CHAT fails closed on binary trust mismatch and never invoke
     try { measureCodexAppServerBinary({ codexBin: bad, codexHome: root }, { cache: new Map(), temporaryRoot: root }) } catch (error) { trustError = error }
     assert.equal(trustError?.code, 'APP_SERVER_BINARY_UNTRUSTED')
     let legacySpawns = 0
-    await assert.rejects(() => runProfileChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, normalizedWire(), {
+    await assert.rejects(() => runProfileChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, normalizedWire({ route: 'CHAT' }), {
       adapterPromise: Promise.reject(trustError), chatWorkdir: root,
       runLegacy: async () => { legacySpawns++; return { status: 'completed' } }
     }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')

@@ -34,6 +34,7 @@ import {
   discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
   inheritManagedRuntimeCapabilities,
+  isTypedInspectionDispatch,
   loadWebSocketClient,
   normalizeInboundMessage,
   normalizeProfile,
@@ -152,6 +153,7 @@ const createChatRuntime = (rootDir, options = {}) => {
     lanes: options.lanes || new FairLaneScheduler({ chatConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 16 }),
     runCommand: options.runCommand || (async () => ({ status: 'completed' })),
     runChat: options.runChat || (async () => ({ status: 'completed' })),
+    recoverChat: options.recoverChat || null,
     sendFn: envelope => { sent.push(envelope); return options.sendResult === undefined ? true : options.sendResult },
     onReject: options.onReject || (() => {})
   })
@@ -412,6 +414,45 @@ test('chat.stop without conversationId cancels only the exact queued or running 
   assert.deepEqual(cancelled, ['chat-dispatch-8'])
   assert.ok(runtime.sent.some(ack => ack.dispatchId === 'chat-dispatch-7' && ack.status === 'cancelled'))
   assert.ok(runtime.sent.some(ack => ack.dispatchId === 'chat-dispatch-8' && ack.status === 'cancel-requested'))
+})
+
+test('typed inspection dispatch detection is fail-closed for either the INSPECT route or trusted marker', () => {
+  assert.equal(isTypedInspectionDispatch({ route: 'CHAT', contextSnapshot: { facts: {} } }), false)
+  assert.equal(isTypedInspectionDispatch({ route: 'INSPECT', contextSnapshot: { facts: {} } }), true)
+  assert.equal(isTypedInspectionDispatch({ route: 'CHAT', contextSnapshot: { facts: { typedInspection: {} } } }), true)
+})
+
+test('processor sends INSPECT through its isolated lane and reconciles unknown acceptance without a second start', async () => {
+  const root = temporaryDirectory(); const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 16 })
+  const observedLanes = []; const originalEnqueue = lanes.enqueue.bind(lanes)
+  lanes.enqueue = (lane, ...args) => { observedLanes.push(lane); return originalEnqueue(lane, ...args) }
+  let starts = 0; let reads = 0; const rejected = []
+  const runtime = createChatRuntime(root, {
+    lanes,
+    runChat: async (_message, controls) => {
+      starts++
+      controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', inputDigest: 'sha256:' + 'a'.repeat(64) })
+      controls.markRunning(() => {}, { threadId: 'engine-thread', turnId: 'engine-turn' })
+      throw Object.assign(new Error('opaque response loss'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+    },
+    onReject: error => rejected.push(error),
+    recoverChat: async (_message, record) => {
+      reads++
+      assert.equal(record.preparation.inputDigest, 'sha256:' + 'a'.repeat(64))
+      assert.deepEqual(record.engine, { threadId: 'engine-thread', turnId: 'engine-turn' })
+      return { status: 'completed', threadId: 'engine-thread', turnId: 'engine-turn' }
+    }
+  })
+  runtime.processor.start()
+  const message = durableChat(88, { route: 'INSPECT' })
+  await runtime.processor.handle(message)
+  for (let attempt = 0; attempt < 20 && reads === 0; attempt++) await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
+  await runtime.processor.waitForIdle()
+  assert.equal(starts, 1); assert.equal(reads, 1); assert.deepEqual(rejected.map(error => [error.code, error.message]), [['TURN_ACCEPTANCE_UNKNOWN', 'opaque response loss']])
+  assert.deepEqual(observedLanes.filter(lane => lane === 'inspect'), ['inspect', 'inspect'])
+  const normalized = normalizeInboundMessage(message)
+  const item = runtime.chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(item.state, 'archive'); assert.equal(item.record.state, 'COMPLETED')
 })
 
 test('production chat runner takes disabled and legacy messages directly to serialized final-only fallback', async () => {

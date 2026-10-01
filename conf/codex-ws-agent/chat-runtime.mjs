@@ -554,6 +554,7 @@ export class PersistentChatInbox {
     })
   }
   listPending() { return readdirSync(this.pending).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).sort().map(name => { const key = name.slice(0, -5); const path = this.path('pending', key); return existsSync(path) ? { key, state: 'pending', path, record: JSON.parse(readFileSync(path, 'utf8')) } : null }).filter(Boolean) }
+  listRecovery() { return readdirSync(this.recovery).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).sort().map(name => { const key = name.slice(0, -5); const path = this.path('recovery', key); return existsSync(path) ? { key, state: 'recovery', path, record: JSON.parse(readFileSync(path, 'utf8')) } : null }).filter(Boolean) }
   claim(key) {
     return this._withLock(() => {
       const path = this.path('pending', key); if (!existsSync(path)) return null
@@ -562,10 +563,14 @@ export class PersistentChatInbox {
       return { key, state: 'processing', path: target, record: claimed }
     })
   }
+  markPrepared(item, preparation) { return this._withLock(() => {
+    if (!item || item.state !== 'processing' || !object(preparation)) throw new Error('CHAT_PREPARATION_INVALID')
+    const record = { ...item.record, state: 'PREPARED', preparation, preparedAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item
+  }) }
   markRunning(item, engine = {}) { return this._withLock(() => { const record = { ...item.record, state: 'RUNNING', engine, runningAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item }) }
   complete(item, result = {}) { return this._withLock(() => this._finalizeTerminal(item, { ...item.record, state: 'COMPLETED', completedAt: Date.now(), result })) }
   cancelProcessing(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'processing') return false; return this._withLock(() => { this._finalizeTerminal(item, { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
-  recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { return this._withLock(() => { const record = { ...item.record, state, recoveryReason: reason, recoveredAt: Date.now() }; atomicJson(item.path, record); durableRename(item.path, this.path('recovery', item.key)); item.record = record; item.state = 'recovery'; return record }) }
+  recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { return this._withLock(() => { const record = { ...item.record, state, recoveryReason: reason, recoveredAt: Date.now() }; const target = this.path('recovery', item.key); atomicJson(item.path, record); durableRename(item.path, target); item.path = target; item.record = record; item.state = 'recovery'; return record }) }
   cancelPending(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'pending') return false; return this._withLock(() => { const current = existsSync(item.path) ? JSON.parse(readFileSync(item.path, 'utf8')) : item.record; this._finalizeTerminal(item, { ...current, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
   findExactTurn(stop) {
     const optionalMatch = (actual, expected) => expected === undefined || expected === null || expected === '' || String(actual) === String(expected)
@@ -616,9 +621,14 @@ export class ChatAckOutbox {
   count() { return readdirSync(this.pending).filter(name => name.endsWith('.json')).length }
 }
 
-export function buildThreadKey({ tenantId, clientId, ownerJiacn, profileId, agentId, conversationId, mode, workspaceScopeHash = '', cwd = '', enginePolicyHash = '', toolPolicyHash = '', instructionSourceHash = '', modelConfigHash = '', conversationGeneration = '' }) {
+export function buildThreadKey({ tenantId, clientId, ownerJiacn, profileId, agentId, conversationId, mode, workspaceScopeHash = '', cwd = '', enginePolicyHash = '', toolPolicyHash = '', instructionSourceHash = '', modelConfigHash = '', conversationGeneration = '', authorizationId = '', manifestDigest = '', inputPolicyDigest = '' }) {
   const components = [tenantId, clientId, ownerJiacn, profileId, agentId, conversationId, mode, workspaceScopeHash, cwd, enginePolicyHash, toolPolicyHash, instructionSourceHash, modelConfigHash, String(conversationGeneration)]
   if (!components.every(value => typeof value === 'string' && value.length > 0)) throw new Error('THREAD_KEY_BINDING_REQUIRED')
+  if (mode === 'INSPECT') {
+    const inspectionBindings = [authorizationId, manifestDigest, inputPolicyDigest]
+    if (!inspectionBindings.every(value => typeof value === 'string' && value.length > 0)) throw new Error('THREAD_KEY_INSPECTION_BINDING_REQUIRED')
+    components.push(...inspectionBindings)
+  }
   return `thk:${createHash('sha256').update(components.join('\u001f')).digest('hex')}`
 }
 
