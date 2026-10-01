@@ -63,7 +63,7 @@ const profile = {
   appServerSchemaContractId: contract.contractId, chatModel: 'no-paid-call-in-test'
 }
 const readback = typed => ({
-  schemaVersion: 1, measured: true, ...typed.manifest.profile, toolPolicy: 'STRICT_NO_TOOLS', recovery: 'durable-inbox-turn-readback-v1',
+  schemaVersion: 1, measured: true, ...typed.manifest.profile, toolPolicy: 'MANIFEST_READ_ONLY', recovery: 'durable-inbox-turn-readback-v1',
   supportedInputs: typed.manifest.sources.map(source => ({ mediaKind: source.mediaKind, mimeType: source.mimeType, carrier: source.carrier, carrierContractDigest: source.carrierContractDigest }))
 })
 const adapterReadback = () => ({ initialize: {}, schema: { ...contract, schemaContractId: contract.contractId, measured: true }, models: {}, config: {} })
@@ -141,7 +141,7 @@ test('unmeasured profile and conflicting CHAT/INSPECT markers fail before materi
   assert.ok(typed)
 })
 
-test('native INSPECT prepares durably before start, uses actual engine IDs, publishes only v2, and never weakens CHAT v1', async () => {
+test('native INSPECT durably prepares a fixed v2 final before publication and never weakens CHAT v1', async () => {
   const bytes = Buffer.from('bird\n'); const message = messageFor(sourceFor(bytes)); const typed = resolveTypedInspectionRequest(profile, message)
   const events = []; const finals = []; const bindings = new Map()
   const adapter = {
@@ -154,14 +154,20 @@ test('native INSPECT prepares durably before start, uses actual engine IDs, publ
     adapter, isolationReadback: readback(typed),
     materializer: { materialize: async () => ({ directory: '/private/request-1', sources: [{ ...sourceFor(bytes), bytes }] }) },
     nativeInputAdapters: {}, bindingStore: { get: key => bindings.get(key), put: (key, value) => bindings.set(key, value), markRecovery: () => {} },
-    controls: { markPrepared: value => events.push(['prepared', value]), markRunning: (_cancel, value) => events.push(['running', value]), isCancelled: () => false },
-    sendFinal: (_profile, _message, content, extra) => finals.push({ content, extra })
+    controls: {
+      markPrepared: value => events.push(['prepared', value]), markRunning: (_cancel, value) => events.push(['running', value]),
+      markFinalPrepared: value => events.push(['final-prepared', value]), markFinalPublication: value => events.push(['final-publication', value]), isCancelled: () => false
+    },
+    sendFinal: (_profile, _message, content, extra) => { finals.push({ content, extra }); return true }
   })
-  assert.equal(result.status, 'completed'); assert.deepEqual(events.map(event => event[0]), ['prepared', 'thread', 'prepared', 'turn', 'running'])
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.computationStatus, 'completed'); assert.equal(result.serverPersistence, 'unconfirmed')
+  assert.deepEqual(events.map(event => event[0]), ['prepared', 'thread', 'prepared', 'turn', 'running', 'final-prepared', 'final-publication'])
   assert.equal(events[0][1].engineThreadId, undefined); assert.equal(events[2][1].engineThreadId, 'engine-thread-1')
   assert.equal(events[3][1].input[0].type, 'text'); assert.equal(events[3][1].input[1].type, 'text')
   assert.deepEqual(events[3][1].policy.outputSchema, TYPED_INSPECTION_OUTPUT_SCHEMA)
   assert.equal(finals[0].extra.outcomeContractVersion, 2); assert.equal(finals[0].extra.inspectionInputReceipt.engineThreadId, 'engine-thread-1'); assert.equal(finals[0].extra.inspectionInputReceipt.engineTurnId, 'engine-turn-1')
+  assert.equal(events[5][1].outboundMessageId, finals[0].extra.outboundMessageId); assert.equal(events[5][1].finalDigest, result.finalDigest)
+  assert.equal(events[6][1].state, 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED')
   assert.throws(() => validateTypedInteractionOutcome(finals[0].extra.interactionOutcome, discussionFacts), error => error.code === 'TYPED_OUTCOME_SHAPE_INVALID')
   assert.deepEqual(validateTypedInspectionOutcome(finals[0].extra.interactionOutcome, discussionFacts), finals[0].extra.interactionOutcome)
   assert.throws(() => validateTypedInspectionOutcome({ schemaVersion: 1, kind: 'ANSWER', text: 'legacy', clarification: null, proposal: null }, discussionFacts), error => error.code === 'TYPED_OUTCOME_SHAPE_INVALID')
@@ -208,8 +214,53 @@ test('unknown acceptance recovery performs only thread/read reconciliation and f
       turn: { id: 'engine-turn-r', status: 'completed', items: [{ type: 'agentMessage', text: JSON.stringify({ schemaVersion: 2, kind: 'ANSWER', text: 'Recovered.', clarification: null, proposal: null }) }] }
     } }
   }
-  const result = await recoverTypedInspection(profile, message, { preparation: prepared }, { adapter, isolationReadback: readback(typed), sendFinal: (_profile, _message, content, extra) => finals.push({ content, extra }) })
-  assert.equal(result.status, 'completed'); assert.equal(reads, 1); assert.equal(starts, 0); assert.equal(finals[0].extra.inspectionInputReceipt.engineTurnId, 'engine-turn-r')
+  let finalPrepared = null
+  const result = await recoverTypedInspection(profile, message, { preparation: prepared }, {
+    adapter, isolationReadback: readback(typed),
+    controls: { markFinalPrepared: value => { finalPrepared = value }, markFinalPublication: () => {} },
+    sendFinal: (_profile, _message, content, extra) => { finals.push({ content, extra }); return true }
+  })
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.computationStatus, 'completed'); assert.equal(reads, 1); assert.equal(starts, 0)
+  assert.equal(finals[0].extra.inspectionInputReceipt.engineTurnId, 'engine-turn-r'); assert.equal(finalPrepared.outboundMessageId, result.outboundMessageId)
+})
+
+
+test('durable final survives false, throw and unconfirmed write publication, replays after restart with one fixed identity, and never restarts the engine', async () => {
+  for (const mode of ['false', 'throw', 'true-unconfirmed']) {
+    const root = mkdtempSync(resolve(tmpdir(), `typed-inspection-final-${mode}-`)); chmodSync(root, 0o700)
+    const inbox = new PersistentChatInbox({ rootDir: root, profile: { profileId: profile.profileId, agentId: profile.agentId } }); inbox.initialize()
+    const bytes = Buffer.from('bird\n'); const message = messageFor(sourceFor(bytes), { dispatchId: `dispatch-${mode}`, dedupeKey: `${ids.tenantId}:${ids.ownerJiacn}:${ids.clientId}:dispatch-${mode}` })
+    const typed = resolveTypedInspectionRequest(profile, message); const accepted = await inbox.accept(message); const claimed = inbox.claim(accepted.key)
+    let starts = 0; let releases = 0
+    const adapter = {
+      closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'engine-thread-1', state: 'HOT' }),
+      runTurn: async options => { starts++; options.onAccepted({ threadId: 'engine-thread-1', turnId: 'engine-turn-1' }); return { threadId: 'engine-thread-1', turnId: 'engine-turn-1', content: JSON.stringify({ schemaVersion: 2, kind: 'ANSWER', text: 'Observed bird.', clarification: null, proposal: null }) } },
+      interrupt: async () => {}
+    }
+    const controls = {
+      markPrepared: value => inbox.markPrepared(claimed, value), markRunning: (_cancel, value) => inbox.markRunning(claimed, value),
+      markFinalPrepared: value => inbox.markFinalPrepared(claimed, value), markFinalPublication: value => inbox.markFinalPublication(claimed, value), isCancelled: () => false
+    }
+    const first = await runTypedInspection(profile, message, {
+      adapter, profileRuntime: { releaseAdapter: async () => { releases++ } }, isolationReadback: readback(typed),
+      materializer: { materialize: async () => ({ directory: '/private/request-1', sources: [{ ...sourceFor(bytes), bytes }] }) },
+      controls, sendFinal: () => { if (mode === 'throw') throw new Error('SIMULATED_WS_WRITE_FAILURE'); return mode === 'true-unconfirmed' }
+    })
+    assert.equal(first.status, 'recovery_required')
+    assert.equal(first.publicationState, mode === 'true-unconfirmed' ? 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED' : 'NOT_SENT')
+    assert.equal(first.serverPersistence, 'unconfirmed'); assert.equal(starts, 1); assert.equal(releases, 1)
+    assert.equal(claimed.record.state, 'FINAL_PREPARED'); assert.equal(claimed.record.finalPrepared.outboundMessageId, first.outboundMessageId)
+    inbox.recoveryRequired(claimed, first.recoveryReason)
+    const restarted = new PersistentChatInbox({ rootDir: root, profile: { profileId: profile.profileId, agentId: profile.agentId } }); restarted.initialize()
+    const recovered = restarted.listRecovery()[0]; const replayed = []
+    const replay = await recoverTypedInspection(profile, message, recovered.record, {
+      controls: { markFinalPublication: value => restarted.markFinalPublication(recovered, value) },
+      sendFinal: (_profile, _message, content, extra) => { replayed.push({ content, extra }); return true }
+    })
+    assert.equal(replay.status, 'recovery_required'); assert.equal(replay.publicationState, 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED')
+    assert.equal(starts, 1); assert.equal(replayed[0].extra.outboundMessageId, first.outboundMessageId)
+    assert.equal(replay.finalDigest, first.finalDigest); assert.equal(replayed[0].content, recovered.record.finalPrepared.content)
+  }
 })
 
 test('missing runtime authentication and unavailable parser fail before fetch or native start', async () => {

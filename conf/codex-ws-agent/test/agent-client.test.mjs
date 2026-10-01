@@ -455,6 +455,25 @@ test('processor sends INSPECT through its isolated lane and reconciles unknown a
   assert.equal(item.state, 'archive'); assert.equal(item.record.state, 'COMPLETED')
 })
 
+
+test('processor retains a durably prepared INSPECT final in recovery instead of archiving local computation as completed', async () => {
+  const root = temporaryDirectory(); let runs = 0; let recoveries = 0
+  const runtime = createChatRuntime(root, {
+    runChat: async (_message, controls) => {
+      runs++; controls.markPrepared({ schemaVersion: 1 }); controls.markRunning(() => {}, { threadId: 'engine-thread', turnId: 'engine-turn' })
+      controls.markFinalPrepared({ schemaVersion: 1, outboundMessageId: 'inspection_final_' + 'a'.repeat(64), finalDigest: 'sha256:' + 'b'.repeat(64) })
+      controls.markFinalPublication({ schemaVersion: 1, outboundMessageId: 'inspection_final_' + 'a'.repeat(64), state: 'NOT_SENT', errorCode: null })
+      return { status: 'recovery_required', recoveryReason: 'FINAL_PUBLISH_NOT_SENT', computationStatus: 'completed', serverPersistence: 'unconfirmed' }
+    },
+    recoverChat: async () => { recoveries++; return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' } }
+  })
+  runtime.processor.start(); const message = durableChat(89, { route: 'INSPECT' }); await runtime.processor.handle(message); await runtime.processor.waitForIdle(); runtime.processor.stop()
+  const normalized = normalizeInboundMessage(message); const item = runtime.chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(runs, 1); assert.equal(recoveries, 0); assert.equal(item.state, 'recovery'); assert.equal(item.record.state, 'RECOVERY_REQUIRED')
+  assert.equal(item.record.finalPrepared.outboundMessageId, 'inspection_final_' + 'a'.repeat(64)); assert.equal(item.record.result, undefined)
+  assert.ok(runtime.sent.some(ack => ack.dispatchId === message.dispatchId && ack.status === 'recovery_required' && ack.errorCode === 'FINAL_PUBLISH_NOT_SENT'))
+})
+
 test('production chat runner takes disabled and legacy messages directly to serialized final-only fallback', async () => {
   const gate = new SerialExecutionGate(); const calls = []
   const result = await runProfileChat(profile, { ...chat(), legacy: true, contextSnapshot: { get schemaVersion() { throw new Error('must not inspect snapshot') } } }, {
@@ -477,6 +496,21 @@ test('registration and presence truthfully advertise capability contract v1 with
     registration,
     JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'u0-runtime-capabilities-v1.json'), 'utf8'))
   )
+})
+
+
+test('typed inspection declaration is absent without measured contract readback and exact when ready', () => {
+  const declaration = {
+    schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', enabled: true, profileId: 'inspection-profile',
+    engineContractId: 'engine-contract-v1', enginePolicyDigest: 'sha256:' + '1'.repeat(64), toolPolicyDigest: 'sha256:' + '2'.repeat(64),
+    inputPolicyDigest: 'sha256:' + '3'.repeat(64), toolPolicy: 'MANIFEST_READ_ONLY', recovery: 'durable-inbox-turn-readback-v1',
+    supportedInputs: [{ mediaKind: 'text', mimeType: 'text/plain', carrier: 'DIRECT_TEXT', carrierContractDigest: 'sha256:' + '4'.repeat(64) }]
+  }
+  const unavailable = { declaration: () => null }; const ready = { declaration: () => declaration }
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(profile, null, false, null, unavailable), 'typedInspection'), false)
+  assert.equal(Object.hasOwn(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: unavailable }), 'typedInspection'), false)
+  assert.deepEqual(buildAgentRegistrationPayload(profile, null, true, null, ready).typedInspection, declaration)
+  assert.deepEqual(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: ready }).typedInspection, declaration)
 })
 
 

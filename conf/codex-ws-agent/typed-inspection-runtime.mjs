@@ -278,10 +278,10 @@ export class TypedInspectionMaterializer {
   }
 }
 
-const carrierSource = source => {
+const carrierSource = (source, profileRuntime = null, inputDirectory = '') => {
   const base = { sourceRefId: source.sourceRefId, sha256: source.sha256, byteLength: source.byteLength, mimeType: source.mimeType,
     carrier: source.carrier, carrierContractDigest: source.carrierContractDigest, bytes: Buffer.from(source.bytes) }
-  if (source.carrier === 'LOCAL_IMAGE' || source.carrier === 'LOCAL_AUDIO') return { ...base, path: source.path }
+  if (source.carrier === 'LOCAL_IMAGE' || source.carrier === 'LOCAL_AUDIO') return { ...base, path: profileRuntime ? profileRuntime.mapInputPath(source.path, inputDirectory) : source.path }
   if (source.carrier === 'PARSED_TEXT') return { ...base, parser: source.parser, parsedText: source.parsedText }
   return base
 }
@@ -291,6 +291,10 @@ const inspectionPolicyHashes = (typed, adapter) => ({
   toolPolicyHash: typed.manifest.profile.toolPolicyDigest,
   instructionSourceHash: canonicalSha256({ source: 'runtime-static', instructions: TYPED_INSPECTION_INSTRUCTIONS, outputSchema: TYPED_INSPECTION_OUTPUT_SCHEMA }),
   modelConfigHash: canonicalSha256({ model: adapter?.readback?.models || {}, config: adapter?.readback?.config || {}, contract: typed.manifest.profile.engineContractId })
+})
+const inspectionEngineStateBinding = (message, typed, requestKey) => freeze({
+  schemaVersion: 1, requestKey, authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest,
+  requestId: message.requestId, turnId: message.turnId, inputPolicyDigest: typed.manifest.profile.inputPolicyDigest
 })
 const preparedRecord = ({ typed, converted, directory, threadKey, engineThreadId = null }) => freeze({
   schemaVersion: 1, contract: typed.contract, authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest,
@@ -310,78 +314,176 @@ const finalAgentText = turn => {
   if (messages.length !== 1) fail('TYPED_INSPECTION_RECOVERED_FINAL_INVALID')
   return messages[0].text
 }
-const publishInspectionFinal = ({ profile, message, typed, rawOutcome, receiptDraft, engineThreadId, engineTurnId, threadKey, sendFinal }) => {
+const inspectionFinalPreimage = finalPrepared => ({
+  schemaVersion: finalPrepared.schemaVersion, contract: finalPrepared.contract, authorizationId: finalPrepared.authorizationId,
+  manifestDigest: finalPrepared.manifestDigest, requestId: finalPrepared.requestId, turnId: finalPrepared.turnId,
+  dispatchId: finalPrepared.dispatchId, outboundMessageId: finalPrepared.outboundMessageId, content: finalPrepared.content,
+  extra: finalPrepared.extra, result: finalPrepared.result
+})
+const buildPreparedInspectionFinal = ({ message, typed, rawOutcome, receiptDraft, engineThreadId, engineTurnId, threadKey }) => {
   const outcome = validateTypedInspectionOutcome(rawOutcome, typed.discussionFacts)
   const receipt = finalizeTypedInspectionInputReceipt({ receiptDraft, engineThreadId, engineTurnId })
-  sendFinal(profile, message, outcome.text, {
-    status: 'completed', routeUsed: 'INSPECT_NATIVE', productPolicy: 'fixed-manifest-read-only', threadGeneration: threadKey,
-    outcomeContractVersion: 2, interactionOutcome: outcome, inspectionInputReceipt: receipt
+  const identityDigest = canonicalSha256({
+    contract: typed.contract, authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest,
+    requestId: message.requestId, turnId: message.turnId, dispatchId: message.dispatchId,
+    engineThreadId, engineTurnId, threadKey, interactionOutcome: outcome, inspectionInputReceipt: receipt
   })
-  return { status: 'completed', threadId: engineThreadId, turnId: engineTurnId, threadKey, inputDigest: receipt.inputDigest }
+  const outboundMessageId = `inspection_final_${identityDigest.slice('sha256:'.length)}`
+  const extra = {
+    status: 'completed', routeUsed: 'INSPECT_NATIVE', productPolicy: 'fixed-manifest-read-only', threadGeneration: threadKey,
+    outcomeContractVersion: 2, interactionOutcome: outcome, inspectionInputReceipt: receipt, outboundMessageId
+  }
+  const result = {
+    status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed',
+    threadId: engineThreadId, turnId: engineTurnId, threadKey, inputDigest: receipt.inputDigest, outboundMessageId
+  }
+  const prepared = {
+    schemaVersion: 1, contract: 'juyiting-typed-inspection-final-v1', authorizationId: typed.authorizationId,
+    manifestDigest: typed.manifestDigest, requestId: message.requestId, turnId: message.turnId,
+    dispatchId: message.dispatchId, outboundMessageId, content: outcome.text, extra, result
+  }
+  return freeze({ ...prepared, finalDigest: canonicalSha256(inspectionFinalPreimage(prepared)) })
+}
+const validatePreparedInspectionFinal = ({ finalPrepared, message, typed }) => {
+  const keys = ['schemaVersion', 'contract', 'authorizationId', 'manifestDigest', 'requestId', 'turnId', 'dispatchId', 'outboundMessageId', 'content', 'extra', 'result', 'finalDigest']
+  if (!exactKeys(finalPrepared, keys) || finalPrepared.schemaVersion !== 1 || finalPrepared.contract !== 'juyiting-typed-inspection-final-v1' ||
+      finalPrepared.authorizationId !== typed.authorizationId || finalPrepared.manifestDigest !== typed.manifestDigest ||
+      finalPrepared.requestId !== message.requestId || finalPrepared.turnId !== message.turnId || finalPrepared.dispatchId !== message.dispatchId ||
+      !/^inspection_final_[a-f0-9]{64}$/.test(finalPrepared.outboundMessageId) || !nonblank(finalPrepared.content) ||
+      !object(finalPrepared.extra) || !object(finalPrepared.result) || !DIGEST.test(finalPrepared.finalDigest) ||
+      canonicalSha256(inspectionFinalPreimage(finalPrepared)) !== finalPrepared.finalDigest) fail('TYPED_INSPECTION_FINAL_PREPARED_INVALID')
+  const outcome = validateTypedInspectionOutcome(finalPrepared.extra.interactionOutcome, typed.discussionFacts)
+  const receipt = finalPrepared.extra.inspectionInputReceipt
+  if (!object(receipt)) fail('TYPED_INSPECTION_FINAL_PREPARED_INVALID')
+  const { engineThreadId, engineTurnId, ...receiptDraft } = receipt
+  const trustedReceipt = finalizeTypedInspectionInputReceipt({ receiptDraft, engineThreadId, engineTurnId })
+  const expectedExtra = {
+    status: 'completed', routeUsed: 'INSPECT_NATIVE', productPolicy: 'fixed-manifest-read-only', threadGeneration: finalPrepared.result.threadKey,
+    outcomeContractVersion: 2, interactionOutcome: outcome, inspectionInputReceipt: trustedReceipt, outboundMessageId: finalPrepared.outboundMessageId
+  }
+  const expectedResult = {
+    status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed',
+    threadId: engineThreadId, turnId: engineTurnId, threadKey: finalPrepared.result.threadKey,
+    inputDigest: trustedReceipt.inputDigest, outboundMessageId: finalPrepared.outboundMessageId
+  }
+  if (finalPrepared.content !== outcome.text || canonicalSha256(finalPrepared.extra) !== canonicalSha256(expectedExtra) ||
+      canonicalSha256(finalPrepared.result) !== canonicalSha256(expectedResult)) fail('TYPED_INSPECTION_FINAL_PREPARED_INVALID')
+  return freeze(finalPrepared)
+}
+const publishPreparedInspectionFinal = async ({ profile, message, typed, finalPrepared, controls, sendFinal }) => {
+  const prepared = validatePreparedInspectionFinal({ finalPrepared, message, typed })
+  let sent = false; let sendError = null
+  try { sent = await sendFinal(profile, message, prepared.content, prepared.extra) === true } catch (error) { sendError = error }
+  const publication = {
+    schemaVersion: 1, outboundMessageId: prepared.outboundMessageId,
+    state: sent ? 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED' : 'NOT_SENT',
+    errorCode: sendError ? String(sendError.code || sendError.message || 'CHAT_FINAL_SEND_FAILED').slice(0, 512) : null
+  }
+  try { await controls?.markFinalPublication?.(publication) } catch {}
+  return {
+    status: 'recovery_required', computationStatus: 'completed', serverPersistence: 'unconfirmed',
+    recoveryReason: sent ? 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' : 'FINAL_PUBLISH_NOT_SENT',
+    threadId: prepared.result.threadId, turnId: prepared.result.turnId, threadKey: prepared.result.threadKey,
+    inputDigest: prepared.result.inputDigest, outboundMessageId: prepared.outboundMessageId, finalDigest: prepared.finalDigest,
+    publicationState: publication.state
+  }
+}
+const publishInspectionFinal = async ({ profile, message, typed, rawOutcome, receiptDraft, engineThreadId, engineTurnId, threadKey, controls, sendFinal }) => {
+  const finalPrepared = buildPreparedInspectionFinal({ message, typed, rawOutcome, receiptDraft, engineThreadId, engineTurnId, threadKey })
+  if (typeof controls?.markFinalPrepared !== 'function') {
+    const error = Object.assign(new Error('TYPED_INSPECTION_FINAL_DURABILITY_REQUIRED'), { code: 'TYPED_INSPECTION_FINAL_DURABILITY_REQUIRED', preserveEngineState: true })
+    throw error
+  }
+  try { await controls.markFinalPrepared(finalPrepared) } catch (cause) {
+    throw Object.assign(new Error(`TYPED_INSPECTION_FINAL_DURABILITY_FAILED: ${cause.message}`), { code: 'TYPED_INSPECTION_FINAL_DURABILITY_FAILED', preserveEngineState: true, cause })
+  }
+  return publishPreparedInspectionFinal({ profile, message, typed, finalPrepared, controls, sendFinal })
 }
 
 export const runTypedInspection = async (profile, message, {
-  adapter, bindingStore, controls = { markPrepared: () => {}, markRunning: () => {}, isCancelled: () => false },
+  adapter, profileRuntime = null, bindingStore, controls = { markPrepared: () => {}, markRunning: () => {}, isCancelled: () => false },
   materializer, isolationReadback, nativeInputAdapters = {}, sendFinal
 } = {}) => {
   const typed = resolveTypedInspectionRequest(profile, message)
   if (!typed) fail('TYPED_INSPECTION_MARKER_REQUIRED')
-  assertMeasuredInspectionProfile({ profile, typed, adapter, isolationReadback })
+  const measuredAdapter = adapter || (profileRuntime?.nativeReadback ? { closed: false, readback: profileRuntime.nativeReadback } : null)
+  const measuredReadback = isolationReadback || profileRuntime?.contractReadback || null
+  assertMeasuredInspectionProfile({ profile, typed, adapter: measuredAdapter, isolationReadback: measuredReadback })
   if (!materializer || typeof materializer.materialize !== 'function' || typeof sendFinal !== 'function') fail('TYPED_INSPECTION_RUNTIME_CONFIG_INVALID')
   const materialized = await materializer.materialize({ message, typed })
-  const converted = buildTypedInspectionNativeInputs({ authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest, sources: materialized.sources.map(carrierSource), adapters: nativeInputAdapters })
-  const hashes = inspectionPolicyHashes(typed, adapter)
-  const key = buildThreadKey({
-    tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId,
-    agentId: profile.agentId, conversationId: message.conversationId, mode: 'INSPECT', workspaceScopeHash: 'inspection-private-inputs-v1',
-    cwd: materialized.directory, ...hashes, conversationGeneration: String(message.conversationGeneration), authorizationId: typed.authorizationId,
-    manifestDigest: typed.manifestDigest, inputPolicyDigest: typed.manifest.profile.inputPolicyDigest
-  })
-  controls.markPrepared(preparedRecord({ typed, converted, directory: materialized.directory, threadKey: key }))
-  const prior = bindingStore?.get(key)
-  if (prior?.state === 'RECOVERY_REQUIRED') fail('TURN_ACCEPTANCE_UNKNOWN')
-  const binding = await adapter.startOrResumeThread(prior, {
-    cwd: materialized.directory, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions: TYPED_INSPECTION_INSTRUCTIONS
-  })
-  bindingStore?.put(key, binding)
-  controls.markPrepared(preparedRecord({ typed, converted, directory: materialized.directory, threadKey: key, engineThreadId: binding.threadId }))
-  let accepted = null
+  const converted = buildTypedInspectionNativeInputs({ authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest, sources: materialized.sources.map(source => carrierSource(source, profileRuntime, materialized.directory)), adapters: nativeInputAdapters })
+  const requestKey = message.dedupeKey || message.messageId
+  const selectedAdapter = adapter || await profileRuntime.openAdapter(materialized.directory, requestKey, inspectionEngineStateBinding(message, typed, requestKey))
+  let preserveAdapter = false; let binding = null; let key = '' ; let accepted = null
   try {
-    const result = await adapter.runTurn({
+    const hashes = inspectionPolicyHashes(typed, selectedAdapter)
+    key = buildThreadKey({
+      tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId,
+      agentId: profile.agentId, conversationId: message.conversationId, mode: 'INSPECT', workspaceScopeHash: 'inspection-private-inputs-v1',
+      cwd: profileRuntime ? '/inputs' : materialized.directory, ...hashes, conversationGeneration: String(message.conversationGeneration), authorizationId: typed.authorizationId,
+      manifestDigest: typed.manifestDigest, inputPolicyDigest: typed.manifest.profile.inputPolicyDigest
+    })
+    controls.markPrepared(preparedRecord({ typed, converted, directory: materialized.directory, threadKey: key }))
+    const prior = bindingStore?.get(key)
+    if (prior?.state === 'RECOVERY_REQUIRED') fail('TURN_ACCEPTANCE_UNKNOWN')
+    binding = await selectedAdapter.startOrResumeThread(prior, {
+      cwd: profileRuntime ? '/inputs' : materialized.directory, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions: TYPED_INSPECTION_INSTRUCTIONS
+    })
+    bindingStore?.put(key, binding)
+    controls.markPrepared(preparedRecord({ typed, converted, directory: materialized.directory, threadKey: key, engineThreadId: binding.threadId }))
+    const result = await selectedAdapter.runTurn({
       threadId: binding.threadId, clientUserMessageId: message.messageId,
       input: [inspectionEnvelopeInput(message), ...converted.nativeInputs],
-      policy: { cwd: materialized.directory, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, outputSchema: TYPED_INSPECTION_OUTPUT_SCHEMA },
-      onAccepted: value => { accepted = value; controls.markRunning(() => adapter.interrupt(value.threadId, value.turnId), value) }
+      policy: { cwd: profileRuntime ? '/inputs' : materialized.directory, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, outputSchema: TYPED_INSPECTION_OUTPUT_SCHEMA },
+      onAccepted: value => { accepted = value; controls.markRunning(() => selectedAdapter.interrupt(value.threadId, value.turnId), value) }
     })
     if (controls.isCancelled()) return { status: 'cancelled', threadId: result.threadId, turnId: result.turnId, threadKey: key }
     if (result.threadId !== binding.threadId || !nonblank(result.turnId)) fail('TYPED_INSPECTION_ENGINE_BINDING_MISMATCH')
-    const published = publishInspectionFinal({ profile, message, typed, rawOutcome: result.content, receiptDraft: converted.inspectionInputReceiptDraft,
-      engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key, sendFinal })
+    const published = await publishInspectionFinal({ profile, message, typed, rawOutcome: result.content, receiptDraft: converted.inspectionInputReceiptDraft,
+      engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key, controls, sendFinal })
     bindingStore?.put(key, { ...binding, state: 'IDLE', lastAppliedContextHash: message.contextSnapshot.contextHash, updatedAt: Date.now() })
     return published
   } catch (error) {
-    if (error?.code === 'TURN_ACCEPTANCE_UNKNOWN') bindingStore?.markRecovery(key, error.message)
-    if (error?.code === 'TURN_ACCEPTANCE_UNKNOWN' && !error.turn) error.turn = accepted || { threadId: binding.threadId, clientUserMessageId: message.messageId }
+    const acceptanceUnknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
+    preserveAdapter = acceptanceUnknown || error?.preserveEngineState === true
+    if (acceptanceUnknown && key) bindingStore?.markRecovery(key, error.message)
+    if (acceptanceUnknown && !error.turn) error.turn = accepted || { threadId: binding?.threadId, clientUserMessageId: message.messageId }
     throw error
+  } finally {
+    if (profileRuntime && !preserveAdapter) await profileRuntime.releaseAdapter(requestKey)
   }
 }
 
 export const recoverTypedInspection = async (profile, message, record, {
-  adapter, isolationReadback, sendFinal
+  adapter, profileRuntime = null, isolationReadback, controls = {}, sendFinal
 } = {}) => {
   const typed = resolveTypedInspectionRequest(profile, message)
   if (!typed) fail('TYPED_INSPECTION_MARKER_REQUIRED')
-  assertMeasuredInspectionProfile({ profile, typed, adapter, isolationReadback })
+  if (typeof sendFinal !== 'function') fail('TYPED_INSPECTION_RUNTIME_CONFIG_INVALID')
+  if (record?.finalPrepared) return publishPreparedInspectionFinal({ profile, message, typed, finalPrepared: record.finalPrepared, controls, sendFinal })
+  const measuredAdapter = adapter || (profileRuntime?.nativeReadback ? { closed: false, readback: profileRuntime.nativeReadback } : null)
+  const measuredReadback = isolationReadback || profileRuntime?.contractReadback || null
+  assertMeasuredInspectionProfile({ profile, typed, adapter: measuredAdapter, isolationReadback: measuredReadback })
   const preparation = validatePreparation(record?.preparation, typed)
   const engineThreadId = record?.engine?.threadId || preparation.engineThreadId
   const expectedTurnId = record?.engine?.turnId || null
   if (!nonblank(engineThreadId)) fail('TYPED_INSPECTION_RECOVERY_BINDING_MISSING')
-  const reconciliation = await adapter.reconcileTurn({ threadId: engineThreadId, turnId: expectedTurnId, clientUserMessageId: message.messageId })
-  if (!reconciliation || ['ABSENT', 'ACCEPTED', 'RECOVERY_REQUIRED'].includes(reconciliation.status)) return { status: 'recovery_required', reconciliationStatus: reconciliation?.status || 'RECOVERY_REQUIRED' }
-  if (reconciliation.status !== 'TERMINAL' || reconciliation.terminalStatus !== 'completed') fail('TYPED_INSPECTION_RECOVERED_TURN_FAILED')
-  const resultThreadId = reconciliation.result?.thread?.id || engineThreadId
-  const engineTurnId = reconciliation.turnId || reconciliation.turn?.id
-  if (resultThreadId !== engineThreadId || !nonblank(engineTurnId) || (expectedTurnId && engineTurnId !== expectedTurnId)) fail('TYPED_INSPECTION_ENGINE_BINDING_MISMATCH')
-  return publishInspectionFinal({ profile, message, typed, rawOutcome: finalAgentText(reconciliation.turn),
-    receiptDraft: preparation.inspectionInputReceiptDraft, engineThreadId, engineTurnId, threadKey: preparation.threadKey, sendFinal })
+  const requestKey = message.dedupeKey || message.messageId
+  const selectedAdapter = adapter || await profileRuntime.openAdapter(preparation.inputDirectory, requestKey, inspectionEngineStateBinding(message, typed, requestKey))
+  let preserveAdapter = false
+  try {
+    const reconciliation = await selectedAdapter.reconcileTurn({ threadId: engineThreadId, turnId: expectedTurnId, clientUserMessageId: message.messageId })
+    if (!reconciliation || ['ABSENT', 'ACCEPTED', 'RECOVERY_REQUIRED'].includes(reconciliation.status)) {
+      preserveAdapter = true
+      return { status: 'recovery_required', reconciliationStatus: reconciliation?.status || 'RECOVERY_REQUIRED' }
+    }
+    if (reconciliation.status !== 'TERMINAL' || reconciliation.terminalStatus !== 'completed') fail('TYPED_INSPECTION_RECOVERED_TURN_FAILED')
+    const resultThreadId = reconciliation.result?.thread?.id || engineThreadId
+    const engineTurnId = reconciliation.turnId || reconciliation.turn?.id
+    if (resultThreadId !== engineThreadId || !nonblank(engineTurnId) || (expectedTurnId && engineTurnId !== expectedTurnId)) fail('TYPED_INSPECTION_ENGINE_BINDING_MISMATCH')
+    return await publishInspectionFinal({ profile, message, typed, rawOutcome: finalAgentText(reconciliation.turn),
+      receiptDraft: preparation.inspectionInputReceiptDraft, engineThreadId, engineTurnId, threadKey: preparation.threadKey, controls, sendFinal })
+  } finally {
+    if (profileRuntime && !preserveAdapter) await profileRuntime.releaseAdapter(requestKey)
+  }
 }

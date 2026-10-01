@@ -267,6 +267,42 @@ export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
   }
 }
 
+const processChildren = pid => {
+  try { return readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(value => /^[1-9][0-9]*$/.test(value)).map(Number) } catch { return [] }
+}
+const processTree = (rootPid, maxDepth = 4) => {
+  const result = []; const queue = [{ pid: rootPid, depth: 0 }]; const seen = new Set()
+  while (queue.length) {
+    const item = queue.shift(); if (seen.has(item.pid)) continue; seen.add(item.pid); result.push(item)
+    if (item.depth < maxDepth) for (const pid of processChildren(item.pid)) queue.push({ pid, depth: item.depth + 1 })
+  }
+  return result
+}
+const matchingSpawnedExecutable = (pid, measurement) => {
+  try {
+    const path = `/proc/${pid}/exe`; const stat = statSync(path, { bigint: true })
+    if (String(stat.dev) !== measurement.snapshotIdentity.dev || String(stat.ino) !== measurement.snapshotIdentity.ino || String(stat.size) !== measurement.snapshotIdentity.size) return null
+    const digest = hashFile(path); if (digest !== measurement.snapshotIdentity.sha256) return null
+    return { measured: true, pid, dev: measurement.snapshotIdentity.dev, ino: measurement.snapshotIdentity.ino, size: measurement.snapshotIdentity.size, sha256: digest }
+  } catch { return null }
+}
+
+export async function verifySpawnedAppServerExecutableTree(child, measurement, { signal = null, maxDepth = 4 } = {}) {
+  const reject = message => {
+    try { if (child?.exitCode === null && !child?.killed) child.kill('SIGKILL') } catch {}
+    throw failTrust(message)
+  }
+  if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || !measurement?.snapshotIdentity || !id(measurement.snapshotPath)) return reject('CODEX_APP_SERVER_CHILD_IDENTITY_REQUIRED')
+  while (child.exitCode === null && !signal?.aborted) {
+    for (const item of processTree(child.pid, maxDepth)) {
+      const matched = matchingSpawnedExecutable(item.pid, measurement)
+      if (matched) return { ...matched, wrapperPid: child.pid, depth: item.depth }
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 10))
+  }
+  return reject(signal?.aborted ? 'CODEX_APP_SERVER_CHILD_IDENTITY_CANCELLED' : 'CODEX_APP_SERVER_CHILD_EXECUTABLE_MISMATCH')
+}
+
 export async function verifySpawnedAppServerExecutable(child, measurement, { timeoutMs = 1500 } = {}) {
   const reject = message => {
     try { if (child?.exitCode === null && !child?.killed) child.kill('SIGKILL') } catch {}
@@ -344,21 +380,21 @@ export function measureCodexAppServerBinary(profile, {
 }
 
 export class AppServerAdapter extends EventEmitter {
-  static spawn(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000, schemaMeasurement = null } = {}) {
+  static spawn(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000, schemaMeasurement = null, spawnedExecutableVerifier = verifySpawnedAppServerExecutable } = {}) {
     verifyCodexAppServerBinaryIdentity(profile, schemaMeasurement)
     const child = spawnFn(schemaMeasurement.snapshotPath, ['app-server'], {
       cwd, shell: false, stdio: ['pipe', 'pipe', 'pipe'],
       env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome, NO_PROXY: '*', no_proxy: '*' }
     })
-    return new AppServerAdapter({ child, requestTimeoutMs, schemaMeasurement })
+    return new AppServerAdapter({ child, requestTimeoutMs, schemaMeasurement, spawnedExecutableVerifier })
   }
   async verifySpawnedExecutable(options = {}) {
-    const probe = await verifySpawnedAppServerExecutable(this.child, this.readback.schema, options)
+    const probe = await this.spawnedExecutableVerifier(this.child, this.readback.schema, options)
     this.readback.processExecutable = probe; return probe
   }
-  constructor({ child, send = null, now = Date.now, requestTimeoutMs = 15000, maxStderrBytes = 1024 * 1024, schemaMeasurement = null } = {}) {
+  constructor({ child, send = null, now = Date.now, requestTimeoutMs = 15000, maxStderrBytes = 1024 * 1024, schemaMeasurement = null, spawnedExecutableVerifier = verifySpawnedAppServerExecutable } = {}) {
     super(); if (!child) throw new Error('APP_SERVER_CHILD_REQUIRED')
-    this.child = child; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.maxStderrBytes = maxStderrBytes
+    this.child = child; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.maxStderrBytes = maxStderrBytes; this.spawnedExecutableVerifier = spawnedExecutableVerifier
     this.nextId = 1; this.pending = new Map(); this.buffer = ''; this.stderrBytes = 0; this.closed = false
     this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [], schema: schemaMeasurement || { ...CODEX_APP_SERVER_SCHEMA, measured: false } }
     this.send = send || (frame => child.stdin.write(`${JSON.stringify(frame)}\n`))

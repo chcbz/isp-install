@@ -508,7 +508,9 @@ export class PersistentChatInbox {
         if (['COMPLETED', 'CANCELLED'].includes(record.state)) {
           this._recordTerminal(key, record); durableRename(path, this.path('archive', key)); settled++; continue
         }
-        atomicJson(path, { ...record, state: 'ACCEPTANCE_UNKNOWN', recoveryReason: 'PROCESSING_ON_RESTART_REQUIRES_RECONCILIATION', recoveredAt: Date.now() })
+        const finalPrepared = object(record.finalPrepared)
+        atomicJson(path, { ...record, state: finalPrepared ? 'RECOVERY_REQUIRED' : 'ACCEPTANCE_UNKNOWN',
+          recoveryReason: finalPrepared ? 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' : 'PROCESSING_ON_RESTART_REQUIRES_RECONCILIATION', recoveredAt: Date.now() })
         durableRename(path, resolve(this.recovery, name)); recovered++
       }
       this._gcArchive()
@@ -568,6 +570,21 @@ export class PersistentChatInbox {
     const record = { ...item.record, state: 'PREPARED', preparation, preparedAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item
   }) }
   markRunning(item, engine = {}) { return this._withLock(() => { const record = { ...item.record, state: 'RUNNING', engine, runningAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item }) }
+  markFinalPrepared(item, finalPrepared) { return this._withLock(() => {
+    if (!item || !['processing', 'recovery'].includes(item.state) || !object(finalPrepared)) throw new Error('CHAT_FINAL_PREPARED_INVALID')
+    const current = existsSync(item.path) ? JSON.parse(readFileSync(item.path, 'utf8')) : item.record
+    if (current.finalPrepared && canonical(current.finalPrepared) !== canonical(finalPrepared)) throw new Error('CHAT_FINAL_PREPARED_CONFLICT')
+    const record = { ...current, state: item.state === 'processing' ? 'FINAL_PREPARED' : current.state,
+      finalPrepared: current.finalPrepared || finalPrepared, finalPreparedAt: current.finalPreparedAt || Date.now() }
+    atomicJson(item.path, record); item.record = record; return record.finalPrepared
+  }) }
+  markFinalPublication(item, publication) { return this._withLock(() => {
+    if (!item || !['processing', 'recovery'].includes(item.state) || !object(publication)) throw new Error('CHAT_FINAL_PUBLICATION_INVALID')
+    const current = existsSync(item.path) ? JSON.parse(readFileSync(item.path, 'utf8')) : item.record
+    if (!object(current.finalPrepared)) throw new Error('CHAT_FINAL_PREPARED_REQUIRED')
+    const record = { ...current, finalPublication: { ...publication, attemptedAt: Date.now() } }
+    atomicJson(item.path, record); item.record = record; return record.finalPublication
+  }) }
   complete(item, result = {}) { return this._withLock(() => this._finalizeTerminal(item, { ...item.record, state: 'COMPLETED', completedAt: Date.now(), result })) }
   cancelProcessing(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'processing') return false; return this._withLock(() => { this._finalizeTerminal(item, { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
   recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { return this._withLock(() => { const record = { ...item.record, state, recoveryReason: reason, recoveredAt: Date.now() }; const target = this.path('recovery', item.key); atomicJson(item.path, record); durableRename(item.path, target); item.path = target; item.record = record; item.state = 'recovery'; return record }) }

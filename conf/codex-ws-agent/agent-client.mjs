@@ -61,6 +61,7 @@ import {
 } from './juyiting-typed-outcome.mjs'
 import { TypedOutcomeTextStreamDecoder } from './juyiting-typed-outcome-stream.mjs'
 import { TypedInspectionMaterializer, recoverTypedInspection, resolveTypedInspectionRequest, runTypedInspection } from './typed-inspection-runtime.mjs'
+import { TypedInspectionProfileRuntime } from './typed-inspection-profile.mjs'
 export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration, TypedInspectionMaterializer, resolveTypedInspectionRequest }
 
 const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
@@ -558,9 +559,22 @@ const parseStringList = value => (Array.isArray(value) ? value : String(value ||
   .map(item => String(item).trim())
   .filter(Boolean)
 
+const parseJsonArray = (value, field) => {
+  if (Array.isArray(value)) return structuredClone(value)
+  const text = String(value || '').trim(); if (!text) return []
+  let parsed; try { parsed = JSON.parse(text) } catch { throw new Error(`${field} must be a JSON array`) }
+  if (!Array.isArray(parsed)) throw new Error(`${field} must be a JSON array`)
+  return parsed
+}
+
 const parseCodexTimeoutMs = (value, fallback = 900000) => {
   const selected = value === undefined || value === null || value === '' ? fallback : value
   return typeof selected === 'number' || typeof selected === 'string' ? Number(selected) : NaN
+}
+
+const parseOptionalPositiveInteger = value => {
+  if (value === undefined || value === null || value === '') return null
+  return typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN
 }
 
 export const normalizeProfile = (profile, fallback = {}, index = 0) => {
@@ -594,6 +608,17 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     typedInspectionEnabled: parseEnabledFlag(profile.typedInspectionEnabled ?? fallback.typedInspectionEnabled),
     typedInspectionApiOrigin: String(profile.typedInspectionApiOrigin ?? fallback.typedInspectionApiOrigin ?? '').trim(),
     typedInspectionRootDir: String(profile.typedInspectionRootDir ?? fallback.typedInspectionRootDir ?? '').trim(),
+    typedInspectionStateRoot: String(profile.typedInspectionStateRoot ?? fallback.typedInspectionStateRoot ?? '').trim(),
+    typedInspectionProfileId: String(profile.typedInspectionProfileId ?? fallback.typedInspectionProfileId ?? '').trim(),
+    typedInspectionEngineContractId: String(profile.typedInspectionEngineContractId ?? fallback.typedInspectionEngineContractId ?? '').trim(),
+    typedInspectionProviderId: String(profile.typedInspectionProviderId ?? fallback.typedInspectionProviderId ?? '').trim(),
+    typedInspectionProviderBaseUrl: String(profile.typedInspectionProviderBaseUrl ?? fallback.typedInspectionProviderBaseUrl ?? '').trim(),
+    typedInspectionProviderWireApi: String(profile.typedInspectionProviderWireApi ?? fallback.typedInspectionProviderWireApi ?? 'responses').trim(),
+    typedInspectionProviderNetwork: String(profile.typedInspectionProviderNetwork ?? fallback.typedInspectionProviderNetwork ?? 'isolated').trim(),
+    typedInspectionNetworkConnectTimeoutMs: parseOptionalPositiveInteger(profile.typedInspectionNetworkConnectTimeoutMs ?? fallback.typedInspectionNetworkConnectTimeoutMs),
+    typedInspectionCarrierEvidencePath: String(profile.typedInspectionCarrierEvidencePath ?? fallback.typedInspectionCarrierEvidencePath ?? '').trim(),
+    typedInspectionBwrapBin: String(profile.typedInspectionBwrapBin ?? fallback.typedInspectionBwrapBin ?? '/usr/bin/bwrap').trim(),
+    typedInspectionSupportedInputs: parseJsonArray(profile.typedInspectionSupportedInputs ?? fallback.typedInspectionSupportedInputs, 'typedInspectionSupportedInputs'),
     chatInboxMaxFiles: parsePositiveInteger(profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles, 1024),
     chatInboxMaxBytes: parsePositiveInteger(profile.chatInboxMaxBytes ?? fallback.chatInboxMaxBytes, 64 * 1024 * 1024),
     chatArchiveMaxFiles: parsePositiveInteger(profile.chatArchiveMaxFiles ?? fallback.chatArchiveMaxFiles, 256),
@@ -651,6 +676,17 @@ const legacyProfile = () => normalizeProfile({
   typedInspectionEnabled: process.env.CODEX_TYPED_INSPECTION_ENABLED || false,
   typedInspectionApiOrigin: process.env.CODEX_TYPED_INSPECTION_API_ORIGIN || '',
   typedInspectionRootDir: process.env.CODEX_TYPED_INSPECTION_ROOT_DIR || '',
+  typedInspectionStateRoot: process.env.CODEX_TYPED_INSPECTION_STATE_ROOT || '',
+  typedInspectionProfileId: process.env.CODEX_TYPED_INSPECTION_PROFILE_ID || '',
+  typedInspectionEngineContractId: process.env.CODEX_TYPED_INSPECTION_ENGINE_CONTRACT_ID || '',
+  typedInspectionProviderId: process.env.CODEX_TYPED_INSPECTION_PROVIDER_ID || '',
+  typedInspectionProviderBaseUrl: process.env.CODEX_TYPED_INSPECTION_PROVIDER_BASE_URL || '',
+  typedInspectionProviderWireApi: process.env.CODEX_TYPED_INSPECTION_PROVIDER_WIRE_API || 'responses',
+  typedInspectionProviderNetwork: process.env.CODEX_TYPED_INSPECTION_PROVIDER_NETWORK || 'isolated',
+  typedInspectionNetworkConnectTimeoutMs: process.env.CODEX_TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_MS || '',
+  typedInspectionCarrierEvidencePath: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_PATH || '',
+  typedInspectionBwrapBin: process.env.CODEX_TYPED_INSPECTION_BWRAP_BIN || '/usr/bin/bwrap',
+  typedInspectionSupportedInputs: process.env.CODEX_TYPED_INSPECTION_SUPPORTED_INPUTS || '',
   chatInboxMaxFiles: process.env.CODEX_CHAT_INBOX_MAX_FILES || 1024,
   chatInboxMaxBytes: process.env.CODEX_CHAT_INBOX_MAX_BYTES || 67108864,
   chatArchiveMaxFiles: process.env.CODEX_CHAT_ARCHIVE_MAX_FILES || 256,
@@ -2335,7 +2371,8 @@ export class AgentMessageProcessor {
   constructor({
     profile, inbox, runCommand, runChat, recoverChat = null, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
     recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
-    ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null, chatInbox = null, chatAckOutbox = null, lanes = null
+    ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null, chatInbox = null, chatAckOutbox = null, lanes = null,
+    chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
   }) {
     this.profile = profile
     this.inbox = inbox
@@ -2356,6 +2393,9 @@ export class AgentMessageProcessor {
     this.lanes = lanes || new FairLaneScheduler()
     this.activeChats = new Map()
     this.chatAckRetries = new Map()
+    this.chatRecoveryRetries = new Map()
+    this.chatRecoveryRetryBaseMs = chatRecoveryRetryBaseMs
+    this.chatRecoveryRetryMaxMs = chatRecoveryRetryMaxMs
     this.drainPromise = null
     this.chatActive = false
     this.commandActive = false
@@ -2633,6 +2673,8 @@ export class AgentMessageProcessor {
     this.paused = true
     for (const retry of this.chatAckRetries.values()) clearTimeout(retry.timer)
     this.chatAckRetries.clear()
+    for (const retry of this.chatRecoveryRetries.values()) clearTimeout(retry.timer)
+    this.chatRecoveryRetries.clear()
   }
 
   isBusy() {
@@ -2719,17 +2761,37 @@ export class AgentMessageProcessor {
     if (!this.chatInbox || !this.recoverChat || this.paused || this.stopped) return
     for (const item of this.chatInbox.listRecovery()) if ((item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' && item.record.preparation) this._scheduleChatRecovery(item)
   }
+  _retryChatRecovery(item) {
+    if (!item || this.stopped || this.paused) return
+    const current = this.chatRecoveryRetries.get(item.key) || { attempt: 0, timer: null }
+    if (current.timer) return
+    const delay = Math.min(this.chatRecoveryRetryMaxMs, this.chatRecoveryRetryBaseMs * (2 ** Math.min(current.attempt, 8)))
+    current.attempt++
+    current.timer = setTimeout(() => {
+      current.timer = null
+      if (this.stopped || this.paused) { this.chatRecoveryRetries.delete(item.key); return }
+      this._scheduleChatRecovery(item)
+    }, delay)
+    current.timer.unref?.(); this.chatRecoveryRetries.set(item.key, current)
+  }
+  _clearChatRecoveryRetry(key) {
+    const retry = this.chatRecoveryRetries.get(key); if (retry?.timer) clearTimeout(retry.timer)
+    this.chatRecoveryRetries.delete(key)
+  }
   _scheduleChatRecovery(item) {
     if (!item || this.activeChats.has(item.key)) return
     const message = item.record.message; const active = { key: item.key, state: 'RECONCILING', message, cancelRequested: false, cancel: null }
     this.activeChats.set(item.key, active)
     const task = async () => {
+      let retry = false
       try {
-        const result = await this.recoverChat(message, item.record)
-        if (result?.status === 'completed') this.chatInbox.complete(item, result)
+        const recoveryControls = { markFinalPublication: publication => this.chatInbox.markFinalPublication(item, publication) }
+        const result = await this.recoverChat(message, item.record, recoveryControls)
+        if (result?.status === 'completed') { this.chatInbox.complete(item, result); this._clearChatRecoveryRetry(item.key) }
+        else if (result?.status === 'recovery_required') retry = true
       } catch (error) {
         this.onReject(new AgentProtocolError(error?.code || 'TYPED_INSPECTION_RECOVERY_ERROR', error?.message || 'Typed inspection readback failed'), message.rawPayload)
-      } finally { this.activeChats.delete(item.key) }
+      } finally { this.activeChats.delete(item.key); if (retry) this._retryChatRecovery(item) }
     }
     try { void this.lanes.enqueue('inspect', this._chatFairness(message), task, `recovery:${this._chatTurnKey(message)}`).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_ERROR', error.message), message.rawPayload) }) }
     catch (error) { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_FULL', error.message), message.rawPayload) }
@@ -2745,13 +2807,20 @@ export class AgentMessageProcessor {
       const controls = {
         markPrepared: preparation => { active.state = 'PREPARED'; this.chatInbox.markPrepared(claimed, preparation) },
         markRunning: (cancel, engine = {}) => { active.state = 'RUNNING'; active.cancel = cancel; this.chatInbox.markRunning(claimed, engine); if (active.cancelRequested && cancel) void Promise.resolve(cancel()).catch(() => {}) },
+        markFinalPrepared: finalPrepared => { active.state = 'FINAL_PREPARED'; return this.chatInbox.markFinalPrepared(claimed, finalPrepared) },
+        markFinalPublication: publication => this.chatInbox.markFinalPublication(claimed, publication),
         isCancelled: () => active.cancelRequested
       }
-      let reconcileInspection = false
+      let reconcileInspection = false; let retryInspectionFinal = false
       try {
         const result = await this.runChat(claimed.record.message, controls)
         if (active.cancelRequested || result?.status === 'cancelled') this.chatInbox.cancelProcessing(claimed)
-        else this.chatInbox.complete(claimed, result || { status: 'completed' })
+        else if (result?.status === 'recovery_required') {
+          this.chatInbox.recoveryRequired(claimed, result.recoveryReason || 'CHAT_RECOVERY_REQUIRED')
+          retryInspectionFinal = (claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' && Boolean(claimed.record.finalPrepared)
+          const recoveryAck = { status: 'recovery_required', errorCode: result.recoveryReason || 'CHAT_RECOVERY_REQUIRED', reason: result.recoveryReason || 'CHAT recovery is required' }
+          try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
+        } else this.chatInbox.complete(claimed, result || { status: 'completed' })
       } catch (error) {
         const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
         this.chatInbox.recoveryRequired(claimed, `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`, unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED')
@@ -2762,6 +2831,7 @@ export class AgentMessageProcessor {
       } finally {
         this.chatActive = false; this.activeChats.delete(item.key); void this.drain(); this._schedulePendingChats()
         if (reconcileInspection) queueMicrotask(() => this._scheduleChatRecovery(claimed))
+        else if (retryInspectionFinal) this._retryChatRecovery(claimed)
       }
     }
     const lane = (message.route || message.routing?.interactionMode) === 'INSPECT' ? 'inspect' : 'chat'
@@ -3752,6 +3822,7 @@ export const buildRuntimeCapabilities = profile => {
 
 export const buildAgentPresencePayload = (profile, status, extra = {}) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, extra.appServerAdapter || null)
+  const typedInspection = extra.typedInspectionProfileRuntime?.declaration?.() || null
   return {
     status,
     currentTaskId: extra.taskId || '',
@@ -3759,12 +3830,14 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => {
     errorMessage: extra.errorMessage || '',
     abilities: resolveProfileAbilities(profile),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
-    ...(typedDeliberation ? { typedDeliberation } : {})
+    ...(typedDeliberation ? { typedDeliberation } : {}),
+    ...(typedInspection ? { typedInspection } : {})
   }
 }
 
-export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null) => {
+export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null, typedInspectionProfileRuntime = null) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, appServerAdapter)
+  const typedInspection = typedInspectionProfileRuntime?.declaration?.() || null
   return {
     name: profile.agentName,
     personaName: profile.personaName,
@@ -3775,20 +3848,21 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
     controlledImageBountyExecution: buildControlledImageBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
     controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration(),
     nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: nativeRuntime, online }),
-    ...(typedDeliberation ? { typedDeliberation } : {})
+    ...(typedDeliberation ? { typedDeliberation } : {}),
+    ...(typedInspection ? { typedInspection } : {})
   }
 }
 
 const sendStatus = (profile, status, extra = {}) => {
   const state = getProfileState(profile)
-  return sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, { ...extra, appServerAdapter: state?.appServerAdapter || null }), profile)
+  return sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, { ...extra, appServerAdapter: state?.appServerAdapter || null, typedInspectionProfileRuntime: state?.typedInspectionProfileRuntime || null }), profile)
 }
 
 const registerAgent = profile => {
   const state = getProfileState(profile)
   const envelope = buildProtocolEnvelope(
     MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(
-      profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN, state.appServerAdapter
+      profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN, state.appServerAdapter, state.typedInspectionProfileRuntime
     ), profile
   )
   return sendRegistrationWithAckObservation({
@@ -4347,9 +4421,14 @@ const profileConfigurationErrors = profile => {
   if (profile.fastChatEnabled && (profile.chatSandbox !== 'read-only' || profile.chatToolPolicy !== 'read-only-constrained')) {
     errors.push('Fast CHAT requires chatSandbox=read-only and chatToolPolicy=read-only-constrained; approval never is not deny-all')
   }
-  const typedInspectionControls = [profile.typedInspectionApiOrigin, profile.typedInspectionRootDir]
-  if (typedInspectionControls.some(value => Boolean(value)) && typedInspectionControls.some(value => !value)) errors.push('typedInspectionApiOrigin and typedInspectionRootDir must be configured together')
-  if (profile.typedInspectionEnabled && (!profile.fastChatEnabled || !profile.appServerEnabled || !typedInspectionControls.every(Boolean))) errors.push('typedInspectionEnabled requires Fast CHAT app-server plus fixed API origin and private root; runtime remains unavailable until isolation measurement is attached')
+  const typedInspectionControls = [profile.typedInspectionApiOrigin, profile.typedInspectionRootDir, profile.typedInspectionStateRoot]
+  if (typedInspectionControls.some(value => Boolean(value)) && typedInspectionControls.some(value => !value)) errors.push('typedInspectionApiOrigin, typedInspectionRootDir and typedInspectionStateRoot must be configured together')
+  if (profile.typedInspectionEnabled && (!profile.appServerEnabled || !typedInspectionControls.every(Boolean) || !profile.typedInspectionSupportedInputs.length)) errors.push('typedInspectionEnabled requires appServerEnabled plus fixed API origin plus distinct private input/state roots; runtime remains unavailable until isolation measurement is attached')
+  if (!['isolated', 'restricted-proxy'].includes(profile.typedInspectionProviderNetwork)) errors.push('typedInspectionProviderNetwork must be isolated or restricted-proxy')
+  if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an exact provider id and HTTPS base URL')
+  if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!Number.isSafeInteger(profile.typedInspectionNetworkConnectTimeoutMs) || profile.typedInspectionNetworkConnectTimeoutMs <= 0)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an explicit positive typedInspectionNetworkConnectTimeoutMs transport timeout')
+  if (profile.typedInspectionCarrierEvidencePath && profile.typedInspectionProviderNetwork !== 'restricted-proxy') errors.push('typedInspectionCarrierEvidencePath requires typedInspectionProviderNetwork=restricted-proxy')
+  if (!profile.typedInspectionBwrapBin) errors.push('typedInspectionBwrapBin is required')
   try { resolveCodexAppServerSchemaContract(profile) } catch (error) { errors.push(error.message) }
   const chatInboxMaxFiles = profile.chatInboxMaxFiles ?? 1024
   const chatInboxMaxBytes = profile.chatInboxMaxBytes ?? 64 * 1024 * 1024
@@ -5245,8 +5324,13 @@ const createProfileState = profile => {
       forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
     })
     : null
-  // This is populated only by a separately measured native isolation profile. Source/config flags alone never make INSPECT ready.
-  const typedInspectionIsolationReadback = null
+  const typedInspectionProfileRuntime = profile.typedInspectionEnabled && typedInspectionMaterializer
+    ? new TypedInspectionProfileRuntime({
+      profile, materializerRoot: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
+      stateRoot: resolve(profile.typedInspectionStateRoot, safeProfileDirectory(profile)), bwrapBin: profile.typedInspectionBwrapBin,
+      forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
+    })
+    : null
   const typedInspectionNativeInputAdapters = {
     localImage: { supportedMimeTypes: ['image/png'], toNativeInput: ({ path }) => ({ type: 'localImage', path }) },
     localAudio: { supportedMimeTypes: ['audio/wav'], toNativeInput: ({ path }) => ({ type: 'localAudio', path }) }
@@ -5302,7 +5386,9 @@ const createProfileState = profile => {
     threadBindingStore,
     chatWorkdir,
     typedInspectionMaterializer,
-    typedInspectionIsolationReadback,
+    typedInspectionProfileRuntime,
+    typedInspectionProfilePromise: null,
+    typedInspectionProfileFailure: null,
     typedInspectionNativeInputAdapters,
     lanes,
     legacyExecutionGate,
@@ -5333,6 +5419,17 @@ const createProfileState = profile => {
     disposed: false,
     ensureAppServer: null
   }
+  state.ensureTypedInspectionProfile = async () => {
+    if (!state.typedInspectionProfileRuntime || state.typedInspectionProfileFailure) return state.typedInspectionProfileRuntime
+    if (!state.typedInspectionProfilePromise) state.typedInspectionProfilePromise = state.typedInspectionProfileRuntime.measure().catch(error => {
+      state.typedInspectionProfileFailure = error
+      console.warn(`typed inspection profile unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
+      return null
+    })
+    await state.typedInspectionProfilePromise
+    return state.typedInspectionProfileRuntime
+  }
+  if (state.typedInspectionProfileRuntime) void state.ensureTypedInspectionProfile()
   if (profile.fastChatEnabled && profile.appServerEnabled) {
     const isCurrent = () => !state.disposed && (!profileStates.has(profile.agentId) || profileStates.get(profile.agentId) === state)
     const scheduleRestart = () => {
@@ -5396,10 +5493,10 @@ const createProfileState = profile => {
     runChat: async (message, controls) => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
       if (isTypedInspectionDispatch(message)) {
-        const adapter = state.appServerAdapter || (state.ensureAppServer ? await state.ensureAppServer() : await state.appServerPromise)
+        const inspectionProfile = await state.ensureTypedInspectionProfile()
         return runReadOnlyInspection(profile, message, {
-          adapter, bindingStore: threadBindingStore, controls, materializer: state.typedInspectionMaterializer,
-          isolationReadback: state.typedInspectionIsolationReadback, nativeInputAdapters: state.typedInspectionNativeInputAdapters,
+          profileRuntime: inspectionProfile, bindingStore: threadBindingStore, controls, materializer: state.typedInspectionMaterializer,
+          nativeInputAdapters: state.typedInspectionNativeInputAdapters,
           sendFinal: (selectedProfile, selectedMessage, content, extra) => sendChatFinal(selectedProfile, selectedMessage, content, extra)
         })
       }
@@ -5408,13 +5505,13 @@ const createProfileState = profile => {
         controls, chatWorkdir, legacyGate: legacyExecutionGate, getAppServerFailure: () => state.appServerPermanentFailure
       })
     },
-    recoverChat: async (message, record) => {
+    recoverChat: async (message, record, controls = {}) => {
       const route = message.route || message.routing?.interactionMode
       if (route !== 'INSPECT') return { status: 'recovery_required', reconciliationStatus: 'UNSUPPORTED_ROUTE' }
-      const adapter = state.appServerAdapter || (state.ensureAppServer ? await state.ensureAppServer() : await state.appServerPromise)
+      const inspectionProfile = await state.ensureTypedInspectionProfile()
       try {
         return await recoverTypedInspection(profile, message, record, {
-          adapter, isolationReadback: state.typedInspectionIsolationReadback,
+          profileRuntime: inspectionProfile, controls,
           sendFinal: (selectedProfile, selectedMessage, content, extra) => sendChatFinal(selectedProfile, selectedMessage, content, extra)
         })
       } catch (error) {
@@ -5668,6 +5765,7 @@ export const disposeProfileState = async (state, reason = 'profile removed') => 
   if (!state || state.disposed) return
   const profile = state.profile
   await disposeAppServerState(state, { timeoutMs: 5000 })
+  await state.typedInspectionProfileRuntime?.dispose()
   state.processor.pause()
   state.resultReplayCancel?.(); state.resultReplayCancel = null
   state.executionReportReplayCancel?.(); state.executionReportReplayCancel = null
