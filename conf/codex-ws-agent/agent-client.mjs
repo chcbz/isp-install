@@ -35,8 +35,10 @@ import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './r
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 import { NativeConversationLane } from './conversation-native.mjs'
 import { ControlledImageConversationLane } from './conversation-controlled-image.mjs'
+import { ControlledImageConversationLaneV3 } from './conversation-controlled-image-v3.mjs'
 import { buildNativeBountyExecutionDeclaration } from './native-bounty-capability.mjs'
 import { buildControlledImageBountyExecutionDeclaration } from './controlled-image-bounty-capability.mjs'
+import { buildControlledImageBountyExecutionV3Declaration } from './controlled-image-bounty-v3-capability.mjs'
 import {
   assertDistinctControlledImageLedgerRoots,
   controlledImageHttpConfigurationErrors,
@@ -46,6 +48,7 @@ import {
 } from './controlled-image-http-config.mjs'
 import { ControlledImageHttpLedger } from './controlled-image-http-ledger.mjs'
 import { ControlledImageHttpExecutor } from './controlled-image-http-executor.mjs'
+import { ControlledImageHttpExecutorV3 } from './controlled-image-http-executor-v3.mjs'
 import { buildNativeProviderCredentialBinding } from './controlled-image-http-provider-binding.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import { AppServerAdapter, cleanupCodexAppServerSnapshots, measureCodexAppServerBinary } from './app-server-adapter.mjs'
@@ -3718,6 +3721,7 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
   runtimeCapabilities: buildRuntimeCapabilities(profile),
   nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
   controlledImageBountyExecution: buildControlledImageBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
+  controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration(),
   nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: nativeRuntime, online })
 })
 
@@ -4878,6 +4882,69 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}) => ({
     ? [...source.executionReportCommandTypes]
     : []
 })
+
+/**
+ * Fully composed source-aware v3 runtime for offline/API integration verification.
+ * Registration remains frozen disabled and the production profile poller does not
+ * schedule this lane until a later verified capability promotion.
+ */
+export const createControlledImageV3SourceRuntime = ({
+  profile,
+  getAuth = () => '',
+  controlledEnv = process.env,
+  providerFetchFn = globalThis.fetch,
+  nativeFetchFn = globalThis.fetch,
+  createLedger = options => new ControlledImageHttpLedger(options),
+  createExecutor = options => new ControlledImageHttpExecutorV3(options),
+  createPollProtocol = options => new ControlledImageConversationLaneV3(options),
+  runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID
+} = {}) => {
+  const httpPollEnabled = profile?.nativeConversationHttpPollEnabled === true
+  const unavailable = ({ controlledConfig = null, credentialReady = false } = {}) => Object.freeze({
+    configReady: false,
+    httpPollEnabled,
+    executor: null,
+    pollProtocol: null,
+    adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+    controlledImageV3Ready: false,
+    credentialReady,
+    controlledConfig
+  })
+  if (profile?.enabled === false || profile?.controlledImageHttpEnabled !== true || !httpPollEnabled
+      || !profile?.workspaceFileApiOrigin || !profile?.workspaceFileRootDir || typeof getAuth !== 'function') return unavailable()
+  let controlledConfig
+  try { controlledConfig = resolveControlledImageHttpConfig(profile, { env: controlledEnv }) }
+  catch { return unavailable() }
+  const credential = controlledEnv?.[controlledConfig.apiKeyEnv]
+  if (typeof credential !== 'string' || !credential || typeof providerFetchFn !== 'function'
+      || typeof nativeFetchFn !== 'function' || typeof createLedger !== 'function'
+      || typeof createExecutor !== 'function' || typeof createPollProtocol !== 'function') {
+    return unavailable({ controlledConfig, credentialReady: false })
+  }
+  try {
+    const ledger = createLedger({ rootDir: controlledConfig.ledgerRoot,
+      profileId: profile.profileId, agentId: profile.agentId })
+    const controlledExecutor = createExecutor({ profile, config: controlledConfig,
+      credential, fetchFn: providerFetchFn, ledger })
+    if (typeof controlledExecutor?.execute !== 'function') return unavailable({ controlledConfig, credentialReady: true })
+    const executor = args => controlledExecutor.execute(args)
+    const pollProtocol = createPollProtocol({ apiOrigin: profile.workspaceFileApiOrigin,
+      rootDir: profile.workspaceFileRootDir, agentId: profile.agentId, runtimeInstanceId,
+      getAuth, fetchFn: nativeFetchFn, execute: executor, controlledConfig })
+    if (typeof pollProtocol?.poll !== 'function') return unavailable({ controlledConfig, credentialReady: true })
+    return Object.freeze({
+      configReady: true,
+      httpPollEnabled: true,
+      executor,
+      pollProtocol,
+      adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+      // Deliberately false until API authority/source and authenticated production polling are verified.
+      controlledImageV3Ready: false,
+      credentialReady: true,
+      controlledConfig
+    })
+  } catch { return unavailable({ controlledConfig, credentialReady: true }) }
+}
 
 export const createNativeBountyExecutionRuntime = ({
   profile,
