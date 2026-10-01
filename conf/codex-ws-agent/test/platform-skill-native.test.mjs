@@ -27,6 +27,7 @@ const view = c => ({ installationId: c.installationId, agentId: scope.agentId, b
 const native = () => ({ wsUrl: 'wss://api.example.invalid/ws', command: command(), runtimeScope: scope, authorization: token })
 test('exact wire validates as an independent platform command', () => {
   assert.equal(command().installationId, 'psi_a'); assert.equal(command().attempt, 1)
+  assert.equal(command().issuedAt, 1); assert.equal(command().expiresAt, 3600001)
 })
 test('foreign scope, package URLs, version coercion and command spoofing fail', () => {
   for (const mutate of [m => { m.ownerJiacn = 'owner-b' }, m => { m.targetAgentId = 'agt_b' }, m => { m.commandId = 'cmd_fake' },
@@ -38,10 +39,12 @@ test('foreign scope, package URLs, version coercion and command spoofing fail', 
   }
   assert.throws(() => validatePlatformSkillCommand(wire(), { ...scope, runtimeInstanceId: undefined }, 1000))
 })
-test('download uses exact origin and runtime-only headers and verifies bytes', async () => {
-  const bytes = await downloadPlatformSkillPackage({ ...native(), fetchFn: async (url, options) => {
+test('download uses exact origin, runtime-only headers and the supplied abort signal', async () => {
+  const controller = new AbortController()
+  const bytes = await downloadPlatformSkillPackage({ ...native(), signal: controller.signal, fetchFn: async (url, options) => {
     assert.equal(String(url), 'https://api.example.invalid/internal/agent/platform-skills/installations/psi_a/package')
-    assert.equal(options.redirect, 'error'); assert.equal(options.credentials, 'omit'); assert.equal(options.headers.Authorization, token)
+    assert.equal(options.redirect, 'error'); assert.equal(options.credentials, 'omit'); assert.equal(options.signal, controller.signal)
+    assert.equal(options.headers.Authorization, token)
     assert.equal(options.headers['X-Agent-Runtime-Id'], 'runtime-a'); assert.equal(options.headers['X-API-Key'], undefined)
     return exactResponse(url, Buffer.from('zip-fixture'))
   } }); assert.equal(bytes.toString(), 'zip-fixture')
@@ -59,13 +62,45 @@ test('size limits and mismatched content length fail before accepting bytes', as
   await assert.rejects(downloadPlatformSkillPackage({ ...native(), fetchFn: async url => { const r = exactResponse(url, Buffer.from('zip-fixture')); r.headers.set('content-length', '1'); return r } }))
 })
 test('result schema is independent and requires exact application receipt', async () => {
-  const c = command()
-  const receipt = await sendPlatformSkillResult({ ...native(), outcome: 'SUCCEEDED', fetchFn: async (url, options) => {
+  const c = command(); const controller = new AbortController()
+  const receipt = await sendPlatformSkillResult({ ...native(), outcome: 'SUCCEEDED', signal: controller.signal, fetchFn: async (url, options) => {
     assert.equal(String(url), 'https://api.example.invalid/internal/agent/platform-skills/installations/psi_a/result')
+    assert.equal(options.signal, controller.signal)
     const body = JSON.parse(options.body); assert.equal(body.challengeId, 'challenge-a'); assert.equal(body.ownerJiacn, undefined); assert.equal(body.orderId, undefined)
     return exactResponse(url, JSON.stringify(view(c)), 'application/json')
   } }); assert.equal(receipt.origin, 'PLATFORM_PROVISIONED')
 })
+test('abort bounds fetch and response-body waits even when custom fetch ignores the signal', async t => {
+  await t.test('fetch', async () => {
+    const controller = new AbortController()
+    const pending = downloadPlatformSkillPackage({ ...native(), signal: controller.signal, fetchFn: async () => new Promise(() => {}) })
+    controller.abort(new Error('download deadline'))
+    await assert.rejects(pending, /download deadline/)
+  })
+  await t.test('download body', async () => {
+    const controller = new AbortController()
+    const pending = downloadPlatformSkillPackage({ ...native(), signal: controller.signal, fetchFn: async url => ({
+      status: 200, redirected: false, url: String(url),
+      headers: { get: name => name.toLowerCase() === 'content-length' ? '11' : name.toLowerCase() === 'content-type' ? 'application/zip' : null },
+      body: { getReader: () => ({ read: () => new Promise(() => {}), cancel: async () => {}, releaseLock: () => {} }) }
+    }) })
+    await new Promise(resolvePromise => setImmediate(resolvePromise))
+    controller.abort(new Error('download body deadline'))
+    await assert.rejects(pending, /download body deadline/)
+  })
+  await t.test('result response body', async () => {
+    const controller = new AbortController()
+    const pending = sendPlatformSkillResult({ ...native(), outcome: 'SUCCEEDED', signal: controller.signal, fetchFn: async url => ({
+      status: 200, redirected: false, url: String(url),
+      headers: { get: name => name.toLowerCase() === 'content-type' ? 'application/json' : null },
+      body: { getReader: () => ({ read: () => new Promise(() => {}), cancel: async () => {}, releaseLock: () => {} }) }
+    }) })
+    await new Promise(resolvePromise => setImmediate(resolvePromise))
+    controller.abort(new Error('result body deadline'))
+    await assert.rejects(pending, /result body deadline/)
+  })
+})
+
 test('lost POST is not automatically retried or reported accepted', async () => {
   let requests = 0
   await assert.rejects(sendPlatformSkillResult({ ...native(), outcome: 'SUCCEEDED', fetchFn: async () => { requests++; throw new Error('response lost') } }))

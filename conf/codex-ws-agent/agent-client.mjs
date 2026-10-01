@@ -32,6 +32,7 @@ import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } fro
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
+import { PlatformSkillRuntime } from './platform-skill-runtime.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 
 const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
@@ -1552,7 +1553,7 @@ export class DurableDedupeLedger {
     }
     if (existing.status === desiredStatus) return existing
     const existingTerminal = TERMINAL_LEDGER_STATUSES.has(existing.status)
-    if (existingTerminal && authority !== 'SKILL_INSTALL_DURABLE_RESULT') {
+    if (existingTerminal && !['SKILL_INSTALL_DURABLE_RESULT', 'PLATFORM_SKILL_DURABLE_RESULT', 'ARCHIVE_MAINTENANCE_AUTHORITATIVE_RESULT'].includes(authority)) {
       throw new Error(`cannot reconcile authoritative command from terminal ledger status ${existing.status}`)
     }
     if (!existingTerminal
@@ -2223,7 +2224,7 @@ export class AgentMessageProcessor {
   start({ drain = true } = {}) {
     const recovery = this.inbox.initialize()
     try {
-      if (this.ledger) this._reconcileLedgerWithInbox()
+      if (this.ledger) this._reconcileLedgerWithInbox({ deferControlled: true })
       else for (const recovered of recovery.recoveryRecords || []) this._recordRecoveryRequired(recovered)
     } catch (error) {
       const protocolError = error instanceof AgentProtocolError
@@ -2276,7 +2277,7 @@ export class AgentMessageProcessor {
     })
   }
 
-  _reconcileLedgerWithInbox() {
+  _reconcileLedgerWithInbox({ deferControlled = false, controlledOnly = false } = {}) {
     if (!this.ledger) return
     const inboxIndex = this.inbox.commandStateIndex()
     const ledgerEntries = this.ledger.listEntries()
@@ -2294,6 +2295,10 @@ export class AgentMessageProcessor {
       }
 
       const reconciledItem = records[0] || null
+      const controlled = ['PLATFORM_SKILL_INSTALL', 'ARCHIVE_MAINTENANCE_EXECUTE'].includes(reconciledItem?.normalized?.commandType)
+        || ['PLATFORM_SKILL_INSTALL', 'ARCHIVE_MAINTENANCE_EXECUTE'].includes(entry?.commandType)
+      if (controlledOnly && !controlled) continue
+      if (deferControlled && controlled) continue
       const committedOutcome = reconciledItem && reconciledItem.record.state !== 'completed'
         ? this.recoverCommandOutcome(reconciledItem.normalized)
         : null
@@ -2314,15 +2319,24 @@ export class AgentMessageProcessor {
           throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Committed installer evidence conflicts with ledger fingerprint for ${commandId}`)
         }
         const completed = this.inbox.markCompleted(reconciledItem, committedOutcome)
-        const terminal = this.ledger.markReconciledOutcome(
-          commandId,
-          committedOutcome,
-          committedOutcome.authoritative ? 'SKILL_INSTALL_DURABLE_RESULT' : ''
-        )
+        const commandType = reconciledItem.normalized.commandType
+        const reconciliationAuthority = committedOutcome.authoritative
+          ? commandType === 'ARCHIVE_MAINTENANCE_EXECUTE'
+            ? 'ARCHIVE_MAINTENANCE_AUTHORITATIVE_RESULT'
+            : commandType === 'PLATFORM_SKILL_INSTALL'
+              ? 'PLATFORM_SKILL_DURABLE_RESULT'
+              : 'SKILL_INSTALL_DURABLE_RESULT'
+          : ''
+        const terminal = this.ledger.markReconciledOutcome(commandId, committedOutcome, reconciliationAuthority)
+        const reconciliationSource = commandType === 'ARCHIVE_MAINTENANCE_EXECUTE'
+          ? 'authoritative ARCHIVE_MAINTENANCE_EXECUTE result'
+          : commandType === 'PLATFORM_SKILL_INSTALL'
+            ? 'authoritative durable PLATFORM_SKILL_INSTALL result'
+            : 'authoritative durable SKILL_INSTALL result'
         this.ackOutbox?.supersedeContradictoryTerminal(
           commandId,
           terminal.status,
-          'superseded by authoritative durable SKILL_INSTALL result reconciliation'
+          `superseded by ${reconciliationSource} reconciliation`
         )
         this._emitAck(terminal.status, {
           ...this._commandMeta(reconciledItem.normalized),
@@ -2439,6 +2453,19 @@ export class AgentMessageProcessor {
         'COMMAND_STATE_CONFLICT',
         `Inbox state ${item.record.state} conflicts with ledger status ${entry.status} for ${commandId}`
       )
+    }
+  }
+
+  reconcileAuthoritativeState() {
+    try {
+      this._reconcileLedgerWithInbox({ controlledOnly: true })
+      return { reconciled: true, failClosedCode: this.failClosedError?.code || '' }
+    } catch (error) {
+      const protocolError = error instanceof AgentProtocolError
+        ? error
+        : new AgentProtocolError('COMMAND_RECOVERY_ERROR', `Failed controlled command reconciliation: ${error.message}`)
+      this._failClosed(protocolError, {})
+      return { reconciled: false, failClosedCode: protocolError.code }
     }
   }
 
@@ -2755,10 +2782,13 @@ export class AgentMessageProcessor {
       try {
         outcome = await this.runCommand(validated.normalized, validated.record)
       } catch (error) {
-        outcome = { status: 'failed', errorMessage: error.message }
+        outcome = ['PLATFORM_SKILL_INSTALL', 'ARCHIVE_MAINTENANCE_EXECUTE'].includes(validated.normalized.commandType)
+          ? { status: 'recovery_required', errorMessage: `CONTROLLED_COMMAND_RECOVERY_REQUIRED: ${error.message}` }
+          : { status: 'failed', errorMessage: error.message }
       }
-      if (outcome?.status === 'recovery_required') {
-        const reason = outcome.errorMessage || 'COMMITTED_OUTCOME_RECONCILIATION_REQUIRED'
+      if (!['completed', 'failed'].includes(outcome?.status)) {
+        const reason = outcome?.errorMessage
+          || `COMMITTED_OUTCOME_RECONCILIATION_REQUIRED: non-terminal command status ${outcome?.status || 'missing'}`
         try {
           const recovered = this.inbox.markRecoveryRequired(item, reason)
           const fingerprint = CommandFingerprint.compute(validated.normalized)
@@ -3456,11 +3486,12 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => ({
   abilities: resolveProfileAbilities(profile)
 })
 
-export const buildAgentRegistrationPayload = profile => ({
+export const buildAgentRegistrationPayload = (profile, commandProtocols = []) => ({
   name: profile.agentName,
   personaName: profile.personaName,
   endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
-  abilities: resolveProfileAbilities(profile)
+  abilities: resolveProfileAbilities(profile),
+  ...(commandProtocols.length ? { commandProtocols: [...commandProtocols] } : {})
 })
 
 const sendStatus = (profile, status, extra = {}) => sendProtocol(
@@ -3470,7 +3501,7 @@ const sendStatus = (profile, status, extra = {}) => sendProtocol(
 const registerAgent = profile => {
   const state = getProfileState(profile)
   const envelope = buildProtocolEnvelope(
-    MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(profile), profile
+    MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(profile, state.platformSkillRuntime.commandProtocols), profile
   )
   return sendRegistrationWithAckObservation({
     observer: state.registration,
@@ -4147,7 +4178,7 @@ export const runWorkspaceFileCommand = async ({
 }
 
 export const runManagedCommand = async ({
-  profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
+  profile, message, skillInstallManager, platformSkillRuntime = null, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
   materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus
 }) => {
   const workspaceFileResult = await runWorkspaceFileCommand({
@@ -4157,6 +4188,21 @@ export const runManagedCommand = async ({
     // Private workspace runs have no public task projection. A successfully committed output
     // manifest is their only completion fact; sending legacy task reports would target a fake task.
     return workspaceFileResult
+  }
+  // These command families require their own server-bound authorization and durable bridge.
+  // Never reinterpret a not-yet-supported archive command as a generic Codex
+  // prompt with ordinary shell/workspace privileges.
+  if (message.commandType === 'PLATFORM_SKILL_INSTALL') {
+    return platformSkillRuntime?.execute(message) || {
+      status: 'failed', commandId: message.commandId || '', taskId: message.taskId || message.commandId || '',
+      workItemId: message.workItemId || '', errorMessage: 'CONTROLLED_COMMAND_UNAVAILABLE: a verified command bridge is required'
+    }
+  }
+  if (message.commandType === 'ARCHIVE_MAINTENANCE_EXECUTE') {
+    return platformSkillRuntime?.execute(message) || {
+      status: 'failed', commandId: message.commandId || '', taskId: message.taskId || message.commandId || '',
+      workItemId: message.workItemId || '', errorMessage: 'CONTROLLED_COMMAND_UNAVAILABLE: a verified command bridge is required'
+    }
   }
   return message.commandType === 'SKILL_INSTALL'
     ? skillInstallManager.execute(message)
@@ -4467,7 +4513,16 @@ const createProfileState = profile => {
 
 
   const taskEvents = new Map()
-  const state = {
+  let state
+  const platformSkillRuntime = new PlatformSkillRuntime({
+    profile,
+    commandInboxDir: config.commandInboxDir,
+    wsUrl: config.wsUrl,
+    enabled: config.platformSkillInstallEnabled,
+    archiveEnabled: config.archiveMaintenanceEnabled,
+    authorizationProvider: () => state?.registration.nativeRuntimeAuthHeader || ''
+  })
+  state = {
     profile,
     ws: null,
     heartbeatTimer: null,
@@ -4485,6 +4540,7 @@ const createProfileState = profile => {
     ackOutbox,
     executionReportOutbox,
     skillInstallManager,
+    platformSkillRuntime,
     workspaceManager,
     workspaceFileBridge,
     workspaceFileRuntimeAuthHeader: '',
@@ -4494,6 +4550,7 @@ const createProfileState = profile => {
       runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
       timeoutMs: config.registrationAckTimeoutMs
     }),
+    registrationReady: false,
     managedRegistered: false,
     managedEngine: null
   }
@@ -4502,7 +4559,7 @@ const createProfileState = profile => {
     inbox,
     runCommand: message => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
-      return runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader })
+      return runManagedCommand({ profile, message, skillInstallManager, platformSkillRuntime, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader })
     },
     runChat: message => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
@@ -4516,7 +4573,8 @@ const createProfileState = profile => {
     onWorkResultReceipt: message => executionReportOutbox.isExecutionReceipt(message)
       ? executionReportOutbox.acknowledgeReceipt(message)
       : skillInstallManager.acknowledgeResultReceipt(message),
-    recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message),
+    recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message)
+      || platformSkillRuntime.reconcileCommandOutcome(message),
     onReject: (error, raw) => {
       console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
       sendProtocol(MESSAGE_TYPES.PROTOCOL_ERROR, {
@@ -4548,8 +4606,58 @@ const createProfileState = profile => {
 
 const isProfileBusy = profile => getProfileState(profile)?.processor?.isBusy() || currentRuns.has(profile.agentId)
 
-export const canPublishProfileOnline = (profile, state) => !profile.managedGeneration ||
-  Boolean(state?.managedRegistered && state?.managedEngine?.ready)
+export const canPublishProfileOnline = (profile, state) => !profile.managedGeneration
+  || Boolean(state?.managedRegistered && state?.managedEngine?.ready)
+
+export const activateRegisteredProfile = async (profile, state) => {
+  const registeredSocket = state.ws
+  const registrationGeneration = state.registration.generation
+  const runtimeScope = state.registration.runtimeScope
+  state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
+  try {
+    if (runtimeScope && state.platformSkillRuntime.commandProtocols.length) {
+      const recovery = await state.platformSkillRuntime.activateAndRecover(runtimeScope)
+      if (!recovery.active || state.ws !== registeredSocket || state.registration.generation !== registrationGeneration
+          || state.registration.runtimeScope?.runtimeInstanceId !== runtimeScope.runtimeInstanceId) return false
+    } else {
+      state.platformSkillRuntime.disconnect(runtimeScope
+        ? 'platform skill runtime is disabled or unsupported'
+        : 'legacy registration has no native runtime authority')
+    }
+    if (runtimeScope && state.platformSkillRuntime.commandProtocols.includes('ARCHIVE_MAINTENANCE_EXECUTE/v1')) {
+      const recoveryMessages = [...state.inbox.commandStateIndex().values()]
+        .flat()
+        .filter(item => item.normalized.commandType === 'ARCHIVE_MAINTENANCE_EXECUTE'
+          && ['processing', 'recovery_required'].includes(item.record.state))
+        .sort((left, right) => left.record.queueSequence - right.record.queueSequence)
+        .map(item => item.normalized)
+      await state.platformSkillRuntime.recoverArchiveCommands(recoveryMessages)
+      if (state.ws !== registeredSocket || state.registration.generation !== registrationGeneration
+          || state.registration.runtimeScope?.runtimeInstanceId !== runtimeScope.runtimeInstanceId) return false
+    }
+    const reconciliation = state.processor.reconcileAuthoritativeState()
+    if (!reconciliation?.reconciled || reconciliation.failClosedCode) {
+      throw new Error(`controlled reconciliation failed: ${reconciliation?.failClosedCode || 'unknown'}`)
+    }
+    state.registrationReady = true
+    if (state.workspaceFileRuntimeAuthHeader) startWorkspaceFilePoller(profile, state)
+    if (canPublishProfileOnline(profile, state)) {
+      sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
+      resumeRegisteredProfile(profile, state)
+    }
+    return true
+  } catch (error) {
+    console.warn(`registered recovery failed | profile=${profile.profileId} | ${error?.message || error}`)
+    if (state.ws !== registeredSocket || state.registration.generation !== registrationGeneration) return false
+    state.registration.disconnect()
+    state.registrationReady = false
+    state.platformSkillRuntime.disconnect('registered recovery failed')
+    state.workspaceFileRuntimeAuthHeader = ''
+    state.processor.pause()
+    try { registeredSocket?.close() } catch {}
+    return false
+  }
+}
 
 const handleMessage = async (profile, raw) => {
   let parsed
@@ -4564,22 +4672,21 @@ const handleMessage = async (profile, raw) => {
   const state = getProfileState(profile)
   const registrationOutcome = state?.registration.observe(parsed)
   if (registrationOutcome === 'registered') {
-    // The API rotates this registration token. Keep it only in memory for this live socket binding.
-    state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
-    startWorkspaceFilePoller(profile, state)
+    // Registration ACK is transport authority only. Recover native durable state,
+    // then reconcile the single inbox/ledger, and only then permit queue drain.
+    if (!await activateRegisteredProfile(profile, state)) return
   }
   if (isLegacyInboundControlFrame(parsed)) {
     if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
       const state = getProfileState(profile)
       if (state?.managedEngine?.ready && !state.managedRegistered) {
         state.managedRegistered = true
-        if (!canPublishProfileOnline(profile, state)) return
+        if (!state.registrationReady || !canPublishProfileOnline(profile, state)) return
         sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
         resumeRegisteredProfile(profile, state)
       }
     } else if (parsed.type === 'connected') {
       registerAgent(profile)
-      sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
     } else if (parsed.type === 'ping') {
       sendLegacy('pong', {}, profile)
     }
@@ -4677,6 +4784,8 @@ const connectProfile = profile => {
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
   state.registration.disconnect()
+  state.registrationReady = false
+  state.platformSkillRuntime.disconnect('socket reconnect')
   state.workspaceFileRuntimeAuthHeader = ''
   if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
     try { state.ws.close() } catch {}
@@ -4694,16 +4803,14 @@ const connectProfile = profile => {
     state.reconnectAttempt = 0
     state.reconnectStartedAt = 0
     registerAgent(profile)
-    if (canPublishProfileOnline(profile, state)) {
-      sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-      resumeRegisteredProfile(profile, state)
-    }
   })
   socket.addEventListener('message', event => { if (state.ws === socket) void handleMessage(profile, event.data) })
   socket.addEventListener('close', () => {
     if (state.ws !== socket) return
     state.managedRegistered = false
     state.registration.disconnect()
+    state.registrationReady = false
+    state.platformSkillRuntime.disconnect('socket closed')
     state.workspaceFileRuntimeAuthHeader = ''
     closeFired = true
     state.resultReplayCancel?.()
@@ -4718,6 +4825,11 @@ const connectProfile = profile => {
   socket.addEventListener('error', error => {
     if (state.ws !== socket) return
     console.error(`websocket error | profile=${profile.profileId}:`, error.message || error)
+    state.registration.disconnect()
+    state.registrationReady = false
+    state.platformSkillRuntime.disconnect('websocket error')
+    state.workspaceFileRuntimeAuthHeader = ''
+    state.processor.pause()
     setTimeout(() => {
       if (state.ws === socket && !closeFired && !shuttingDown && !state.reconnectScheduled) {
         try { state.ws?.close() } catch {}
@@ -4739,6 +4851,8 @@ const disconnectProfile = (profile, reason = 'profile removed') => {
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
   state.registration.disconnect()
+  state.registrationReady = false
+  state.platformSkillRuntime.disconnect(reason)
   state.workspaceFileRuntimeAuthHeader = ''
   sendStatus(profile, 'offline', { errorMessage: reason })
   try { state.ws?.close() } catch {}
@@ -4834,6 +4948,7 @@ const shutdown = (exitCode = 0, reason = '') => {
     clearInterval(state?.heartbeatTimer)
     stopWorkspaceFilePoller(state)
     state?.registration.disconnect()
+    if (state) { state.registrationReady = false; state.platformSkillRuntime.disconnect('process shutdown'); state.workspaceFileRuntimeAuthHeader = '' }
     sendStatus(profile, 'offline')
     try { state?.ws?.close() } catch {}
   }
@@ -4870,6 +4985,8 @@ export const main = async () => {
     commandInboxDir: resolve(process.env.COMMAND_INBOX_DIR || '/home/isp/apps/codex-ws-agent/data/inbox'),
     commandInboxSuccessPolicy: process.env.COMMAND_INBOX_SUCCESS_POLICY || 'archive',
     skillInstallEnabled: parseEnabledFlag(process.env.AGENT_SKILL_INSTALL_ENABLED),
+    platformSkillInstallEnabled: parseEnabledFlag(process.env.AGENT_PLATFORM_SKILL_INSTALL_ENABLED),
+    archiveMaintenanceEnabled: parseEnabledFlag(process.env.AGENT_ARCHIVE_MAINTENANCE_ENABLED),
     skillInstallMaxBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_BYTES, 16 * 1024 * 1024),
     skillInstallMaxExtractedBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_EXTRACTED_BYTES, 64 * 1024 * 1024)
   }

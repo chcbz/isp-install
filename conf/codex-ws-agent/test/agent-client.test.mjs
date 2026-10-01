@@ -26,6 +26,7 @@ import {
   buildWebSocketOptions,
   buildWebSocketUrl,
   canPublishProfileOnline,
+  activateRegisteredProfile,
   discoverCodexSkills,
   discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
@@ -3106,3 +3107,191 @@ for (const startCase of ['transport', 'wrong-run', 'server-error', 'rejected']) 
     if (startCase !== 'rejected') assert.equal(calls.some(call => call.path.endsWith('/failure')), false)
   })
 }
+
+test('new archive and platform commands cannot fall through to generic Codex execution', async () => {
+  for (const commandType of ['ARCHIVE_MAINTENANCE_EXECUTE', 'PLATFORM_SKILL_INSTALL']) {
+    let executed = 0
+    const result = await runManagedCommand({
+      profile: { agentId: 'agent-archive' },
+      message: { commandType, commandId: `command-${commandType}`, payload: {} },
+      runCodexFn: async () => { executed++; return { status: 'completed' } },
+      skillInstallManager: { execute: async () => { executed++; return { status: 'completed' } } }
+    })
+    assert.equal(result.status, 'failed')
+    assert.match(result.errorMessage, /^CONTROLLED_COMMAND_UNAVAILABLE:/)
+    assert.equal(executed, 0, commandType)
+  }
+})
+
+
+test('registration advertises only explicitly supplied supported controlled protocols', () => {
+  const disabled = buildAgentRegistrationPayload(profile)
+  assert.equal(Object.hasOwn(disabled, 'commandProtocols'), false)
+  const platformOnly = buildAgentRegistrationPayload(profile, ['PLATFORM_SKILL_INSTALL/v1'])
+  assert.deepEqual(platformOnly.commandProtocols, ['PLATFORM_SKILL_INSTALL/v1'])
+  assert.equal(platformOnly.commandProtocols.includes('ARCHIVE_MAINTENANCE_EXECUTE/v1'), false)
+  const both = buildAgentRegistrationPayload(profile, ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1'])
+  assert.deepEqual(both.commandProtocols, ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1'])
+})
+
+test('platform and archive commands route only through the supplied controlled runtime', async () => {
+  let platformCalls = 0
+  let codexCalls = 0
+  const platformSkillRuntime = { execute: async message => { platformCalls++; return { status: 'completed', commandId: message.commandId } } }
+  const platform = await runManagedCommand({
+    profile,
+    message: { commandType: 'PLATFORM_SKILL_INSTALL', commandId: 'platform-a', payload: {} },
+    platformSkillRuntime,
+    skillInstallManager: { execute: async () => { throw new Error('legacy installer must not run') } },
+    runCodexFn: async () => { codexCalls++; return { status: 'completed' } }
+  })
+  assert.equal(platform.status, 'completed')
+  assert.equal(platformCalls, 1)
+  const archive = await runManagedCommand({
+    profile,
+    message: { commandType: 'ARCHIVE_MAINTENANCE_EXECUTE', commandId: 'archive-a', payload: {} },
+    platformSkillRuntime,
+    skillInstallManager: { execute: async () => { throw new Error('legacy installer must not run') } },
+    runCodexFn: async () => { codexCalls++; return { status: 'completed' } }
+  })
+  assert.equal(archive.status, 'completed')
+  assert.equal(platformCalls, 2)
+  assert.equal(codexCalls, 0)
+})
+
+
+test('stale registered recovery failure cannot clear a newer socket generation', async () => {
+  let rejectRecovery
+  const recovery = new Promise((resolve, reject) => { rejectRecovery = reject })
+  let runtimeDisconnects = 0
+  let pauses = 0
+  let oldSocketCloses = 0
+  let newerSocketCloses = 0
+  const oldSocket = { close: () => { oldSocketCloses += 1 } }
+  const newerSocket = { close: () => { newerSocketCloses += 1 } }
+  const registration = {
+    generation: 7,
+    runtimeScope: { runtimeInstanceId: 'runtime-a' },
+    runtimeAuthHeader: `AgentRuntime ${'a'.repeat(32)}`,
+    disconnect: () => { throw new Error('stale cleanup must not disconnect newer registration') }
+  }
+  const state = {
+    ws: oldSocket,
+    registration,
+    workspaceFileRuntimeAuthHeader: '',
+    platformSkillRuntime: {
+      commandProtocols: ['PLATFORM_SKILL_INSTALL/v1'],
+      activateAndRecover: async () => recovery,
+      disconnect: () => { runtimeDisconnects += 1 }
+    },
+    processor: { pause: () => { pauses += 1 } }
+  }
+  const activation = activateRegisteredProfile({ profileId: 'profile-a' }, state)
+  await new Promise(resolve => setImmediate(resolve))
+  state.ws = newerSocket
+  registration.generation = 8
+  registration.runtimeAuthHeader = `AgentRuntime ${'b'.repeat(32)}`
+  state.workspaceFileRuntimeAuthHeader = registration.runtimeAuthHeader
+  rejectRecovery(new Error('old recovery failed'))
+  assert.equal(await activation, false)
+  assert.equal(state.workspaceFileRuntimeAuthHeader, `AgentRuntime ${'b'.repeat(32)}`)
+  assert.equal(runtimeDisconnects, 0)
+  assert.equal(pauses, 0)
+  assert.equal(oldSocketCloses, 0)
+  assert.equal(newerSocketCloses, 0)
+})
+
+
+test('routed platform unknown outcome remains non-terminal and restart denial preserves recovery', async () => {
+  const rootDir = temporaryDirectory()
+  const storageRoot = profileStorageRoot(rootDir)
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  ledger.initialize(); ackOutbox.initialize()
+  const acks = []; const reports = []; const rejected = []
+  const platformMessage = { ...command(41), commandType: 'PLATFORM_SKILL_INSTALL' }
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    ledger,
+    ackOutbox,
+    runCommand: message => runManagedCommand({
+      profile,
+      message,
+      skillInstallManager: { execute: async () => { throw new Error('legacy installer must not run') } },
+      platformSkillRuntime: { execute: async () => ({ status: 'unknown', errorMessage: 'server registrationHash denied' }) },
+      runCodexFn: async () => { throw new Error('Codex fallback must not run') }
+    }),
+    runChat: async () => {},
+    executionReportOutbox: {
+      profile: { executionReportCommandTypes: ['PLATFORM_SKILL_INSTALL'] },
+      enqueueAndSend: (...arguments_) => reports.push(arguments_)
+    },
+    sendFn: envelope => { acks.push(envelope); return true },
+    onReject: error => rejected.push(error.code)
+  })
+  processor.start()
+  await processor.handle(platformMessage)
+  await processor.waitForIdle()
+
+  assert.equal(inbox.count('recovery'), 1)
+  assert.equal(inbox.count('archive'), 0)
+  assert.equal(ledger.getEntry(platformMessage.commandId).status, LEDGER_STATUS.RECOVERY_REQUIRED)
+  assert.equal(acks.some(ack => [ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(ack.ackStatus)), false)
+  assert.deepEqual(reports, [])
+  assert.deepEqual(rejected, ['COMMAND_COMMITTED_RECOVERY_REQUIRED'])
+
+  const restartedInbox = createInbox(rootDir)
+  const restartedLedger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
+  const restartedAckOutbox = new AckOutbox({ rootDir: storageRoot, profile })
+  restartedLedger.initialize(); restartedAckOutbox.initialize()
+  let reruns = 0
+  const restarted = new AgentMessageProcessor({
+    profile,
+    inbox: restartedInbox,
+    ledger: restartedLedger,
+    ackOutbox: restartedAckOutbox,
+    runCommand: async () => { reruns += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    recoverCommandOutcome: () => null,
+    sendFn: () => true
+  })
+  const recovery = restarted.start()
+  await restarted.waitForIdle()
+  assert.equal(recovery.recoveryRequired, 1)
+  assert.equal(restartedInbox.count('recovery'), 1)
+  assert.equal(restartedInbox.count('archive'), 0)
+  assert.equal(restartedLedger.getEntry(platformMessage.commandId).status, LEDGER_STATUS.RECOVERY_REQUIRED)
+  assert.equal(reruns, 0)
+})
+
+test('failed authoritative reconciliation never marks registration ready or publishes online', async () => {
+  let registrationDisconnects = 0
+  let runtimeDisconnects = 0
+  let pauses = 0
+  let closes = 0
+  const registration = {
+    generation: 3,
+    runtimeScope: null,
+    runtimeAuthHeader: '',
+    disconnect: () => { registrationDisconnects += 1; registration.generation += 1 }
+  }
+  const state = {
+    ws: { close: () => { closes += 1 } },
+    registration,
+    registrationReady: false,
+    workspaceFileRuntimeAuthHeader: '',
+    platformSkillRuntime: { commandProtocols: [], disconnect: () => { runtimeDisconnects += 1 } },
+    processor: {
+      reconcileAuthoritativeState: () => ({ reconciled: false, failClosedCode: 'COMMAND_STATE_CONFLICT' }),
+      pause: () => { pauses += 1 }
+    }
+  }
+  assert.equal(await activateRegisteredProfile({ profileId: 'profile-a' }, state), false)
+  assert.equal(state.registrationReady, false)
+  assert.equal(registrationDisconnects, 1)
+  assert.equal(runtimeDisconnects, 2)
+  assert.equal(pauses, 1)
+  assert.equal(closes, 1)
+})

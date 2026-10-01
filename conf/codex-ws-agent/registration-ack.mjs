@@ -1,12 +1,24 @@
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const exactValue = (value, expected, max) => typeof value === 'string' && value === expected &&
   Buffer.byteLength(value) <= max && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value)
+const exactText = (value, max) => typeof value === 'string' && Buffer.byteLength(value) > 0 &&
+  Buffer.byteLength(value) <= max && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value)
+const exactKeys = (value, fields) => isObject(value) && Object.keys(value).sort().join('\0') === [...fields].sort().join('\0')
 const framePayload = frame => isObject(frame?.data) ? frame.data : frame
 const traceMatches = (payload, messageId, runtimeInstanceId) =>
   exactValue(payload?.messageId, messageId, 128) &&
   exactValue(payload?.runtimeInstanceId, runtimeInstanceId, 128)
-const validToken = token => typeof token === 'string' && Buffer.byteLength(token) > 0 &&
-  Buffer.byteLength(token) <= 512 && token.trim() === token && !/[\x00-\x1f\x7f]/u.test(token)
+const validNativeToken = token => typeof token === 'string' && /^[0-9a-f]{32}$/.test(token)
+const validLegacyToken = token => exactText(token, 512)
+const RUNTIME_AUTH_FIELDS = ['agentId', 'clientId', 'contextPackEnabled', 'ownerJiacn', 'runtimeInstanceId', 'scheme', 'tenantId']
+
+const runtimeScopeReceipt = (value, agentId, runtimeInstanceId) => {
+  if (!exactKeys(value, RUNTIME_AUTH_FIELDS) || value.scheme !== 'native-runtime-v1' || value.tenantId !== '0'
+      || !exactText(value.clientId, 50) || value.clientId === '0' || !exactText(value.ownerJiacn, 50) || value.ownerJiacn === '0'
+      || !exactValue(value.agentId, agentId, 100) || !exactValue(value.runtimeInstanceId, runtimeInstanceId, 100)
+      || typeof value.contextPackEnabled !== 'boolean') return null
+  return Object.freeze({ ...value })
+}
 
 /** Track only request-correlated server registration outcomes without logging identity or payloads. */
 export class RegistrationAckObserver {
@@ -21,13 +33,20 @@ export class RegistrationAckObserver {
     this.stage = 'idle'
     this.messageId = null
     this.runtimeToken = null
+    this.confirmedRuntimeScope = null
+    this._generation = 0
     this.timer = null
   }
 
   get registered() { return this.stage === 'registered' }
+  get generation() { return this._generation }
 
-  // Token remains process-memory only; snapshots and logs must never expose it.
-  get runtimeAuthHeader() { return /^[0-9a-f]{32}$/.test(this.runtimeToken || '') ? `AgentRuntime ${this.runtimeToken}` : '' }
+  // Token and server-bound scope remain process-memory only; snapshots and logs never expose either.
+  get runtimeAuthHeader() { return validNativeToken(this.runtimeToken) ? `AgentRuntime ${this.runtimeToken}` : '' }
+  get nativeRuntimeAuthHeader() {
+    return this.confirmedRuntimeScope && validNativeToken(this.runtimeToken) ? `AgentRuntime ${this.runtimeToken}` : ''
+  }
+  get runtimeScope() { return this.confirmedRuntimeScope ? Object.freeze({ ...this.confirmedRuntimeScope }) : null }
 
   snapshot() { return { stage: this.stage, registered: this.registered } }
 
@@ -40,18 +59,22 @@ export class RegistrationAckObserver {
     this.timer = null
   }
 
+  clearAuthority() {
+    this.runtimeToken = null
+    this.confirmedRuntimeScope = null
+  }
+
   begin(messageId) {
     this.clearTimer()
+    this._generation += 1
+    this.clearAuthority()
     this.stage = 'pending_ack'
     this.messageId = messageId
-    this.runtimeToken = null
     this.log('log', this.stage)
     this.timer = this.schedule(() => {
       if (this.stage !== 'pending_ack' || this.messageId !== messageId) return
       this.timer = null
-      // This timer is a slow-registration observation, not an authority deadline.
-      // Keep the current request correlation so a late exact ACK can still enable
-      // the native file lane. begin/sendFailed/disconnect invalidate old attempts.
+      // Observation timeout is not authority. The exact current request may still receive a late ACK.
       this.stage = 'ack_timeout'
       this.log('warn', this.stage)
     }, this.timeoutMs)
@@ -60,37 +83,55 @@ export class RegistrationAckObserver {
   sendFailed(messageId) {
     if (this.stage !== 'pending_ack' || this.messageId !== messageId) return
     this.clearTimer()
+    this.clearAuthority()
     this.stage = 'send_failed'
     this.messageId = null
     this.log('warn', this.stage)
   }
 
-  observe(frame) {
-    if (!['pending_ack', 'ack_timeout'].includes(this.stage) || !isObject(frame)) return null
-    const payload = framePayload(frame)
-    if (!isObject(payload) || !traceMatches(payload, this.messageId, this.runtimeInstanceId)) return null
-    if (frame.type === 'agent_registered' && exactValue(payload.agentId, this.agentId, 100) &&
-        payload.status === 'online' && validToken(payload.token)) {
-      this.clearTimer()
-      this.runtimeToken = payload.token
-      this.stage = 'registered'
-      this.messageId = null
-      this.log('log', this.stage)
-      return 'registered'
-    }
-    if (frame.type !== 'error' && frame.type !== 'protocol_error' && frame.messageType !== 'protocol.error') return null
+  rejectCurrent() {
     this.clearTimer()
+    this.clearAuthority()
     this.stage = 'rejected'
     this.messageId = null
     this.log('warn', this.stage)
     return 'rejected'
   }
 
+  observe(frame) {
+    if (!['pending_ack', 'ack_timeout'].includes(this.stage) || !isObject(frame)) return null
+    const payload = framePayload(frame)
+    if (!isObject(payload) || !traceMatches(payload, this.messageId, this.runtimeInstanceId)) return null
+    if (frame.type === 'agent_registered') {
+      // Preserve the legacy observer contract for a correlated but invalid ordinary ACK:
+      // it remains pending/observable rather than converting old chat paths into a hard rejection.
+      if (!exactValue(payload.agentId, this.agentId, 100) || payload.status !== 'online') return null
+      const hasRuntimeAuth = Object.prototype.hasOwnProperty.call(payload, 'runtimeAuth')
+      const runtimeScope = hasRuntimeAuth ? runtimeScopeReceipt(payload.runtimeAuth, this.agentId, this.runtimeInstanceId) : null
+      // Once the server claims native authority, malformed scope or a non-native token is
+      // an explicit authority failure. A missing receipt remains a compatible legacy ACK.
+      if (hasRuntimeAuth && (!runtimeScope || !validNativeToken(payload.token))) return this.rejectCurrent()
+      if (!hasRuntimeAuth && !validLegacyToken(payload.token)) return null
+      this.clearTimer()
+      // A legacy ACK preserves ordinary chat/command registration but confers no
+      // controlled native authority. Only the exact native receipt retains a token.
+      this.runtimeToken = payload.token
+      this.confirmedRuntimeScope = runtimeScope
+      this.stage = 'registered'
+      this.messageId = null
+      this.log('log', this.stage)
+      return 'registered'
+    }
+    if (frame.type !== 'error' && frame.type !== 'protocol_error' && frame.messageType !== 'protocol.error') return null
+    return this.rejectCurrent()
+  }
+
   disconnect() {
     this.clearTimer()
+    this._generation += 1
+    this.clearAuthority()
     this.stage = 'disconnected'
     this.messageId = null
-    this.runtimeToken = null
   }
 }
 

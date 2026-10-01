@@ -69,6 +69,8 @@ export const validatePlatformSkillCommand = (message, runtimeScope, now = Date.n
     fencingToken: wire.fencingToken,
     deliveryEpoch: wire.deliveryEpoch,
     executionEpoch: wire.executionEpoch,
+    issuedAt: wire.issuedAt,
+    expiresAt: wire.expiresAt,
     tenantId: wire.tenantId,
     clientId: wire.clientId,
     ownerJiacn: wire.ownerJiacn,
@@ -92,38 +94,54 @@ const responseIsExact = (response, url) => {
   if (response?.status !== 200 || response.redirected !== false || typeof response.url !== 'string') return false
   try { return new URL(response.url).href === url.href } catch { return false }
 }
-const readBounded = async (response, maxBytes, exactLength = null) => {
+const abortError = (signal, code) => signal?.reason instanceof Error ? signal.reason : new PlatformSkillNativeError(code)
+const requireNotAborted = (signal, code) => {
+  if (signal?.aborted) throw abortError(signal, code)
+}
+const awaitAbortable = async (operation, signal, code) => {
+  requireNotAborted(signal, code)
+  if (!signal) return operation
+  let rejectAbort
+  const aborted = new Promise((resolvePromise, rejectPromise) => { rejectAbort = rejectPromise })
+  const onAbort = () => rejectAbort(abortError(signal, code))
+  signal.addEventListener('abort', onAbort, { once: true })
+  try { return await Promise.race([operation, aborted]) } finally { signal.removeEventListener('abort', onAbort) }
+}
+const readBounded = async (response, maxBytes, exactLength = null, signal = null, abortCode = 'PLATFORM_SKILL_NATIVE_RESPONSE_INVALID') => {
   const reader = response.body?.getReader?.()
   require(reader && Number.isSafeInteger(maxBytes) && maxBytes > 0, 'PLATFORM_SKILL_NATIVE_RESPONSE_INVALID')
   const parts = []
   let length = 0
   try {
     while (true) {
-      const next = await reader.read()
+      const next = await awaitAbortable(reader.read(), signal, abortCode)
       if (next.done) break
       const bytes = Buffer.from(next.value)
       length += bytes.length
       require(length <= maxBytes && (exactLength === null || length <= exactLength), 'PLATFORM_SKILL_NATIVE_RESPONSE_INVALID')
       parts.push(bytes)
     }
+    requireNotAborted(signal, abortCode)
     require(exactLength === null || length === exactLength, 'PLATFORM_SKILL_NATIVE_RESPONSE_INVALID')
     return Buffer.concat(parts, length)
   } catch (error) {
-    try { await reader.cancel() } catch { /* retain original failure */ }
+    try { void reader.cancel().catch(() => {}) } catch { /* retain original failure */ }
     throw error
-  } finally { reader.releaseLock() }
+  } finally {
+    try { reader.releaseLock() } catch { /* a pending read may retain the lock after an abort; preserve the abort failure */ }
+  }
 }
 
 /** Downloads only; callers must use the secure package extractor and atomic no-replace activator. */
-export const downloadPlatformSkillPackage = async ({ wsUrl, command, runtimeScope, authorization, fetchFn = globalThis.fetch, maxPackageBytes = 16 * 1024 * 1024 }) => {
+export const downloadPlatformSkillPackage = async ({ wsUrl, command, runtimeScope, authorization, fetchFn = globalThis.fetch, maxPackageBytes = 16 * 1024 * 1024, signal = null }) => {
   require(id(command?.installationId) && SHA.test(command?.packageSha256) && command.packageRef === `/internal/agent/platform-skills/installations/${command.installationId}/package`)
   const url = nativeUrl(wsUrl, command.installationId, 'package')
-  const response = await fetchFn(url, { method: 'GET', redirect: 'error', credentials: 'omit', headers: headers(runtimeScope, authorization, 'application/zip') })
+  const response = await awaitAbortable(Promise.resolve().then(() => fetchFn(url, { method: 'GET', redirect: 'error', credentials: 'omit', signal, headers: headers(runtimeScope, authorization, 'application/zip') })), signal, 'PLATFORM_SKILL_NATIVE_RESPONSE_INVALID')
   require(responseIsExact(response, url), 'PLATFORM_SKILL_NATIVE_FORBIDDEN')
   const length = response.headers?.get('content-length')
   require(typeof length === 'string' && /^[1-9][0-9]*$/.test(length) && Number.isSafeInteger(Number(length)) && Number(length) <= maxPackageBytes, 'PLATFORM_SKILL_NATIVE_RESPONSE_INVALID')
   require(response.headers?.get('content-type')?.split(';')[0].trim().toLowerCase() === 'application/zip', 'PLATFORM_SKILL_NATIVE_RESPONSE_INVALID')
-  const bytes = await readBounded(response, maxPackageBytes, Number(length))
+  const bytes = await readBounded(response, maxPackageBytes, Number(length), signal)
   require(sha256(bytes) === command.packageSha256, 'PLATFORM_SKILL_DIGEST_MISMATCH')
   return bytes
 }
@@ -137,17 +155,20 @@ export const validatePlatformSkillReceipt = (receipt, command, runtimeScope, out
 }
 
 /** Sends one exact persisted result. Retry policy belongs to the durable manager, never this helper. */
-export const sendPlatformSkillResult = async ({ wsUrl, command, runtimeScope, authorization, outcome, errorCode = null, fetchFn = globalThis.fetch }) => {
+export const sendPlatformSkillResult = async ({ wsUrl, command, runtimeScope, authorization, outcome, errorCode = null, fetchFn = globalThis.fetch, signal = null }) => {
   require(outcome === 'SUCCEEDED' && errorCode === null || outcome === 'FAILED' && FAILURES.has(errorCode), 'PLATFORM_SKILL_RESULT_INVALID')
   require(id(command?.installationId) && id(command?.commandId) && id(command?.challengeId) && SHA.test(command?.packageSha256)
     && Number.isSafeInteger(command?.attempt) && command.attempt > 0 && command.executionEpoch === '1', 'PLATFORM_SKILL_RESULT_INVALID')
   const url = nativeUrl(wsUrl, command.installationId, 'result')
   const body = { schemaVersion: 1, installationId: command.installationId, commandId: command.commandId, attempt: command.attempt,
     executionEpoch: command.executionEpoch, challengeId: command.challengeId, packageSha256: command.packageSha256, outcome, errorCode }
-  const response = await fetchFn(url, { method: 'POST', redirect: 'error', credentials: 'omit', headers: { ...headers(runtimeScope, authorization, 'application/json'), 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const response = await awaitAbortable(Promise.resolve().then(() => fetchFn(url, { method: 'POST', redirect: 'error', credentials: 'omit', signal, headers: { ...headers(runtimeScope, authorization, 'application/json'), 'Content-Type': 'application/json' }, body: JSON.stringify(body) })), signal, 'PLATFORM_SKILL_RECEIPT_UNKNOWN')
   require(responseIsExact(response, url), 'PLATFORM_SKILL_RECEIPT_UNKNOWN')
   require(response.headers?.get('content-type')?.split(';')[0].trim().toLowerCase() === 'application/json', 'PLATFORM_SKILL_RECEIPT_UNKNOWN')
   let receipt
-  try { receipt = JSON.parse((await readBounded(response, 4096)).toString('utf8')) } catch { throw new PlatformSkillNativeError('PLATFORM_SKILL_RECEIPT_UNKNOWN') }
+  try { receipt = JSON.parse((await readBounded(response, 4096, null, signal, 'PLATFORM_SKILL_RECEIPT_UNKNOWN')).toString('utf8')) } catch (error) {
+    if (signal?.aborted) throw abortError(signal, 'PLATFORM_SKILL_RECEIPT_UNKNOWN')
+    throw new PlatformSkillNativeError('PLATFORM_SKILL_RECEIPT_UNKNOWN')
+  }
   return validatePlatformSkillReceipt(receipt, command, runtimeScope, outcome, errorCode)
 }

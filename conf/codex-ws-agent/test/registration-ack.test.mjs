@@ -10,7 +10,7 @@ import {
 const secret = {
   agentId: 'sensitive-agent-identity',
   apiKey: 'secret-api-key',
-  token: 'secret-registration-token',
+  token: 'a'.repeat(32),
   payload: 'secret-full-payload'
 }
 const profile = {
@@ -77,6 +77,10 @@ const ack = envelope => ({
   agentId: secret.agentId,
   status: 'online',
   token: secret.token,
+  runtimeAuth: {
+    scheme: 'native-runtime-v1', tenantId: '0', clientId: 'client-confirmed', ownerJiacn: 'owner-confirmed',
+    agentId: secret.agentId, runtimeInstanceId, contextPackEnabled: true
+  },
   payload: secret.payload
 })
 
@@ -113,17 +117,53 @@ test('valid runtime tokens are held only in memory and cleared before a new regi
   assert.equal(f.observer.runtimeAuthHeader, '')
 })
 
-test('invalid acknowledgement identity, status, or token never marks registered', () => {
-  for (const changed of [
-    { agentId: 'other-agent' },
-    { status: 'offline' },
-    { token: '' },
-    { token: `bad\ntoken` }
-  ]) {
+test('legacy ACK preserves ordinary registration but confers no controlled native authority', () => {
+  const f = fixture()
+  const { envelope } = send(f)
+  const legacy = ack(envelope)
+  delete legacy.runtimeAuth
+  legacy.token = 'legacy-registration-token'
+  assert.equal(f.observer.observe(legacy), 'registered')
+  assert.equal(f.observer.registered, true)
+  assert.equal(f.observer.runtimeScope, null)
+  assert.equal(f.observer.runtimeAuthHeader, '')
+  assert.equal(f.observer.nativeRuntimeAuthHeader, '')
+
+  const hex = fixture()
+  const { envelope: hexEnvelope } = send(hex)
+  const legacyHex = ack(hexEnvelope)
+  delete legacyHex.runtimeAuth
+  assert.equal(hex.observer.observe(legacyHex), 'registered')
+  assert.equal(hex.observer.runtimeAuthHeader, `AgentRuntime ${secret.token}`)
+  assert.equal(hex.observer.nativeRuntimeAuthHeader, '')
+})
+
+test('exact native receipt is retained in memory and cleared with its token', () => {
+  const f = fixture()
+  const { envelope } = send(f)
+  assert.equal(f.observer.observe(ack(envelope)), 'registered')
+  assert.deepEqual(f.observer.runtimeScope, ack(envelope).runtimeAuth)
+  assert.equal(f.observer.nativeRuntimeAuthHeader, `AgentRuntime ${secret.token}`)
+  assert.equal(JSON.stringify(f.observer.snapshot()).includes('client-confirmed'), false)
+  f.observer.disconnect()
+  assert.equal(f.observer.runtimeScope, null)
+  assert.equal(f.observer.runtimeAuthHeader, '')
+})
+
+test('invalid legacy acknowledgement remains pending while malformed claimed native authority rejects', () => {
+  for (const changed of [{ agentId: 'other-agent' }, { status: 'offline' }]) {
     const f = fixture()
     const { envelope } = send(f)
     assert.equal(f.observer.observe({ ...ack(envelope), ...changed }), null)
     assert.equal(f.observer.registered, false)
+  }
+  for (const changed of [{ token: '' }, { token: `bad
+token` }, { runtimeAuth: { scheme: 'native-runtime-v1' } }]) {
+    const f = fixture()
+    const { envelope } = send(f)
+    assert.equal(f.observer.observe({ ...ack(envelope), ...changed }), 'rejected')
+    assert.equal(f.observer.registered, false)
+    assert.equal(f.observer.nativeRuntimeAuthHeader, '')
   }
 })
 
@@ -201,20 +241,22 @@ test('agent runtime wires send, inbound control, timeout, and disconnect to the 
 })
 
 
-test('observation timeout never weakens identity, correlation or token validation', () => {
-  const f = fixture()
-  const { envelope } = send(f)
-  f.fireTimers()
+test('observation timeout never weakens identity, correlation or native receipt validation', () => {
   for (const changed of [
     { messageId: 'wrong-request' }, { runtimeInstanceId: 'wrong-runtime' },
     { agentId: 'wrong-agent' }, { status: 'offline' }, { token: '' },
-    { token: 'bad\ntoken' }
+    { token: 'bad\ntoken' }, { runtimeAuth: { scheme: 'native-runtime-v1' } }
   ]) {
-    assert.equal(f.observer.observe({ ...ack(envelope), ...changed }), null)
+    const f = fixture()
+    const { envelope } = send(f)
+    f.fireTimers()
+    const outcome = f.observer.observe({ ...ack(envelope), ...changed })
+    if (changed.messageId || changed.runtimeInstanceId || changed.agentId || changed.status) assert.equal(outcome, null)
+    else assert.equal(outcome, 'rejected')
     assert.equal(f.observer.registered, false)
     assert.equal(f.observer.runtimeAuthHeader, '')
+    assert.equal(f.observer.runtimeScope, null)
   }
-  assert.equal(f.observer.observe(ack(envelope)), 'registered')
 })
 
 test('new attempt, disconnect and send failure invalidate late timeout ACKs', () => {

@@ -46,18 +46,56 @@ const DEFAULT_MAX_EXTRACTED_BYTES = 64 * 1024 * 1024
 const DEFAULT_MAX_ENTRY_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_ENTRIES = 256
 const DEFAULT_MAX_REPLAY_BATCH = 32
+const DEFAULT_MAX_NATIVE_CALL_MS = 30 * 1000
+const DEFAULT_RECEIPT_REPLAY_GRACE_MS = 5 * 60 * 1000
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const SHA256 = /^[0-9a-f]{64}$/
 const FAILURE_CODES = new Set(Object.values(PLATFORM_SKILL_FAILURE))
 const COMMAND_FIELDS = ['attempt', 'bindingVersion', 'challengeId', 'clientId', 'commandId', 'commandType', 'deliveryEpoch', 'executionEpoch',
-  'fencingToken', 'installationId', 'messageId', 'origin', 'ownerJiacn', 'packageRef', 'packageSha256', 'runtimeInstanceId', 'schemaVersion',
-  'skillKey', 'skillVersion', 'targetAgentId', 'tenantId']
+  'expiresAt', 'fencingToken', 'installationId', 'issuedAt', 'messageId', 'origin', 'ownerJiacn', 'packageRef', 'packageSha256',
+  'runtimeInstanceId', 'schemaVersion', 'skillKey', 'skillVersion', 'targetAgentId', 'tenantId']
 const RESULT_FIELDS = ['attempt', 'challengeId', 'commandId', 'errorCode', 'executionEpoch', 'installationId', 'outcome', 'packageSha256', 'schemaVersion']
 const RECEIPT_RECORD_FIELDS = ['acknowledgedAt', 'formatVersion', 'origin', 'receipt', 'resultSha256', 'scopeDigest']
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const exactKeys = (value, fields) => isObject(value) && Object.keys(value).sort().join('\0') === [...fields].sort().join('\0')
 const sha256 = value => createHash('sha256').update(value).digest('hex')
 const sameJson = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+const APPROVED_PACKAGE_SHA256 = '8894d96341067dd7f9e2f45696eef44057dc61346255a0323b2d713a3c7ea081'
+const APPROVED_MANIFEST_SHA256 = '5e73f1243f09891f22c69e60bee07da95249fdc12e053d81ca3eb9d733fe6fff'
+const APPROVED_RESOURCE_ENTRIES = Object.freeze([
+  ['SKILL.md', 1876, 'aeaae95b2343dcc5c7bcdee268db9743023d10539d4b3de77b36b8e47b7ace77'],
+  ['schemas/content.json', 2141, '3a0481fc7bd82a28da17a50801da06dfa5116fdfbe952a63b10d3c03791d011a'],
+  ['scripts/parse-text.mjs', 14802, '1cf673c6188f6fa3d93cabb98104383000d2ab631265801227861da1a9c2b163'],
+  ['scripts/check-content.mjs', 737, '53b6ae466dd50bbc8de6fc808cde8450f6c06a238f958937b3c64eb6f925a7d6'],
+  ['fixtures/ordinary-crlf-bom-emoji.txt', 75, '1feae8ad12ef5f9da6a32b6420b0cb3f990dd7d53a030bfbc4571d733628f9a2'],
+  ['fixtures/ordinary-crlf-bom-emoji.expected.json', 2559, 'd1944336ed40a8acb765d8709422d455d7846242a176c2fa79d3450d7eee6bee'],
+  ['fixtures/no-preface-multichapter.txt', 38, 'c7487497b2c8a56ac5cb8367cd260c67d6e142f2a569a63c6a6a585a685e38ed'],
+  ['fixtures/no-preface-multichapter.expected.json', 1660, '9c8697797e43f4b52251e70bf1e501f2ea0778ed4b7906039bfd93323385586e'],
+  ['fixtures/malicious-instructions.txt', 63, 'f77aa5976fcdd1e609f26cb7aa7a408214e00105ff8dad1fdd44f206c4d50dc7'],
+  ['fixtures/malicious-instructions.expected.json', 1000, '8eacdd191e393936d46e4a707325c6e5e8e575c82cbe3dfad7c46fcae0386dfb'],
+  ['fixtures/invalid-leading-body.txt', 43, '67ac917927a99635bbb3a175f53f769d3d2b406bdfa37da54816106d4102e1ef'],
+  ['fixtures/invalid-empty-chapter.txt', 32, '9347571762c908bc7aa42d907fd3725bfa91f468243865157807be0920a8ad3e'],
+  ['fixtures/invalid-number-gap.txt', 36, '50fabe698b00ee3d978241c60a4dd393e089bc8deb1a70cb04ca196613796675'],
+  ['fixtures/invalid-ambiguous-numeral.txt', 21, 'ea1f901417f4a9bc6cd5ea42d34cc97aedc6a9dcee9cde331af067f60be39800'],
+  ['fixtures/invalid-heading-edge-formatting.txt', 22, 'a803f2811e9243e9d23058ea1ce0b7c86055c33976e32e8b702f8f1e0b3db738'],
+  ['fixtures/invalid-tampered-schema.json', 2592, '78a3105bf4e798df9a66c16c78121272f3bbb94c6cd22ebe459d3f9bd3324e71'],
+  ['fixtures/invalid-tampered-range.json', 2559, 'a62f078bb804c935c8ee87cb6ca44a2eba62685d292331fdc9a3693285686ebd'],
+  ['fixtures/parse-text.test.mjs', 6264, '25a46a9a1e921652dc0c135e15b52acda6cee4e35a33f97c756dc56e23a9a055']
+].map(([path, size, digest]) => Object.freeze({ path, size, sha256: digest })))
+const APPROVED_PACKAGE_FILES = Object.freeze([
+  Object.freeze({ path: 'manifest.json', size: 1009, sha256: APPROVED_MANIFEST_SHA256 }),
+  ...APPROVED_RESOURCE_ENTRIES
+])
+const APPROVED_PACKAGE_PATHS = new Set(APPROVED_PACKAGE_FILES.map(entry => entry.path))
+const APPROVED_PACKAGE_DIRECTORIES = new Set(APPROVED_PACKAGE_FILES.flatMap(entry => {
+  const parts = entry.path.split('/'); return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/'))
+}))
+const APPROVED_MANIFEST = Object.freeze({
+  key: 'archive-maintainer', version: '1.0.0', protocol: 'archive-maintainer/utf8-exact-v1', adapter: 'plain-text-v1',
+  contentSchema: 'schemas/content.json', packageDigestBinding: 'external-installation-receipt-sha256',
+  entries: Object.freeze(APPROVED_RESOURCE_ENTRIES.map(entry => entry.path))
+})
+const APPROVED_TREE_SHA256 = sha256(Buffer.from(`CYF_PLATFORM_SKILL_TREE_V1\0${JSON.stringify(APPROVED_PACKAGE_FILES.map(({ path, size, sha256: digest }) => ({ path, size, sha256: digest })))}`))
 
 export class PlatformSkillManagerError extends Error {
   constructor(code, message) { super(message); this.name = 'PlatformSkillManagerError'; this.code = code }
@@ -215,6 +253,8 @@ const businessCommand = command => Object.freeze({
   fencingToken: command.fencingToken,
   deliveryEpoch: command.deliveryEpoch,
   executionEpoch: command.executionEpoch,
+  issuedAt: command.issuedAt,
+  expiresAt: command.expiresAt,
   tenantId: command.tenantId,
   clientId: command.clientId,
   ownerJiacn: command.ownerJiacn,
@@ -228,7 +268,7 @@ const businessCommand = command => Object.freeze({
   challengeId: command.challengeId,
   packageRef: command.packageRef
 })
-const commandFingerprint = command => sha256(Buffer.from(`CYF_PLATFORM_SKILL_BUSINESS_V2\0${JSON.stringify(businessCommand(command))}`))
+const commandFingerprint = command => sha256(Buffer.from(`CYF_PLATFORM_SKILL_BUSINESS_V3\0${JSON.stringify(businessCommand(command))}`))
 const profileDirectory = profile => Buffer.from(String(profile.agentId), 'utf8').toString('hex')
 
 const mapFailure = error => {
@@ -298,11 +338,16 @@ export class PlatformSkillManager {
     maxExtractedBytes = DEFAULT_MAX_EXTRACTED_BYTES,
     maxEntryBytes = DEFAULT_MAX_ENTRY_BYTES,
     maxEntries = DEFAULT_MAX_ENTRIES,
-    maxReplayBatch = DEFAULT_MAX_REPLAY_BATCH
+    maxReplayBatch = DEFAULT_MAX_REPLAY_BATCH,
+    maxNativeCallMs = DEFAULT_MAX_NATIVE_CALL_MS,
+    receiptReplayGraceMs = DEFAULT_RECEIPT_REPLAY_GRACE_MS,
+    sessionSignal = null
   }) {
     if (!profile?.profileId || !profile?.agentId || !profile?.codexHome) throw new Error('profileId, agentId and codexHome are required')
     if (!runtimeScope || profile.agentId !== runtimeScope.agentId) throw new Error('profile agentId must match native runtime scope')
     if (!Number.isSafeInteger(maxReplayBatch) || maxReplayBatch < 1 || maxReplayBatch > 256) throw new Error('maxReplayBatch must be between 1 and 256')
+    if (!Number.isSafeInteger(maxNativeCallMs) || maxNativeCallMs < 1 || maxNativeCallMs > 3600000) throw new Error('maxNativeCallMs must be between 1 and 3600000')
+    if (!Number.isSafeInteger(receiptReplayGraceMs) || receiptReplayGraceMs < 0 || receiptReplayGraceMs > 3600000) throw new Error('receiptReplayGraceMs must be between 0 and 3600000')
     this.profile = { profileId: String(profile.profileId), agentId: String(profile.agentId), codexHome: resolve(profile.codexHome) }
     this.runtimeScope = Object.freeze({ ...runtimeScope })
     this.stateRoot = resolve(stateRoot)
@@ -318,6 +363,9 @@ export class PlatformSkillManager {
     this.maxPackageBytes = maxPackageBytes
     this.extractLimits = { maxExtractedBytes, maxEntryBytes, maxEntries }
     this.maxReplayBatch = maxReplayBatch
+    this.maxNativeCallMs = maxNativeCallMs
+    this.receiptReplayGraceMs = receiptReplayGraceMs
+    this.sessionSignal = sessionSignal
     this.apiOrigin = platformSkillApiOrigin(wsUrl)
     this.scope = Object.freeze({
       formatVersion: 1,
@@ -357,6 +405,64 @@ export class PlatformSkillManager {
     if (!this.initialized) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, 'platform skill manager is not initialized')
   }
 
+  _assertSessionCurrent(phase = 'native operation') {
+    if (this.sessionSignal?.aborted) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, `platform skill ${phase} was fenced by socket rotation`)
+    }
+  }
+
+  _clockNow() {
+    this._assertSessionCurrent('clock observation')
+    const value = this.now()
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, 'platform skill clock is invalid')
+    }
+    return value
+  }
+
+  _receiptReplayDeadline(command) {
+    return command.expiresAt > Number.MAX_SAFE_INTEGER - this.receiptReplayGraceMs
+      ? Number.MAX_SAFE_INTEGER : command.expiresAt + this.receiptReplayGraceMs
+  }
+
+  _assertBeforeDeadline(command, phase, deadline = command.expiresAt) {
+    if (this._clockNow() >= deadline) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, `platform skill deadline elapsed before ${phase}`)
+    }
+  }
+
+  async _boundedCall(command, phase, deadline, callback) {
+    const remaining = deadline - this._clockNow()
+    if (remaining <= 0) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, `platform skill deadline elapsed before ${phase}`)
+    }
+    const controller = new AbortController()
+    const timeoutError = new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, `platform skill ${phase} timed out`)
+    const rotationError = new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, `platform skill ${phase} was fenced by socket rotation`)
+    let timer
+    let rejectRotation
+    const timeout = new Promise((resolvePromise, rejectPromise) => {
+      timer = setTimeout(() => {
+        controller.abort(timeoutError)
+        rejectPromise(timeoutError)
+      }, Math.min(remaining, this.maxNativeCallMs))
+    })
+    const rotation = new Promise((resolvePromise, rejectPromise) => { rejectRotation = rejectPromise })
+    const onRotation = () => {
+      controller.abort(rotationError)
+      rejectRotation(rotationError)
+    }
+    this.sessionSignal?.addEventListener('abort', onRotation, { once: true })
+    const operation = Promise.resolve().then(() => callback(controller.signal))
+    try {
+      this._assertSessionCurrent(phase)
+      return await Promise.race([operation, timeout, rotation])
+    } finally {
+      clearTimeout(timer)
+      this.sessionSignal?.removeEventListener('abort', onRotation)
+    }
+  }
+
   _installationDirectory(installationId) {
     return resolve(this.installationsDir, assertSafeId(installationId, 'installationId'))
   }
@@ -368,13 +474,16 @@ export class PlatformSkillManager {
     if (!exactKeys(command, COMMAND_FIELDS) || command.schemaVersion !== 1 || command.origin !== PLATFORM_SKILL_ORIGIN
         || command.commandType !== 'PLATFORM_SKILL_INSTALL' || !SAFE_ID.test(command.messageId) || !SAFE_ID.test(command.commandId)
         || command.commandId !== expectedCommandId || !Number.isSafeInteger(command.attempt) || command.attempt < 1
+        || !Number.isSafeInteger(command.issuedAt) || command.issuedAt < 1 || !Number.isSafeInteger(command.expiresAt)
+        || command.expiresAt !== command.issuedAt + 3600000
         || command.fencingToken !== '1' || command.deliveryEpoch !== '1' || command.executionEpoch !== '1'
         || command.tenantId !== this.runtimeScope.tenantId || command.clientId !== this.runtimeScope.clientId
         || command.ownerJiacn !== this.runtimeScope.ownerJiacn || command.targetAgentId !== this.runtimeScope.agentId
         || command.runtimeInstanceId !== this.runtimeScope.runtimeInstanceId || !SAFE_ID.test(command.installationId)
         || !SAFE_ID.test(command.challengeId) || typeof command.bindingVersion !== 'string'
-        || !/^[1-9][0-9]{0,18}$/u.test(command.bindingVersion) || command.skillKey !== 'archive-maintainer'
-        || command.skillVersion !== '1.0.0' || !SHA256.test(command.packageSha256)
+        || !/^[1-9][0-9]{0,18}$/u.test(command.bindingVersion) || BigInt(command.bindingVersion) > 9223372036854775807n
+        || command.skillKey !== 'archive-maintainer'
+        || command.skillVersion !== '1.0.0' || command.packageSha256 !== APPROVED_PACKAGE_SHA256
         || command.packageRef !== `/internal/agent/platform-skills/installations/${command.installationId}/package`) {
       throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'durable platform command shape or scope is invalid')
     }
@@ -460,35 +569,38 @@ export class PlatformSkillManager {
     return { directory, commandRecord: actual, created: false }
   }
 
-  _namespacePaths() {
+  _namespacePaths(command) {
+    const installationId = assertSafeId(command?.installationId, 'installationId')
     const skills = resolve(this.profile.codexHome, 'skills')
     const origin = resolve(skills, 'platform-provisioned')
     const scope = resolve(origin, this.scopeRecord.digest)
     const skill = resolve(scope, 'archive-maintainer')
+    const version = resolve(skill, '1.0.0')
     const stagingRoot = resolve(skills, '.platform-provisioned-staging')
     const staging = resolve(stagingRoot, this.scopeRecord.digest)
-    return { skills, origin, scope, skill, stagingRoot, staging, targetPath: resolve(skill, '1.0.0') }
+    return { skills, origin, scope, skill, version, stagingRoot, staging, targetPath: resolve(version, installationId) }
   }
 
-  _skillsNamespace() {
+  _skillsNamespace(command) {
     assertRealDirectory(this.profile.codexHome, 'profile CODEX_HOME')
-    const paths = this._namespacePaths()
+    const paths = this._namespacePaths(command)
     ensureRealDirectory(paths.skills)
     ensureRealDirectory(paths.origin)
     ensureRealDirectory(paths.scope)
     ensureRealDirectory(paths.skill)
+    ensureRealDirectory(paths.version)
     ensureRealDirectory(paths.stagingRoot)
     ensureRealDirectory(paths.staging)
     return {
       ...paths,
       sourceParentIdentity: pathIdentity(paths.staging),
-      targetParentIdentity: pathIdentity(paths.skill)
+      targetParentIdentity: pathIdentity(paths.version)
     }
   }
 
   _marker(command) {
     return Object.freeze({
-      schemaVersion: 1,
+      schemaVersion: 2,
       origin: PLATFORM_SKILL_ORIGIN,
       scopeDigest: this.scopeRecord.digest,
       businessFingerprint: commandFingerprint(command),
@@ -496,24 +608,98 @@ export class PlatformSkillManager {
       commandId: command.commandId,
       attempt: command.attempt,
       executionEpoch: command.executionEpoch,
+      issuedAt: command.issuedAt,
+      expiresAt: command.expiresAt,
       challengeId: command.challengeId,
       bindingVersion: command.bindingVersion,
       agentId: command.targetAgentId,
       runtimeInstanceId: command.runtimeInstanceId,
       skillKey: command.skillKey,
       skillVersion: command.skillVersion,
-      packageSha256: command.packageSha256
+      packageSha256: command.packageSha256,
+      packageTreeSha256: APPROVED_TREE_SHA256
     })
   }
 
-  _manifestProof(directory) {
-    const manifestPath = resolve(directory, 'SKILL.md')
-    const bytes = safeReadBytes(manifestPath, 'platform SKILL.md', this.extractLimits.maxEntryBytes)
-    const identity = pathIdentity(manifestPath)
-    if (!validIdentity(identity, 'file', manifestPath)) {
-      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform SKILL.md identity is invalid')
+  _packageProof(directory) {
+    const root = assertRealDirectory(directory, 'platform package root')
+    const observedFiles = []
+    const observedDirectories = new Set()
+    const visit = (current, prefix = '') => {
+      for (const name of readdirSync(current).sort()) {
+        const relativePath = prefix ? `${prefix}/${name}` : name
+        const path = resolve(current, name)
+        const status = lstatSync(path)
+        if (status.isSymbolicLink() || realpathSync(path) !== path) {
+          throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, `platform package entry is not canonical: ${relativePath}`)
+        }
+        if (status.isDirectory()) {
+          if (!APPROVED_PACKAGE_DIRECTORIES.has(relativePath)) {
+            throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, `platform package contains an undeclared directory: ${relativePath}`)
+          }
+          observedDirectories.add(relativePath)
+          visit(path, relativePath)
+          continue
+        }
+        if (!status.isFile()) {
+          throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, `platform package contains a special entry: ${relativePath}`)
+        }
+        if (relativePath === MARKER_NAME) continue
+        if (!APPROVED_PACKAGE_PATHS.has(relativePath)) {
+          throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, `platform package contains an undeclared file: ${relativePath}`)
+        }
+        observedFiles.push(relativePath)
+      }
     }
-    return { manifestIdentity: identity, manifestSha256: sha256(bytes) }
+    visit(root)
+    const expectedFiles = [...APPROVED_PACKAGE_PATHS].sort()
+    if (observedFiles.sort().join('\0') !== expectedFiles.join('\0')
+        || [...observedDirectories].sort().join('\0') !== [...APPROVED_PACKAGE_DIRECTORIES].sort().join('\0')) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, 'platform package is missing a declared file or directory')
+    }
+    const entries = APPROVED_PACKAGE_FILES.map(expected => {
+      const path = resolve(root, ...expected.path.split('/'))
+      const bytes = safeReadBytes(path, `platform package ${expected.path}`, this.extractLimits.maxEntryBytes)
+      const identity = pathIdentity(path)
+      if (bytes.length !== expected.size || sha256(bytes) !== expected.sha256 || !validIdentity(identity, 'file', path)) {
+        throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, `platform package resource proof mismatch: ${expected.path}`)
+      }
+      if (expected.path === 'manifest.json') {
+        let manifest
+        try { manifest = JSON.parse(bytes.toString('utf8')) } catch {
+          throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, 'platform package manifest is not valid JSON')
+        }
+        if (!sameJson(manifest, APPROVED_MANIFEST)) {
+          throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, 'platform package manifest contract is not the approved fixed manifest')
+        }
+      }
+      return Object.freeze({ path: expected.path, size: expected.size, sha256: expected.sha256, identity })
+    })
+    return Object.freeze({
+      formatVersion: 1,
+      packageSha256: APPROVED_PACKAGE_SHA256,
+      treeSha256: APPROVED_TREE_SHA256,
+      entries: Object.freeze(entries)
+    })
+  }
+
+  _validateStoredPackageProof(proof, rootPath) {
+    if (!exactKeys(proof, ['entries', 'formatVersion', 'packageSha256', 'treeSha256']) || proof.formatVersion !== 1
+        || proof.packageSha256 !== APPROVED_PACKAGE_SHA256 || proof.treeSha256 !== APPROVED_TREE_SHA256
+        || !Array.isArray(proof.entries) || proof.entries.length !== APPROVED_PACKAGE_FILES.length) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'prepared platform package proof format is invalid')
+    }
+    for (let index = 0; index < APPROVED_PACKAGE_FILES.length; index += 1) {
+      const expected = APPROVED_PACKAGE_FILES[index]
+      const actual = proof.entries[index]
+      const expectedPath = resolve(rootPath, ...expected.path.split('/'))
+      if (!exactKeys(actual, ['identity', 'path', 'sha256', 'size']) || actual.path !== expected.path
+          || actual.size !== expected.size || actual.sha256 !== expected.sha256
+          || !validIdentity(actual.identity, 'file', expectedPath)) {
+        throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, `prepared platform package proof conflicts at ${expected.path}`)
+      }
+    }
+    return proof
   }
 
   _validActivation(path, command, prepared) {
@@ -522,20 +708,23 @@ export class PlatformSkillManager {
       if (!status.isDirectory() || status.isSymbolicLink() || realpathSync(path) !== resolve(path)) return false
       const directoryIdentity = pathIdentity(path)
       if (!sameNodeIdentity(directoryIdentity, prepared.stagingIdentity)) return false
-      const names = readdirSync(path).sort()
-      if (names.join('\0') !== [MARKER_NAME, 'SKILL.md'].sort().join('\0')) return false
       const marker = readJson(resolve(path, MARKER_NAME), 'platform activation marker')
       if (!sameJson(marker, this._marker(command))) return false
-      const manifest = this._manifestProof(path)
-      return manifest.manifestSha256 === prepared.manifestSha256
-        && sameNodeIdentity(manifest.manifestIdentity, prepared.manifestIdentity)
+      const current = this._packageProof(path)
+      if (current.packageSha256 !== prepared.packageProof.packageSha256 || current.treeSha256 !== prepared.packageProof.treeSha256
+          || current.entries.length !== prepared.packageProof.entries.length) return false
+      return current.entries.every((entry, index) => {
+        const expected = prepared.packageProof.entries[index]
+        return entry.path === expected.path && entry.size === expected.size && entry.sha256 === expected.sha256
+          && sameNodeIdentity(entry.identity, expected.identity)
+      })
     } catch { return false }
   }
 
   _preparedRecord(command, stagingPath, namespace) {
-    const proof = this._manifestProof(stagingPath)
+    const packageProof = this._packageProof(stagingPath)
     return Object.freeze({
-      formatVersion: 2,
+      formatVersion: 3,
       origin: PLATFORM_SKILL_ORIGIN,
       scopeDigest: this.scopeRecord.digest,
       businessFingerprint: commandFingerprint(command),
@@ -544,27 +733,25 @@ export class PlatformSkillManager {
       sourceParentIdentity: namespace.sourceParentIdentity,
       targetParentIdentity: namespace.targetParentIdentity,
       stagingIdentity: pathIdentity(stagingPath),
-      manifestIdentity: proof.manifestIdentity,
-      manifestSha256: proof.manifestSha256,
+      packageProof,
       preparedAt: this.now()
     })
   }
 
   _validatePrepared(record, command) {
-    const paths = this._namespacePaths()
-    const fields = ['businessFingerprint', 'formatVersion', 'manifestIdentity', 'manifestSha256', 'origin', 'preparedAt', 'scopeDigest',
+    const paths = this._namespacePaths(command)
+    const fields = ['businessFingerprint', 'formatVersion', 'origin', 'packageProof', 'preparedAt', 'scopeDigest',
       'sourceParentIdentity', 'stagingIdentity', 'stagingPath', 'targetParentIdentity', 'targetPath']
-    const valid = exactKeys(record, fields) && record.formatVersion === 2 && record.origin === PLATFORM_SKILL_ORIGIN
+    const valid = exactKeys(record, fields) && record.formatVersion === 3 && record.origin === PLATFORM_SKILL_ORIGIN
       && record.scopeDigest === this.scopeRecord.digest && record.businessFingerprint === commandFingerprint(command)
       && record.targetPath === paths.targetPath && dirname(record.stagingPath) === paths.staging
       && basename(record.stagingPath).startsWith(`${command.installationId}-`)
       && validIdentity(record.sourceParentIdentity, 'directory', paths.staging)
-      && validIdentity(record.targetParentIdentity, 'directory', paths.skill)
+      && validIdentity(record.targetParentIdentity, 'directory', paths.version)
       && validIdentity(record.stagingIdentity, 'directory', record.stagingPath)
-      && validIdentity(record.manifestIdentity, 'file', resolve(record.stagingPath, 'SKILL.md'))
-      && typeof record.manifestSha256 === 'string' && SHA256.test(record.manifestSha256)
       && Number.isSafeInteger(record.preparedAt) && record.preparedAt >= 0
     if (!valid) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'prepared platform installation record conflicts with scope or namespace')
+    this._validateStoredPackageProof(record.packageProof, record.stagingPath)
     return record
   }
 
@@ -575,6 +762,7 @@ export class PlatformSkillManager {
   }
 
   _persistResult(directory, command, outcome, errorCode) {
+    this._assertSessionCurrent('result journal publication')
     const body = resultBody(command, outcome, errorCode)
     if (!validResultBody(body, command)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform result body is invalid')
     const record = Object.freeze({
@@ -637,28 +825,36 @@ export class PlatformSkillManager {
   }
 
   async _postPersisted(directory, command, resultRecord) {
+    this._assertSessionCurrent('result reconciliation')
     if (resultRecord.result.outcome === 'SUCCEEDED') {
       const prepared = this._loadPrepared(directory, command)
       if (!prepared || !existsSync(prepared.targetPath) || existsSync(prepared.stagingPath)
           || !this._validActivation(prepared.targetPath, command, prepared)) {
         return this._recovery(new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT,
-          'persisted platform success no longer matches the activated SKILL.md proof'), resultRecord.result, false)
+          'persisted platform success no longer matches the activated full-package proof'), resultRecord.result, false)
       }
     }
     const existingReceipt = this._loadReceipt(directory, command, resultRecord)
     if (existingReceipt) return this._terminal(resultRecord.result, existingReceipt, true)
-    let authorization
-    try { authorization = await this.authorizationProvider() } catch { authorization = '' }
+    const receiptDeadline = resultRecord.result.outcome === 'SUCCEEDED'
+      ? this._receiptReplayDeadline(command) : command.expiresAt
     try {
-      const receipt = await this.sendResultFn({
+      this._assertBeforeDeadline(command, 'result receipt replay', receiptDeadline)
+      const authorization = await this._boundedCall(command, 'result authorization', receiptDeadline,
+        signal => this.authorizationProvider({ signal, command, phase: 'result' }))
+      this._assertBeforeDeadline(command, 'result POST', receiptDeadline)
+      const receipt = await this._boundedCall(command, 'result POST', receiptDeadline, signal => this.sendResultFn({
         wsUrl: this.wsUrl,
         command,
         runtimeScope: this.runtimeScope,
         authorization,
         outcome: resultRecord.result.outcome,
         errorCode: resultRecord.result.errorCode,
-        fetchFn: this.fetchFn
-      })
+        fetchFn: this.fetchFn,
+        signal
+      }))
+      this._assertBeforeDeadline(command, 'receipt journal publication', receiptDeadline)
+      this._assertSessionCurrent('receipt journal publication')
       const validated = validatePlatformSkillReceipt(receipt, command, this.runtimeScope, resultRecord.result.outcome, resultRecord.result.errorCode)
       const receiptRecord = {
         formatVersion: 1,
@@ -720,6 +916,8 @@ export class PlatformSkillManager {
         || !this._validActivation(record.stagingPath, command, record)) {
       throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'prepared platform skill staging is unavailable or invalid')
     }
+    this._assertBeforeDeadline(command, 'atomic activation')
+    this._assertSessionCurrent('atomic activation')
     const result = this.atomicFs.renameNoReplace(record.stagingPath, record.targetPath, {
       sourceParent: record.sourceParentIdentity,
       targetParent: record.targetParentIdentity,
@@ -735,10 +933,26 @@ export class PlatformSkillManager {
     if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > this.maxPackageBytes) {
       throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, 'platform package is not a bounded byte buffer')
     }
-    if (sha256(bytes) !== command.packageSha256) {
-      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.DIGEST_MISMATCH, 'platform package digest does not match command')
+    if (command.packageSha256 !== APPROVED_PACKAGE_SHA256 || sha256(bytes) !== APPROVED_PACKAGE_SHA256) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.DIGEST_MISMATCH, 'platform package is not the fixed approved package')
     }
     return bytes
+  }
+
+  async _authorizeApprovedPackage(command) {
+    const authorization = await this._boundedCall(command, 'package authorization', command.expiresAt,
+      signal => this.authorizationProvider({ signal, command, phase: 'download' }))
+    this._assertBeforeDeadline(command, 'package download')
+    return this._verifyPackage(await this._boundedCall(command, 'package download', command.expiresAt,
+      signal => this.downloadFn({
+        wsUrl: this.wsUrl,
+        command,
+        runtimeScope: this.runtimeScope,
+        authorization,
+        fetchFn: this.fetchFn,
+        maxPackageBytes: this.maxPackageBytes,
+        signal
+      })), command)
   }
 
   _safeRemoveStaging(path, identity) {
@@ -757,6 +971,10 @@ export class PlatformSkillManager {
     const existingPrepared = this._loadPrepared(directory, command)
     if (existingPrepared) {
       try {
+        // PREPARED is local evidence only. A reconnect rotates registrationHash on the server,
+        // so activation always requires a fresh package authorization under the original deadline.
+        await this._authorizeApprovedPackage(command)
+        this._assertSessionCurrent('prepared activation')
         this._activatePrepared(existingPrepared, command)
         const result = this._persistResult(directory, command, 'SUCCEEDED', null)
         return this._postPersisted(directory, command, result)
@@ -765,11 +983,9 @@ export class PlatformSkillManager {
           && this._validActivation(existingPrepared.targetPath, command, existingPrepared))
       }
     }
-    if (!created) {
-      return this._recovery(new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED,
-        'installation registry has no durable result or prepared activation'), null, false, 'unknown')
-    }
     if (!this.enabled) {
+      if (!created) return this._recovery(new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.DISABLED,
+        'recovered platform installation is disabled'))
       const result = this._persistResult(directory, command, 'FAILED', PLATFORM_SKILL_FAILURE.DISABLED)
       return this._postPersisted(directory, command, result)
     }
@@ -777,17 +993,11 @@ export class PlatformSkillManager {
     let stagingPath = ''
     let stagingIdentity = null
     try {
-      const namespace = this._skillsNamespace()
+      const namespace = this._skillsNamespace(command)
       if (existsSync(namespace.targetPath)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform skill namespace target already exists')
-      const authorization = await this.authorizationProvider()
-      const bytes = this._verifyPackage(await this.downloadFn({
-        wsUrl: this.wsUrl,
-        command,
-        runtimeScope: this.runtimeScope,
-        authorization,
-        fetchFn: this.fetchFn,
-        maxPackageBytes: this.maxPackageBytes
-      }), command)
+      const bytes = await this._authorizeApprovedPackage(command)
+      this._assertBeforeDeadline(command, 'staging creation')
+      this._assertSessionCurrent('staging creation')
       stagingPath = resolve(namespace.staging, `${command.installationId}-${this.createId()}`)
       const parentBefore = pathIdentity(namespace.staging)
       mkdirSync(stagingPath, { mode: 0o700 })
@@ -798,20 +1008,22 @@ export class PlatformSkillManager {
       chmodSync(stagingPath, 0o700)
       fsyncDirectory(namespace.staging)
       await extractSkillArchive(bytes, stagingPath, command, this.extractLimits)
-      if (readdirSync(stagingPath).join('\0') !== 'SKILL.md') {
-        throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.PACKAGE_INVALID, 'approved platform package must contain only root SKILL.md')
-      }
-      this._manifestProof(stagingPath)
+      this._packageProof(stagingPath)
+      this._assertBeforeDeadline(command, 'activation marker publication')
+      this._assertSessionCurrent('activation marker publication')
       if (!this._writeOnce(resolve(stagingPath, MARKER_NAME), this._marker(command), 0o644)) {
         throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform staging marker already exists')
       }
       fsyncDirectory(stagingPath)
+      this._assertBeforeDeadline(command, 'PREPARED journal publication')
+      this._assertSessionCurrent('PREPARED journal publication')
       const prepared = this._preparedRecord(command, stagingPath, namespace)
       const preparedPath = resolve(directory, 'prepared.json')
       if (!this._writeOnce(preparedPath, prepared)) {
         const existing = this._loadPrepared(directory, command)
         if (!sameJson(existing, prepared)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'prepared platform installation creation raced')
       }
+      this._assertSessionCurrent('prepared activation')
       this._activatePrepared(prepared, command)
       const result = this._persistResult(directory, command, 'SUCCEEDED', null)
       return this._postPersisted(directory, command, result)
@@ -819,7 +1031,9 @@ export class PlatformSkillManager {
       const error = mapFailure(rawError)
       const preparedExists = existsSync(resolve(directory, 'prepared.json'))
       if (stagingPath && !preparedExists && stagingIdentity) this._safeRemoveStaging(stagingPath, stagingIdentity)
-      if (preparedExists) return this._recovery(error)
+      // A rotated/disconnected socket or any restarted command-only/PREPARED attempt is
+      // recoverable evidence, never a durable business failure under stale authority.
+      if (preparedExists || !created || this.sessionSignal?.aborted) return this._recovery(error)
       const result = this._persistResult(directory, command, 'FAILED', error.code)
       return this._postPersisted(directory, command, result)
     }
@@ -855,6 +1069,8 @@ export class PlatformSkillManager {
     }
   }
 
+  get replayPendingComplete() { return this.replayCursor === null }
+
   async replayPending(limit = this.maxReplayBatch) {
     this._requireInitialized()
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > this.maxReplayBatch) {
@@ -887,6 +1103,81 @@ export class PlatformSkillManager {
     return results
   }
 
+  reconcileCommandOutcome(message) {
+    const wire = message?.rawPayload || message
+    if (wire?.commandType !== 'PLATFORM_SKILL_INSTALL') return null
+    try {
+      const issuedAt = Number.isSafeInteger(wire.issuedAt) ? wire.issuedAt : 1
+      const command = validatePlatformSkillCommand(message, this.runtimeScope, issuedAt)
+      const installation = this.getInstallation(command.installationId)
+      if (!installation || installation.status === 'unknown' || !installation.result || !installation.receipt) return null
+      if (installation.command.businessFingerprint !== commandFingerprint(command)) return null
+      const outcome = installation.result.result
+      return {
+        status: outcome.outcome === 'SUCCEEDED' ? 'completed' : 'failed',
+        exitCode: outcome.outcome === 'SUCCEEDED' ? 0 : null,
+        errorMessage: outcome.errorCode || '',
+        failureCode: outcome.errorCode,
+        activationCommitted: outcome.outcome === 'SUCCEEDED',
+        authoritative: true
+      }
+    } catch {
+      return null
+    }
+  }
+
+  resolveApprovedArchiveInstallation(installationId) {
+    this._requireInitialized()
+    const installation = this.getInstallation(installationId)
+    if (!installation?.command || !installation?.result || !installation?.receipt
+        || installation.result.result?.outcome !== 'SUCCEEDED' || installation.receipt.state !== 'SUCCEEDED') {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'approved archive skill has no authoritative successful installation receipt')
+    }
+    const command = installation.command.command
+    if (command.skillKey !== 'archive-maintainer' || command.skillVersion !== '1.0.0'
+        || command.packageSha256 !== APPROVED_PACKAGE_SHA256) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'installed skill is not the approved archive maintainer package')
+    }
+    const directory = this._installationDirectory(installationId)
+    const prepared = this._loadPrepared(directory, command)
+    if (!prepared || !this._validActivation(prepared.targetPath, command, prepared)) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'approved archive skill activation proof is no longer valid')
+    }
+    const files = new Map(APPROVED_PACKAGE_FILES.map(entry => [
+      entry.path,
+      Buffer.from(safeReadBytes(resolve(prepared.targetPath, ...entry.path.split('/')),
+        `approved archive package ${entry.path}`, this.extractLimits.maxEntryBytes))
+    ]))
+    return Object.freeze({
+      installationId,
+      targetPath: prepared.targetPath,
+      packageSha256: prepared.packageProof.packageSha256,
+      treeSha256: prepared.packageProof.treeSha256,
+      directoryIdentity: Object.freeze({ ...pathIdentity(prepared.targetPath) }),
+      entries: Object.freeze(prepared.packageProof.entries.map(entry => Object.freeze({
+        path: entry.path, size: entry.size, sha256: entry.sha256, identity: Object.freeze({ ...entry.identity })
+      }))),
+      files
+    })
+  }
+
+  reverifyApprovedArchiveInstallation(reference) {
+    if (!reference || typeof reference.installationId !== 'string') {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'approved archive installation reference is invalid')
+    }
+    const current = this.resolveApprovedArchiveInstallation(reference.installationId)
+    const same = current.targetPath === reference.targetPath && current.packageSha256 === reference.packageSha256
+      && current.treeSha256 === reference.treeSha256 && samePathIdentity(current.directoryIdentity, reference.directoryIdentity)
+      && Array.isArray(reference.entries) && current.entries.length === reference.entries.length
+      && current.entries.every((entry, index) => {
+        const expected = reference.entries[index]
+        return entry.path === expected.path && entry.size === expected.size && entry.sha256 === expected.sha256
+          && samePathIdentity(entry.identity, expected.identity)
+      })
+    if (!same) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'approved archive installation changed during execution')
+    return current
+  }
+
   getInstallation(installationId) {
     this._requireInitialized()
     const directory = this._installationDirectory(installationId)
@@ -895,6 +1186,13 @@ export class PlatformSkillManager {
     if (!existsSync(resolve(directory, 'command.json'))) return { status: 'unknown', installationId }
     const command = this._loadCommandRecord(directory)
     const result = this._loadResult(directory, command.command)
+    if (result?.result?.outcome === 'SUCCEEDED') {
+      const prepared = this._loadPrepared(directory, command.command)
+      if (!prepared || !existsSync(prepared.targetPath) || existsSync(prepared.stagingPath)
+          || !this._validActivation(prepared.targetPath, command.command, prepared)) {
+        return { status: 'unknown', installationId, command, result, receipt: null }
+      }
+    }
     const receipt = result ? this._loadReceipt(directory, command.command, result) : null
     return { command, result, receipt }
   }

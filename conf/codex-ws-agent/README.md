@@ -337,6 +337,26 @@ SKILL_INSTALL_IO_FAILED
 
 This V0 preview does not provide publisher-signature verification, binding proof-of-possession, mTLS download sessions, isolation attestation, capability leases, or production-grade refund reconciliation. It installs verified bytes into the selected profile's skill directory but does not advertise installed skill names as scheduling abilities.
 
+## Controlled Archive Maintenance Runner
+
+`ARCHIVE_MAINTENANCE_EXECUTE/v1` is disabled by default. It is advertised only when
+`AGENT_ARCHIVE_MAINTENANCE_ENABLED=true`, the production Linux atomic bridge is available, and the
+server confirms the current socket's `native-runtime-v1` receipt. The runner accepts only the fixed
+approved `archive-maintainer` 1.0.0 package and performs authenticated same-origin native HTTP calls;
+it never falls back to Codex, a shell, arbitrary URLs, or an administrator/user JWT. AUTO publication
+uses only the exact work/CAS snapshot returned by the authenticated job context, while MANUAL and
+DRAFT_ONLY stop at the authoritative awaiting-human result. Only server-authoritative `COMPLETED` or
+`FAILED` receipts are terminal; transport uncertainty remains durable `recovery_required`.
+
+```bash
+AGENT_PLATFORM_SKILL_INSTALL_ENABLED=false
+AGENT_ARCHIVE_MAINTENANCE_ENABLED=false
+```
+
+The flags are independent, but archive execution still requires the already installed package's full
+content, identity, activation, installation-result, and server-receipt proof. Credentials and runtime
+scope remain process-memory-only and are cleared on registration rotation or disconnect.
+
 ## Protocol v1 Message Handling
 
 The client is fail-closed and uses the canonical `messageType` as the semantic discriminator:

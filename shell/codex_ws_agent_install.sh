@@ -163,6 +163,11 @@ stage_application_files() {
     install -m 0644 "$CONF_SRC/agent-client.mjs" "$stage/agent-client.mjs"
     install -m 0644 "$CONF_SRC/report-outbox.mjs" "$stage/report-outbox.mjs"
     install -m 0644 "$CONF_SRC/registration-ack.mjs" "$stage/registration-ack.mjs"
+    install -m 0644 "$CONF_SRC/platform-skill-manager.mjs" "$stage/platform-skill-manager.mjs"
+    install -m 0644 "$CONF_SRC/platform-skill-native.mjs" "$stage/platform-skill-native.mjs"
+    install -m 0644 "$CONF_SRC/platform-skill-runtime.mjs" "$stage/platform-skill-runtime.mjs"
+    install -m 0644 "$CONF_SRC/archive-maintenance-native.mjs" "$stage/archive-maintenance-native.mjs"
+    install -m 0644 "$CONF_SRC/archive-maintenance-runner.mjs" "$stage/archive-maintenance-runner.mjs"
     if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ] && [ "${CODEX_WS_AGENT_TEST_FAIL_PHASE:-}" = "copy" ]; then
         __red "测试注入：候选 release 源文件复制失败。"
         return 1
