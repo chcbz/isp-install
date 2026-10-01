@@ -654,7 +654,8 @@ export class PersistentChatInbox {
     return matches.values().next().value || null
   }
   confirmFinalSaved(rawAck) {
-    const ack = finalSavedAck(rawAck)
+    const candidateTurnId = object(rawAck) && visible(rawAck.turnId) ? rawAck.turnId : null
+    if (!candidateTurnId) return { status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH' }
     return this._withLock(() => {
       const matches = []
       for (const state of ['pending', 'processing', 'recovery', 'archive']) {
@@ -662,7 +663,7 @@ export class PersistentChatInbox {
           if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
           const key = name.slice(0, -5); const path = this.path(state, key)
           const record = JSON.parse(readFileSync(path, 'utf8'))
-          if (record.message?.turnId === ack.turnId) matches.push({ key, state, path, record })
+          if (record.message?.turnId === candidateTurnId) matches.push({ key, state, path, record })
         }
       }
       if (matches.length > 1) { const error = new Error('CHAT_FINAL_ACK_AMBIGUOUS'); error.code = 'CHAT_FINAL_ACK_AMBIGUOUS'; throw error }
@@ -670,6 +671,7 @@ export class PersistentChatInbox {
       const item = matches[0]
       const route = item.record.message?.route || item.record.message?.routing?.interactionMode
       if (route !== 'INSPECT') return { status: 'ignored', reason: 'NON_INSPECT_DURABLE_TURN', key: item.key }
+      const ack = finalSavedAck(rawAck)
       const prepared = item.record.finalPrepared
       if (item.record.message?.targetAgentId !== this.profile.agentId) {
         const error = new Error('CHAT_FINAL_ACK_PROFILE_MISMATCH'); error.code = 'CHAT_FINAL_ACK_PROFILE_MISMATCH'; throw error

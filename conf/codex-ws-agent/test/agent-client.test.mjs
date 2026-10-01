@@ -612,7 +612,11 @@ test('processor ignores ordinary CHAT and unmatched legacy saved events while re
     kind: 'ignored', status: 'ignored', reason: 'NON_INSPECT_DURABLE_TURN',
     key: (await import('../chat-runtime.mjs')).durableChatKey(normalizeInboundMessage(ordinary))
   })
-  const unmatchedOutcome = await runtime.processor.handle(finalSavedAck({ ...ordinary, turnId: 'legacy-turn-without-durable-inbox' }))
+  const legacySaved = {
+    type: 'agent_message_saved', channel: 'agent', messageId: '123', conversationId: '42', conversationType: 'normal',
+    agentId: profile.agentId, senderType: 'agent', senderName: 'Agent A', content: 'legacy text', eventId: 'legacy-event-1', timestamp: 1
+  }
+  const unmatchedOutcome = await runtime.processor.handle(legacySaved)
   assert.deepEqual(unmatchedOutcome, { kind: 'ignored', status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH', key: null })
   assert.deepEqual(rejected, [])
 
@@ -629,7 +633,14 @@ test('processor ignores ordinary CHAT and unmatched legacy saved events while re
   }
   const ambiguousOutcome = await runtime.processor.handle(finalSavedAck({ ...forged, turnId: sharedTurn }))
   assert.equal(ambiguousOutcome.kind, 'rejected'); assert.equal(ambiguousOutcome.error.code, 'CHAT_FINAL_ACK_AMBIGUOUS')
-  assert.deepEqual(rejected.map(error => error.code), ['CHAT_FINAL_ACK_PREPARED_REQUIRED', 'CHAT_FINAL_ACK_AMBIGUOUS'])
+
+  const malformed = normalizeInboundMessage(durableChat(102, { route: 'INSPECT' }))
+  const malformedAccepted = await runtime.chatInbox.accept(malformed); const malformedClaimed = runtime.chatInbox.claim(malformedAccepted.key)
+  runtime.chatInbox.markFinalPrepared(malformedClaimed, preparedInspectionFinal(malformed))
+  const malformedOutcome = await runtime.processor.handle({ ...finalSavedAck(malformed), duplicate: undefined })
+  assert.equal(malformedOutcome.kind, 'rejected'); assert.equal(malformedOutcome.error.code, 'CHAT_FINAL_ACK_INVALID')
+  assert.equal(runtime.chatInbox.findByKey(malformedAccepted.key).state, 'processing')
+  assert.deepEqual(rejected.map(error => error.code), ['CHAT_FINAL_ACK_PREPARED_REQUIRED', 'CHAT_FINAL_ACK_AMBIGUOUS', 'CHAT_FINAL_ACK_INVALID'])
   runtime.processor.stop()
 })
 
