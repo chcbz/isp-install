@@ -572,12 +572,14 @@ test('final-saved duplicate ACK completes a prepared recovery after process relo
   runtime.processor.stop()
 })
 
-test('final-saved ACK rejects foreign, ambiguous, stale, unprepared and terminal-conflicting bindings', async () => {
+test('final-saved ACK ignores unmatched legacy events but rejects ambiguous, stale, unprepared and terminal-conflicting INSPECT bindings', async () => {
   const root = temporaryDirectory(); const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
   const unpreparedMessage = normalizeInboundMessage(durableChat(93, { route: 'INSPECT' }))
   const unprepared = await inbox.accept(unpreparedMessage); inbox.claim(unprepared.key)
   assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(unpreparedMessage)), error => error.code === 'CHAT_FINAL_ACK_PREPARED_REQUIRED')
-  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck({ ...unpreparedMessage, turnId: 'foreign-turn' })), error => error.code === 'CHAT_FINAL_ACK_NOT_FOUND')
+  assert.deepEqual(inbox.confirmFinalSaved(finalSavedAck({ ...unpreparedMessage, turnId: 'foreign-turn' })), {
+    status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH'
+  })
   assert.throws(() => inbox.confirmFinalSaved({ ...finalSavedAck(unpreparedMessage), channel: 'foreign' }), error => error.code === 'CHAT_FINAL_ACK_INVALID')
 
   const sharedTurn = 'stable-turn-ambiguous'
@@ -596,6 +598,39 @@ test('final-saved ACK rejects foreign, ambiguous, stale, unprepared and terminal
   const confirmedAccepted = await inbox.accept(confirmedMessage); const confirmed = inbox.claim(confirmedAccepted.key)
   inbox.markFinalPrepared(confirmed, preparedInspectionFinal(confirmedMessage)); inbox.confirmFinalSaved(finalSavedAck(confirmedMessage))
   assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(confirmedMessage, { messageId: '502', duplicate: true, eventId: undefined })), error => error.code === 'CHAT_FINAL_ACK_TERMINAL_CONFLICT')
+})
+
+test('processor ignores ordinary CHAT and unmatched legacy saved events while rejecting forged or ambiguous INSPECT acknowledgements', async () => {
+  const root = temporaryDirectory(); const rejected = []
+  const runtime = createChatRuntime(root, { onReject: error => rejected.push(error) })
+  runtime.processor.start()
+
+  const ordinary = durableChat(98, { route: 'CHAT' })
+  await runtime.processor.handle(ordinary); await runtime.processor.waitForIdle()
+  const ordinaryOutcome = await runtime.processor.handle(finalSavedAck(ordinary))
+  assert.deepEqual(ordinaryOutcome, {
+    kind: 'ignored', status: 'ignored', reason: 'NON_INSPECT_DURABLE_TURN',
+    key: (await import('../chat-runtime.mjs')).durableChatKey(normalizeInboundMessage(ordinary))
+  })
+  const unmatchedOutcome = await runtime.processor.handle(finalSavedAck({ ...ordinary, turnId: 'legacy-turn-without-durable-inbox' }))
+  assert.deepEqual(unmatchedOutcome, { kind: 'ignored', status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH', key: null })
+  assert.deepEqual(rejected, [])
+
+  const forged = normalizeInboundMessage(durableChat(99, { route: 'INSPECT' }))
+  const forgedAccepted = await runtime.chatInbox.accept(forged); runtime.chatInbox.claim(forgedAccepted.key)
+  const forgedOutcome = await runtime.processor.handle(finalSavedAck(forged))
+  assert.equal(forgedOutcome.kind, 'rejected'); assert.equal(forgedOutcome.error.code, 'CHAT_FINAL_ACK_PREPARED_REQUIRED')
+
+  const sharedTurn = 'processor-ambiguous-inspect-turn'
+  for (const number of [100, 101]) {
+    const message = normalizeInboundMessage(durableChat(number, { route: 'INSPECT', turnId: sharedTurn }))
+    const accepted = await runtime.chatInbox.accept(message); const claimed = runtime.chatInbox.claim(accepted.key)
+    runtime.chatInbox.markFinalPrepared(claimed, preparedInspectionFinal(message))
+  }
+  const ambiguousOutcome = await runtime.processor.handle(finalSavedAck({ ...forged, turnId: sharedTurn }))
+  assert.equal(ambiguousOutcome.kind, 'rejected'); assert.equal(ambiguousOutcome.error.code, 'CHAT_FINAL_ACK_AMBIGUOUS')
+  assert.deepEqual(rejected.map(error => error.code), ['CHAT_FINAL_ACK_PREPARED_REQUIRED', 'CHAT_FINAL_ACK_AMBIGUOUS'])
+  runtime.processor.stop()
 })
 
 test('production chat runner takes disabled and legacy messages directly to serialized final-only fallback', async () => {

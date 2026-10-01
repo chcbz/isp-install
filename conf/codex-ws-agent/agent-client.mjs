@@ -2790,6 +2790,7 @@ export class AgentMessageProcessor {
     if (!this.chatInbox) throw new AgentProtocolError('CHAT_FINAL_ACK_UNAVAILABLE', 'Durable CHAT inbox is unavailable')
     try {
       const outcome = this.chatInbox.confirmFinalSaved(raw)
+      if (outcome.status === 'ignored') return { kind: 'ignored', status: 'ignored', reason: outcome.reason, key: outcome.key || null }
       this._clearChatRecoveryRetry(outcome.key)
       const active = this.activeChats.get(outcome.key)
       if (active) active.state = 'FINAL_PERSISTED'

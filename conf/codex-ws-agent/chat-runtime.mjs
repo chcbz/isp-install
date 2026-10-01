@@ -666,8 +666,11 @@ export class PersistentChatInbox {
         }
       }
       if (matches.length > 1) { const error = new Error('CHAT_FINAL_ACK_AMBIGUOUS'); error.code = 'CHAT_FINAL_ACK_AMBIGUOUS'; throw error }
-      if (!matches.length) { const error = new Error('CHAT_FINAL_ACK_NOT_FOUND'); error.code = 'CHAT_FINAL_ACK_NOT_FOUND'; throw error }
-      const item = matches[0]; const prepared = item.record.finalPrepared
+      if (!matches.length) return { status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH' }
+      const item = matches[0]
+      const route = item.record.message?.route || item.record.message?.routing?.interactionMode
+      if (route !== 'INSPECT') return { status: 'ignored', reason: 'NON_INSPECT_DURABLE_TURN', key: item.key }
+      const prepared = item.record.finalPrepared
       if (item.record.message?.targetAgentId !== this.profile.agentId) {
         const error = new Error('CHAT_FINAL_ACK_PROFILE_MISMATCH'); error.code = 'CHAT_FINAL_ACK_PROFILE_MISMATCH'; throw error
       }
