@@ -65,10 +65,17 @@ test('app-server schema registry keeps legacy default and requires an exact expl
     cliVersion: nativeAppContract.cliVersion,
     bundleSha256: nativeAppContract.bundleSha256
   })
-  assert.throws(
-    () => resolveCodexAppServerSchemaContract({ appServerSchemaContractId: 'codex-cli-unknown' }),
-    error => error.code === 'APP_SERVER_BINARY_UNTRUSTED' && error.trustReason === 'CODEX_APP_SERVER_SCHEMA_CONTRACT_UNKNOWN:codex-cli-unknown'
+  assert.deepEqual(
+    resolveCodexAppServerSchemaContract({ appServerSchemaContractId: `  ${nativeAppContract.contractId}  ` }),
+    CODEX_APP_SERVER_SCHEMA_CONTRACTS[nativeAppContract.contractId]
   )
+  for (const unregistered of ['codex-cli-unknown', ...Object.getOwnPropertyNames(Object.prototype), ' __proto__ ']) {
+    const selected = unregistered.trim()
+    assert.throws(
+      () => resolveCodexAppServerSchemaContract({ appServerSchemaContractId: unregistered }),
+      error => error.code === 'APP_SERVER_BINARY_UNTRUSTED' && error.trustReason === `CODEX_APP_SERVER_SCHEMA_CONTRACT_UNKNOWN:${selected}`
+    )
+  }
 })
 
 test('API-generated hostedWire golden is byte-exact and accepted as schema v1 additive durable CHAT', () => {

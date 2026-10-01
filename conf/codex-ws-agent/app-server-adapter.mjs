@@ -30,9 +30,8 @@ export const resolveCodexAppServerSchemaContract = profile => {
   const selected = typeof profile?.appServerSchemaContractId === 'string' && profile.appServerSchemaContractId.trim()
     ? profile.appServerSchemaContractId.trim()
     : DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID
-  const contract = CODEX_APP_SERVER_SCHEMA_CONTRACTS[selected]
-  if (!contract) throw failTrust(`CODEX_APP_SERVER_SCHEMA_CONTRACT_UNKNOWN:${selected}`)
-  return contract
+  if (!Object.hasOwn(CODEX_APP_SERVER_SCHEMA_CONTRACTS, selected)) throw failTrust(`CODEX_APP_SERVER_SCHEMA_CONTRACT_UNKNOWN:${selected}`)
+  return CODEX_APP_SERVER_SCHEMA_CONTRACTS[selected]
 }
 const hashOpenedFile = (fd, size = fstatSync(fd, { bigint: true }).size) => {
   const digest = createHash('sha256'); const buffer = Buffer.allocUnsafe(1024 * 1024); let offset = 0n

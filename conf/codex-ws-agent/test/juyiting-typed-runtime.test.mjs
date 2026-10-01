@@ -142,6 +142,20 @@ test('disabled, malformed or schema-selection-mismatched typed request rejects b
 })
 
 
+test('inherited schema contract keys reject incomplete measured readback before engine start', async () => {
+  for (const inherited of [...Object.getOwnPropertyNames(Object.prototype), ' __proto__ ']) {
+    let starts = 0; let fallback = 0
+    const adapter = {
+      closed: false, readback: { initialize: {}, schema: { measured: true } },
+      startOrResumeThread: async () => { starts++; return { threadId: 'forbidden' } }
+    }
+    await assert.rejects(() => runFastChat({ ...profile, appServerSchemaContractId: inherited }, typedMessage(), {
+      adapter, chatWorkdir: '/chat', fallback: () => { fallback++; return null }, sendProtocolFn: () => assert.fail('must not publish')
+    }), error => error.code === 'TYPED_DELIBERATION_RUNTIME_UNAVAILABLE')
+    assert.equal(starts, 0); assert.equal(fallback, 0)
+  }
+})
+
 const assertInvalidTypedStartsNoEngine = async (message, expectedCode) => {
   let threadStarts = 0; let turnStarts = 0
   const adapter = {

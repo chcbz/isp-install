@@ -460,6 +460,13 @@ test('typed deliberation declaration binds the exact locally selected schema con
   assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: adapter(legacy) }).typedDeliberation.state, 'UNAVAILABLE')
   assert.equal(buildAgentPresencePayload({ ...configured, appServerSchemaContractId: legacy.contractId }, 'online', { appServerAdapter: liveNative }).typedDeliberation.state, 'UNAVAILABLE')
   assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...liveNative, closed: true } }).typedDeliberation.state, 'UNAVAILABLE')
+  const incompleteMeasured = { closed: false, readback: { initialize: {}, schema: { measured: true } } }
+  for (const inherited of [...Object.getOwnPropertyNames(Object.prototype), ' __proto__ ']) {
+    assert.equal(
+      buildAgentRegistrationPayload({ ...configured, appServerSchemaContractId: inherited }, null, true, incompleteMeasured).typedDeliberation.state,
+      'UNAVAILABLE'
+    )
+  }
 })
 
 test('capability contract advertises CHAT only after its read-only-constrained profile is configured', () => {
