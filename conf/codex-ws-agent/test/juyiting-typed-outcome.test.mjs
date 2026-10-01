@@ -70,6 +70,12 @@ test('trusted typed dispatch is exact, bounded and bound to CHAT bounty task/con
   ]) assert.throws(() => resolveTypedDeliberationRequest(profile, { ...message(facts()), ...changed }), error => error.code === 'TYPED_DELIBERATION_BINDING_INVALID')
   const none = facts(); none.referenceMode = 'NONE'; assert.throws(() => validateTypedDeliberationFacts(none), error => error.code === 'TYPED_DELIBERATION_REFERENCE_MODE_INVALID')
   const duplicate = facts(); duplicate.availableSources.push({ ...duplicate.availableSources[0] }); assert.throws(() => validateTypedDeliberationFacts(duplicate))
+  const malformed = facts(); malformed.availableSources[0].sourceRefId = `source_${String.fromCharCode(0xd800)}`
+  assert.throws(() => validateTypedDeliberationFacts(malformed), error => error.code === 'TYPED_DELIBERATION_SOURCES_INVALID')
+  const missingTask = message(facts()); delete missingTask.taskId; delete missingTask.contextSnapshot.facts.task.id
+  assert.throws(() => resolveTypedDeliberationRequest(profile, missingTask), error => error.code === 'TYPED_DELIBERATION_BINDING_INVALID')
+  const numericScope = message(facts()); numericScope.contextSnapshot.facts.conversation.id = 1
+  assert.throws(() => resolveTypedDeliberationRequest(profile, numericScope), error => error.code === 'TYPED_DELIBERATION_BINDING_INVALID')
   const unknown = facts(); unknown.extra = true; assert.throws(() => validateTypedDeliberationFacts(unknown))
 })
 

@@ -37,6 +37,15 @@ const fakeChild = () => {
   return child
 }
 const bindingStore = () => { const values = new Map(); return { values, get: key => values.get(key), put: (key, value) => values.set(key, value), markRecovery: (key, reason) => values.set(key, { state: 'RECOVERY_REQUIRED', reason }) } }
+const mutateTypedMessage = mutate => {
+  const message = structuredClone(typedMessage())
+  mutate(message, message.contextSnapshot.facts)
+  const sourceVector = message.contextSnapshot.sourceVector; const facts = message.contextSnapshot.facts
+  const contextHash = canonicalSha256({ sourceVector, facts })
+  message.contextHash = contextHash; message.factsManifest = facts; message.sourceVector = sourceVector
+  message.contextSnapshot.contextHash = contextHash
+  return validateChatDispatch(message)
+}
 const measuredReadback = () => ({
   initialize: { capabilities: {} }, account: { account: { type: 'apiKey' } }, models: { data: [] }, config: {}, tools: { data: [] },
   schema: { ...CODEX_APP_SERVER_SCHEMA, measured: true }
@@ -119,6 +128,35 @@ test('disabled, malformed or unmeasured typed request rejects before any engine 
     }))
     assert.equal(starts, 0); assert.equal(fallback, 0)
   }
+})
+
+
+const assertInvalidTypedStartsNoEngine = async (message, expectedCode) => {
+  let threadStarts = 0; let turnStarts = 0
+  const adapter = {
+    closed: false, readback: measuredReadback(),
+    startOrResumeThread: async () => { threadStarts++; return { threadId: 'forbidden' } },
+    runTurn: async () => { turnStarts++; return { threadId: 'forbidden', turnId: 'forbidden', content: '' } }
+  }
+  await assert.rejects(() => runFastChat(profile, message, {
+    adapter, chatWorkdir: '/chat', sendProtocolFn: () => assert.fail('invalid typed dispatch must not publish')
+  }), error => error.code === expectedCode)
+  assert.equal(threadStarts, 0); assert.equal(turnStarts, 0)
+}
+
+test('malformed opaque source Unicode rejects before thread or engine start', async () => {
+  const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation.availableSources[0].sourceRefId = `source_${String.fromCharCode(0xd800)}` })
+  await assertInvalidTypedStartsNoEngine(message, 'TYPED_DELIBERATION_SOURCES_INVALID')
+})
+
+test('missing task binding on both sides rejects before thread or engine start', async () => {
+  const message = mutateTypedMessage((message, facts) => { delete message.taskId; delete facts.task.id })
+  await assertInvalidTypedStartsNoEngine(message, 'TYPED_DELIBERATION_BINDING_INVALID')
+})
+
+test('numeric fact scope identity rejects instead of coercing before thread or engine start', async () => {
+  const message = mutateTypedMessage((_message, facts) => { facts.conversation.id = Number(hosted.conversationId) })
+  await assertInvalidTypedStartsNoEngine(message, 'TYPED_DELIBERATION_BINDING_INVALID')
 })
 
 test('cancelled typed turn and unknown acceptance publish no success sidecar and never retry model', async () => {

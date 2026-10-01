@@ -138,7 +138,7 @@ const boundedIdentifier = value => {
   for (let index = 0; index < value.length; index++) {
     const unit = value.charCodeAt(index)
     if (unit >= 0xd800 && unit <= 0xdbff) {
-      const low = value.charCodeAt(index + 1); if (low < 0xdc00 || low > 0xdfff) return false; index++
+      const low = value.charCodeAt(index + 1); if (!(low >= 0xdc00 && low <= 0xdfff)) return false; index++
     } else if (unit >= 0xdc00 && unit <= 0xdfff) return false
   }
   return true
@@ -162,9 +162,14 @@ export const resolveTypedDeliberationRequest = (profile, message) => {
   if (profile?.typedDeliberationEnabled !== true) fail('TYPED_DELIBERATION_DISABLED')
   const typed = validateTypedDeliberationFacts(facts.typedDeliberation)
   const conversation = facts.conversation; const task = facts.task
-  if (message?.durable !== true || String(message.route || message.routing?.interactionMode || '').toUpperCase() !== 'CHAT' ||
-      conversation?.scopeType !== 'bounty' || String(conversation?.id) !== String(message.conversationId) ||
-      String(conversation?.generation) !== String(message.conversationGeneration) || String(task?.id) !== String(message.taskId) ||
+  const route = message.route === undefined ? message.routing?.interactionMode : message.route
+  const boundStrings = [
+    message.conversationId, message.conversationGeneration, message.taskId, message.targetAgentId,
+    conversation?.id, conversation?.generation, task?.id, facts.targetAgentId, profile?.agentId
+  ]
+  if (message?.durable !== true || route !== 'CHAT' || boundStrings.some(value => typeof value !== 'string' || !value) ||
+      conversation?.scopeType !== 'bounty' || conversation.id !== message.conversationId ||
+      conversation.generation !== message.conversationGeneration || task.id !== message.taskId ||
       facts.targetAgentId !== profile.agentId || message.targetAgentId !== profile.agentId) fail('TYPED_DELIBERATION_BINDING_INVALID')
   return typed
 }
