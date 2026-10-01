@@ -12,13 +12,19 @@ import {
   buildContextEnvelope, validateChatDispatch, buildChatDispatchAck, PersistentChatInbox,
   ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, verifyHostedWireContract
 } from '../chat-runtime.mjs'
-import { AppServerAdapter, measureCodexAppServerBinary, reclaimStaleCodexAppServerSnapshots, verifyCodexAppServerBinaryIdentity, verifySpawnedAppServerExecutable } from '../app-server-adapter.mjs'
+import {
+  AppServerAdapter, CODEX_APP_SERVER_SCHEMA, CODEX_APP_SERVER_SCHEMA_CONTRACTS,
+  DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID, measureCodexAppServerBinary,
+  reclaimStaleCodexAppServerSnapshots, resolveCodexAppServerSchemaContract,
+  verifyCodexAppServerBinaryIdentity, verifySpawnedAppServerExecutable
+} from '../app-server-adapter.mjs'
 import { normalizeInboundMessage, runFastChat, runProfileChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
 
 const profile = { profileId: 'profile-A', agentId: 'hosted-a', fastChatEnabled: false, appServerEnabled: false }
 const fixturePath = resolve(import.meta.dirname, '..', 'contracts', 'api-hosted-wire-v1.json')
 const apiWire = () => JSON.parse(readFileSync(fixturePath, 'utf8'))
 const appContract = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'codex-app-server-0.153.4-contract.json'), 'utf8'))
+const nativeAppContract = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'codex-app-server-schema-0.159.2-contract.json'), 'utf8'))
 const normalizedWire = (extra = {}) => {
   const base = apiWire()
   const wire = { ...base, ...extra, payload: { ...base.payload } }
@@ -45,6 +51,24 @@ test('pinned Codex CLI 0.153.4 generated schemas match recorded digests and wire
   assert.deepEqual(turnStart.required, ['input', 'threadId']); assert.equal(turnStart.properties.input.type, 'array'); assert.ok(turnStart.properties.outputSchema)
   assert.ok(threadStart.properties.developerInstructions); assert.ok(threadStart.properties.baseInstructions); assert.equal(threadStart.properties.instructions, undefined)
   assert.deepEqual(completed.definitions.TurnStatus.enum, ['completed', 'interrupted', 'failed', 'inProgress'])
+})
+
+test('app-server schema registry keeps legacy default and requires an exact explicit registered native profile', () => {
+  assert.equal(DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID, 'codex-cli-0.153.4')
+  assert.deepEqual(CODEX_APP_SERVER_SCHEMA, {
+    cliVersion: appContract.cliVersion,
+    bundleSha256: appContract.bundleSha256
+  })
+  assert.deepEqual(resolveCodexAppServerSchemaContract({}), CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4'])
+  assert.deepEqual(resolveCodexAppServerSchemaContract({ appServerSchemaContractId: nativeAppContract.contractId }), {
+    contractId: nativeAppContract.contractId,
+    cliVersion: nativeAppContract.cliVersion,
+    bundleSha256: nativeAppContract.bundleSha256
+  })
+  assert.throws(
+    () => resolveCodexAppServerSchemaContract({ appServerSchemaContractId: 'codex-cli-unknown' }),
+    error => error.code === 'APP_SERVER_BINARY_UNTRUSTED' && error.trustReason === 'CODEX_APP_SERVER_SCHEMA_CONTRACT_UNKNOWN:codex-cli-unknown'
+  )
 })
 
 test('API-generated hostedWire golden is byte-exact and accepted as schema v1 additive durable CHAT', () => {
@@ -495,9 +519,10 @@ test('actual codex binary version and generated experimental schema are measured
     const bundle = '{"measured":"schema"}\n'; const digest = createHash('sha256').update(bundle).digest('hex')
     const bin = resolve(root, 'fake-codex'); writeFileSync(bin, `#!/usr/bin/env node\nconst fs=require('fs'),p=require('path');if(process.argv[2]==='--version'){process.stdout.write('codex-cli test-1\\n');process.exit(0)}const i=process.argv.indexOf('--out');if(i<0)process.exit(2);fs.mkdirSync(process.argv[i+1],{recursive:true});fs.writeFileSync(p.join(process.argv[i+1],'codex_app_server_protocol.schemas.json'),${JSON.stringify(bundle)});\n`); chmodSync(bin, 0o700)
     const temp = resolve(root, 'temporary'); mkdirSync(temp)
-    const expected = { cliVersion: 'test-1', bundleSha256: digest }; const cache = new Map()
+    const expected = { contractId: 'test-1', cliVersion: 'test-1', bundleSha256: digest }; const cache = new Map()
     const measured = measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp })
-    assert.equal(measured.measured, true); assert.equal(measured.bundleSha256, digest); assert.ok(measured.binaryIdentityDigest)
+    assert.equal(measured.measured, true); assert.equal(measured.schemaContractId, 'test-1'); assert.equal(measured.bundleSha256, digest); assert.ok(measured.binaryIdentityDigest)
+    assert.equal(measured.resourceFileCount, 0); assert.equal(measured.resourceBytes, '0')
     assert.equal(measured.snapshotKind, 'copy'); assert.equal(statSync(measured.snapshotPath).mode & 0o777, 0o500)
     assert.notEqual(statSync(measured.snapshotPath).ino, statSync(bin).ino)
     assert.strictEqual(measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp }), measured)
@@ -505,6 +530,29 @@ test('actual codex binary version and generated experimental schema are measured
     assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, cliVersion: 'wrong' }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
     assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, bundleSha256: '0'.repeat(64) }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
     assert.deepEqual(readdirSync(temp), [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('resource snapshots retain exact trust checks while old count bounds become telemetry only', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-resource-telemetry-'))
+  try {
+    const binDirectory = resolve(root, 'bin'); const resourceRoot = resolve(root, 'codex-resources'); const temp = resolve(root, 'temporary')
+    mkdirSync(binDirectory); mkdirSync(resourceRoot); mkdirSync(temp)
+    const bundle = '{"resource":"schema"}\n'; const digest = createHash('sha256').update(bundle).digest('hex')
+    const bin = resolve(binDirectory, 'codex')
+    writeFileSync(bin, `#!/usr/bin/env node\nconst fs=require('fs'),p=require('path');if(process.argv[2]==='--version'){process.stdout.write('codex-cli resource-test\\n');process.exit(0)}const i=process.argv.indexOf('--out');fs.mkdirSync(process.argv[i+1],{recursive:true});fs.writeFileSync(p.join(process.argv[i+1],'codex_app_server_protocol.schemas.json'),${JSON.stringify(bundle)});\n`)
+    chmodSync(bin, 0o700)
+    for (let index = 0; index < 65; index++) writeFileSync(resolve(resourceRoot, `resource-${String(index).padStart(2, '0')}.txt`), 'x')
+    const expected = { contractId: 'resource-test', cliVersion: 'resource-test', bundleSha256: digest }
+    const measured = measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache: new Map(), temporaryRoot: temp })
+    assert.equal(measured.resourceFileCount, 65); assert.equal(measured.resourceBytes, '65')
+    assert.equal(readdirSync(resolve(measured.snapshotPath, '..', '..', 'codex-resources')).length, 65)
+
+    symlinkSync(resolve(resourceRoot, 'resource-00.txt'), resolve(resourceRoot, 'linked-resource'))
+    assert.throws(
+      () => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache: new Map(), temporaryRoot: temp }),
+      error => error.code === 'APP_SERVER_BINARY_UNTRUSTED' && error.trustReason === 'CODEX_APP_SERVER_SNAPSHOT_FAILED:CODEX_APP_SERVER_RESOURCE_SYMLINK'
+    )
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

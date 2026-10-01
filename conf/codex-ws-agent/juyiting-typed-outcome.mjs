@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { CODEX_APP_SERVER_SCHEMA } from './app-server-adapter.mjs'
+import { resolveCodexAppServerSchemaContract } from './app-server-adapter.mjs'
 
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
 const exactKeys = (value, expected) => {
@@ -174,16 +174,21 @@ export const resolveTypedDeliberationRequest = (profile, message) => {
   return typed
 }
 
-export const typedDeliberationAdapterReady = adapter => Boolean(adapter && !adapter.closed && adapter.readback?.initialize &&
-  adapter.readback?.schema?.measured === true && adapter.readback.schema.cliVersion === CODEX_APP_SERVER_SCHEMA.cliVersion &&
-  adapter.readback.schema.bundleSha256 === CODEX_APP_SERVER_SCHEMA.bundleSha256)
+export const typedDeliberationAdapterReady = (profile, adapter) => {
+  let selected
+  try { selected = resolveCodexAppServerSchemaContract(profile) } catch { return false }
+  const measured = adapter?.readback?.schema
+  return Boolean(adapter && !adapter.closed && adapter.readback?.initialize && measured?.measured === true &&
+    measured.schemaContractId === selected.contractId && measured.cliVersion === selected.cliVersion &&
+    measured.bundleSha256 === selected.bundleSha256)
+}
 
 export const buildTypedDeliberationDeclaration = (profile, adapter) => {
   if (profile?.typedDeliberationEnabled !== true) return null
   return freeze({
     schemaVersion: 1,
     state: profile.fastChatEnabled === true && profile.appServerEnabled === true && profile.chatEngine === 'app-server' &&
-      profile.chatSandbox === 'read-only' && profile.chatToolPolicy === 'read-only-constrained' && typedDeliberationAdapterReady(adapter) ? 'READY' : 'UNAVAILABLE',
+      profile.chatSandbox === 'read-only' && profile.chatToolPolicy === 'read-only-constrained' && typedDeliberationAdapterReady(profile, adapter) ? 'READY' : 'UNAVAILABLE',
     carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V1',
     referenceModes: ['NONE', 'AVAILABLE'],
     outcomeKinds: ['ANSWER', 'CLARIFY', 'EXECUTION_PROPOSAL'],

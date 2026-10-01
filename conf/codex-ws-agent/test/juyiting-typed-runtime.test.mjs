@@ -4,17 +4,20 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { AppServerAdapter, CODEX_APP_SERVER_SCHEMA } from '../app-server-adapter.mjs'
+import { AppServerAdapter, CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
 import { runFastChat, MESSAGE_TYPES } from '../agent-client.mjs'
 import { canonicalSha256, validateChatDispatch } from '../chat-runtime.mjs'
 import { TYPED_DELIBERATION_OUTPUT_SCHEMA } from '../juyiting-typed-outcome.mjs'
 
 const fixture = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'typed-deliberation-client-result-v1.json'), 'utf8'))
 const hosted = JSON.parse(readFileSync(resolve(import.meta.dirname, '..', 'contracts', 'api-hosted-wire-v1.json'), 'utf8'))
+const legacyContract = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4']
+const nativeContract = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
 const profile = {
   profileId: 'typed-profile', agentId: hosted.targetAgentId, agentName: 'Typed Agent', personaName: 'Typed Agent',
   fastChatEnabled: true, appServerEnabled: true, typedDeliberationEnabled: true, trueDeltaEnabled: true,
-  chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained', chatModel: 'operator-selected'
+  chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained', chatModel: 'operator-selected',
+  appServerSchemaContractId: nativeContract.contractId
 }
 const typedMessage = (overrides = {}) => {
   const facts = structuredClone(hosted.contextSnapshot.facts)
@@ -46,9 +49,9 @@ const mutateTypedMessage = mutate => {
   message.contextSnapshot.contextHash = contextHash
   return validateChatDispatch(message)
 }
-const measuredReadback = () => ({
+const measuredReadback = (contract = nativeContract, schemaOverrides = {}) => ({
   initialize: { capabilities: {} }, account: { account: { type: 'apiKey' } }, models: { data: [] }, config: {}, tools: { data: [] },
-  schema: { ...CODEX_APP_SERVER_SCHEMA, measured: true }
+  schema: { ...contract, schemaContractId: contract.contractId, measured: true, ...schemaOverrides }
 })
 
 test('real AppServerAdapter callback boundary passes native outputSchema and atomically publishes text plus typed final sidecar', async () => {
@@ -67,7 +70,7 @@ test('real AppServerAdapter callback boundary passes native outputSchema and ato
   })
   const adapter = new AppServerAdapter({ child, requestTimeoutMs: 1000 })
   await adapter.initialize()
-  adapter.readback.schema = { ...CODEX_APP_SERVER_SCHEMA, measured: true }
+  adapter.readback.schema = measuredReadback().schema
   const frames = []
   const result = await runFastChat(profile, typedMessage(), {
     adapter, bindingStore: bindingStore(), chatWorkdir: '/runtime-owned-empty-chat',
@@ -115,11 +118,19 @@ test('typed and plain CHAT use distinct threads while plain wire/content stays w
   assert.equal(Object.hasOwn(plainFrames.at(-1).payload, 'outcomeContractVersion'), false)
 })
 
-test('disabled, malformed or unmeasured typed request rejects before any engine start with no fallback', async () => {
+test('disabled, malformed or schema-selection-mismatched typed request rejects before any engine start with no fallback', async () => {
   for (const scenario of [
     { selectedProfile: { ...profile, typedDeliberationEnabled: false }, selectedMessage: typedMessage(), adapter: { readback: measuredReadback() } },
     { selectedProfile: profile, selectedMessage: typedMessage({ route: 'INSPECT' }), adapter: { readback: measuredReadback() } },
-    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: { ...measuredReadback(), schema: { ...CODEX_APP_SERVER_SCHEMA, measured: false } } } }
+    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { measured: false }) } },
+    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(legacyContract) } },
+    { selectedProfile: { ...profile, appServerSchemaContractId: legacyContract.contractId }, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract) } },
+    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: true, readback: measuredReadback() } },
+    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: { ...measuredReadback(), initialize: null } } },
+    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { cliVersion: '0.153.4' }) } },
+    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { bundleSha256: '0'.repeat(64) }) } },
+    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { schemaContractId: legacyContract.contractId }) } },
+    { selectedProfile: { ...profile, appServerSchemaContractId: 'codex-cli-unknown' }, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract) } }
   ]) {
     let starts = 0; let fallback = 0
     scenario.adapter.startOrResumeThread = async () => { starts++; return { threadId: 'forbidden' } }

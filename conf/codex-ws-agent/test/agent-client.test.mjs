@@ -49,6 +49,7 @@ import {
 import { WorkspaceFileBridge } from '../workspace-file-bridge.mjs'
 import { RegistrationAckObserver } from '../registration-ack.mjs'
 import { ExecutionReportOutbox, EXECUTION_REPORT_RESULT_TYPE } from '../report-outbox.mjs'
+import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
 
 const temporaryDirectories = []
 afterEach(() => {
@@ -438,15 +439,27 @@ test('registration and presence truthfully advertise capability contract v1 with
 })
 
 
-test('typed deliberation profile is explicit default-off and declaration downgrades after adapter exit', () => {
-  assert.equal(normalizeProfile({ agentId: 'typed-default' }).typedDeliberationEnabled, false)
-  const configured = normalizeProfile({
-    agentId: 'typed-agent', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
+test('typed deliberation declaration binds the exact locally selected schema contract and defaults legacy', () => {
+  const legacy = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4']; const native = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
+  const defaultProfile = normalizeProfile({ agentId: 'typed-default' })
+  assert.equal(defaultProfile.typedDeliberationEnabled, false)
+  assert.equal(defaultProfile.appServerSchemaContractId, legacy.contractId)
+  const defaultTypedProfile = normalizeProfile({
+    agentId: 'typed-default-ready', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
     chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained'
   })
-  const live = { closed: false, readback: { initialize: {}, schema: { measured: true, cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' } } }
-  assert.equal(buildAgentRegistrationPayload(configured, null, true, live).typedDeliberation.state, 'READY')
-  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...live, closed: true } }).typedDeliberation.state, 'UNAVAILABLE')
+  const adapter = contract => ({ closed: false, readback: { initialize: {}, schema: { ...contract, schemaContractId: contract.contractId, measured: true } } })
+  assert.equal(buildAgentRegistrationPayload(defaultTypedProfile, null, true, adapter(legacy)).typedDeliberation.state, 'READY')
+  const configured = normalizeProfile({
+    agentId: 'typed-agent', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
+    chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained',
+    appServerSchemaContractId: native.contractId
+  })
+  const liveNative = adapter(native)
+  assert.equal(buildAgentRegistrationPayload(configured, null, true, liveNative).typedDeliberation.state, 'READY')
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: adapter(legacy) }).typedDeliberation.state, 'UNAVAILABLE')
+  assert.equal(buildAgentPresencePayload({ ...configured, appServerSchemaContractId: legacy.contractId }, 'online', { appServerAdapter: liveNative }).typedDeliberation.state, 'UNAVAILABLE')
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...liveNative, closed: true } }).typedDeliberation.state, 'UNAVAILABLE')
 })
 
 test('capability contract advertises CHAT only after its read-only-constrained profile is configured', () => {

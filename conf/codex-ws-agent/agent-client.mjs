@@ -51,7 +51,10 @@ import { ControlledImageHttpExecutor } from './controlled-image-http-executor.mj
 import { ControlledImageHttpExecutorV3 } from './controlled-image-http-executor-v3.mjs'
 import { buildNativeProviderCredentialBinding } from './controlled-image-http-provider-binding.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
-import { AppServerAdapter, cleanupCodexAppServerSnapshots, measureCodexAppServerBinary } from './app-server-adapter.mjs'
+import {
+  AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
+  measureCodexAppServerBinary, resolveCodexAppServerSchemaContract
+} from './app-server-adapter.mjs'
 import {
   TYPED_DELIBERATION_CONTRACT_DIGEST, TYPED_DELIBERATION_INSTRUCTIONS, TYPED_DELIBERATION_OUTPUT_SCHEMA,
   buildTypedDeliberationDeclaration, resolveTypedDeliberationRequest, typedDeliberationAdapterReady, validateTypedInteractionOutcome
@@ -584,6 +587,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     chatWorkdir: profile.chatWorkdir || fallback.chatWorkdir || '',
     fastChatEnabled: parseEnabledFlag(profile.fastChatEnabled ?? fallback.fastChatEnabled),
     appServerEnabled: parseEnabledFlag(profile.appServerEnabled ?? fallback.appServerEnabled),
+    appServerSchemaContractId: String(profile.appServerSchemaContractId ?? fallback.appServerSchemaContractId ?? DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID).trim() || DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
     trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
     typedDeliberationEnabled: parseEnabledFlag(profile.typedDeliberationEnabled ?? fallback.typedDeliberationEnabled),
     chatInboxMaxFiles: parsePositiveInteger(profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles, 1024),
@@ -4183,7 +4187,7 @@ export const runFastChat = async (profile, message, {
     if (permanent) throw new AgentProtocolError(permanent.code || 'APP_SERVER_BINARY_UNTRUSTED', permanent.message || 'Permanent app-server trust failure')
     throw new AgentProtocolError('APP_SERVER_UNAVAILABLE', 'Modern durable CHAT app-server is unavailable; legacy workspace execution is forbidden')
   }
-  if (typedRequest && !typedDeliberationAdapterReady(selectedAdapter)) {
+  if (typedRequest && !typedDeliberationAdapterReady(profile, selectedAdapter)) {
     throw new AgentProtocolError('TYPED_DELIBERATION_RUNTIME_UNAVAILABLE', 'Typed deliberation requires the initialized measured native output-schema adapter')
   }
   if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
@@ -4296,6 +4300,7 @@ const profileConfigurationErrors = profile => {
   if (profile.fastChatEnabled && (profile.chatSandbox !== 'read-only' || profile.chatToolPolicy !== 'read-only-constrained')) {
     errors.push('Fast CHAT requires chatSandbox=read-only and chatToolPolicy=read-only-constrained; approval never is not deny-all')
   }
+  try { resolveCodexAppServerSchemaContract(profile) } catch (error) { errors.push(error.message) }
   const chatInboxMaxFiles = profile.chatInboxMaxFiles ?? 1024
   const chatInboxMaxBytes = profile.chatInboxMaxBytes ?? 64 * 1024 * 1024
   if (!Number.isSafeInteger(chatInboxMaxFiles) || chatInboxMaxFiles < 1 || chatInboxMaxFiles > 100000) errors.push('chatInboxMaxFiles must be an integer from 1 to 100000')
@@ -4363,6 +4368,7 @@ export const buildConfigurationReport = runtimeConfig => ({
       codexApproval: profile.codexApproval,
       codexSessionMode: profile.codexSessionMode,
       codexTimeoutMs: profile.codexTimeoutMs,
+      appServerSchemaContractId: profile.appServerSchemaContractId,
       codexModel: profile.codexModel || null,
       modelSource: profile.codexModel ? 'agent --model' : 'Codex configuration/default',
       websocketAuthSource: profile.apiKey ? 'profile.apiKey' : (process.env.OPENCLAW_API_KEY ? 'OPENCLAW_API_KEY' : 'missing'),

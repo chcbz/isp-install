@@ -9,10 +9,31 @@ const id = value => typeof value === 'string' && value.length > 0
 const deniedMethods = /(?:command|file|permission|network|mcp|dynamic.?tool|tool)/i
 const terminalMethods = new Set(['turn/failed', 'turn/cancelled', 'turn/interrupted'])
 export const CODEX_APP_SERVER_SCHEMA = Object.freeze({ cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' })
+export const DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID = 'codex-cli-0.153.4'
+export const CODEX_APP_SERVER_SCHEMA_CONTRACTS = Object.freeze({
+  [DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID]: Object.freeze({
+    contractId: DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
+    ...CODEX_APP_SERVER_SCHEMA
+  }),
+  'codex-cli-0.159.2': Object.freeze({
+    contractId: 'codex-cli-0.159.2',
+    cliVersion: '0.159.2',
+    bundleSha256: '7243ba241962af92ca60581f1a81808ebda4212a800f8b205f54703bcfd508c5'
+  })
+})
 
 const binaryMeasurementCache = new Map()
 const binarySnapshotDirectories = new Set()
-const failTrust = message => { const error = new Error(message); error.code = 'APP_SERVER_BINARY_UNTRUSTED'; return error }
+const failTrust = message => { const error = new Error(message); error.code = 'APP_SERVER_BINARY_UNTRUSTED'; error.trustReason = message; return error }
+const trustCause = error => error?.trustReason || (error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? error?.message : error?.code) || 'UNKNOWN'
+export const resolveCodexAppServerSchemaContract = profile => {
+  const selected = typeof profile?.appServerSchemaContractId === 'string' && profile.appServerSchemaContractId.trim()
+    ? profile.appServerSchemaContractId.trim()
+    : DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID
+  const contract = CODEX_APP_SERVER_SCHEMA_CONTRACTS[selected]
+  if (!contract) throw failTrust(`CODEX_APP_SERVER_SCHEMA_CONTRACT_UNKNOWN:${selected}`)
+  return contract
+}
 const hashOpenedFile = (fd, size = fstatSync(fd, { bigint: true }).size) => {
   const digest = createHash('sha256'); const buffer = Buffer.allocUnsafe(1024 * 1024); let offset = 0n
   while (offset < size) {
@@ -90,15 +111,13 @@ const liveProcessUsesSnapshot = directory => {
 const resourceManifest = root => {
   if (!existsSync(root)) return []
   const rootLexical = lstatSync(root, { bigint: true }); if (rootLexical.isSymbolicLink() || !rootLexical.isDirectory()) throw failTrust('CODEX_APP_SERVER_RESOURCE_ROOT_UNSAFE')
-  const entries = []; let totalBytes = 0n
+  const entries = []
   const visit = (directory, relativePrefix = '') => {
     for (const name of readdirSync(directory).sort()) {
       const path = resolve(directory, name); const relativePath = relativePrefix ? `${relativePrefix}/${name}` : name; const lexical = lstatSync(path, { bigint: true })
       if (lexical.isSymbolicLink()) throw failTrust('CODEX_APP_SERVER_RESOURCE_SYMLINK')
       if (lexical.isDirectory()) { visit(path, relativePath); continue }
       if (!lexical.isFile()) throw failTrust('CODEX_APP_SERVER_RESOURCE_TYPE_UNSAFE')
-      totalBytes += lexical.size
-      if (entries.length >= 64 || totalBytes > 64n * 1024n * 1024n) throw failTrust('CODEX_APP_SERVER_RESOURCE_BOUNDS_EXCEEDED')
       entries.push({
         relativePath, path, size: String(lexical.size), mode: Number(lexical.mode & 0o777n), sha256: hashFile(path),
         sourceIdentity: { dev: String(lexical.dev), ino: String(lexical.ino), size: String(lexical.size), mtimeNs: String(lexical.mtimeNs), mode: String(lexical.mode), uid: String(lexical.uid), gid: String(lexical.gid) }
@@ -108,7 +127,7 @@ const resourceManifest = root => {
   visit(root); return entries
 }
 const manifestDigest = entries => createHash('sha256').update(JSON.stringify(entries.map(({ relativePath, size, sha256 }) => ({ relativePath, size, sha256 })))).digest('hex')
-const resourceDigest = executable => manifestDigest(resourceManifest(executableResources(executable)))
+const resourceTelemetry = entries => ({ fileCount: entries.length, totalBytes: entries.reduce((total, entry) => total + BigInt(entry.size), 0n).toString() })
 const fsyncFile = path => { const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) } }
 const fsyncDirectory = path => { const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) } }
 const fdStable = (left, right) => ['dev', 'ino', 'size', 'mtimeNs', 'mode', 'uid', 'gid'].every(field => left[field] === right[field])
@@ -230,7 +249,8 @@ export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
     const executableIdentity = statIdentity(resolved.executable)
     executableIdentity.sha256 = hashFile(resolved.executable)
     if (!sameIdentity(executableIdentity, measurement.executableIdentity) || executableIdentity.sha256 !== measurement.executableIdentity.sha256) throw failTrust('CODEX_APP_SERVER_EXECUTABLE_IDENTITY_DRIFT')
-    if (resourceDigest(resolved.executable) !== measurement.resourceDigest) throw failTrust('CODEX_APP_SERVER_RESOURCE_DRIFT')
+    const executableResourceManifest = resourceManifest(executableResources(resolved.executable)); const executableResourceTelemetry = resourceTelemetry(executableResourceManifest)
+    if (manifestDigest(executableResourceManifest) !== measurement.resourceDigest || executableResourceTelemetry.fileCount !== measurement.resourceFileCount || executableResourceTelemetry.totalBytes !== measurement.resourceBytes) throw failTrust('CODEX_APP_SERVER_RESOURCE_DRIFT')
     const lexicalSnapshot = lstatSync(measurement.snapshotPath)
     if (lexicalSnapshot.isSymbolicLink() || !lexicalSnapshot.isFile()) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_UNSAFE')
     const snapshotIdentity = statIdentity(measurement.snapshotPath)
@@ -239,7 +259,8 @@ export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
     if (measurement.snapshotKind !== 'copy' || (snapshotIdentity.dev === executableIdentity.dev && snapshotIdentity.ino === executableIdentity.ino)) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_NOT_ISOLATED')
     const snapshotResources = resourceManifest(executableResources(measurement.snapshotPath))
     if (snapshotResources.some(entry => ![0o400, 0o500].includes(entry.mode))) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_RESOURCE_MODE_UNSAFE')
-    if (snapshotIdentity.mode !== 0o500 || snapshotIdentity.sha256 !== executableIdentity.sha256 || manifestDigest(snapshotResources) !== measurement.resourceDigest) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_CONTENT_DRIFT')
+    const snapshotResourceTelemetry = resourceTelemetry(snapshotResources)
+    if (snapshotIdentity.mode !== 0o500 || snapshotIdentity.sha256 !== executableIdentity.sha256 || manifestDigest(snapshotResources) !== measurement.resourceDigest || snapshotResourceTelemetry.fileCount !== measurement.resourceFileCount || snapshotResourceTelemetry.totalBytes !== measurement.resourceBytes) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_CONTENT_DRIFT')
     return true
   } catch (error) {
     if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') throw error
@@ -269,7 +290,7 @@ export async function verifySpawnedAppServerExecutable(child, measurement, { tim
 }
 
 export function measureCodexAppServerBinary(profile, {
-  expected = CODEX_APP_SERVER_SCHEMA, spawnSyncFn = spawnSync, cache = binaryMeasurementCache, temporaryRoot = tmpdir(), snapshotRoot = profile.codexHome || temporaryRoot
+  expected = resolveCodexAppServerSchemaContract(profile), spawnSyncFn = spawnSync, cache = binaryMeasurementCache, temporaryRoot = tmpdir(), snapshotRoot = profile.codexHome || temporaryRoot
 } = {}) {
   if (process.platform !== 'linux') throw failTrust('CODEX_APP_SERVER_IMMUTABLE_SNAPSHOT_UNSUPPORTED')
   let resolved; let configuredIdentity; let executableIdentity; let sourceFd
@@ -289,7 +310,7 @@ export function measureCodexAppServerBinary(profile, {
   try {
     snapshot = snapshotExecutable(sourceFd, resolved.executable, snapshotRoot)
   } catch (error) {
-    closeSync(sourceFd); throw failTrust(`CODEX_APP_SERVER_SNAPSHOT_FAILED:${error.code || error.message}`)
+    closeSync(sourceFd); throw failTrust(`CODEX_APP_SERVER_SNAPSHOT_FAILED:${trustCause(error)}`)
   }
   closeSync(sourceFd)
   const snapshotIdentity = statIdentity(snapshot.path); snapshotIdentity.sha256 = hashFile(snapshot.path); snapshotIdentity.ancestorPolicy = protectedAncestorPolicy(snapshot.path)
@@ -307,9 +328,11 @@ export function measureCodexAppServerBinary(profile, {
     const bundle = readFileSync(resolve(generated, 'codex_app_server_protocol.schemas.json'))
     const bundleSha256 = createHash('sha256').update(bundle).digest('hex')
     if (bundleSha256 !== expected.bundleSha256) throw failTrust(`CODEX_APP_SERVER_SCHEMA_MISMATCH:${bundleSha256}`)
+    const resources = resourceManifest(executableResources(resolved.executable)); const telemetry = resourceTelemetry(resources)
     const measurement = {
-      measured: true, cliVersion: expected.cliVersion, versionOutput, bundleSha256, snapshotKind: snapshot.snapshotKind,
-      binarySha256: executableIdentity.sha256, binaryIdentityDigest: cacheKey, resourceDigest: resourceDigest(resolved.executable),
+      measured: true, schemaContractId: expected.contractId || null, cliVersion: expected.cliVersion, versionOutput, bundleSha256, snapshotKind: snapshot.snapshotKind,
+      binarySha256: executableIdentity.sha256, binaryIdentityDigest: cacheKey, resourceDigest: manifestDigest(resources),
+      resourceFileCount: telemetry.fileCount, resourceBytes: telemetry.totalBytes,
       configuredIdentity: Object.freeze(configuredIdentity), executableIdentity: Object.freeze(executableIdentity), snapshotIdentity: Object.freeze(snapshotIdentity)
     }
     Object.defineProperty(measurement, 'snapshotPath', { value: snapshot.path, enumerable: false })

@@ -1,0 +1,8 @@
+{
+  "contractId": "codex-cli-0.159.2",
+  "cliVersion": "0.159.2",
+  "generatedWith": "codex app-server generate-json-schema --experimental",
+  "bundleFile": "codex_app_server_protocol.schemas.json",
+  "bundleSha256": "7243ba241962af92ca60581f1a81808ebda4212a800f8b205f54703bcfd508c5",
+  "binarySha256": "1748767b230ebfc3d4ab7e4e254920d0c0ad9691fd8c11f190e7d44511a4a92e"
+}
