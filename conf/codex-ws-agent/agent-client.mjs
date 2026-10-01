@@ -155,7 +155,7 @@ const RESERVED_FIELDS = [
 ]
 const INBOUND_CONTROL_TYPES = new Set([
   'connected', 'ping', 'pong', 'agent_registered', 'agent_status_updated', 'agent_status',
-  'agent_capability_index', 'protocol_error', 'error', 'task_reported'
+  'agent_capability_index', 'protocol_error', 'error', 'task_reported', 'agent_message_saved'
 ])
 const DISABLED_PROFILE_STATUSES = new Set(['disabled', 'inactive', 'unavailable'])
 
@@ -2770,7 +2770,9 @@ export class AgentMessageProcessor {
     current.timer = setTimeout(() => {
       current.timer = null
       if (this.stopped || this.paused) { this.chatRecoveryRetries.delete(item.key); return }
-      this._scheduleChatRecovery(item)
+      const latest = this.chatInbox?.findByKey(item.key)
+      if (!latest || latest.state !== 'recovery') { this.chatRecoveryRetries.delete(item.key); return }
+      this._scheduleChatRecovery(latest)
     }, delay)
     current.timer.unref?.(); this.chatRecoveryRetries.set(item.key, current)
   }
@@ -2778,8 +2780,30 @@ export class AgentMessageProcessor {
     const retry = this.chatRecoveryRetries.get(key); if (retry?.timer) clearTimeout(retry.timer)
     this.chatRecoveryRetries.delete(key)
   }
+  _chatFinalPersistenceConfirmed(key) {
+    const current = this.chatInbox?.findByKey(key)
+    return current?.record?.state === 'COMPLETED' && current.record.finalConfirmation?.serverPersistence === 'confirmed'
+      ? current
+      : null
+  }
+  _handleAgentMessageSaved(raw) {
+    if (!this.chatInbox) throw new AgentProtocolError('CHAT_FINAL_ACK_UNAVAILABLE', 'Durable CHAT inbox is unavailable')
+    try {
+      const outcome = this.chatInbox.confirmFinalSaved(raw)
+      this._clearChatRecoveryRetry(outcome.key)
+      const active = this.activeChats.get(outcome.key)
+      if (active) active.state = 'FINAL_PERSISTED'
+      return { kind: 'chat-final-saved', status: outcome.status, key: outcome.key, confirmation: outcome.confirmation }
+    } catch (error) {
+      const protocolError = new AgentProtocolError(error?.code || 'CHAT_FINAL_ACK_REJECTED', error?.message || 'Durable CHAT final acknowledgement was rejected')
+      this.onReject(protocolError, raw)
+      return { kind: 'rejected', error: protocolError }
+    }
+  }
   _scheduleChatRecovery(item) {
     if (!item || this.activeChats.has(item.key)) return
+    item = this.chatInbox?.findByKey(item.key)
+    if (!item || item.state !== 'recovery') { if (item?.key) this._clearChatRecoveryRetry(item.key); return }
     const message = item.record.message; const active = { key: item.key, state: 'RECONCILING', message, cancelRequested: false, cancel: null }
     this.activeChats.set(item.key, active)
     const task = async () => {
@@ -2790,11 +2814,15 @@ export class AgentMessageProcessor {
           markFinalPublication: publication => this.chatInbox.markFinalPublication(item, publication)
         }
         const result = await this.recoverChat(message, item.record, recoveryControls)
-        if (result?.status === 'completed') { this.chatInbox.complete(item, result); this._clearChatRecoveryRetry(item.key) }
+        if (this._chatFinalPersistenceConfirmed(item.key)) this._clearChatRecoveryRetry(item.key)
+        else if (result?.status === 'completed') { this.chatInbox.complete(item, result); this._clearChatRecoveryRetry(item.key) }
         else if (result?.status === 'recovery_required') retry = true
       } catch (error) {
-        this.onReject(new AgentProtocolError(error?.code || 'TYPED_INSPECTION_RECOVERY_ERROR', error?.message || 'Typed inspection readback failed'), message.rawPayload)
-      } finally { this.activeChats.delete(item.key); if (retry) this._retryChatRecovery(item) }
+        if (!this._chatFinalPersistenceConfirmed(item.key)) this.onReject(new AgentProtocolError(error?.code || 'TYPED_INSPECTION_RECOVERY_ERROR', error?.message || 'Typed inspection readback failed'), message.rawPayload)
+      } finally {
+        this.activeChats.delete(item.key)
+        if (retry && !this._chatFinalPersistenceConfirmed(item.key)) this._retryChatRecovery(item)
+      }
     }
     try { void this.lanes.enqueue('inspect', this._chatFairness(message), task, `recovery:${this._chatTurnKey(message)}`).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_ERROR', error.message), message.rawPayload) }) }
     catch (error) { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_FULL', error.message), message.rawPayload) }
@@ -2817,24 +2845,32 @@ export class AgentMessageProcessor {
       let reconcileInspection = false; let retryInspectionFinal = false
       try {
         const result = await this.runChat(claimed.record.message, controls)
-        if (active.cancelRequested || result?.status === 'cancelled') this.chatInbox.cancelProcessing(claimed)
+        if (this._chatFinalPersistenceConfirmed(claimed.key)) this._clearChatRecoveryRetry(claimed.key)
+        else if (active.cancelRequested || result?.status === 'cancelled') this.chatInbox.cancelProcessing(claimed)
         else if (result?.status === 'recovery_required') {
-          this.chatInbox.recoveryRequired(claimed, result.recoveryReason || 'CHAT_RECOVERY_REQUIRED')
-          retryInspectionFinal = (claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' && Boolean(claimed.record.finalPrepared)
-          const recoveryAck = { status: 'recovery_required', errorCode: result.recoveryReason || 'CHAT_RECOVERY_REQUIRED', reason: result.recoveryReason || 'CHAT recovery is required' }
-          try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
+          const recovered = this.chatInbox.recoveryRequired(claimed, result.recoveryReason || 'CHAT_RECOVERY_REQUIRED')
+          if (recovered.state === 'COMPLETED' && recovered.finalConfirmation?.serverPersistence === 'confirmed') this._clearChatRecoveryRetry(claimed.key)
+          else {
+            retryInspectionFinal = (claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' && Boolean(claimed.record.finalPrepared)
+            const recoveryAck = { status: 'recovery_required', errorCode: result.recoveryReason || 'CHAT_RECOVERY_REQUIRED', reason: result.recoveryReason || 'CHAT recovery is required' }
+            try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
+          }
         } else this.chatInbox.complete(claimed, result || { status: 'completed' })
       } catch (error) {
-        const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
-        this.chatInbox.recoveryRequired(claimed, `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`, unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED')
-        reconcileInspection = unknown && (claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT'
-        const recoveryAck = { status: 'recovery_required', errorCode: error?.code || 'CHAT_RUNTIME_ERROR', reason: String(error.message || 'CHAT runtime failure').slice(0, 512) }
-        try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
-        this.onReject(new AgentProtocolError(unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : (error?.code || 'CHAT_RUNTIME_ERROR'), error.message), claimed.record.message.rawPayload)
+        if (!this._chatFinalPersistenceConfirmed(claimed.key)) {
+          const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
+          const recovered = this.chatInbox.recoveryRequired(claimed, `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`, unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED')
+          if (!(recovered.state === 'COMPLETED' && recovered.finalConfirmation?.serverPersistence === 'confirmed')) {
+            reconcileInspection = unknown && (claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT'
+            const recoveryAck = { status: 'recovery_required', errorCode: error?.code || 'CHAT_RUNTIME_ERROR', reason: String(error.message || 'CHAT runtime failure').slice(0, 512) }
+            try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
+            this.onReject(new AgentProtocolError(unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : (error?.code || 'CHAT_RUNTIME_ERROR'), error.message), claimed.record.message.rawPayload)
+          }
+        }
       } finally {
         this.chatActive = false; this.activeChats.delete(item.key); void this.drain(); this._schedulePendingChats()
-        if (reconcileInspection) queueMicrotask(() => this._scheduleChatRecovery(claimed))
-        else if (retryInspectionFinal) this._retryChatRecovery(claimed)
+        if (reconcileInspection && !this._chatFinalPersistenceConfirmed(claimed.key)) queueMicrotask(() => this._scheduleChatRecovery(claimed))
+        else if (retryInspectionFinal && !this._chatFinalPersistenceConfirmed(claimed.key)) this._retryChatRecovery(claimed)
       }
     }
     const lane = (message.route || message.routing?.interactionMode) === 'INSPECT' ? 'inspect' : 'chat'
@@ -2855,6 +2891,7 @@ export class AgentMessageProcessor {
   }
 
   async handle(raw) {
+    if (isObject(raw) && raw.type === 'agent_message_saved' && !hasOwn(raw, 'messageType')) return this._handleAgentMessageSaved(raw)
     let message
     try {
       message = normalizeInboundMessage(raw)
@@ -5586,7 +5623,9 @@ const handleMessage = async (profile, raw) => {
     startNativeConversationPoller(profile, state)
   }
   if (isLegacyInboundControlFrame(parsed)) {
-    if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
+    if (parsed.type === 'agent_message_saved') {
+      await state?.processor?.handle(parsed)
+    } else if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
       const state = getProfileState(profile)
       if (state?.managedEngine?.ready && !state.managedRegistered) {
         state.managedRegistered = true

@@ -140,6 +140,22 @@ const durableChat = (number = 1, overrides = {}) => {
   }
 }
 
+const preparedInspectionFinal = message => ({
+  schemaVersion: 1, contract: 'juyiting-typed-inspection-final-v1', requestId: message.requestId,
+  turnId: message.turnId, dispatchId: message.dispatchId,
+  outboundMessageId: `inspection_final_${createHash('sha256').update(message.dedupeKey).digest('hex')}`,
+  finalDigest: 'sha256:' + 'd'.repeat(64),
+  result: {
+    status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed',
+    threadId: 'engine-thread-final', turnId: 'engine-turn-final', threadKey: 'thk:final', inputDigest: 'sha256:' + 'e'.repeat(64)
+  }
+})
+
+const finalSavedAck = (message, overrides = {}) => ({
+  type: 'agent_message_saved', channel: 'agent', timestamp: Date.now(), turnId: message.turnId,
+  messageId: '501', eventId: 'event-final-501', duplicate: false, ...overrides
+})
+
 const createChatRuntime = (rootDir, options = {}) => {
   const inbox = new PersistentCommandInbox({ rootDir, profile })
   const chatInbox = new PersistentChatInbox({ rootDir, profile })
@@ -501,6 +517,87 @@ test('processor retains a durably prepared INSPECT final in recovery instead of 
   assert.ok(runtime.sent.some(ack => ack.dispatchId === message.dispatchId && ack.status === 'recovery_required' && ack.errorCode === 'FINAL_PUBLISH_NOT_SENT'))
 })
 
+test('trusted final-saved ACK wins the send-return race, archives confirmed completion and accepts duplicate receipt idempotently', async () => {
+  const root = temporaryDirectory(); const rejected = []; const message = durableChat(91, { route: 'INSPECT' })
+  let runtime; let acknowledgements = 0
+  runtime = createChatRuntime(root, {
+    runChat: async (_message, controls) => {
+      const prepared = preparedInspectionFinal(message)
+      controls.markFinalPrepared(prepared)
+      const acknowledged = await runtime.processor.handle(finalSavedAck(message))
+      assert.equal(acknowledged.kind, 'chat-final-saved'); acknowledgements++
+      controls.markFinalPublication({ schemaVersion: 1, outboundMessageId: prepared.outboundMessageId, state: 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED', errorCode: null })
+      return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' }
+    },
+    onReject: error => rejected.push(error)
+  })
+  runtime.processor.start(); await runtime.processor.handle(message); await runtime.processor.waitForIdle()
+  const normalized = normalizeInboundMessage(message); const key = (await import('../chat-runtime.mjs')).durableChatKey(normalized)
+  const archived = runtime.chatInbox.findByKey(key)
+  assert.equal(acknowledgements, 1); assert.equal(archived.state, 'archive'); assert.equal(archived.record.state, 'COMPLETED')
+  assert.equal(archived.record.result.serverPersistence, 'confirmed'); assert.equal(archived.record.result.persistedMessageId, '501')
+  assert.equal(archived.record.finalConfirmation.outboundMessageId, preparedInspectionFinal(message).outboundMessageId)
+  assert.equal(runtime.processor.chatRecoveryRetries.size, 0); assert.deepEqual(rejected, [])
+  assert.equal(runtime.sent.some(envelope => envelope.status === 'recovery_required'), false)
+
+  const duplicate = await runtime.processor.handle(finalSavedAck(message, { duplicate: true, eventId: undefined }))
+  assert.equal(duplicate.kind, 'chat-final-saved'); assert.equal(duplicate.status, 'duplicate')
+  assert.equal(runtime.chatInbox.findByKey(key).record.result.persistedMessageId, '501')
+  runtime.processor.stop()
+})
+
+test('final-saved duplicate ACK completes a prepared recovery after process reload and clears scheduled replay', async () => {
+  const root = temporaryDirectory(); const message = normalizeInboundMessage(durableChat(92, { route: 'INSPECT' }))
+  const seeded = new PersistentChatInbox({ rootDir: root, profile }); seeded.initialize()
+  const accepted = await seeded.accept(message); const claimed = seeded.claim(accepted.key)
+  seeded.markPrepared(claimed, { schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', inputDigest: 'sha256:' + 'a'.repeat(64) })
+  seeded.markFinalPrepared(claimed, preparedInspectionFinal(message)); seeded.recoveryRequired(claimed, 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED')
+
+  let recoveries = 0
+  const runtime = createChatRuntime(root, {
+    recoverChat: async () => { recoveries++; return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' } },
+    chatRecoveryRetryBaseMs: 60000,
+    onReject: () => {}
+  })
+  runtime.processor.chatRecoveryRetryBaseMs = 60000; runtime.processor.chatRecoveryRetryMaxMs = 60000
+  runtime.processor.start()
+  for (let attempt = 0; attempt < 50 && runtime.processor.chatRecoveryRetries.size === 0; attempt++) await new Promise(resolveWait => setTimeout(resolveWait, 10))
+  assert.equal(recoveries, 1); assert.equal(runtime.processor.chatRecoveryRetries.size, 1)
+  const outcome = await runtime.processor.handle(finalSavedAck(message, { duplicate: true, eventId: undefined }))
+  assert.equal(outcome.kind, 'chat-final-saved'); assert.equal(outcome.status, 'confirmed')
+  assert.equal(runtime.processor.chatRecoveryRetries.size, 0)
+  const archived = runtime.chatInbox.findByKey(accepted.key)
+  assert.equal(archived.state, 'archive'); assert.equal(archived.record.result.serverPersistence, 'confirmed')
+  assert.equal(archived.record.result.persistenceDuplicate, true); assert.equal(archived.record.result.persistedEventId, null)
+  runtime.processor.stop()
+})
+
+test('final-saved ACK rejects foreign, ambiguous, stale, unprepared and terminal-conflicting bindings', async () => {
+  const root = temporaryDirectory(); const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+  const unpreparedMessage = normalizeInboundMessage(durableChat(93, { route: 'INSPECT' }))
+  const unprepared = await inbox.accept(unpreparedMessage); inbox.claim(unprepared.key)
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(unpreparedMessage)), error => error.code === 'CHAT_FINAL_ACK_PREPARED_REQUIRED')
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck({ ...unpreparedMessage, turnId: 'foreign-turn' })), error => error.code === 'CHAT_FINAL_ACK_NOT_FOUND')
+  assert.throws(() => inbox.confirmFinalSaved({ ...finalSavedAck(unpreparedMessage), channel: 'foreign' }), error => error.code === 'CHAT_FINAL_ACK_INVALID')
+
+  const sharedTurn = 'stable-turn-ambiguous'
+  for (const number of [94, 95]) {
+    const message = normalizeInboundMessage(durableChat(number, { route: 'INSPECT', turnId: sharedTurn }))
+    const accepted = await inbox.accept(message); const claimed = inbox.claim(accepted.key); inbox.markFinalPrepared(claimed, preparedInspectionFinal(message))
+  }
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck({ ...unpreparedMessage, turnId: sharedTurn })), error => error.code === 'CHAT_FINAL_ACK_AMBIGUOUS')
+
+  const staleMessage = normalizeInboundMessage(durableChat(96, { route: 'INSPECT' }))
+  const staleAccepted = await inbox.accept(staleMessage); const stale = inbox.claim(staleAccepted.key)
+  inbox.markFinalPrepared(stale, preparedInspectionFinal(staleMessage)); inbox.cancelProcessing(stale)
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(staleMessage)), error => error.code === 'CHAT_FINAL_ACK_STALE')
+
+  const confirmedMessage = normalizeInboundMessage(durableChat(97, { route: 'INSPECT' }))
+  const confirmedAccepted = await inbox.accept(confirmedMessage); const confirmed = inbox.claim(confirmedAccepted.key)
+  inbox.markFinalPrepared(confirmed, preparedInspectionFinal(confirmedMessage)); inbox.confirmFinalSaved(finalSavedAck(confirmedMessage))
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(confirmedMessage, { messageId: '502', duplicate: true, eventId: undefined })), error => error.code === 'CHAT_FINAL_ACK_TERMINAL_CONFLICT')
+})
+
 test('production chat runner takes disabled and legacy messages directly to serialized final-only fallback', async () => {
   const gate = new SerialExecutionGate(); const calls = []
   const result = await runProfileChat(profile, { ...chat(), legacy: true, contextSnapshot: { get schemaVersion() { throw new Error('must not inspect snapshot') } } }, {
@@ -730,6 +827,7 @@ test('legacy agent status is ignored only as a non-executable control notificati
     status: 'online'
   }), true)
   assert.equal(isLegacyInboundControlFrame({ type: 'agent_capability_index', agents: [] }), true)
+  assert.equal(isLegacyInboundControlFrame(finalSavedAck(durableChat(98))), true)
   assert.equal(isLegacyInboundControlFrame({ type: 'task_assigned', content: 'do it' }), false)
   assert.equal(isLegacyInboundControlFrame({ type: 'task.assign', content: 'do it' }), false)
   assert.equal(isLegacyInboundControlFrame({ type: 'codex.exec', content: 'do it' }), false)

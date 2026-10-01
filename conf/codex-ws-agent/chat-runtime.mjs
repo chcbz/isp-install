@@ -29,6 +29,17 @@ const visible = (value, max = 512) => typeof value === 'string' && value.length 
 const identity = (value, max = 512) => visible(value, max) && !value.includes(':')
 const decimal = value => typeof value === 'string' && /^[1-9][0-9]{0,18}$/.test(value) && BigInt(value) <= MAX_LONG_DECIMAL
 const decimalOrZero = value => typeof value === 'string' && /^(?:0|[1-9][0-9]{0,18})$/.test(value) && BigInt(value) <= MAX_LONG_DECIMAL
+const finalSavedAck = value => {
+  if (!object(value) || value.type !== 'agent_message_saved' || value.channel !== 'agent' ||
+      !visible(value.turnId) || !decimal(value.messageId) || typeof value.duplicate !== 'boolean' ||
+      (!value.duplicate && !visible(value.eventId))) {
+    const error = new Error('CHAT_FINAL_ACK_INVALID'); error.code = 'CHAT_FINAL_ACK_INVALID'; throw error
+  }
+  return {
+    schemaVersion: 1, turnId: value.turnId, persistedMessageId: value.messageId,
+    eventId: visible(value.eventId) ? value.eventId : null, duplicate: value.duplicate
+  }
+}
 const directoryFsync = path => { const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) } }
 const ensureDirectory = path => {
   const target = resolve(path)
@@ -580,14 +591,35 @@ export class PersistentChatInbox {
   }) }
   markFinalPublication(item, publication) { return this._withLock(() => {
     if (!item || !['processing', 'recovery'].includes(item.state) || !object(publication)) throw new Error('CHAT_FINAL_PUBLICATION_INVALID')
-    const current = existsSync(item.path) ? JSON.parse(readFileSync(item.path, 'utf8')) : item.record
+    const latest = this.findByKey(item.key)
+    if (latest?.record?.state === 'COMPLETED' && latest.record.finalConfirmation?.serverPersistence === 'confirmed') {
+      return latest.record.finalPublication || latest.record.finalConfirmation
+    }
+    if (!latest || !['processing', 'recovery'].includes(latest.state)) throw new Error('CHAT_FINAL_PUBLICATION_STALE')
+    const current = latest.record
     if (!object(current.finalPrepared)) throw new Error('CHAT_FINAL_PREPARED_REQUIRED')
     const record = { ...current, finalPublication: { ...publication, attemptedAt: Date.now() } }
-    atomicJson(item.path, record); item.record = record; return record.finalPublication
+    atomicJson(latest.path, record); latest.record = record; item.path = latest.path; item.state = latest.state; item.record = record
+    return record.finalPublication
   }) }
-  complete(item, result = {}) { return this._withLock(() => this._finalizeTerminal(item, { ...item.record, state: 'COMPLETED', completedAt: Date.now(), result })) }
+  complete(item, result = {}) { return this._withLock(() => {
+    const latest = item?.key ? this.findByKey(item.key) : null
+    if (latest?.record?.state === 'COMPLETED') return latest.record
+    if (!latest || !['processing', 'recovery'].includes(latest.state)) throw new Error('CHAT_COMPLETION_STALE')
+    const completed = this._finalizeTerminal(latest, { ...latest.record, state: 'COMPLETED', completedAt: Date.now(), result })
+    item.path = latest.path; item.state = latest.state; item.record = completed
+    return completed
+  }) }
   cancelProcessing(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'processing') return false; return this._withLock(() => { this._finalizeTerminal(item, { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
-  recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { return this._withLock(() => { const record = { ...item.record, state, recoveryReason: reason, recoveredAt: Date.now() }; const target = this.path('recovery', item.key); atomicJson(item.path, record); durableRename(item.path, target); item.path = target; item.record = record; item.state = 'recovery'; return record }) }
+  recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { return this._withLock(() => {
+    const latest = item?.key ? this.findByKey(item.key) : null
+    if (latest?.record?.state === 'COMPLETED' && latest.record.finalConfirmation?.serverPersistence === 'confirmed') return latest.record
+    if (!latest || !['processing', 'recovery'].includes(latest.state)) throw new Error('CHAT_RECOVERY_TRANSITION_STALE')
+    const record = { ...latest.record, state, recoveryReason: reason, recoveredAt: Date.now() }
+    const target = this.path('recovery', item.key); atomicJson(latest.path, record)
+    if (latest.path !== target) durableRename(latest.path, target)
+    item.path = target; item.record = record; item.state = 'recovery'; return record
+  }) }
   cancelPending(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'pending') return false; return this._withLock(() => { const current = existsSync(item.path) ? JSON.parse(readFileSync(item.path, 'utf8')) : item.record; this._finalizeTerminal(item, { ...current, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
   findExactTurn(stop) {
     const optionalMatch = (actual, expected) => expected === undefined || expected === null || expected === '' || String(actual) === String(expected)
@@ -620,6 +652,60 @@ export class PersistentChatInbox {
     }
     if (matches.size > 1) { const error = new Error('CHAT_STOP_AMBIGUOUS'); error.code = 'CHAT_STOP_AMBIGUOUS'; throw error }
     return matches.values().next().value || null
+  }
+  confirmFinalSaved(rawAck) {
+    const ack = finalSavedAck(rawAck)
+    return this._withLock(() => {
+      const matches = []
+      for (const state of ['pending', 'processing', 'recovery', 'archive']) {
+        for (const name of readdirSync(this[state])) {
+          if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
+          const key = name.slice(0, -5); const path = this.path(state, key)
+          const record = JSON.parse(readFileSync(path, 'utf8'))
+          if (record.message?.turnId === ack.turnId) matches.push({ key, state, path, record })
+        }
+      }
+      if (matches.length > 1) { const error = new Error('CHAT_FINAL_ACK_AMBIGUOUS'); error.code = 'CHAT_FINAL_ACK_AMBIGUOUS'; throw error }
+      if (!matches.length) { const error = new Error('CHAT_FINAL_ACK_NOT_FOUND'); error.code = 'CHAT_FINAL_ACK_NOT_FOUND'; throw error }
+      const item = matches[0]; const prepared = item.record.finalPrepared
+      if (item.record.message?.targetAgentId !== this.profile.agentId) {
+        const error = new Error('CHAT_FINAL_ACK_PROFILE_MISMATCH'); error.code = 'CHAT_FINAL_ACK_PROFILE_MISMATCH'; throw error
+      }
+      if (!object(prepared) || prepared.contract !== 'juyiting-typed-inspection-final-v1' || prepared.turnId !== ack.turnId ||
+          prepared.requestId !== item.record.message?.requestId || prepared.dispatchId !== item.record.message?.dispatchId ||
+          !/^inspection_final_[a-f0-9]{64}$/.test(prepared.outboundMessageId || '') ||
+          !/^sha256:[a-f0-9]{64}$/.test(prepared.finalDigest || '')) {
+        const error = new Error('CHAT_FINAL_ACK_PREPARED_REQUIRED'); error.code = 'CHAT_FINAL_ACK_PREPARED_REQUIRED'; throw error
+      }
+      const existing = item.record.finalConfirmation
+      if (item.record.state === 'COMPLETED' && object(existing)) {
+        const samePersistedMessage = existing.persistedMessageId === ack.persistedMessageId
+        const compatibleEvent = !existing.eventId || !ack.eventId || existing.eventId === ack.eventId
+        if (!samePersistedMessage || !compatibleEvent || existing.serverPersistence !== 'confirmed') {
+          const error = new Error('CHAT_FINAL_ACK_TERMINAL_CONFLICT'); error.code = 'CHAT_FINAL_ACK_TERMINAL_CONFLICT'; throw error
+        }
+        return { status: 'duplicate', key: item.key, record: item.record, confirmation: existing }
+      }
+      if (!['processing', 'recovery'].includes(item.state)) {
+        const error = new Error('CHAT_FINAL_ACK_STALE'); error.code = 'CHAT_FINAL_ACK_STALE'; throw error
+      }
+      const confirmedAt = Date.now()
+      const confirmation = {
+        ...ack, serverPersistence: 'confirmed', profileId: this.profile.profileId,
+        agentId: this.profile.agentId, outboundMessageId: prepared.outboundMessageId, confirmedAt
+      }
+      const preparedResult = object(prepared.result) ? prepared.result : {}
+      const result = {
+        ...preparedResult, status: 'completed', computationStatus: preparedResult.computationStatus || 'completed',
+        serverPersistence: 'confirmed', persistedMessageId: ack.persistedMessageId,
+        persistedEventId: ack.eventId, persistenceDuplicate: ack.duplicate,
+        outboundMessageId: prepared.outboundMessageId
+      }
+      const record = this._finalizeTerminal(item, {
+        ...item.record, state: 'COMPLETED', completedAt: confirmedAt, finalConfirmation: confirmation, result
+      })
+      return { status: 'confirmed', key: item.key, record, confirmation }
+    })
   }
   count(state) { if (state === 'ledger') return this._readDedupeUsage().count; return readdirSync(this[state]).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).length }
 }
