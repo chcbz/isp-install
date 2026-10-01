@@ -417,7 +417,7 @@ export class AppServerAdapter extends EventEmitter {
     let response
     try {
       const userInput = Array.isArray(input) ? input : [{ type: 'text', text: String(input) }]
-      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false } })
+      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false }, ...(policy.outputSchema ? { outputSchema: policy.outputSchema } : {}) })
     } catch (cause) {
       cleanup(); turn.state = 'ACCEPTANCE_UNKNOWN'; turn.error = cause.message
       const reconciliation = await this.reconcileTurn(turn).catch(() => ({ status: 'RECOVERY_REQUIRED' }))

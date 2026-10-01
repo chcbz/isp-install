@@ -36,6 +36,7 @@ import {
   inheritManagedRuntimeCapabilities,
   loadWebSocketClient,
   normalizeInboundMessage,
+  normalizeProfile,
   pollWorkspaceFileCommands,
   resolveProfileAbilities,
   runCodex,
@@ -424,12 +425,28 @@ test('production chat runner takes disabled and legacy messages directly to seri
 
 test('registration and presence truthfully advertise capability contract v1 with Fast CHAT disabled by default', () => {
   const registration = buildAgentRegistrationPayload(profile).runtimeCapabilities
-  const presence = buildAgentPresencePayload(profile, 'online').runtimeCapabilities
+  const presencePayload = buildAgentPresencePayload(profile, 'online')
+  const registrationPayload = buildAgentRegistrationPayload(profile)
+  const presence = presencePayload.runtimeCapabilities
   assert.deepEqual(presence, registration)
+  assert.equal(Object.hasOwn(registrationPayload, 'typedDeliberation'), false)
+  assert.equal(Object.hasOwn(presencePayload, 'typedDeliberation'), false)
   assert.deepEqual(
     registration,
     JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'u0-runtime-capabilities-v1.json'), 'utf8'))
   )
+})
+
+
+test('typed deliberation profile is explicit default-off and declaration downgrades after adapter exit', () => {
+  assert.equal(normalizeProfile({ agentId: 'typed-default' }).typedDeliberationEnabled, false)
+  const configured = normalizeProfile({
+    agentId: 'typed-agent', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
+    chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained'
+  })
+  const live = { closed: false, readback: { initialize: {}, schema: { measured: true, cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' } } }
+  assert.equal(buildAgentRegistrationPayload(configured, null, true, live).typedDeliberation.state, 'READY')
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...live, closed: true } }).typedDeliberation.state, 'UNAVAILABLE')
 })
 
 test('capability contract advertises CHAT only after its read-only-constrained profile is configured', () => {

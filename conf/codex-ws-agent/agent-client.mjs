@@ -52,6 +52,11 @@ import { ControlledImageHttpExecutorV3 } from './controlled-image-http-executor-
 import { buildNativeProviderCredentialBinding } from './controlled-image-http-provider-binding.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import { AppServerAdapter, cleanupCodexAppServerSnapshots, measureCodexAppServerBinary } from './app-server-adapter.mjs'
+import {
+  TYPED_DELIBERATION_CONTRACT_DIGEST, TYPED_DELIBERATION_INSTRUCTIONS, TYPED_DELIBERATION_OUTPUT_SCHEMA,
+  buildTypedDeliberationDeclaration, resolveTypedDeliberationRequest, typedDeliberationAdapterReady, validateTypedInteractionOutcome
+} from './juyiting-typed-outcome.mjs'
+import { TypedOutcomeTextStreamDecoder } from './juyiting-typed-outcome-stream.mjs'
 export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration }
 
 const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
@@ -580,6 +585,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     fastChatEnabled: parseEnabledFlag(profile.fastChatEnabled ?? fallback.fastChatEnabled),
     appServerEnabled: parseEnabledFlag(profile.appServerEnabled ?? fallback.appServerEnabled),
     trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
+    typedDeliberationEnabled: parseEnabledFlag(profile.typedDeliberationEnabled ?? fallback.typedDeliberationEnabled),
     chatInboxMaxFiles: parsePositiveInteger(profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles, 1024),
     chatInboxMaxBytes: parsePositiveInteger(profile.chatInboxMaxBytes ?? fallback.chatInboxMaxBytes, 64 * 1024 * 1024),
     chatArchiveMaxFiles: parsePositiveInteger(profile.chatArchiveMaxFiles ?? fallback.chatArchiveMaxFiles, 256),
@@ -633,6 +639,7 @@ const legacyProfile = () => normalizeProfile({
   fastChatEnabled: process.env.CODEX_FAST_CHAT_ENABLED || false,
   appServerEnabled: process.env.CODEX_APP_SERVER_ENABLED || false,
   trueDeltaEnabled: process.env.CODEX_TRUE_DELTA_ENABLED || false,
+  typedDeliberationEnabled: process.env.CODEX_TYPED_DELIBERATION_ENABLED || false,
   chatInboxMaxFiles: process.env.CODEX_CHAT_INBOX_MAX_FILES || 1024,
   chatInboxMaxBytes: process.env.CODEX_CHAT_INBOX_MAX_BYTES || 67108864,
   chatArchiveMaxFiles: process.env.CODEX_CHAT_ARCHIVE_MAX_FILES || 256,
@@ -3704,36 +3711,45 @@ export const buildRuntimeCapabilities = profile => {
   })
 }
 
-export const buildAgentPresencePayload = (profile, status, extra = {}) => ({
-  status,
-  currentTaskId: extra.taskId || '',
-  currentTaskTitle: extra.title || '',
-  errorMessage: extra.errorMessage || '',
-  abilities: resolveProfileAbilities(profile),
-  runtimeCapabilities: buildRuntimeCapabilities(profile)
-})
+export const buildAgentPresencePayload = (profile, status, extra = {}) => {
+  const typedDeliberation = buildTypedDeliberationDeclaration(profile, extra.appServerAdapter || null)
+  return {
+    status,
+    currentTaskId: extra.taskId || '',
+    currentTaskTitle: extra.title || '',
+    errorMessage: extra.errorMessage || '',
+    abilities: resolveProfileAbilities(profile),
+    runtimeCapabilities: buildRuntimeCapabilities(profile),
+    ...(typedDeliberation ? { typedDeliberation } : {})
+  }
+}
 
-export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false) => ({
-  name: profile.agentName,
-  personaName: profile.personaName,
-  endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
-  abilities: resolveProfileAbilities(profile),
-  runtimeCapabilities: buildRuntimeCapabilities(profile),
-  nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
-  controlledImageBountyExecution: buildControlledImageBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
-  controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration(),
-  nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: nativeRuntime, online })
-})
+export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null) => {
+  const typedDeliberation = buildTypedDeliberationDeclaration(profile, appServerAdapter)
+  return {
+    name: profile.agentName,
+    personaName: profile.personaName,
+    endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
+    abilities: resolveProfileAbilities(profile),
+    runtimeCapabilities: buildRuntimeCapabilities(profile),
+    nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
+    controlledImageBountyExecution: buildControlledImageBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
+    controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration(),
+    nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: nativeRuntime, online }),
+    ...(typedDeliberation ? { typedDeliberation } : {})
+  }
+}
 
-const sendStatus = (profile, status, extra = {}) => sendProtocol(
-  MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, extra), profile
-)
+const sendStatus = (profile, status, extra = {}) => {
+  const state = getProfileState(profile)
+  return sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, { ...extra, appServerAdapter: state?.appServerAdapter || null }), profile)
+}
 
 const registerAgent = profile => {
   const state = getProfileState(profile)
   const envelope = buildProtocolEnvelope(
     MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(
-      profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN
+      profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN, state.appServerAdapter
     ), profile
   )
   return sendRegistrationWithAckObservation({
@@ -4146,6 +4162,10 @@ export const runFastChat = async (profile, message, {
   }
   // Only explicit old protocol may use the compatibility runner. Modern durable CHAT never falls through to legacy execution.
   if (message.legacy || !modern) return legacy('LEGACY_CHAT_PROTOCOL', false)
+  if (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedDeliberation')) {
+    try { validateChatDispatch(message) } catch (error) { throw new AgentProtocolError(error.code || 'TYPED_DELIBERATION_BINDING_INVALID', error.message || 'Invalid typed deliberation dispatch binding') }
+  }
+  const typedRequest = resolveTypedDeliberationRequest(profile, message)
   if (!profile.fastChatEnabled || !profile.appServerEnabled) {
     throw new AgentProtocolError('FAST_CHAT_FEATURE_DISABLED', 'Modern durable CHAT is disabled for this profile; legacy workspace execution is forbidden')
   }
@@ -4163,30 +4183,65 @@ export const runFastChat = async (profile, message, {
     if (permanent) throw new AgentProtocolError(permanent.code || 'APP_SERVER_BINARY_UNTRUSTED', permanent.message || 'Permanent app-server trust failure')
     throw new AgentProtocolError('APP_SERVER_UNAVAILABLE', 'Modern durable CHAT app-server is unavailable; legacy workspace execution is forbidden')
   }
+  if (typedRequest && !typedDeliberationAdapterReady(selectedAdapter)) {
+    throw new AgentProtocolError('TYPED_DELIBERATION_RUNTIME_UNAVAILABLE', 'Typed deliberation requires the initialized measured native output-schema adapter')
+  }
   if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
   const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
-  const effectiveEnginePolicyHash = enginePolicyHash || canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {} })
+  const developerInstructions = typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${TYPED_DELIBERATION_INSTRUCTIONS}` : FAST_CHAT_INSTRUCTIONS
+  const typedContractBinding = typedRequest ? { contractDigest: TYPED_DELIBERATION_CONTRACT_DIGEST, dispatchFacts: typedRequest, outputSchema: TYPED_DELIBERATION_OUTPUT_SCHEMA } : null
+  const effectiveEnginePolicyHash = enginePolicyHash
+    ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
+    : canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {}, ...(typedRequest ? { typedContractBinding } : {}) })
   const effectiveToolPolicyHash = toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
-  const effectiveInstructionSourceHash = instructionSourceHash || canonicalSha256({ source: 'runtime-static', instructions: FAST_CHAT_INSTRUCTIONS })
+  const effectiveInstructionSourceHash = instructionSourceHash
+    ? (typedRequest ? canonicalSha256({ base: instructionSourceHash, typedContractBinding }) : instructionSourceHash)
+    : canonicalSha256({ source: 'runtime-static', instructions: developerInstructions, ...(typedRequest ? { typedContractBinding } : {}) })
   const effectiveModelConfigHash = modelConfigHash || canonicalSha256({ model: profile.chatModel || profile.codexModel || 'default', effort: profile.chatReasoningEffort || '', models: selectedAdapter.readback?.models || {}, config: selectedAdapter.readback?.config || {} })
   const key = buildThreadKey({ tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId, mode: 'CHAT', workspaceScopeHash: 'none', cwd: chatWorkdir, enginePolicyHash: effectiveEnginePolicyHash, toolPolicyHash: effectiveToolPolicyHash, instructionSourceHash: effectiveInstructionSourceHash, modelConfigHash: effectiveModelConfigHash, conversationGeneration: String(message.conversationGeneration) })
   metrics.queueAt = Date.now()
   const prior = bindingStore?.get(key)
   if (prior?.state === 'RECOVERY_REQUIRED') throw Object.assign(new Error('THREAD_BINDING_RECOVERY_REQUIRED'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
-  const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions: FAST_CHAT_INSTRUCTIONS })
+  const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions })
   bindingStore?.put(key, binding)
   metrics.engineStartAt = Date.now()
-  let acceptedTurn = null
+  let acceptedTurn = null; let typedStreamError = null
+  const decoder = typedRequest ? new TypedOutcomeTextStreamDecoder() : null
   try {
     const result = await selectedAdapter.runTurn({
       threadId: binding.threadId, clientUserMessageId: message.messageId, input: JSON.stringify(envelope),
-      policy: { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort },
+      policy: { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, ...(typedRequest ? { outputSchema: TYPED_DELIBERATION_OUTPUT_SCHEMA } : {}) },
       onAccepted: accepted => { acceptedTurn = accepted; controls.markRunning(() => selectedAdapter.interrupt(accepted.threadId, accepted.turnId), accepted) },
-      onDelta: event => { if (!profile.trueDeltaEnabled || !event.content || controls.isCancelled()) return; metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, event.content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn) }
+      onDelta: event => {
+        if (!profile.trueDeltaEnabled || !event.content || controls.isCancelled() || typedStreamError) return
+        let content = event.content
+        if (decoder) {
+          try { content = decoder.push(content) } catch (error) {
+            typedStreamError = error
+            if (acceptedTurn) void selectedAdapter.interrupt(acceptedTurn.threadId, acceptedTurn.turnId).catch(() => {})
+            return
+          }
+        }
+        if (!content) return
+        metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn)
+      }
     })
+    if (typedStreamError) throw typedStreamError
     if (controls.isCancelled()) return { status: 'cancelled', turnId: result.turnId, routeUsed: 'CHAT_FAST', metrics }
     metrics.finalAt = Date.now()
-    sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
+    if (typedRequest) {
+      const outcome = validateTypedInteractionOutcome(result.content, typedRequest)
+      if (profile.trueDeltaEnabled) {
+        const suffix = decoder.finish(outcome.text)
+        if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn) }
+      }
+      sendChatFinal(profile, message, outcome.text, {
+        status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key,
+        resourceReadback: readbackSummary, outcomeContractVersion: 1, interactionOutcome: outcome
+      }, sendProtocolFn)
+    } else {
+      sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
+    }
     metrics.publishAt = Date.now(); bindingStore?.put(key, { ...binding, state: 'IDLE', lastAppliedContextHash: message.contextSnapshot.contextHash, updatedAt: Date.now() })
     return { status: 'completed', turnId: result.turnId, threadKey: key, routeUsed: 'CHAT_FAST', metrics }
   } catch (error) {
@@ -4194,6 +4249,7 @@ export const runFastChat = async (profile, message, {
       bindingStore?.markRecovery(key, error.message)
       if (!error.reconciliation) await selectedAdapter.reconcileTurn(error.turn || acceptedTurn || { threadId: binding.threadId, clientUserMessageId: message.messageId }).catch(() => null)
     }
+    if (typedStreamError && error.code !== 'TURN_ACCEPTANCE_UNKNOWN') throw typedStreamError
     throw error
   }
 }
@@ -5234,11 +5290,13 @@ const createProfileState = profile => {
           if (state.appServerAdapter === adapter) state.appServerAdapter = null
           state.appServerPromise = null
           if (!isCurrent()) return
+          if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
           state.appServerRestartAttempt++; scheduleRestart()
         }
         state.appServerExitListener = exitListener
         adapter.once('exit', exitListener)
         state.appServerAdapter = adapter; state.appServerRestartAttempt = 0; state.appServerNotBefore = 0
+        if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
         return adapter
       }).catch(error => {
         state.appServerAdapter = null; state.appServerRestartAttempt++; state.appServerNotBefore = 0

@@ -1,0 +1,250 @@
+{
+  "schema": "typed-deliberation-client-result-fixture-v1",
+  "contract": "typed-deliberation-client-result-contract-v1.md",
+  "clientSourcePin": "71b26ce69d25a59f223499854b692e597b57d911",
+  "status": "FROZEN_EXPECTATIONS_NOT_EXECUTED",
+  "actualProvider": false,
+  "dispatchFacts": {
+    "schemaVersion": 1,
+    "referenceMode": "AVAILABLE",
+    "supportedOperations": [
+      "GENERATE_IMAGE",
+      "EDIT_IMAGE"
+    ],
+    "availableSources": [
+      {
+        "sourceRefId": "source_1",
+        "kind": "CURRENT_CONVERSATION_ASSET",
+        "mediaType": "image"
+      }
+    ]
+  },
+  "outcomes": [
+    {
+      "schemaVersion": 1,
+      "kind": "ANSWER",
+      "text": "这是一只鸟的创作需求。",
+      "clarification": null,
+      "proposal": null
+    },
+    {
+      "schemaVersion": 1,
+      "kind": "CLARIFY",
+      "text": "你想修改哪一稿？",
+      "clarification": {
+        "question": "你想修改哪一稿？",
+        "requiredFacts": [
+          "SOURCE_SELECTION"
+        ]
+      },
+      "proposal": null
+    },
+    {
+      "schemaVersion": 1,
+      "kind": "EXECUTION_PROPOSAL",
+      "text": "我可以把上一稿的羽毛颜色调得更鲜艳。",
+      "clarification": null,
+      "proposal": {
+        "operation": "EDIT_IMAGE",
+        "instruction": "把羽毛颜色调得更鲜艳，保持鸟的姿态",
+        "sourceRefIds": [
+          "source_1"
+        ]
+      }
+    }
+  ],
+  "expectedRuntimeCases": [
+    {
+      "id": "ANSWER_union",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "CLARIFY_union",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "PROPOSAL_exact_source",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "native_outputSchema_passed",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "plain_CHAT_byte_compatible",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "top_level_text_stream_not_raw_JSON",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "field_order_and_all_chunk_splits",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "escaped_quotes_backslashes_unicode_surrogates",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "duplicate_unknown_keys_refused",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "illegal_UNAVAILABLE_mode_refused",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "unsupported_operation_no_authority",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "forged_source_no_lookup_or_execution",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "EDIT_requires_single_current_image",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "no_snapshot_contract_no_prose_parsing",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "disabled_or_unmeasured_adapter_zero_run",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "cancel_no_final_sidecar",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "unknown_turn_no_new_model_call",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "typed_thread_separate_plain",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "defaultoff_capability_omitted",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "adapter_exit_capability_unavailable",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "final_content_equals_text",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "metadata_text_prefix_consistent",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "prompt_injection_DATA_only",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "all_legacy_controlled_wire_regression",
+      "execution": "NOT_RUN"
+    }
+  ],
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "schemaVersion": {
+        "type": "integer",
+        "enum": [
+          1
+        ]
+      },
+      "kind": {
+        "type": "string",
+        "enum": [
+          "ANSWER",
+          "CLARIFY",
+          "EXECUTION_PROPOSAL"
+        ]
+      },
+      "text": {
+        "type": "string"
+      },
+      "clarification": {
+        "anyOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "question": {
+                "type": "string"
+              },
+              "requiredFacts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "SOURCE_SELECTION",
+                    "REFERENCE_REQUIRED",
+                    "REQUIREMENT_DETAILS",
+                    "OPERATION_CHOICE"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "question",
+              "requiredFacts"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "proposal": {
+        "anyOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "GENERATE_IMAGE",
+                  "EDIT_IMAGE"
+                ]
+              },
+              "instruction": {
+                "type": "string"
+              },
+              "sourceRefIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "operation",
+              "instruction",
+              "sourceRefIds"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "required": [
+      "schemaVersion",
+      "kind",
+      "text",
+      "clarification",
+      "proposal"
+    ],
+    "additionalProperties": false
+  }
+}
