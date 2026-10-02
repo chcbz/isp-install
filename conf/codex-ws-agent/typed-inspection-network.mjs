@@ -40,6 +40,17 @@ const poll = signal => new Promise((resolve, reject) => {
   signal?.addEventListener('abort', aborted, { once: true })
 })
 
+export const buildProviderTlsProbe = ({ timeoutSeconds, proxyPort, authority, host, caPath }) => String.raw`import socket,ssl,sys,json,hashlib
+t=${JSON.stringify(timeoutSeconds)};proxy=('10.0.2.2',${proxyPort});authority=${JSON.stringify(authority)};host=${JSON.stringify(host)};ca=${JSON.stringify(caPath)}
+s=socket.create_connection(proxy,t);s.settimeout(t);s.sendall(('CONNECT '+authority+' HTTP/1.1\r\nHost: '+authority+'\r\n\r\n').encode('ascii'));d=b''
+while b'\r\n\r\n' not in d and len(d)<4096:
+ chunk=s.recv(4096)
+ if not chunk:break
+ d+=chunk
+if b' 200 ' not in d.split(b'\r\n',1)[0]:print(d[:128].decode('ascii','replace'));sys.exit(9)
+ctx=ssl.create_default_context(cafile=ca);tls=ctx.wrap_socket(s,server_hostname=host);cert=tls.getpeercert(binary_form=True);print(json.dumps({'protocol':tls.version(),'peerCertificateSha256':'sha256:'+hashlib.sha256(cert).hexdigest()}));tls.close()
+`
+
 export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs } = {}) => {
   let url
   try { url = new URL(baseUrl) } catch { fail('TYPED_INSPECTION_PROVIDER_ORIGIN_REQUIRED') }
@@ -240,16 +251,7 @@ export class RestrictedProviderEgress {
     if (sandboxPath !== '/trust/ca-bundle.pem' || !/^sha256:[a-f0-9]{64}$/.test(expectedDigest || '')) fail('TYPED_INSPECTION_EGRESS_CA_BINDING_INVALID')
     const caPath = `/proc/${owner.holder.pid}/root${sandboxPath}`
     if (`sha256:${sha256File(caPath)}` !== expectedDigest) fail('TYPED_INSPECTION_EGRESS_CA_BINDING_INVALID')
-    const probe = `import socket,ssl,sys,json,hashlib
-t=${JSON.stringify(timeoutSeconds)};proxy=('10.0.2.2',${this.port});authority=${JSON.stringify(authority)};host=${JSON.stringify(provider.hostname)};ca=${JSON.stringify(caPath)}
-s=socket.create_connection(proxy,t);s.settimeout(t);s.sendall(('CONNECT '+authority+' HTTP/1.1\r\nHost: '+authority+'\r\n\r\n').encode('ascii'));d=b''
-while b'\r\n\r\n' not in d and len(d)<4096:
- chunk=s.recv(4096)
- if not chunk:break
- d+=chunk
-if b' 200 ' not in d.split(b'\r\n',1)[0]:print(d[:128].decode('ascii','replace'));sys.exit(9)
-ctx=ssl.create_default_context(cafile=ca);tls=ctx.wrap_socket(s,server_hostname=host);cert=tls.getpeercert(binary_form=True);print(json.dumps({'protocol':tls.version(),'peerCertificateSha256':'sha256:'+hashlib.sha256(cert).hexdigest()}));tls.close()
-`
+    const probe = buildProviderTlsProbe({ timeoutSeconds, proxyPort: this.port, authority, host: provider.hostname, caPath })
     const tested = await this._nsenter(owner.holder.pid, [this.pythonBin, '-c', probe], { signal })
     if (tested.status !== 0) fail('TYPED_INSPECTION_EGRESS_TLS_FAILED', `${tested.stdout || ''}${tested.stderr || ''}`.trim())
     let readback; try { readback = JSON.parse(String(tested.stdout || '').trim()) } catch { fail('TYPED_INSPECTION_EGRESS_TLS_READBACK_INVALID') }

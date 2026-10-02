@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { RestrictedProviderEgress, restrictedProviderNetworkPolicy, verifyRestrictedNftReadback } from '../typed-inspection-network.mjs'
+import { spawnSync } from 'node:child_process'
+import { buildProviderTlsProbe, RestrictedProviderEgress, restrictedProviderNetworkPolicy, verifyRestrictedNftReadback } from '../typed-inspection-network.mjs'
 
 const hostNs = Object.freeze({ dev: '1', ino: '10', link: 'net:[10]' })
 const privateNs = Object.freeze({ dev: '1', ino: '20', link: 'net:[20]' })
@@ -39,6 +40,14 @@ const egressFor = processInspector => new RestrictedProviderEgress({
   spawnFn: () => { throw new Error('network command must not start during owner guard tests') }
 })
 const child = () => ({ pid: 200, exitCode: null })
+
+test('generated provider TLS probe preserves escaped CRLF and parses as Python before any network execution', () => {
+  const probe = buildProviderTlsProbe({ timeoutSeconds: 15, proxyPort: 43210, authority: 'provider.example:443', host: 'provider.example', caPath: '/proc/123/root/trust/ca-bundle.pem' })
+  assert.match(probe, /\\r\\nHost:/)
+  assert.equal(probe.includes("HTTP/1.1\r\nHost:"), false)
+  const parsed = spawnSync('/usr/bin/python3', ['-c', 'import ast,sys; ast.parse(sys.stdin.read())'], { input: probe, encoding: 'utf8' })
+  assert.equal(parsed.status, 0, parsed.stderr)
+})
 
 test('restricted provider policy binds one exact HTTPS authority and explicit transport timeout', () => {
   assert.deepEqual(restrictedProviderNetworkPolicy('https://provider.example:8443/v1', { connectTimeoutMs: 250 }), {
