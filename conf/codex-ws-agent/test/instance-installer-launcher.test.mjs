@@ -278,6 +278,7 @@ test('instance installer rejects unsafe names and symlinked roots before target 
   try {
     const outside = resolve(fixture.root, 'outside')
     mkdirSync(outside)
+    rmSync(fixture.instanceRoot, { recursive: true, force: true })
     mkdirSync(dirname(fixture.instanceRoot), { recursive: true })
     symlinkSync(outside, fixture.instanceRoot)
     const result = runInstaller(fixture, 'safe-name')
