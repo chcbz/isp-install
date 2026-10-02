@@ -1,15 +1,84 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
-import { buildTypedInspectionCodexConfig, buildTypedInspectionNativeAttestation, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
+import { buildTypedInspectionCodexConfig, buildTypedInspectionNativeAttestation, loadTypedInspectionCarrierEvidence, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
 import { RestrictedProviderEgress } from '../typed-inspection-network.mjs'
 
 const enabled = process.env.CYF_TYPED_INSPECTION_NATIVE_PROBE === '1'
 
+
+const evidenceDigest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+const carrierBinding = Object.freeze({
+  profileId: 'inspection-profile', engineContractId: 'engine-contract-v1',
+  enginePolicyDigest: `sha256:${'1'.repeat(64)}`, toolPolicyDigest: `sha256:${'2'.repeat(64)}`,
+  inputPolicyDigest: `sha256:${'3'.repeat(64)}`
+})
+const carrierInput = Object.freeze({ mediaKind: 'image', mimeType: 'image/png', carrier: 'LOCAL_IMAGE', carrierContractDigest: `sha256:${'4'.repeat(64)}` })
+const carrierEvidence = (overrides = {}) => ({
+  schemaVersion: 1, profile: carrierBinding, nativeProbeDigest: `sha256:${'5'.repeat(64)}`,
+  providerId: 'gpt', providerModel: 'gpt-5.6-terra',
+  cases: [{ ...carrierInput, status: 'PASS', sourceSha256: '6'.repeat(64), inputDigest: `sha256:${'7'.repeat(64)}`,
+    resultDigest: `sha256:${'8'.repeat(64)}`, terminalStatus: 'completed', semanticPass: true }],
+  ...overrides
+})
+const writeEvidence = (directory, value = carrierEvidence(), name = 'carrier-evidence.json') => {
+  const path = resolve(directory, name); const bytes = Buffer.from(`${JSON.stringify(value)}\n`)
+  writeFileSync(path, bytes, { mode: 0o600 }); chmodSync(path, 0o600)
+  return { path, bytes, digest: evidenceDigest(bytes) }
+}
+const loadEvidence = ({ path, digest, providerModel = 'gpt-5.6-terra', providerId = 'gpt', binding = carrierBinding } = {}) =>
+  loadTypedInspectionCarrierEvidence({ path, expectedDigest: digest, binding, supportedInputs: [carrierInput],
+    nativeProbeDigest: `sha256:${'5'.repeat(64)}`, providerId, providerModel })
+
+test('carrier readiness evidence is immutable and bound to exact profile, provider, model, source and result digests', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-carrier-evidence-')); chmodSync(root, 0o700)
+  try {
+    const written = writeEvidence(root)
+    const loaded = loadEvidence(written)
+    assert.equal(loaded.digest, written.digest)
+    assert.equal(loaded.providerModel, 'gpt-5.6-terra')
+    assert.deepEqual(loaded.cases, [{ ...carrierInput, sourceSha256: '6'.repeat(64), inputDigest: `sha256:${'7'.repeat(64)}`, resultDigest: `sha256:${'8'.repeat(64)}` }])
+    assert.throws(() => loadEvidence({ ...written, providerModel: 'gpt-5.6-sol' }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+    assert.throws(() => loadEvidence({ ...written, providerId: 'other-provider' }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+    assert.throws(() => loadEvidence({ ...written, binding: { ...carrierBinding, profileId: 'other-profile' } }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+
+    writeFileSync(written.path, Buffer.from(`${JSON.stringify(carrierEvidence({ cases: [{ ...carrierEvidence().cases[0], sourceSha256: '9'.repeat(64) }] }))}\n`), { mode: 0o600 })
+    assert.throws(() => loadEvidence(written), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_DRIFT')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('carrier readiness evidence rejects writable, relative, symlinked and incomplete files', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-carrier-evidence-negative-')); chmodSync(root, 0o700)
+  try {
+    const writable = writeEvidence(root, carrierEvidence(), 'writable.json'); chmodSync(writable.path, 0o622)
+    assert.throws(() => loadEvidence(writable), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_UNSAFE')
+    const target = writeEvidence(root, carrierEvidence(), 'target.json'); const link = resolve(root, 'link.json'); symlinkSync(target.path, link)
+    assert.throws(() => loadEvidence({ path: link, digest: target.digest }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_UNSAFE')
+    assert.throws(() => loadEvidence({ path: 'relative.json', digest: target.digest }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+    const incomplete = writeEvidence(root, carrierEvidence({ cases: [] }), 'incomplete.json')
+    assert.throws(() => loadEvidence(incomplete), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INCOMPLETE')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('accepted exact 1f95 local-image evidence is consumable only under its pinned digest and model', () => {
+  const path = resolve(import.meta.dirname, '..', 'evidence', 'typed-inspection-local-image-gpt-5.6-terra-1f95df2.json')
+  const binding = {
+    profileId: 'mmd-image-understanding-1f95df2-v1', engineContractId: 'codex-app-server-codex-cli-0.159.2-typed-inspection-v1',
+    enginePolicyDigest: 'sha256:d370907dd5a82c75dee79949a03ad8bb2dfd59f60856be7ac4eba247e003c5be',
+    toolPolicyDigest: 'sha256:150f82829ec43496ae09a4eb1504ed81d5e50d4283bb47f5e428f22961f70d69',
+    inputPolicyDigest: 'sha256:39a5950107a345929d852a8b95ffec823e24c2be1c6f841fd4d3402733466b34'
+  }
+  const supportedInputs = [{ mediaKind: 'image', mimeType: 'image/png', carrier: 'LOCAL_IMAGE', carrierContractDigest: 'sha256:fb699e707ec0bef6f874c285276f6cec324406f34a2a75620ba235cf36d0244e' }]
+  const loaded = loadTypedInspectionCarrierEvidence({ path, expectedDigest: 'sha256:d22de19b1b86c988c81deadb2697e5a577fdbc9abb4982ddc015fefa7fd6bdab', binding, supportedInputs,
+    nativeProbeDigest: 'sha256:3a8e6420a9188bdc7229058ce248558b5acbdcdf4c184571dfa6c90b6ceb321b', providerId: 'gpt', providerModel: 'gpt-5.6-terra' })
+  assert.equal(loaded.cases[0].sourceSha256, '7a5842eba1da2ca948f5d982cbfe80dd061b465d787ae83594daacc9318bcbd3')
+  assert.equal(loaded.cases[0].inputDigest, 'sha256:91305fa61ec6934ae79726122d3e3386669c458560813ab39176b7d5ec3deb95')
+})
 
 
 test('restricted profile explicitly enables Codex system proxy routing without embedding proxy endpoints or credentials', () => {
@@ -67,8 +136,11 @@ test('native attestation digest excludes process and filesystem instance telemet
   assert.equal(remeasured, first)
   const network = { schemaVersion: 1, measured: true, policy: { transport: 'fixed-connect-proxy-v1' }, hostCanaryReachableControl: true,
     forbiddenConnectRejected: true, otherHostPortBlocked: true, sandboxCanaryBlocked: true, nftDefaultDropReadback: true,
-    nftRulesDigest: `sha256:${'6'.repeat(64)}`, directInternetProbeBlocked: true, directInternetBlocked: true }
-  assert.equal(canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, nftRulesDigest: `sha256:${'7'.repeat(64)}` } })), canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: network })))
+    nftRulesDigest: `sha256:${'6'.repeat(64)}`, proxyPort: 31001, canaryPort: 31002, packetCounters: { accepted: 1, dropped: 2 },
+    runtimeRoot: '/tmp/measurement-first', directInternetProbeBlocked: true, directInternetBlocked: true }
+  const rerunNetwork = { ...network, nftRulesDigest: `sha256:${'7'.repeat(64)}`, proxyPort: 41001, canaryPort: 41002,
+    packetCounters: { accepted: 30, dropped: 40 }, runtimeRoot: '/tmp/measurement-second' }
+  assert.equal(canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: rerunNetwork })), canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: network })))
   const providerTls = { measured: true, providerAuthority: 'provider.example:443', tlsVerified: true, protocol: 'TLSv1.3', peerCertificateSha256: `sha256:${'8'.repeat(64)}`, caBundleSha256: `sha256:${'9'.repeat(64)}` }
   const withTls = canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, providerTls } }))
   assert.equal(withTls, canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, providerTls: { ...providerTls, protocol: 'TLSv1.2', peerCertificateSha256: `sha256:${'a'.repeat(64)}` } } })))

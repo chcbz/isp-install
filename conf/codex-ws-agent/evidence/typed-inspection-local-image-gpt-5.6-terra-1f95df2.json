@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "profile": {
+    "profileId": "mmd-image-understanding-1f95df2-v1",
+    "engineContractId": "codex-app-server-codex-cli-0.159.2-typed-inspection-v1",
+    "enginePolicyDigest": "sha256:d370907dd5a82c75dee79949a03ad8bb2dfd59f60856be7ac4eba247e003c5be",
+    "toolPolicyDigest": "sha256:150f82829ec43496ae09a4eb1504ed81d5e50d4283bb47f5e428f22961f70d69",
+    "inputPolicyDigest": "sha256:39a5950107a345929d852a8b95ffec823e24c2be1c6f841fd4d3402733466b34"
+  },
+  "nativeProbeDigest": "sha256:3a8e6420a9188bdc7229058ce248558b5acbdcdf4c184571dfa6c90b6ceb321b",
+  "providerId": "gpt",
+  "providerModel": "gpt-5.6-terra",
+  "cases": [
+    {
+      "mediaKind": "image",
+      "mimeType": "image/png",
+      "carrier": "LOCAL_IMAGE",
+      "carrierContractDigest": "sha256:fb699e707ec0bef6f874c285276f6cec324406f34a2a75620ba235cf36d0244e",
+      "status": "PASS",
+      "sourceSha256": "7a5842eba1da2ca948f5d982cbfe80dd061b465d787ae83594daacc9318bcbd3",
+      "inputDigest": "sha256:91305fa61ec6934ae79726122d3e3386669c458560813ab39176b7d5ec3deb95",
+      "resultDigest": "sha256:64126601c2e9934d9549c6d83079e3ba98e8a7285a6f855eb4783faf2337c275",
+      "terminalStatus": "completed",
+      "semanticPass": true
+    }
+  ]
+}

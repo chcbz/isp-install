@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  chmodSync, closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync,
+  chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync,
   openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync
 } from 'node:fs'
 import { dirname, resolve, sep } from 'node:path'
@@ -204,16 +204,47 @@ export const buildTypedInspectionNativeAttestation = ({ schemaMeasurement, bwrap
   mcpCatalogEmpty: mcpCatalogCount === 0
 })
 
-const loadCarrierEvidence = (path, binding, supportedInputs, nativeProbeDigest) => {
-  if (!path) return null
-  const absolute = resolve(path); const lexical = lstatSync(absolute, { bigint: true }); if (lexical.isSymbolicLink() || !lexical.isFile()) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
-  const evidence = JSON.parse(readFileSync(absolute, 'utf8'))
-  const expectedKeys = ['schemaVersion', 'profile', 'nativeProbeDigest', 'providerModel', 'cases']
-  if (!object(evidence) || Object.keys(evidence).sort().join(',') !== expectedKeys.sort().join(',') || evidence.schemaVersion !== 1 || canonicalSha256(evidence.profile) !== canonicalSha256(binding) || evidence.nativeProbeDigest !== nativeProbeDigest || !nonblank(evidence.providerModel) || !Array.isArray(evidence.cases)) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+const HASH = /^[a-f0-9]{64}$/
+const carrierEvidenceBytes = (path, expectedDigest) => {
+  if (!nonblank(path) || resolve(path) !== path || !DIGEST.test(expectedDigest || '')) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+  const absolute = path
+  let resolved; try { resolved = realpathSync(absolute) } catch { fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID') }
+  if (resolved !== absolute) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_UNSAFE')
+  const lexical = lstatSync(absolute, { bigint: true }); const uid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null
+  if (lexical.isSymbolicLink() || !lexical.isFile() || (uid !== null && lexical.uid !== 0n && lexical.uid !== uid) || (lexical.mode & 0o022n) !== 0n) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_UNSAFE')
+  const fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = fstatSync(fd, { bigint: true }); const bytes = readFileSync(fd); const after = fstatSync(fd, { bigint: true }); const current = lstatSync(absolute, { bigint: true })
+    const stable = [after, current].every(value => value.dev === before.dev && value.ino === before.ino && value.size === before.size && value.uid === before.uid && value.mode === before.mode)
+    if (!stable || !before.isFile() || `sha256:${sha256(bytes)}` !== expectedDigest) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_DRIFT')
+    return Object.freeze({ absolute, bytes, digest: expectedDigest })
+  } finally { closeSync(fd) }
+}
+
+export const loadTypedInspectionCarrierEvidence = ({ path, expectedDigest, binding, supportedInputs, nativeProbeDigest, providerId, providerModel } = {}) => {
+  if (!path && !expectedDigest) return null
+  if (!object(binding) || !Array.isArray(supportedInputs) || !DIGEST.test(nativeProbeDigest || '') || !nonblank(providerId) || !nonblank(providerModel)) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+  const loaded = carrierEvidenceBytes(path, expectedDigest)
+  let evidence; try { evidence = JSON.parse(loaded.bytes.toString('utf8')) } catch { fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID') }
+  const expectedKeys = ['schemaVersion', 'profile', 'nativeProbeDigest', 'providerId', 'providerModel', 'cases']
+  if (!object(evidence) || Object.keys(evidence).sort().join(',') !== expectedKeys.sort().join(',') || evidence.schemaVersion !== 1 ||
+      canonicalSha256(evidence.profile) !== canonicalSha256(binding) || evidence.nativeProbeDigest !== nativeProbeDigest ||
+      evidence.providerId !== providerId || evidence.providerModel !== providerModel || !Array.isArray(evidence.cases)) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
   const expected = new Set(supportedInputs.map(item => [item.mediaKind, item.mimeType, item.carrier, item.carrierContractDigest].join('\u001f')))
-  const passed = new Set(evidence.cases.filter(item => object(item) && item.status === 'PASS').map(item => [item.mediaKind, item.mimeType, item.carrier, item.carrierContractDigest].join('\u001f')))
-  if (expected.size !== passed.size || [...expected].some(key => !passed.has(key))) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INCOMPLETE')
-  return Object.freeze({ path: absolute, digest: `sha256:${sha256(readFileSync(absolute))}`, providerModel: evidence.providerModel })
+  const passed = new Set()
+  const caseKeys = ['mediaKind', 'mimeType', 'carrier', 'carrierContractDigest', 'status', 'sourceSha256', 'inputDigest', 'resultDigest', 'terminalStatus', 'semanticPass']
+  for (const item of evidence.cases) {
+    if (!object(item) || Object.keys(item).sort().join(',') !== caseKeys.sort().join(',') || item.status !== 'PASS' || item.terminalStatus !== 'completed' || item.semanticPass !== true ||
+        !nonblank(item.mediaKind) || !nonblank(item.mimeType) || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT'].includes(item.carrier) ||
+        !DIGEST.test(item.carrierContractDigest || '') || !HASH.test(item.sourceSha256 || '') || !DIGEST.test(item.inputDigest || '') || !DIGEST.test(item.resultDigest || '')) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+    const key = [item.mediaKind, item.mimeType, item.carrier, item.carrierContractDigest].join('\u001f')
+    if (passed.has(key)) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+    passed.add(key)
+  }
+  if (expected.size !== passed.size || evidence.cases.length !== expected.size || [...expected].some(key => !passed.has(key))) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INCOMPLETE')
+  return Object.freeze({ path: loaded.absolute, digest: loaded.digest, providerId: evidence.providerId, providerModel: evidence.providerModel,
+    cases: Object.freeze(evidence.cases.map(item => Object.freeze({ sourceSha256: item.sourceSha256, inputDigest: item.inputDigest, resultDigest: item.resultDigest,
+      mediaKind: item.mediaKind, mimeType: item.mimeType, carrier: item.carrier, carrierContractDigest: item.carrierContractDigest }))) })
 }
 
 export class TypedInspectionProfileRuntime {
@@ -292,7 +323,10 @@ export class TypedInspectionProfileRuntime {
       const nativeProbe = { schemaVersion: 1, schemaContractId: schemaMeasurement.schemaContractId, processExecutable: isolatedReadback.processExecutable, bwrap: this.bwrap, view, authSourceDigest: isolatedState.authDigest, isolatedConfigDigest: isolatedState.configDigest, credentialIsolation: isolatedReadback.credentialIsolation, executionNetworkReadback: executionNetworkAttestation, providerSystemProxyEnabled: executionReadback?.providerSystemProxy?.enabled === true, providerCaTrust: executionReadback?.providerCaTrust || null, modelCount: Array.isArray(isolatedReadback.models?.data) ? isolatedReadback.models.data.length : null, mcpCatalogCount: isolatedReadback.tools.data.length }
       const nativeAttestation = buildTypedInspectionNativeAttestation({ schemaMeasurement, bwrap: this.bwrap, view, isolatedConfigDigest: isolatedState.configDigest, mcpCatalogCount: isolatedReadback.tools.data.length, executionNetworkAttestation })
       const nativeAttestationDigest = canonicalSha256(nativeAttestation)
-      const carrierEvidence = loadCarrierEvidence(this.profile.typedInspectionCarrierEvidencePath, binding, supportedInputs, nativeAttestationDigest)
+      const providerModel = String(this.profile.chatModel || this.profile.codexModel || '')
+      const carrierEvidence = loadTypedInspectionCarrierEvidence({ path: this.profile.typedInspectionCarrierEvidencePath,
+        expectedDigest: this.profile.typedInspectionCarrierEvidenceDigest, binding, supportedInputs, nativeProbeDigest: nativeAttestationDigest,
+        providerId: this.profile.typedInspectionProviderId, providerModel })
       this.nativeReadback = executionReadback
       this.contractReadback = carrierEvidence && executionReadback && executionNetworkAttestation ? Object.freeze({ schemaVersion: 1, measured: true, ...binding, toolPolicy: 'MANIFEST_READ_ONLY', recovery: 'durable-inbox-turn-readback-v1', supportedInputs }) : null
       this.measurement = Object.freeze({ schemaVersion: 1, measured: true, binding, supportedInputs, nativeProbe: Object.freeze(nativeProbe), nativeAttestation, nativeAttestationDigest, nativeProbeDigest: nativeAttestationDigest, carrierEvidence, providerExecutionNetwork: executionNetworkAttestation ? 'restricted-proxy-measured-no-paid-turn' : 'isolated-measurement-only', providerExecutionNetworkAttestation: executionNetworkAttestation, providerSystemProxyEnabled: nativeProbe.providerSystemProxyEnabled, providerCaTrustDigest: nativeProbe.providerCaTrust?.sha256 || null, contractReady: Boolean(this.contractReadback) })

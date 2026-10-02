@@ -39,6 +39,7 @@ import {
   normalizeInboundMessage,
   normalizeProfile,
   pollWorkspaceFileCommands,
+  publishTypedInspectionReadiness,
   resolveProfileAbilities,
   runCodex,
   runProfileChat,
@@ -668,6 +669,19 @@ test('registration and presence truthfully advertise capability contract v1 with
   )
 })
 
+
+test('completed typed inspection measurement republishes exact readiness only on an active registered socket', () => {
+  const declaration = { schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', enabled: true }
+  const statuses = []
+  const state = { disposed: false, ws: { readyState: 1 }, registration: { snapshot: () => ({ stage: 'pending_ack' }) },
+    typedInspectionProfileRuntime: { declaration: () => declaration } }
+  assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: (_profile, status) => { statuses.push(status); return true }, busyFn: () => false }), true)
+  assert.deepEqual(statuses, ['online'])
+  state.registration = { snapshot: () => ({ stage: 'idle' }) }
+  assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: () => assert.fail('must not publish before registration'), busyFn: () => false }), false)
+  state.registration = { snapshot: () => ({ stage: 'registered' }) }; state.typedInspectionProfileRuntime = { declaration: () => null }
+  assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: () => assert.fail('must not publish unready declaration'), busyFn: () => false }), false)
+})
 
 test('typed inspection declaration is absent without measured contract readback and exact when ready', () => {
   const declaration = {

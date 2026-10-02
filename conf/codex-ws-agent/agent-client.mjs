@@ -617,6 +617,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     typedInspectionProviderNetwork: String(profile.typedInspectionProviderNetwork ?? fallback.typedInspectionProviderNetwork ?? 'isolated').trim(),
     typedInspectionNetworkConnectTimeoutMs: parseOptionalPositiveInteger(profile.typedInspectionNetworkConnectTimeoutMs ?? fallback.typedInspectionNetworkConnectTimeoutMs),
     typedInspectionCarrierEvidencePath: String(profile.typedInspectionCarrierEvidencePath ?? fallback.typedInspectionCarrierEvidencePath ?? '').trim(),
+    typedInspectionCarrierEvidenceDigest: String(profile.typedInspectionCarrierEvidenceDigest ?? fallback.typedInspectionCarrierEvidenceDigest ?? '').trim(),
     typedInspectionBwrapBin: String(profile.typedInspectionBwrapBin ?? fallback.typedInspectionBwrapBin ?? '/usr/bin/bwrap').trim(),
     typedInspectionSupportedInputs: parseJsonArray(profile.typedInspectionSupportedInputs ?? fallback.typedInspectionSupportedInputs, 'typedInspectionSupportedInputs'),
     chatInboxMaxFiles: parsePositiveInteger(profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles, 1024),
@@ -685,6 +686,7 @@ const legacyProfile = () => normalizeProfile({
   typedInspectionProviderNetwork: process.env.CODEX_TYPED_INSPECTION_PROVIDER_NETWORK || 'isolated',
   typedInspectionNetworkConnectTimeoutMs: process.env.CODEX_TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_MS || '',
   typedInspectionCarrierEvidencePath: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_PATH || '',
+  typedInspectionCarrierEvidenceDigest: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_DIGEST || '',
   typedInspectionBwrapBin: process.env.CODEX_TYPED_INSPECTION_BWRAP_BIN || '/usr/bin/bwrap',
   typedInspectionSupportedInputs: process.env.CODEX_TYPED_INSPECTION_SUPPORTED_INPUTS || '',
   chatInboxMaxFiles: process.env.CODEX_CHAT_INBOX_MAX_FILES || 1024,
@@ -3899,6 +3901,13 @@ const sendStatus = (profile, status, extra = {}) => {
   return sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, { ...extra, appServerAdapter: state?.appServerAdapter || null, typedInspectionProfileRuntime: state?.typedInspectionProfileRuntime || null }), profile)
 }
 
+export const publishTypedInspectionReadiness = (profile, state, { sendStatusFn = sendStatus, busyFn = isProfileBusy } = {}) => {
+  const stage = state?.registration?.snapshot?.().stage
+  if (!state || state.disposed || !state.typedInspectionProfileRuntime?.declaration?.() ||
+      !['pending_ack', 'ack_timeout', 'registered'].includes(stage) || state.ws?.readyState !== 1) return false
+  return sendStatusFn(profile, busyFn(profile) ? 'busy' : 'online') === true
+}
+
 const registerAgent = profile => {
   const state = getProfileState(profile)
   const envelope = buildProtocolEnvelope(
@@ -4468,7 +4477,11 @@ const profileConfigurationErrors = profile => {
   if (!['isolated', 'restricted-proxy'].includes(profile.typedInspectionProviderNetwork)) errors.push('typedInspectionProviderNetwork must be isolated or restricted-proxy')
   if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an exact provider id and HTTPS base URL')
   if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!Number.isSafeInteger(profile.typedInspectionNetworkConnectTimeoutMs) || profile.typedInspectionNetworkConnectTimeoutMs <= 0)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an explicit positive typedInspectionNetworkConnectTimeoutMs transport timeout')
+  const typedInspectionEvidenceControls = [profile.typedInspectionCarrierEvidencePath, profile.typedInspectionCarrierEvidenceDigest]
+  if (typedInspectionEvidenceControls.some(Boolean) && !typedInspectionEvidenceControls.every(Boolean)) errors.push('typedInspectionCarrierEvidencePath and typedInspectionCarrierEvidenceDigest must be configured together')
   if (profile.typedInspectionCarrierEvidencePath && profile.typedInspectionProviderNetwork !== 'restricted-proxy') errors.push('typedInspectionCarrierEvidencePath requires typedInspectionProviderNetwork=restricted-proxy')
+  if (profile.typedInspectionCarrierEvidenceDigest && !/^sha256:[a-f0-9]{64}$/.test(profile.typedInspectionCarrierEvidenceDigest)) errors.push('typedInspectionCarrierEvidenceDigest must be an exact sha256 digest')
+  if (profile.typedInspectionCarrierEvidencePath && !(profile.chatModel || profile.codexModel)) errors.push('typedInspectionCarrierEvidencePath requires an explicit chatModel or codexModel')
   if (!profile.typedInspectionBwrapBin) errors.push('typedInspectionBwrapBin is required')
   try { resolveCodexAppServerSchemaContract(profile) } catch (error) { errors.push(error.message) }
   const chatInboxMaxFiles = profile.chatInboxMaxFiles ?? 1024
@@ -5462,7 +5475,10 @@ const createProfileState = profile => {
   }
   state.ensureTypedInspectionProfile = async () => {
     if (!state.typedInspectionProfileRuntime || state.typedInspectionProfileFailure) return state.typedInspectionProfileRuntime
-    if (!state.typedInspectionProfilePromise) state.typedInspectionProfilePromise = state.typedInspectionProfileRuntime.measure().catch(error => {
+    if (!state.typedInspectionProfilePromise) state.typedInspectionProfilePromise = state.typedInspectionProfileRuntime.measure().then(() => {
+      if (!state.disposed && profileStates.get(profile.agentId) === state) publishTypedInspectionReadiness(profile, state)
+      return state.typedInspectionProfileRuntime
+    }).catch(error => {
       state.typedInspectionProfileFailure = error
       console.warn(`typed inspection profile unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
       return null
