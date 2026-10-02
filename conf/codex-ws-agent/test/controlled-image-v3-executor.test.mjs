@@ -166,3 +166,40 @@ test('unknown network outcome retains the v3 claim and restart attempt never fet
   assert.equal(calls, 1)
   assert.equal(existsSync(f.ledger.claimPath(selected.commandId)), true)
 })
+
+// Observed existing Codex connection response: data[0] also contains generation_id.
+test('provider generation_id metadata preserves exact output bytes and never authorizes a second call', async t => {
+  const f = fixture(t)
+  let calls = 0
+  const executor = make(f, async url => {
+    calls++
+    return response(url, { data: [{ b64_json: png.toString('base64'), generation_id: 'provider-generation-1' }] })
+  })
+  const selected = command('metadata_response')
+  const args = { command: selected, runDirectory: f.runDirectory, inputs: [] }
+  const output = await executor.execute(args)
+  assert.deepEqual(output, { outputId: 'output_1', contentType: 'image/png', bytes: png })
+  await assert.rejects(executor.execute(args), error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')
+  assert.equal(calls, 1)
+})
+
+test('generation metadata cannot replace image bytes or introduce alternative output/authority fields', async t => {
+  const cases = [
+    { generation_id: 'provider-generation-1' },
+    ...[null, 3, {}, [], ''].map(generation_id => ({ b64_json: png.toString('base64'), generation_id })),
+    { b64_json: 'not base64!', generation_id: 'provider-generation-1' },
+    { b64_json: png.toString('base64'), generation_id: 'provider-generation-1', url: 'https://example.test/image.png' },
+    { b64_json: png.toString('base64'), generation_id: 'provider-generation-1', outputId: 'other-output' }
+  ]
+  for (const [index, item] of cases.entries()) {
+    await t.test(String(index), async t => {
+      const f = fixture(t)
+      let calls = 0
+      const executor = make(f, async url => { calls++; return response(url, { data: [item] }) })
+      const args = { command: command(`metadata_invalid_${index}`), runDirectory: f.runDirectory, inputs: [] }
+      await assert.rejects(executor.execute(args), error => error.code === 'CONTROLLED_IMAGE_RESPONSE_INVALID')
+      await assert.rejects(executor.execute(args), error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')
+      assert.equal(calls, 1)
+    })
+  }
+})

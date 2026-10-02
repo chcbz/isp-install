@@ -135,9 +135,13 @@ const responsePng = async (response, endpoint) => {
     fail('CONTROLLED_IMAGE_OUTCOME_UNKNOWN', 'controlled image Provider response could not be read')
   }
   if (!isObject(payload) || !Array.isArray(payload.data) || payload.data.length !== 1
-      || !isObject(payload.data[0]) || Object.keys(payload.data[0]).sort().join(',') !== 'b64_json') {
+      || !isObject(payload.data[0])
+      || !['b64_json', 'b64_json,generation_id'].includes(Object.keys(payload.data[0]).sort().join(','))
+      || (Object.hasOwn(payload.data[0], 'generation_id')
+        && (typeof payload.data[0].generation_id !== 'string' || !payload.data[0].generation_id))) {
     fail('CONTROLLED_IMAGE_RESPONSE_INVALID', 'controlled image Provider response must contain exactly one base64 image')
   }
+  // Provider generation_id is opaque metadata, never an output/command identity.
   return decodeCanonicalPng(payload.data[0].b64_json)
 }
 
