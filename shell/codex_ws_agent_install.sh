@@ -21,6 +21,56 @@ CURRENT_LINK="$APP_HOME/current"
 STAGED_RELEASE=""
 ACTIVE_RELEASE=""
 PYTHON_BIN=""
+SOURCE_COMMIT=""
+SOURCE_TREE=""
+
+# Keep this allowlist explicit. A new release-local import or contract must be reviewed here and
+# covered by the isolated collation test before it can become an advertised runtime capability.
+RELEASE_PAYLOAD=(
+    ".gitignore"
+    "README.md"
+    "agent-client.mjs"
+    "app-server-adapter.mjs"
+    "chat-runtime.mjs"
+    "codex-home.example.toml"
+    "codex-profiles.conf"
+    "contracts/api-hosted-wire-v1.json"
+    "contracts/api-hosted-wire-v1.provenance.json"
+    "contracts/probes/api-long-history-wire.mjs"
+    "controlled-image-bounty-capability.mjs"
+    "controlled-image-bounty-v3-capability.mjs"
+    "controlled-image-http-config.mjs"
+    "controlled-image-http-executor-v3.mjs"
+    "controlled-image-http-executor.mjs"
+    "controlled-image-http-ledger.mjs"
+    "controlled-image-http-provider-binding.mjs"
+    "conversation-controlled-image-v3.mjs"
+    "conversation-controlled-image.mjs"
+    "conversation-native.mjs"
+    "conversation-reference-inputs-v3.mjs"
+    "conversation-reference-inputs.mjs"
+    "env.example"
+    "evidence/typed-inspection-local-image-gpt-5.6-terra-1f95df2.json"
+    "install-policy-check.mjs"
+    "juyiting-typed-outcome-stream.mjs"
+    "juyiting-typed-outcome.mjs"
+    "managed-host.mjs"
+    "native-bounty-capability.mjs"
+    "package-lock.json"
+    "package.json"
+    "registration-ack.mjs"
+    "report-outbox.mjs"
+    "skill-install-manager.mjs"
+    "toolchain/delivery_tool.py"
+    "toolchain/requirements.txt"
+    "typed-inspection-input-carriers.mjs"
+    "typed-inspection-network.mjs"
+    "typed-inspection-profile.mjs"
+    "typed-inspection-runtime.mjs"
+    "workspace-file-bridge.mjs"
+    "workspace-manager.mjs"
+    "workspace-policies.example.json"
+)
 
 cleanup_staged_release() {
     if [ -n "${STAGED_RELEASE:-}" ] && [ -e "$STAGED_RELEASE" ]; then
@@ -157,30 +207,112 @@ prepare_managed_layout() {
     secure_existing_private_file "$APP_HOME/codex-session-map.json"
 }
 
+sha256_file() {
+    sha256sum -- "$1" | awk '{print $1}'
+}
+
+resolve_source_identity() {
+    SOURCE_COMMIT="${CODEX_WS_AGENT_SOURCE_COMMIT:-}"
+    SOURCE_TREE="${CODEX_WS_AGENT_SOURCE_TREE:-}"
+    if { [ -z "$SOURCE_COMMIT" ] || [ -z "$SOURCE_TREE" ]; } && command -v git >/dev/null 2>&1 \
+        && git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse 'HEAD^{commit}')"
+        SOURCE_TREE="$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')"
+    fi
+    if [[ ! "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]]; then
+        __red "无法确定 exact source commit/tree；拒绝生成无来源制品。"
+        return 1
+    fi
+}
+
+payload_mode() {
+    case "$1" in
+        toolchain/delivery_tool.py) printf '0755\n' ;;
+        workspace-policies.example.json) printf '0640\n' ;;
+        evidence/*) printf '0444\n' ;;
+        *) printf '0644\n' ;;
+    esac
+}
+
+verify_release_payload() {
+    local release_dir="$1"
+    local manifest="$release_dir/release-manifest.sha256"
+    local provenance="$release_dir/release-provenance.json"
+    local integrity="$release_dir/release-integrity.sha256"
+    if [ -L "$manifest" ] || [ ! -f "$manifest" ] || [ -L "$provenance" ] || [ ! -f "$provenance" ] \
+        || [ -L "$integrity" ] || [ ! -f "$integrity" ]; then
+        __red "release 完整性元数据缺失或不安全: $release_dir"
+        return 1
+    fi
+    if [ "$(wc -l < "$manifest")" -ne "${#RELEASE_PAYLOAD[@]}" ]; then
+        __red "release payload 清单数量不匹配: $release_dir"
+        return 1
+    fi
+    if ! (cd "$release_dir" && sha256sum --quiet -c release-manifest.sha256 \
+        && sha256sum --quiet -c release-integrity.sha256); then
+        __red "release payload SHA-256 校验失败: $release_dir"
+        return 1
+    fi
+}
+
 stage_application_files() {
     local stage="$1"
+    local relative source destination source_hash destination_hash mode
+    local manifest="$stage/release-manifest.sha256"
+    local provenance="$stage/release-provenance.json"
+    local integrity="$stage/release-integrity.sha256"
+    local manifest_hash installer_hash
     install -d -m 0755 "$stage"
-    install -m 0644 "$CONF_SRC/agent-client.mjs" "$stage/agent-client.mjs"
-    install -m 0644 "$CONF_SRC/report-outbox.mjs" "$stage/report-outbox.mjs"
-    install -m 0644 "$CONF_SRC/registration-ack.mjs" "$stage/registration-ack.mjs"
+    resolve_source_identity
+    : > "$manifest"
+    chmod 0600 "$manifest"
+    for relative in "${RELEASE_PAYLOAD[@]}"; do
+        source="$CONF_SRC/$relative"
+        destination="$stage/$relative"
+        if [ -L "$source" ] || [ ! -f "$source" ]; then
+            __red "release payload 源不是普通文件或为符号链接: $source"
+            return 1
+        fi
+        install -d -m 0755 "$(dirname "$destination")"
+        mode="$(payload_mode "$relative")"
+        install -m "$mode" "$source" "$destination"
+        if [ -L "$destination" ] || [ ! -f "$destination" ]; then
+            __red "release payload 目标不是普通文件: $destination"
+            return 1
+        fi
+        source_hash="$(sha256_file "$source")"
+        destination_hash="$(sha256_file "$destination")"
+        if [ "$source_hash" != "$destination_hash" ]; then
+            __red "release payload 复制摘要不匹配: $relative"
+            return 1
+        fi
+        printf '%s  %s\n' "$source_hash" "$relative" >> "$manifest"
+    done
+    chmod 0444 "$manifest"
+    ln -s env.example "$stage/.env.example"
+
+    manifest_hash="$(sha256_file "$manifest")"
+    installer_hash="$(sha256_file "$SCRIPT_DIR/codex_ws_agent_install.sh")"
+    cat > "$provenance" <<EOF
+{
+  "schemaVersion": 1,
+  "artifact": "codex-ws-agent-release",
+  "sourceCommit": "$SOURCE_COMMIT",
+  "sourceTree": "$SOURCE_TREE",
+  "payloadCount": ${#RELEASE_PAYLOAD[@]},
+  "payloadManifest": "release-manifest.sha256",
+  "payloadManifestSha256": "$manifest_hash",
+  "installerSha256": "$installer_hash"
+}
+EOF
+    chmod 0444 "$provenance"
+    (cd "$stage" && sha256sum release-manifest.sha256 release-provenance.json > release-integrity.sha256)
+    chmod 0444 "$integrity"
+    verify_release_payload "$stage"
     if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ] && [ "${CODEX_WS_AGENT_TEST_FAIL_PHASE:-}" = "copy" ]; then
         __red "测试注入：候选 release 源文件复制失败。"
         return 1
     fi
-    install -m 0644 "$CONF_SRC/skill-install-manager.mjs" "$stage/skill-install-manager.mjs"
-    install -m 0644 "$CONF_SRC/managed-host.mjs" "$stage/managed-host.mjs"
-    install -m 0644 "$CONF_SRC/workspace-manager.mjs" "$stage/workspace-manager.mjs"
-    install -m 0644 "$CONF_SRC/workspace-file-bridge.mjs" "$stage/workspace-file-bridge.mjs"
-    install -d -m 0755 "$stage/toolchain"
-    install -m 0755 "$CONF_SRC/toolchain/delivery_tool.py" "$stage/toolchain/delivery_tool.py"
-    install -m 0644 "$CONF_SRC/toolchain/requirements.txt" "$stage/toolchain/requirements.txt"
-    install -m 0644 "$CONF_SRC/install-policy-check.mjs" "$stage/install-policy-check.mjs"
-    install -m 0644 "$CONF_SRC/package.json" "$stage/package.json"
-    install -m 0644 "$CONF_SRC/package-lock.json" "$stage/package-lock.json"
-    install -m 0644 "$CONF_SRC/README.md" "$stage/README.md"
-    install -m 0644 "$CONF_SRC/env.example" "$stage/.env.example"
-    install -m 0644 "$CONF_SRC/codex-home.example.toml" "$stage/codex-home.example.toml"
-    install -m 0640 "$CONF_SRC/workspace-policies.example.json" "$stage/workspace-policies.example.json"
 }
 
 install_runtime_dependencies() {
@@ -234,10 +366,26 @@ install_compatibility_entrypoints() {
     local entry
     local next_link
     # Only static entrypoints/templates: never link persistent .env, profiles, auth, or state.
-    for entry in workspace-manager.mjs agent-client.mjs README.md .env.example codex-home.example.toml; do
+    for entry in workspace-manager.mjs agent-client.mjs README.md .env.example codex-home.example.toml evidence; do
         next_link="$APP_HOME/.${entry}.next-$$"
         ln -s "current/$entry" "$next_link"
         mv -Tf "$next_link" "$APP_HOME/$entry"
+    done
+}
+
+validate_compatibility_entrypoint_targets() {
+    local entry target
+    for entry in workspace-manager.mjs agent-client.mjs README.md .env.example codex-home.example.toml evidence; do
+        target="$APP_HOME/$entry"
+        if [ "$entry" = "evidence" ]; then
+            if [ -e "$target" ] && [ ! -L "$target" ]; then
+                __red "静态 evidence 入口已被非符号链接占用，拒绝覆盖: $target"
+                return 1
+            fi
+        elif [ -d "$target" ] && [ ! -L "$target" ]; then
+            __red "静态兼容入口已被目录占用，拒绝覆盖: $target"
+            return 1
+        fi
     done
 }
 
@@ -255,7 +403,13 @@ collate_release() {
     stage_application_files "$STAGED_RELEASE"
     install_runtime_dependencies "$STAGED_RELEASE"
     install_delivery_toolchain "$STAGED_RELEASE"
+    if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ] && [ "${CODEX_WS_AGENT_TEST_FAIL_PHASE:-}" = "payload-drift" ]; then
+        printf '\nTEST-ONLY-PAYLOAD-DRIFT\n' >> "$STAGED_RELEASE/agent-client.mjs"
+    fi
+    verify_release_payload "$STAGED_RELEASE"
     run_validation_gate "$STAGED_RELEASE"
+    verify_release_payload "$STAGED_RELEASE"
+    validate_compatibility_entrypoint_targets
 
     mv -T "$STAGED_RELEASE" "$final_release"
     STAGED_RELEASE=""
