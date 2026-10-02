@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
+import { ManagedHost } from '../managed-host.mjs'
 import {
   buildAgentRegistrationPayload,
   createControlledImageV3SourceRuntime,
@@ -245,4 +246,62 @@ test('schema v2 exact managed scope selects the frozen GPT CLI adapter without i
   }), source(), authorizations)
   assert.equal(wrongGeneration.controlledImageHttpEnabled, false)
   assert.equal(wrongGeneration.controlledImageExecutorKind, '')
+})
+
+
+test('actual 130-character ManagedHost profile composes loader ledger executors and registration for CLI and HTTP', async t => {
+  const root = mkdtempSync(resolve(tmpdir(), 'managed-image-long-profile-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const ownerJiacn = 'o'.repeat(28)
+  const host = new ManagedHost({ root: resolve(root, 'managed'), templateHome: resolve(root, 'template'),
+    codexBin: '/bin/true', runtimeInstanceId: 'runtime-long-profile', tenantId: 'tenant-a', clientId: 'client-a',
+    ownerJiacn: '*', attachProfile: async () => {}, profileState: () => null, conflicts: () => false,
+    workspacePolicyId: 'managed-policy' })
+  const generated = host.profileFor({ tenantId: 'tenant-a', clientId: 'client-a', ownerJiacn, agentId: AGENT,
+    intentId: GENERATION, apiKey: 'fixture-api-key' })
+  assert.equal(generated.profileId.length, 130)
+  assert.equal(generated.profileId,
+    `managed:owner-${Buffer.from(ownerJiacn).toString('base64url')}:${AGENT}:${GENERATION}`)
+
+  const codexDir = resolve(root, 'codex')
+  const imageGen = resolve(codexDir, 'skills/.system/imagegen/scripts/image_gen.py')
+  const python = resolve(root, 'python')
+  const runner = resolve(codexDir, 'skills/gpt-image-cli/scripts/run.py')
+  const verifier = resolve(codexDir, 'skills/gpt-image-cli/scripts/verify_images.py')
+  for (const path of [resolve(imageGen, '..'), resolve(runner, '..')]) mkdirSync(path, { recursive: true, mode: 0o700 })
+  for (const [path, bytes, mode] of [[python, '#!/bin/sh\nexit 0\n', 0o500], [runner, 'runner\n', 0o400],
+    [verifier, 'verifier\n', 0o400], [imageGen, 'imagegen\n', 0o400]]) writeFileSync(path, bytes, { mode })
+  const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex')
+  const generatedProfile = { ...generated, workspaceFileApiOrigin: 'http://127.0.0.1:10018',
+    workspaceFileRootDir: resolve(root, 'workspace-files') }
+  const longScope = overrides => scope({ ownerJiacn, profileId: generated.profileId,
+    controlledImageHttpLedgerRoot: resolve(root, 'cli-ledger'), controlledImageHttpModelId: 'gpt-image-2.5',
+    controlledImageHttpBindingEpoch: '8', controlledImageExecutorKind: 'GPT_IMAGE_CLI_V1',
+    controlledImageCliPython: python, controlledImageCliPythonSha256: digest(python),
+    controlledImageCliRunner: runner, controlledImageCliRunnerSha256: digest(runner),
+    controlledImageCliVerifier: verifier, controlledImageCliVerifierSha256: digest(verifier),
+    controlledImageCliCodexDir: codexDir, controlledImageCliImageGenSha256: digest(imageGen), ...overrides })
+  const cliScopes = parseManagedImageScopeAuthorizations(JSON.stringify({ schemaVersion: 2,
+    authorizations: [longScope()] }))
+  const cliProfile = resolveManagedRuntimeProfile(generatedProfile, source(), cliScopes)
+  const cliRuntime = createControlledImageV3SourceRuntime({ profile: cliProfile,
+    controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' }, providerFetchFn: async () => assert.fail('must stay idle'),
+    createPollProtocol: () => ({ poll: async () => ({ processed: 0 }) }), runtimeInstanceId: 'managed-cli-long' })
+  assert.equal(cliRuntime.controlledImageV3Ready, true)
+  assert.equal(cliRuntime.adapterKind, 'GPT_IMAGE_CLI_V1')
+  assert.equal(buildAgentRegistrationPayload(cliProfile, null, true, null, null, cliRuntime)
+    .nativeProviderCredentialBinding.enabled, true)
+
+  const httpAuthorization = scope({ ownerJiacn, profileId: generated.profileId,
+    controlledImageHttpLedgerRoot: resolve(root, 'http-ledger') })
+  const httpProfile = resolveManagedRuntimeProfile(generatedProfile, source(),
+    parseManagedImageScopeAuthorizations(document(httpAuthorization)))
+  const httpRuntime = createControlledImageV3SourceRuntime({ profile: httpProfile,
+    controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' }, providerFetchFn: async () => assert.fail('must stay idle'),
+    createPollProtocol: () => ({ poll: async () => ({ processed: 0 }) }), runtimeInstanceId: 'managed-http-long' })
+  assert.equal(httpRuntime.controlledImageV3Ready, true)
+  assert.equal(httpRuntime.adapterKind, 'CONTROLLED_IMAGE_HTTP_V1')
+  const registration = buildAgentRegistrationPayload(httpProfile, null, true, null, null, httpRuntime)
+  assert.equal(registration.controlledImageBountyExecutionV3.enabled, true)
+  assert.equal(registration.nativeProviderCredentialBinding.enabled, true)
 })

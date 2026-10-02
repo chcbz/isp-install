@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 
-import { CONTROLLED_IMAGE_MAX_INPUT_ITEMS } from './controlled-image-http-config.mjs'
+import { CONTROLLED_IMAGE_MAX_INPUT_ITEMS, isControlledImageProfileIdentity } from './controlled-image-http-config.mjs'
 import {
   CONTROLLED_IMAGE_MAX_EDIT_IMAGE_URL_LENGTH,
   CONTROLLED_IMAGE_MAX_OUTPUT_BYTES,
@@ -89,7 +89,7 @@ const responsePng = async (response, endpoint) => {
 export class ControlledImageHttpExecutorV3 {
   #profile; #config; #credential; #fetch; #ledger
   constructor ({ profile, config, credential, fetchFn = globalThis.fetch, ledger } = {}) {
-    if (!profile || !SAFE_ID.test(profile.profileId || '') || !SAFE_ID.test(profile.agentId || '')
+    if (!profile || !isControlledImageProfileIdentity(profile.profileId, profile.agentId) || !SAFE_ID.test(profile.agentId || '')
         || config?.enabled !== true || typeof credential !== 'string' || !credential
         || typeof fetchFn !== 'function' || typeof ledger?.createClaim !== 'function') {
       fail('CONTROLLED_IMAGE_CONFIG_INVALID', 'controlled image v3 executor configuration is incomplete')

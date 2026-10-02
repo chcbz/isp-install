@@ -5,8 +5,15 @@ import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 
 import { ControlledImageHttpLedger } from '../controlled-image-http-ledger.mjs'
+import { CONTROLLED_IMAGE_MAX_PROFILE_ID_LENGTH } from '../controlled-image-http-config.mjs'
 
 const digest = 'a'.repeat(64)
+
+const managedAgent = 'agt_0123456789abcdef0123456789abcdef'
+const managedGeneration = 'hri_00000000-0000-0000-0000-000000000001'
+const managedOwner = 'o'.repeat(28)
+const managedProfile = `managed:owner-${Buffer.from(managedOwner).toString('base64url')}:${managedAgent}:${managedGeneration}`
+const maxManagedProfile = `managed:owner-${Buffer.from('o'.repeat(50)).toString('base64url')}:${managedAgent}:${managedGeneration}`
 const claim = overrides => ({ commandId: 'command-1', requestDigest: digest,
   bindingId: 'binding-1', bindingEpoch: '1', modelId: 'image-model', ...overrides })
 const fixture = t => {
@@ -25,6 +32,38 @@ test('exclusive durable claim survives restart and blocks a second executor', t 
   assert.equal(record.commandId, 'command-1')
   const restarted = new ControlledImageHttpLedger({ rootDir: f.ledgerRoot, profileId: 'profile-a', agentId: 'agent-a' })
   assert.throws(() => restarted.createClaim(claim()), error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')
+})
+
+test('canonical 130-character and maximum ManagedHost profiles keep full identity through claim replay', t => {
+  const f = fixture(t)
+  assert.equal(managedProfile.length, 130)
+  assert.equal(maxManagedProfile.length, CONTROLLED_IMAGE_MAX_PROFILE_ID_LENGTH)
+  for (const [index, profileId] of [managedProfile, maxManagedProfile].entries()) {
+    const rootDir = resolve(f.root, `managed-ledger-${index}`)
+    const first = new ControlledImageHttpLedger({ rootDir, profileId, agentId: managedAgent })
+    const created = first.createClaim(claim({ commandId: 'managed-command' }))
+    assert.equal(JSON.parse(readFileSync(created.path, 'utf8')).profileId, profileId)
+    const restarted = new ControlledImageHttpLedger({ rootDir, profileId, agentId: managedAgent })
+    assert.equal(restarted.claimPath('managed-command'), created.path)
+    assert.throws(() => restarted.createClaim(claim({ commandId: 'managed-command' })),
+      error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')
+  }
+})
+
+test('managed identity admission rejects truncation substitutes mismatched Agents and unrelated overlong IDs', t => {
+  const f = fixture(t)
+  for (const [profileId, agentId] of [
+    [managedProfile.slice(0, -1), managedAgent],
+    [managedProfile, 'agt_11111111111111111111111111111111'],
+    [`profile-${'x'.repeat(123)}`, managedAgent],
+    [`managed:owner-${Buffer.from(`${managedOwner}x`).toString('base64url')}:${managedAgent}:${managedGeneration}x`, managedAgent]
+  ]) assert.throws(() => new ControlledImageHttpLedger({ rootDir: f.ledgerRoot, profileId, agentId }),
+    error => error.code === 'CONTROLLED_IMAGE_LEDGER_CONFIG_INVALID')
+
+  const ledger = new ControlledImageHttpLedger({ rootDir: resolve(f.root, 'valid-ledger'),
+    profileId: managedProfile, agentId: managedAgent })
+  assert.throws(() => ledger.claimPath(`c${'x'.repeat(100)}`),
+    error => error.code === 'CONTROLLED_IMAGE_COMMAND_INVALID')
 })
 
 test('concurrent ledger instances admit exactly one claim', async t => {

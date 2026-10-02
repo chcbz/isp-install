@@ -10,7 +10,7 @@ import {
 } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
-import { CONTROLLED_IMAGE_MAX_INPUT_ITEMS } from './controlled-image-http-config.mjs'
+import { CONTROLLED_IMAGE_MAX_INPUT_ITEMS, isControlledImageProfileIdentity } from './controlled-image-http-config.mjs'
 
 const NO_FOLLOW = fsConstants.O_NOFOLLOW || 0
 const SHA256 = /^[a-f0-9]{64}$/
@@ -153,7 +153,7 @@ export class ControlledImageHttpExecutor {
   #ledger
 
   constructor({ profile, config, credential, fetchFn = globalThis.fetch, ledger } = {}) {
-    if (!profile || !SAFE_ID.test(profile.profileId || '') || !SAFE_ID.test(profile.agentId || '')
+    if (!profile || !isControlledImageProfileIdentity(profile.profileId, profile.agentId) || !SAFE_ID.test(profile.agentId || '')
         || config?.enabled !== true || typeof credential !== 'string' || !credential
         || typeof fetchFn !== 'function' || typeof ledger?.createClaim !== 'function') {
       fail('CONTROLLED_IMAGE_CONFIG_INVALID', 'controlled image executor configuration is incomplete')

@@ -11,7 +11,7 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 
-import { CONTROLLED_IMAGE_MAX_INPUT_ITEMS } from './controlled-image-http-config.mjs'
+import { CONTROLLED_IMAGE_MAX_INPUT_ITEMS, isControlledImageProfileIdentity } from './controlled-image-http-config.mjs'
 import { CONTROLLED_IMAGE_GPT_CLI_ADAPTER } from './controlled-image-gpt-cli-config.mjs'
 import { ControlledImageGptCliEgressGate } from './controlled-image-gpt-cli-egress-gate.mjs'
 import {
@@ -119,7 +119,7 @@ export class ControlledImageGptCliExecutorV3 {
 
   constructor ({ profile, providerConfig, cliConfig, credential, ledger, providerFetchFn = globalThis.fetch,
     spawnFn = spawn, createGate = options => new ControlledImageGptCliEgressGate(options) } = {}) {
-    if (!profile || !SAFE_ID.test(profile.profileId || '') || !SAFE_ID.test(profile.agentId || '')
+    if (!profile || !isControlledImageProfileIdentity(profile.profileId, profile.agentId) || !SAFE_ID.test(profile.agentId || '')
         || providerConfig?.enabled !== true || cliConfig?.enabled !== true
         || cliConfig.adapterKind !== CONTROLLED_IMAGE_GPT_CLI_ADAPTER
         || typeof credential !== 'string' || !credential || typeof ledger?.createClaim !== 'function'

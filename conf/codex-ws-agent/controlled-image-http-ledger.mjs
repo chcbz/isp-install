@@ -16,6 +16,8 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, resolve, sep } from 'node:path'
 
+import { CONTROLLED_IMAGE_MAX_PROFILE_ID_LENGTH, isControlledImageProfileIdentity } from './controlled-image-http-config.mjs'
+
 const NO_FOLLOW = fsConstants.O_NOFOLLOW || 0
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const SHA256 = /^[a-f0-9]{64}$/
@@ -25,7 +27,7 @@ const validEpoch = value => {
   try { return BigInt(value) <= LONG_MAX } catch { return false }
 }
 const CLAIM_MAX_BYTES = Buffer.byteLength(`${JSON.stringify({
-  schemaVersion: 1, state: 'CLAIMED', profileId: 'x'.repeat(100), agentId: 'x'.repeat(100),
+  schemaVersion: 1, state: 'CLAIMED', profileId: 'x'.repeat(CONTROLLED_IMAGE_MAX_PROFILE_ID_LENGTH), agentId: 'x'.repeat(100),
   commandId: 'x'.repeat(100), requestDigest: 'a'.repeat(64), bindingId: 'x'.repeat(100),
   bindingEpoch: LONG_MAX.toString(), modelId: 'x'.repeat(100)
 })}\n`, 'utf8')
@@ -120,7 +122,7 @@ export class ControlledImageHttpLedger {
 
   constructor({ rootDir, profileId, agentId } = {}) {
     if (typeof rootDir !== 'string' || !isAbsolute(rootDir)) fail('CONTROLLED_IMAGE_LEDGER_CONFIG_INVALID', 'controlled image ledger root must be absolute')
-    if (!SAFE_ID.test(profileId || '') || !SAFE_ID.test(agentId || '')) {
+    if (!isControlledImageProfileIdentity(profileId, agentId) || !SAFE_ID.test(agentId || '')) {
       fail('CONTROLLED_IMAGE_LEDGER_CONFIG_INVALID', 'controlled image ledger profile and Agent identity must be canonical')
     }
     this.#root = resolve(rootDir)
@@ -167,6 +169,7 @@ export class ControlledImageHttpLedger {
       if (keys !== ['agentId', 'bindingEpoch', 'bindingId', 'commandId', 'modelId', 'profileId', 'requestDigest', 'schemaVersion', 'state'].sort().join(',')
           || record.schemaVersion !== 1 || record.state !== 'CLAIMED'
           || record.profileId !== this.#profileId || record.agentId !== this.#agentId
+          || !isControlledImageProfileIdentity(record.profileId, record.agentId)
           || record.commandId !== expectedCommandId || !SAFE_ID.test(record.commandId || '')
           || !SHA256.test(record.requestDigest || '') || !SAFE_ID.test(record.bindingId || '')
           || !validEpoch(record.bindingEpoch) || !SAFE_ID.test(record.modelId || '')) {
