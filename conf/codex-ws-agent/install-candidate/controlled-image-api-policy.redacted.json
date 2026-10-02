@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "sourceContractCommit": "9ab62d6665c695a574b8b3bde9cfff3ea3ca13d4",
+  "properties": {
+    "agent.controlled-image-provider.bridge-enabled": true,
+    "agent.controlled-image-provider.enabled": true,
+    "agent.controlled-image-provider.followup-v3-enabled": true,
+    "jia.agent.conversation-execution.enabled": true,
+    "jia.chat.service.websocket.enable": true,
+    "chat.bounty-bootstrap.enabled": true,
+    "chat.bounty-execution.enabled": true,
+    "agent.personal-workspace-storage.enabled": true,
+    "agent.task-deliberation-operation.read-enabled": true,
+    "agent.task-requirement-snapshot.read-enabled": true,
+    "agent.task-reference-inputs.enabled": true,
+    "agent.controlled-image-provider.operator-policies[0].tenant-id": "0",
+    "agent.controlled-image-provider.operator-policies[0].client-id": "__EXISTING_CHCBZ_CLIENT_ID__",
+    "agent.controlled-image-provider.operator-policies[0].owner-jiacn": "__EXISTING_CHCBZ_OWNER_JIACN__",
+    "agent.controlled-image-provider.operator-policies[0].target-agent-id": "__EXISTING_WUYONG_AGENT_ID__",
+    "agent.controlled-image-provider.operator-policies[0].provider-lane": "CONTROLLED_IMAGE_HTTP_V1",
+    "agent.controlled-image-provider.operator-policies[0].binding-id": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_ID__",
+    "agent.controlled-image-provider.operator-policies[0].binding-epoch": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_EPOCH__",
+    "agent.controlled-image-provider.operator-policies[0].model-id": "__FROZEN_CONTROLLED_IMAGE_MODEL_ID__",
+    "agent.controlled-image-provider.operator-policies[0].custody": "__FROZEN_OPERATOR_CUSTODY__",
+    "agent.controlled-image-provider.operator-policies[0].issuer": "__FROZEN_OPERATOR_ISSUER__",
+    "agent.controlled-image-provider.operator-policies[0].policy-revision": "__FROZEN_OPERATOR_POLICY_REVISION__",
+    "agent.controlled-image-provider.operator-policies[0].expires-at": "__FROZEN_OPERATOR_POLICY_EXPIRY_EPOCH_MS__",
+    "agent.controlled-image-provider.operator-policies[0].allow-unpriced-external-account": true,
+    "agent.controlled-image-provider.operator-policies[0].max-outbound-request-attempts": 1
+  },
+  "forbiddenClientWireFields": [
+    "producerRequestRevision"
+  ]
+}
