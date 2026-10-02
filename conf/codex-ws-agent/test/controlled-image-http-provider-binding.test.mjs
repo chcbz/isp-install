@@ -63,3 +63,11 @@ test('generic Codex executor can advertise native-v1 but never controlled creden
   assert.equal(payload.nativeBountyExecution.enabled, true)
   assert.deepEqual(payload.nativeProviderCredentialBinding, { schemaVersion: 1, enabled: false })
 })
+
+
+test('exact CLI adapter maps to the existing server controlled provider lane without changing the nine-field wire', () => {
+  const cliRuntime = { ...runtime, adapterKind: 'GPT_IMAGE_CLI_V1', controlledImageV3Ready: true }
+  assert.deepEqual(buildNativeProviderCredentialBinding({ profile, runtime: cliRuntime, online: true }), enabled)
+  assert.equal(buildAgentRegistrationPayload(profile, null, true, null, null, cliRuntime)
+    .nativeProviderCredentialBinding.providerLane, 'CONTROLLED_IMAGE_HTTP_V1')
+})

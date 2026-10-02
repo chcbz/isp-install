@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
@@ -182,4 +183,66 @@ test('exact managed authorization reaches real registration and poll runtime com
   assert.equal(pollOptions[0].agentId, AGENT)
   assert.equal(await runtime.pollProtocol.poll().then(result => result.processed), 0)
   assert.equal(polls, 1)
+})
+
+test('schema v2 exact managed scope selects the frozen GPT CLI adapter without inheriting shared runtime material', async t => {
+  const root = mkdtempSync(resolve(tmpdir(), 'managed-image-cli-scope-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const codexDir = resolve(root, 'codex')
+  const imageGen = resolve(codexDir, 'skills/.system/imagegen/scripts/image_gen.py')
+  const python = resolve(root, 'python')
+  const runner = resolve(codexDir, 'skills/gpt-image-cli/scripts/run.py')
+  const verifier = resolve(codexDir, 'skills/gpt-image-cli/scripts/verify_images.py')
+  for (const path of [resolve(imageGen, '..'), resolve(runner, '..')]) mkdirSync(path, { recursive: true, mode: 0o700 })
+  for (const [path, bytes, mode] of [[python, '#!/bin/sh\nexit 0\n', 0o500], [runner, 'runner\n', 0o400],
+    [verifier, 'verifier\n', 0o400], [imageGen, 'imagegen\n', 0o400]]) writeFileSync(path, bytes, { mode })
+  const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex')
+  const cliAuthorization = scope({
+    controlledImageHttpModelId: 'gpt-image-2.5',
+    controlledImageHttpBindingEpoch: '8',
+    controlledImageHttpLedgerRoot: resolve(root, 'ledger'),
+    controlledImageExecutorKind: 'GPT_IMAGE_CLI_V1',
+    controlledImageCliPython: python,
+    controlledImageCliPythonSha256: digest(python),
+    controlledImageCliRunner: runner,
+    controlledImageCliRunnerSha256: digest(runner),
+    controlledImageCliVerifier: verifier,
+    controlledImageCliVerifierSha256: digest(verifier),
+    controlledImageCliCodexDir: codexDir,
+    controlledImageCliImageGenSha256: digest(imageGen)
+  })
+  const authorizations = parseManagedImageScopeAuthorizations(JSON.stringify({ schemaVersion: 2,
+    authorizations: [cliAuthorization] }))
+  const managed = resolveManagedRuntimeProfile(profile(), source({
+    controlledImageExecutorKind: 'GPT_IMAGE_CLI_V1',
+    controlledImageCliPython: '/shared/python',
+    controlledImageCliPythonSha256: 'f'.repeat(64)
+  }), authorizations)
+  assert.equal(managed.controlledImageExecutorKind, 'GPT_IMAGE_CLI_V1')
+  assert.equal(managed.controlledImageCliPython, python)
+  const ledgerOptions = []; const cliOptions = []; let httpConstructed = false
+  const runtime = createControlledImageV3SourceRuntime({
+    profile: managed,
+    controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' },
+    providerFetchFn: async () => assert.fail('Provider fetch must stay idle'),
+    nativeFetchFn: async () => assert.fail('native fetch is owned by the fake poll protocol'),
+    createLedger: options => { ledgerOptions.push(options); return { createClaim: () => {} } },
+    createHttpExecutor: () => { httpConstructed = true; return { execute () {} } },
+    createCliExecutor: options => { cliOptions.push(options); return { execute: async () => ({}) } },
+    createPollProtocol: () => ({ poll: async () => ({ processed: 0 }) }),
+    runtimeInstanceId: 'managed-cli-runtime'
+  })
+  assert.equal(runtime.controlledImageV3Ready, true)
+  assert.equal(runtime.adapterKind, 'GPT_IMAGE_CLI_V1')
+  assert.equal(httpConstructed, false)
+  assert.equal(cliOptions.length, 1)
+  assert.equal(cliOptions[0].providerConfig.modelId, 'gpt-image-2.5')
+  assert.equal(cliOptions[0].cliConfig.runnerSha256, digest(runner))
+  assert.deepEqual(ledgerOptions, [{ rootDir: resolve(root, 'ledger'), profileId: PROFILE, agentId: AGENT }])
+  assert.equal(buildAgentRegistrationPayload(managed, null, true, null, null, runtime).nativeProviderCredentialBinding.enabled, true)
+  const wrongGeneration = resolveManagedRuntimeProfile(profile({
+    managedGeneration: 'hri_00000000-0000-0000-0000-000000000002'
+  }), source(), authorizations)
+  assert.equal(wrongGeneration.controlledImageHttpEnabled, false)
+  assert.equal(wrongGeneration.controlledImageExecutorKind, '')
 })

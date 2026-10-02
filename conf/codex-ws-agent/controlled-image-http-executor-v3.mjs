@@ -1,92 +1,33 @@
 import { createHash } from 'node:crypto'
-import {
-  closeSync,
-  constants as fsConstants,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  realpathSync
-} from 'node:fs'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { isAbsolute } from 'node:path'
 
 import { CONTROLLED_IMAGE_MAX_INPUT_ITEMS } from './controlled-image-http-config.mjs'
-import { canonicalContextJsonV1, controlledImageV3OperationSourcesValid, isCanonicalPositiveJavaLong } from './conversation-reference-inputs-v3.mjs'
+import {
+  CONTROLLED_IMAGE_MAX_EDIT_IMAGE_URL_LENGTH,
+  CONTROLLED_IMAGE_MAX_OUTPUT_BYTES,
+  canonicalControlledImageRunDirectory,
+  readVerifiedControlledImageV3Input
+} from './controlled-image-v3-files.mjs'
+import { canonicalContextJsonV1, controlledImageV3OperationSourcesValid } from './conversation-reference-inputs-v3.mjs'
 
-const NO_FOLLOW = fsConstants.O_NOFOLLOW || 0
 const SHA256 = /^[a-f0-9]{64}$/
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
-const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
-const MAX_EDIT_IMAGE_URL_LENGTH = 20_971_520
-const MATERIALIZED_FIELDS = ['inputRef', 'relativePath', 'source', 'contentType', 'byteLength', 'sha256'].sort().join(',')
 
 export class ControlledImageHttpV3Error extends Error {
-  constructor(code, message) { super(message); this.name = 'ControlledImageHttpV3Error'; this.code = code }
+  constructor (code, message) { super(message); this.name = 'ControlledImageHttpV3Error'; this.code = code }
 }
 const fail = (code, message) => { throw new ControlledImageHttpV3Error(code, message) }
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
-const effectiveUid = () => typeof process.geteuid === 'function' ? process.geteuid() : null
 
-const assertInside = (parent, child) => {
-  const local = relative(parent, child)
-  if (!local || local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local)) {
-    fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image input escaped the private run directory')
+const verifiedHttpInput = (runDirectory, input, index) => {
+  const verified = readVerifiedControlledImageV3Input(runDirectory, input, index)
+  const dataUrl = `data:${verified.contentType};base64,${verified.bytes.toString('base64')}`
+  if (dataUrl.length > CONTROLLED_IMAGE_MAX_EDIT_IMAGE_URL_LENGTH) {
+    fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image data URL exceeds the official JSON edit limit')
   }
-}
-const sameIdentity = (left, right) => left.dev === right.dev && left.ino === right.ino
-  && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
-
-const readVerifiedInput = (runDirectory, input, index) => {
-  if (!object(input) || Object.keys(input).sort().join(',') !== MATERIALIZED_FIELDS
-      || input.inputRef !== `input_${index + 1}` || !object(input.source)
-      || !['image/jpeg', 'image/png'].includes(input.contentType)
-      || !isCanonicalPositiveJavaLong(input.byteLength) || !SHA256.test(input.sha256 || '')
-      || input.relativePath !== `inputs/${input.inputRef}.${input.contentType === 'image/png' ? 'png' : 'jpg'}`) {
-    fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image v3 input metadata is not canonical')
-  }
-  const path = resolve(runDirectory, input.relativePath)
-  const inputsRoot = resolve(runDirectory, 'inputs')
-  assertInside(inputsRoot, path)
-  let parent = path
-  while (parent !== inputsRoot) {
-    const info = lstatSync(parent)
-    if (info.isSymbolicLink()) fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image input path contains a symbolic link')
-    parent = resolve(parent, '..')
-  }
-  if (realpathSync(inputsRoot) !== inputsRoot) fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image input root is not canonical')
-  const descriptor = openSync(path, fsConstants.O_RDONLY | NO_FOLLOW)
-  try {
-    const before = fstatSync(descriptor, { bigint: true })
-    const uid = effectiveUid()
-    if (!before.isFile() || before.nlink !== 1n || before.size !== BigInt(input.byteLength)
-        || (uid !== null && Number(before.uid) !== uid)) {
-      fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image input is not the expected private regular file')
-    }
-    const bytes = readFileSync(descriptor)
-    const after = fstatSync(descriptor, { bigint: true })
-    if (!sameIdentity(before, after) || BigInt(bytes.length) !== BigInt(input.byteLength) || hash(bytes) !== input.sha256) {
-      fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image input bytes do not match the source-aware snapshot')
-    }
-    const signature = input.contentType === 'image/png' ? PNG_SIGNATURE : JPEG_SIGNATURE
-    if (bytes.length < signature.length || !bytes.subarray(0, signature.length).equals(signature)) {
-      fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image input bytes do not match their declared MIME')
-    }
-    const dataUrl = `data:${input.contentType};base64,${bytes.toString('base64')}`
-    if (dataUrl.length > MAX_EDIT_IMAGE_URL_LENGTH) {
-      fail('CONTROLLED_IMAGE_INPUT_INVALID', 'controlled image data URL exceeds the official JSON edit limit')
-    }
-    return Object.freeze({
-      inputRef: input.inputRef,
-      source: input.source,
-      contentType: input.contentType,
-      sha256: input.sha256,
-      byteLength: input.byteLength,
-      dataUrl
-    })
-  } finally { closeSync(descriptor) }
+  return Object.freeze({ ...verified, dataUrl })
 }
 
 const requestDigest = ({ command, profile, config, inputs, path, body }) => hash(Buffer.from(canonicalContextJsonV1({
@@ -116,7 +57,7 @@ const decodeCanonicalPng = value => {
   }
   const bytes = Buffer.from(value, 'base64')
   if (bytes.toString('base64') !== value || bytes.length < PNG_SIGNATURE.length
-      || bytes.length > MAX_OUTPUT_BYTES || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+      || bytes.length > CONTROLLED_IMAGE_MAX_OUTPUT_BYTES || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
     fail('CONTROLLED_IMAGE_RESPONSE_INVALID', 'controlled image response is not one bounded PNG')
   }
   return bytes
@@ -173,9 +114,8 @@ export class ControlledImageHttpExecutorV3 {
         || !controlledImageV3OperationSourcesValid(command.operation, inputs, command.conversationId)) {
       fail('CONTROLLED_IMAGE_COMMAND_INVALID', 'controlled image v3 operation and sources are not canonical')
     }
-    const canonicalRun = realpathSync(runDirectory)
-    if (canonicalRun !== resolve(runDirectory)) fail('CONTROLLED_IMAGE_COMMAND_INVALID', 'controlled image run directory is not canonical')
-    const verifiedInputs = inputs.map((input, index) => readVerifiedInput(canonicalRun, input, index))
+    const canonicalRun = canonicalControlledImageRunDirectory(runDirectory)
+    const verifiedInputs = inputs.map((input, index) => verifiedHttpInput(canonicalRun, input, index))
     const requestPath = command.operation === 'GENERATE_IMAGE' && verifiedInputs.length === 0
       ? '/v1/images/generations' : '/v1/images/edits'
     const body = verifiedInputs.length

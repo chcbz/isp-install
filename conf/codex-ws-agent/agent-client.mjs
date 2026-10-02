@@ -49,6 +49,13 @@ import {
 import { ControlledImageHttpLedger } from './controlled-image-http-ledger.mjs'
 import { ControlledImageHttpExecutor } from './controlled-image-http-executor.mjs'
 import { ControlledImageHttpExecutorV3 } from './controlled-image-http-executor-v3.mjs'
+import {
+  CONTROLLED_IMAGE_GPT_CLI_ADAPTER,
+  controlledImageGptCliConfigurationErrors,
+  normalizeControlledImageGptCliProfile,
+  resolveControlledImageGptCliConfig
+} from './controlled-image-gpt-cli-config.mjs'
+import { ControlledImageGptCliExecutorV3 } from './controlled-image-gpt-cli-executor-v3.mjs'
 import { buildNativeProviderCredentialBinding } from './controlled-image-http-provider-binding.mjs'
 import {
   emptyManagedImageScopeAuthorizations,
@@ -656,6 +663,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
       profile.nativeConversationImageGenerationEnabled ?? fallback.nativeConversationImageGenerationEnabled
     ),
     ...normalizeControlledImageHttpProfile(profile, fallback),
+    ...normalizeControlledImageGptCliProfile(profile, fallback),
     enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
@@ -4554,6 +4562,7 @@ const profileConfigurationErrors = profile => {
     errors.push('native conversation HTTP poll/executor requires workspaceFileApiOrigin and workspaceFileRootDir')
   }
   errors.push(...controlledImageHttpConfigurationErrors(profile, { env: process.env }))
+  errors.push(...controlledImageGptCliConfigurationErrors(profile))
   return errors
 }
 
@@ -5187,6 +5196,15 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}, managedI
     controlledImageHttpBindingId: controlled?.controlledImageHttpBindingId || '',
     controlledImageHttpBindingEpoch: controlled?.controlledImageHttpBindingEpoch || '',
     controlledImageHttpLedgerRoot: controlled?.controlledImageHttpLedgerRoot || '',
+    controlledImageExecutorKind: controlled?.controlledImageExecutorKind || '',
+    controlledImageCliPython: controlled?.controlledImageCliPython || '',
+    controlledImageCliPythonSha256: controlled?.controlledImageCliPythonSha256 || '',
+    controlledImageCliRunner: controlled?.controlledImageCliRunner || '',
+    controlledImageCliRunnerSha256: controlled?.controlledImageCliRunnerSha256 || '',
+    controlledImageCliVerifier: controlled?.controlledImageCliVerifier || '',
+    controlledImageCliVerifierSha256: controlled?.controlledImageCliVerifierSha256 || '',
+    controlledImageCliCodexDir: controlled?.controlledImageCliCodexDir || '',
+    controlledImageCliImageGenSha256: controlled?.controlledImageCliImageGenSha256 || '',
     executionReportCommandTypes: Array.isArray(source.executionReportCommandTypes)
       ? [...source.executionReportCommandTypes]
       : []
@@ -5204,54 +5222,72 @@ export const createControlledImageV3SourceRuntime = ({
   providerFetchFn = globalThis.fetch,
   nativeFetchFn = globalThis.fetch,
   createLedger = options => new ControlledImageHttpLedger(options),
-  createExecutor = options => new ControlledImageHttpExecutorV3(options),
+  createExecutor = null,
+  createHttpExecutor = createExecutor || (options => new ControlledImageHttpExecutorV3(options)),
+  createCliExecutor = options => new ControlledImageGptCliExecutorV3(options),
   createPollProtocol = options => new ControlledImageConversationLaneV3(options),
   runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID
 } = {}) => {
   const httpPollEnabled = profile?.nativeConversationHttpPollEnabled === true
-  const unavailable = ({ controlledConfig = null, credentialReady = false } = {}) => Object.freeze({
+  const declaredAdapterKind = profile?.controlledImageExecutorKind || ''
+  const cliSelected = declaredAdapterKind === CONTROLLED_IMAGE_GPT_CLI_ADAPTER
+  const adapterKind = cliSelected ? CONTROLLED_IMAGE_GPT_CLI_ADAPTER : CONTROLLED_IMAGE_PROVIDER_LANE
+  const unavailable = ({ controlledConfig = null, cliConfig = null, credentialReady = false } = {}) => Object.freeze({
     configReady: false,
     httpPollEnabled,
     executor: null,
     pollProtocol: null,
-    adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+    adapterKind,
     controlledImageV3Ready: false,
     credentialReady,
-    controlledConfig
+    controlledConfig,
+    cliConfig
   })
   if (profile?.enabled === false || profile?.controlledImageHttpEnabled !== true || !httpPollEnabled
       || !profile?.workspaceFileApiOrigin || !profile?.workspaceFileRootDir || typeof getAuth !== 'function') return unavailable()
+  if (declaredAdapterKind && ![CONTROLLED_IMAGE_PROVIDER_LANE, CONTROLLED_IMAGE_GPT_CLI_ADAPTER].includes(declaredAdapterKind)) {
+    return unavailable()
+  }
   let controlledConfig
-  try { controlledConfig = resolveControlledImageHttpConfig(profile, { env: controlledEnv }) }
-  catch { return unavailable() }
+  let cliConfig = null
+  try {
+    controlledConfig = resolveControlledImageHttpConfig(profile, { env: controlledEnv })
+    if (cliSelected) cliConfig = resolveControlledImageGptCliConfig(profile)
+  } catch { return unavailable() }
+  if (cliSelected && cliConfig?.enabled !== true) return unavailable({ controlledConfig, cliConfig })
   const credential = controlledEnv?.[controlledConfig.apiKeyEnv]
   if (typeof credential !== 'string' || !credential || typeof providerFetchFn !== 'function'
       || typeof nativeFetchFn !== 'function' || typeof createLedger !== 'function'
-      || typeof createExecutor !== 'function' || typeof createPollProtocol !== 'function') {
-    return unavailable({ controlledConfig, credentialReady: false })
+      || typeof createHttpExecutor !== 'function' || typeof createCliExecutor !== 'function'
+      || typeof createPollProtocol !== 'function') {
+    return unavailable({ controlledConfig, cliConfig, credentialReady: false })
   }
   try {
     const ledger = createLedger({ rootDir: controlledConfig.ledgerRoot,
       profileId: profile.profileId, agentId: profile.agentId })
-    const controlledExecutor = createExecutor({ profile, config: controlledConfig,
-      credential, fetchFn: providerFetchFn, ledger })
-    if (typeof controlledExecutor?.execute !== 'function') return unavailable({ controlledConfig, credentialReady: true })
+    const controlledExecutor = cliSelected
+      ? createCliExecutor({ profile, providerConfig: controlledConfig, cliConfig,
+        credential, providerFetchFn, ledger })
+      : createHttpExecutor({ profile, config: controlledConfig,
+        credential, fetchFn: providerFetchFn, ledger })
+    if (typeof controlledExecutor?.execute !== 'function') return unavailable({ controlledConfig, cliConfig, credentialReady: true })
     const executor = args => controlledExecutor.execute(args)
     const pollProtocol = createPollProtocol({ apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir, agentId: profile.agentId, runtimeInstanceId,
       getAuth, fetchFn: nativeFetchFn, execute: executor, controlledConfig })
-    if (typeof pollProtocol?.poll !== 'function') return unavailable({ controlledConfig, credentialReady: true })
+    if (typeof pollProtocol?.poll !== 'function') return unavailable({ controlledConfig, cliConfig, credentialReady: true })
     return Object.freeze({
       configReady: true,
       httpPollEnabled: true,
       executor,
       pollProtocol,
-      adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
+      adapterKind,
       controlledImageV3Ready: true,
       credentialReady: true,
-      controlledConfig
+      controlledConfig,
+      cliConfig
     })
-  } catch { return unavailable({ controlledConfig, credentialReady: true }) }
+  } catch { return unavailable({ controlledConfig, cliConfig, credentialReady: true }) }
 }
 
 export const createNativeBountyExecutionRuntime = ({
@@ -5270,6 +5306,8 @@ export const createNativeBountyExecutionRuntime = ({
 } = {}) => {
   const httpPollEnabled = profile?.nativeConversationHttpPollEnabled === true
   const controlledSelected = profile?.controlledImageHttpEnabled === true
+  const declaredAdapterKind = profile?.controlledImageExecutorKind || ''
+  const cliSelected = declaredAdapterKind === CONTROLLED_IMAGE_GPT_CLI_ADAPTER
   const unavailable = ({ adapterKind = '', controlledConfig = null, credentialReady = false } = {}) => Object.freeze({
     configReady: false,
     httpPollEnabled,
@@ -5290,6 +5328,8 @@ export const createNativeBountyExecutionRuntime = ({
   )
 
   if (controlledSelected) {
+    if (cliSelected) return unavailable({ adapterKind: CONTROLLED_IMAGE_GPT_CLI_ADAPTER })
+    if (declaredAdapterKind && declaredAdapterKind !== CONTROLLED_IMAGE_PROVIDER_LANE) return unavailable()
     let controlledConfig
     try { controlledConfig = resolveControlledImageHttpConfig(profile, { env: controlledEnv }) }
     catch { return unavailable({ adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE }) }

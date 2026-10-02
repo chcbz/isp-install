@@ -7,7 +7,7 @@ import {
 } from './controlled-image-http-config.mjs'
 
 const TOP_LEVEL_KEYS = Object.freeze(['schemaVersion', 'authorizations'])
-const AUTHORIZATION_KEYS = Object.freeze([
+const AUTHORIZATION_KEYS_V1 = Object.freeze([
   'tenantId',
   'clientId',
   'ownerJiacn',
@@ -23,6 +23,19 @@ const AUTHORIZATION_KEYS = Object.freeze([
   'controlledImageHttpBindingEpoch',
   'controlledImageHttpLedgerRoot'
 ])
+
+const CLI_KEYS = Object.freeze([
+  'controlledImageExecutorKind',
+  'controlledImageCliPython',
+  'controlledImageCliPythonSha256',
+  'controlledImageCliRunner',
+  'controlledImageCliRunnerSha256',
+  'controlledImageCliVerifier',
+  'controlledImageCliVerifierSha256',
+  'controlledImageCliCodexDir',
+  'controlledImageCliImageGenSha256'
+])
+const AUTHORIZATION_KEYS_V2 = Object.freeze([...AUTHORIZATION_KEYS_V1, ...CLI_KEYS])
 
 const exactKeys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === expected.length && Object.keys(value).every(key => expected.includes(key))
@@ -54,13 +67,26 @@ const scopeFields = Object.freeze(['tenantId', 'clientId', 'ownerJiacn', 'agentI
 const scopeKey = scope => scopeFields.map(field => scope[field]).join('\0')
 const rootsOverlap = (left, right) => left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`)
 
-const normalizeAuthorization = input => {
-  if (!exactKeys(input, AUTHORIZATION_KEYS) ||
+const normalizeAuthorization = (input, schemaVersion) => {
+  const expectedKeys = schemaVersion === 2 ? AUTHORIZATION_KEYS_V2 : AUTHORIZATION_KEYS_V1
+  if (!exactKeys(input, expectedKeys) ||
       !scopeFields.every(field => exactText(input[field])) ||
       !/^agt_[0-9a-f]{32}$/.test(input.agentId) ||
       !/^hri_[0-9a-f-]{36}$/.test(input.generation) ||
       input.nativeConversationHttpPollEnabled !== true || input.controlledImageHttpEnabled !== true) {
     throw new Error('Invalid managed image scope authorization')
+  }
+  const cli = schemaVersion === 2 ? Object.fromEntries(CLI_KEYS.map(key => [key, input[key]])) : {
+    controlledImageExecutorKind: '', controlledImageCliPython: '', controlledImageCliPythonSha256: '',
+    controlledImageCliRunner: '', controlledImageCliRunnerSha256: '', controlledImageCliVerifier: '',
+    controlledImageCliVerifierSha256: '', controlledImageCliCodexDir: '', controlledImageCliImageGenSha256: ''
+  }
+  if (schemaVersion === 2 && (cli.controlledImageExecutorKind !== 'GPT_IMAGE_CLI_V1'
+      || !['controlledImageCliPython', 'controlledImageCliRunner', 'controlledImageCliVerifier', 'controlledImageCliCodexDir']
+        .every(key => exactText(cli[key]) && isAbsolute(cli[key]))
+      || !['controlledImageCliPythonSha256', 'controlledImageCliRunnerSha256', 'controlledImageCliVerifierSha256',
+        'controlledImageCliImageGenSha256'].every(key => /^[a-f0-9]{64}$/.test(cli[key] || '')))) {
+    throw new Error('Invalid managed image CLI authorization')
   }
   const controlled = {
     controlledImageHttpEnabled: true,
@@ -76,6 +102,7 @@ const normalizeAuthorization = input => {
     ...Object.fromEntries(scopeFields.map(field => [field, input[field]])),
     nativeConversationHttpPollEnabled: true,
     ...controlled,
+    ...cli,
     controlledImageHttpEndpoint: resolved.endpoint,
     controlledImageHttpBindingEpoch: resolved.bindingEpoch,
     controlledImageHttpLedgerRoot: resolved.ledgerRoot
@@ -96,10 +123,10 @@ export const emptyManagedImageScopeAuthorizations = () => Object.freeze({
 export const parseManagedImageScopeAuthorizations = (raw, { reservedProfiles = [] } = {}) => {
   let document
   try { document = JSON.parse(String(raw)) } catch { throw new Error('Managed image scope config must be valid JSON') }
-  if (!exactKeys(document, TOP_LEVEL_KEYS) || document.schemaVersion !== 1 || !Array.isArray(document.authorizations)) {
+  if (!exactKeys(document, TOP_LEVEL_KEYS) || ![1, 2].includes(document.schemaVersion) || !Array.isArray(document.authorizations)) {
     throw new Error('Managed image scope config schema is invalid')
   }
-  const authorizations = document.authorizations.map(normalizeAuthorization)
+  const authorizations = document.authorizations.map(input => normalizeAuthorization(input, document.schemaVersion))
   const byScope = new Map()
   for (const authorization of authorizations) {
     const key = scopeKey(authorization)

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "authorizations": [
     {
       "tenantId": "replace-with-exact-tenant",
@@ -12,10 +12,19 @@
       "controlledImageHttpEnabled": true,
       "controlledImageHttpEndpoint": "https://images.example.test",
       "controlledImageHttpApiKeyEnv": "MANAGED_IMAGE_EXAMPLE_API_KEY",
-      "controlledImageHttpModelId": "replace-with-explicit-model-id",
+      "controlledImageHttpModelId": "gpt-image-2.5",
       "controlledImageHttpBindingId": "replace-with-explicit-binding-id",
       "controlledImageHttpBindingEpoch": "1",
-      "controlledImageHttpLedgerRoot": "/home/isp/apps/codex-ws-agent/data/managed-image-ledgers/replace-with-exact-scope"
+      "controlledImageHttpLedgerRoot": "/home/isp/apps/codex-ws-agent/data/managed-image-ledgers/replace-with-exact-scope",
+      "controlledImageExecutorKind": "GPT_IMAGE_CLI_V1",
+      "controlledImageCliPython": "/replace/with/venv/bin/python",
+      "controlledImageCliPythonSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "controlledImageCliRunner": "/replace/with/codex-home/skills/gpt-image-cli/scripts/run.py",
+      "controlledImageCliRunnerSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "controlledImageCliVerifier": "/replace/with/codex-home/skills/gpt-image-cli/scripts/verify_images.py",
+      "controlledImageCliVerifierSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "controlledImageCliCodexDir": "/replace/with/codex-home",
+      "controlledImageCliImageGenSha256": "0000000000000000000000000000000000000000000000000000000000000000"
     }
   ]
 }
