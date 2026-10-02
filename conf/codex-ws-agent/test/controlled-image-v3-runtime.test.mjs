@@ -6,9 +6,12 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
 import {
+  buildAgentPresencePayload,
   buildAgentRegistrationPayload,
   createControlledImageV3SourceRuntime,
-  normalizeProfile
+  normalizeProfile,
+  startControlledImageV3ConversationPoller,
+  stopControlledImageV3ConversationPoller
 } from '../agent-client.mjs'
 import { controlledImageV3InputDigest } from '../conversation-reference-inputs-v3.mjs'
 
@@ -126,18 +129,31 @@ const setup = (t, { startMode = 'success' } = {}) => {
   return { root, profile, runtime, events, providerCalls: () => providerCalls, startCalls: () => startCalls }
 }
 
-test('registration remains exact disabled while the composed v3 runtime manually executes one exact-asset EDIT', async t => {
+const enabledDeclaration = {
+  schemaVersion: 1, enabled: true, transport: 'PERSONAL_WORKSPACE_CONTROLLED_IMAGE_HTTP_V3',
+  commandSchemaVersions: [3], leaseProtocolVersions: [1], providerStartFenceVersions: [3],
+  resultCommitProtocolVersions: [1], operations: [
+    { operation: 'GENERATE_IMAGE', inputManifest: { schemaVersion: 3, minItems: 0, maxItems: 16,
+      mimeTypes: ['image/jpeg', 'image/png'], sourceKinds: ['TASK_LINKED_WORKSPACE_VERSION'] },
+    resultManifest: { schemaVersion: 1, minItems: 1, maxItems: 1, outputId: 'output_1', mimeTypes: ['image/png'] } },
+    { operation: 'EDIT_IMAGE', inputManifest: { schemaVersion: 3, minItems: 1, maxItems: 1,
+      mimeTypes: ['image/jpeg', 'image/png'], sourceKinds: ['CURRENT_CONVERSATION_ASSET'] },
+    resultManifest: { schemaVersion: 1, minItems: 1, maxItems: 1, outputId: 'output_1', mimeTypes: ['image/png'] } }
+  ]
+}
+
+test('composed v3 runtime advertises exact source-aware GENERATE and EDIT then executes one exact-asset EDIT', async t => {
   const fixture = setup(t)
   assert.equal(fixture.runtime.configReady, true)
   assert.equal(fixture.runtime.credentialReady, true)
-  assert.equal(fixture.runtime.controlledImageV3Ready, false)
+  assert.equal(fixture.runtime.controlledImageV3Ready, true)
   assert.equal(fixture.runtime.adapterKind, 'CONTROLLED_IMAGE_HTTP_V1')
-  const registration = buildAgentRegistrationPayload(fixture.profile, fixture.runtime, true)
-  assert.deepEqual(registration.controlledImageBountyExecutionV3, {
-    schemaVersion: 1, enabled: false, transport: 'PERSONAL_WORKSPACE_CONTROLLED_IMAGE_HTTP_V3',
-    commandSchemaVersions: [3], leaseProtocolVersions: [1], providerStartFenceVersions: [3],
-    resultCommitProtocolVersions: [1], operations: []
-  })
+  const registration = buildAgentRegistrationPayload(fixture.profile, null, true, null, null, fixture.runtime)
+  const presence = buildAgentPresencePayload(fixture.profile, 'online', { controlledImageV3Runtime: fixture.runtime })
+  assert.deepEqual(registration.controlledImageBountyExecutionV3, enabledDeclaration)
+  assert.deepEqual(presence.controlledImageBountyExecutionV3, enabledDeclaration)
+  assert.deepEqual(presence.nativeProviderCredentialBinding, registration.nativeProviderCredentialBinding)
+  assert.equal(registration.nativeProviderCredentialBinding.enabled, true)
 
   assert.deepEqual(await fixture.runtime.pollProtocol.poll(), { processed: 1 })
   assert.equal(fixture.startCalls(), 1)
@@ -145,6 +161,36 @@ test('registration remains exact disabled while the composed v3 runtime manually
   assert.ok(fixture.events.indexOf('provider:/v1/images/edits')
     > fixture.events.indexOf('native:/internal/agent/tasks/task-1/runs/run-edit/conversation/provider-start-controlled-image-v3'))
   assert.equal(filesBelow(resolve(fixture.root, 'ledger')).filter(path => path.endsWith('.json')).length, 1)
+})
+
+test('production v3 poller starts only with a current registration token and stops without duplicate timers', async t => {
+  let polls = 0
+  const state = {
+    conversationControlledImageV3Lane: { poll: async () => { polls++ } },
+    conversationControlledImageV3PollTimer: null,
+    conversationControlledImageV3PollInFlight: false,
+    workspaceFileRuntimeAuthHeader: '',
+    ws: { readyState: 1 },
+    processor: { paused: false },
+    disposed: false
+  }
+  t.after(() => stopControlledImageV3ConversationPoller(state))
+  assert.equal(startControlledImageV3ConversationPoller({ profileId: 'controlled-profile' }, state), false)
+  assert.equal(state.conversationControlledImageV3PollTimer, null)
+  assert.equal(polls, 0)
+
+  state.workspaceFileRuntimeAuthHeader = `AgentRuntime ${'a'.repeat(32)}`
+  assert.equal(startControlledImageV3ConversationPoller({ profileId: 'controlled-profile' }, state), true)
+  await new Promise(resolveImmediate => setImmediate(resolveImmediate))
+  assert.equal(polls, 1)
+  const firstTimer = state.conversationControlledImageV3PollTimer
+  assert.ok(firstTimer)
+  assert.equal(startControlledImageV3ConversationPoller({ profileId: 'controlled-profile' }, state), true)
+  await new Promise(resolveImmediate => setImmediate(resolveImmediate))
+  assert.equal(polls, 2)
+  assert.notEqual(state.conversationControlledImageV3PollTimer, firstTimer)
+  stopControlledImageV3ConversationPoller(state)
+  assert.equal(state.conversationControlledImageV3PollTimer, null)
 })
 
 test('lost or drifted v3 START receipt leaves zero Provider calls and zero pre-call claims', async t => {

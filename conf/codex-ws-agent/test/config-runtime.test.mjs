@@ -534,3 +534,30 @@ test('section-style profile template has a conservative inherited sandbox', t =>
   assert.equal(report.profiles[0].codexSandbox, 'workspace-write')
   assert.equal(report.profiles[0].codexTimeoutMs, 900000)
 })
+
+test('legacy CA bundle environment fallback reaches profile validation without exposing file contents', t => {
+  const root = fixture(t)
+  const selectedProfile = profileFor(root)
+  const common = {
+    CODEX_TYPED_INSPECTION_PROVIDER_NETWORK: 'restricted-proxy',
+    CODEX_TYPED_INSPECTION_PROVIDER_ID: 'gpt',
+    CODEX_TYPED_INSPECTION_PROVIDER_BASE_URL: 'https://provider.example.test/v1',
+    CODEX_TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_MS: '1000'
+  }
+  const relative = runCli(root, [selectedProfile], ['--inspect-config'], {
+    ...common,
+    CODEX_TYPED_INSPECTION_CA_BUNDLE_PATH: 'relative-ca.pem'
+  })
+  assert.equal(relative.status, 1)
+  const relativeReport = JSON.parse(relative.stdout)
+  assert.equal(relativeReport.profiles[0].errors.includes('typedInspectionCaBundlePath must be an absolute path'), true)
+
+  const absolute = runCli(root, [selectedProfile], ['--inspect-config'], {
+    ...common,
+    CODEX_TYPED_INSPECTION_CA_BUNDLE_PATH: '/etc/ssl/certs/ca-certificates.crt'
+  })
+  assert.equal(absolute.status, 0, absolute.stderr)
+  const absoluteReport = JSON.parse(absolute.stdout)
+  assert.equal(absoluteReport.profiles[0].errors.some(error => error.includes('typedInspectionCaBundlePath')), false)
+  assert.equal(absolute.stdout.includes('BEGIN CERTIFICATE'), false)
+})

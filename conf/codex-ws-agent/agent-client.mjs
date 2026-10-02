@@ -616,6 +616,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     typedInspectionProviderWireApi: String(profile.typedInspectionProviderWireApi ?? fallback.typedInspectionProviderWireApi ?? 'responses').trim(),
     typedInspectionProviderNetwork: String(profile.typedInspectionProviderNetwork ?? fallback.typedInspectionProviderNetwork ?? 'isolated').trim(),
     typedInspectionNetworkConnectTimeoutMs: parseOptionalPositiveInteger(profile.typedInspectionNetworkConnectTimeoutMs ?? fallback.typedInspectionNetworkConnectTimeoutMs),
+    typedInspectionCaBundlePath: String(profile.typedInspectionCaBundlePath ?? fallback.typedInspectionCaBundlePath ?? '').trim(),
     typedInspectionCarrierEvidencePath: String(profile.typedInspectionCarrierEvidencePath ?? fallback.typedInspectionCarrierEvidencePath ?? '').trim(),
     typedInspectionCarrierEvidenceDigest: String(profile.typedInspectionCarrierEvidenceDigest ?? fallback.typedInspectionCarrierEvidenceDigest ?? '').trim(),
     typedInspectionBwrapBin: String(profile.typedInspectionBwrapBin ?? fallback.typedInspectionBwrapBin ?? '/usr/bin/bwrap').trim(),
@@ -685,6 +686,7 @@ const legacyProfile = () => normalizeProfile({
   typedInspectionProviderWireApi: process.env.CODEX_TYPED_INSPECTION_PROVIDER_WIRE_API || 'responses',
   typedInspectionProviderNetwork: process.env.CODEX_TYPED_INSPECTION_PROVIDER_NETWORK || 'isolated',
   typedInspectionNetworkConnectTimeoutMs: process.env.CODEX_TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_MS || '',
+  typedInspectionCaBundlePath: process.env.CODEX_TYPED_INSPECTION_CA_BUNDLE_PATH || '',
   typedInspectionCarrierEvidencePath: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_PATH || '',
   typedInspectionCarrierEvidenceDigest: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_DIGEST || '',
   typedInspectionBwrapBin: process.env.CODEX_TYPED_INSPECTION_BWRAP_BIN || '/usr/bin/bwrap',
@@ -3863,9 +3865,16 @@ export const buildRuntimeCapabilities = profile => {
   })
 }
 
+const controlledImageProviderRuntime = (nativeRuntime, controlledImageV3Runtime) => (
+  controlledImageV3Runtime?.controlledImageV3Ready === true ? controlledImageV3Runtime : nativeRuntime
+)
+
 export const buildAgentPresencePayload = (profile, status, extra = {}) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, extra.appServerAdapter || null)
   const typedInspection = extra.typedInspectionProfileRuntime?.declaration?.() || null
+  const online = ['online', 'busy'].includes(status)
+  const controlledImageV3Runtime = extra.controlledImageV3Runtime || null
+  const providerRuntime = controlledImageProviderRuntime(extra.nativeRuntime || null, controlledImageV3Runtime)
   return {
     status,
     currentTaskId: extra.taskId || '',
@@ -3873,14 +3882,22 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => {
     errorMessage: extra.errorMessage || '',
     abilities: resolveProfileAbilities(profile),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
+    controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration({
+      profile, runtime: controlledImageV3Runtime, online
+    }),
+    nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({
+      profile, runtime: providerRuntime, online
+    }),
     ...(typedDeliberation ? { typedDeliberation } : {}),
     ...(typedInspection ? { typedInspection } : {})
   }
 }
 
-export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null, typedInspectionProfileRuntime = null) => {
+export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null,
+  typedInspectionProfileRuntime = null, controlledImageV3Runtime = null) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, appServerAdapter)
   const typedInspection = typedInspectionProfileRuntime?.declaration?.() || null
+  const providerRuntime = controlledImageProviderRuntime(nativeRuntime, controlledImageV3Runtime)
   return {
     name: profile.agentName,
     personaName: profile.personaName,
@@ -3889,8 +3906,10 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
     runtimeCapabilities: buildRuntimeCapabilities(profile),
     nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
     controlledImageBountyExecution: buildControlledImageBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
-    controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration(),
-    nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: nativeRuntime, online }),
+    controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration({
+      profile, runtime: controlledImageV3Runtime, online
+    }),
+    nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: providerRuntime, online }),
     ...(typedDeliberation ? { typedDeliberation } : {}),
     ...(typedInspection ? { typedInspection } : {})
   }
@@ -3898,7 +3917,13 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
 
 const sendStatus = (profile, status, extra = {}) => {
   const state = getProfileState(profile)
-  return sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, { ...extra, appServerAdapter: state?.appServerAdapter || null, typedInspectionProfileRuntime: state?.typedInspectionProfileRuntime || null }), profile)
+  return sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, {
+    ...extra,
+    appServerAdapter: state?.appServerAdapter || null,
+    typedInspectionProfileRuntime: state?.typedInspectionProfileRuntime || null,
+    nativeRuntime: state?.nativeBountyExecutionRuntime || null,
+    controlledImageV3Runtime: state?.controlledImageV3SourceRuntime || null
+  }), profile)
 }
 
 export const publishTypedInspectionReadiness = (profile, state, { sendStatusFn = sendStatus, busyFn = isProfileBusy } = {}) => {
@@ -3912,7 +3937,8 @@ const registerAgent = profile => {
   const state = getProfileState(profile)
   const envelope = buildProtocolEnvelope(
     MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(
-      profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN, state.appServerAdapter, state.typedInspectionProfileRuntime
+      profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN,
+      state.appServerAdapter, state.typedInspectionProfileRuntime, state.controlledImageV3SourceRuntime
     ), profile
   )
   return sendRegistrationWithAckObservation({
@@ -4477,6 +4503,8 @@ const profileConfigurationErrors = profile => {
   if (!['isolated', 'restricted-proxy'].includes(profile.typedInspectionProviderNetwork)) errors.push('typedInspectionProviderNetwork must be isolated or restricted-proxy')
   if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an exact provider id and HTTPS base URL')
   if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!Number.isSafeInteger(profile.typedInspectionNetworkConnectTimeoutMs) || profile.typedInspectionNetworkConnectTimeoutMs <= 0)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an explicit positive typedInspectionNetworkConnectTimeoutMs transport timeout')
+  if (profile.typedInspectionCaBundlePath && profile.typedInspectionProviderNetwork !== 'restricted-proxy') errors.push('typedInspectionCaBundlePath requires typedInspectionProviderNetwork=restricted-proxy')
+  if (profile.typedInspectionCaBundlePath && !isAbsolute(profile.typedInspectionCaBundlePath)) errors.push('typedInspectionCaBundlePath must be an absolute path')
   const typedInspectionEvidenceControls = [profile.typedInspectionCarrierEvidencePath, profile.typedInspectionCarrierEvidenceDigest]
   if (typedInspectionEvidenceControls.some(Boolean) && !typedInspectionEvidenceControls.every(Boolean)) errors.push('typedInspectionCarrierEvidencePath and typedInspectionCarrierEvidenceDigest must be configured together')
   if (profile.typedInspectionCarrierEvidencePath && profile.typedInspectionProviderNetwork !== 'restricted-proxy') errors.push('typedInspectionCarrierEvidencePath requires typedInspectionProviderNetwork=restricted-proxy')
@@ -4997,6 +5025,34 @@ const startNativeConversationPoller = (profile, state) => {
   state.conversationNativePollTimer = setInterval(() => { void tick() }, 3000)
 }
 
+// V3 has a distinct queue, timer, and in-flight guard. It is authenticated by the
+// same current registration token but never shares scheduling state with v1/v2.
+export const stopControlledImageV3ConversationPoller = state => {
+  if (!state) return
+  clearInterval(state.conversationControlledImageV3PollTimer)
+  state.conversationControlledImageV3PollTimer = null
+}
+
+export const startControlledImageV3ConversationPoller = (profile, state) => {
+  stopControlledImageV3ConversationPoller(state)
+  if (!state?.conversationControlledImageV3Lane
+      || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return false
+  const tick = async () => {
+    const openState = WebSocketClient?.OPEN ?? 1
+    if (state.conversationControlledImageV3PollInFlight || state.ws?.readyState !== openState
+        || state.processor.paused || state.disposed) return
+    state.conversationControlledImageV3PollInFlight = true
+    try { await state.conversationControlledImageV3Lane.poll() } catch (error) {
+      const code = typeof error?.code === 'string' && /^CONVERSATION_[A-Z_]{1,80}$/.test(error.code)
+        ? error.code : 'CONVERSATION_UNAVAILABLE'
+      console.warn(`controlled image v3 poll unavailable | profile=${profile.profileId} | code=${code}`)
+    } finally { state.conversationControlledImageV3PollInFlight = false }
+  }
+  void tick()
+  state.conversationControlledImageV3PollTimer = setInterval(() => { void tick() }, 3000)
+  return true
+}
+
 const canonicalizeConfiguredPath = configuredPath => {
   let existingPrefix = resolve(configuredPath)
   const missingSegments = []
@@ -5128,11 +5184,7 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}) => ({
     : []
 })
 
-/**
- * Fully composed source-aware v3 runtime for offline/API integration verification.
- * Registration remains frozen disabled and the production profile poller does not
- * schedule this lane until a later verified capability promotion.
- */
+/** Fully composed source-aware v3 runtime for production registration and polling. */
 export const createControlledImageV3SourceRuntime = ({
   profile,
   getAuth = () => '',
@@ -5183,8 +5235,7 @@ export const createControlledImageV3SourceRuntime = ({
       executor,
       pollProtocol,
       adapterKind: CONTROLLED_IMAGE_PROVIDER_LANE,
-      // Deliberately false until API authority/source and authenticated production polling are verified.
-      controlledImageV3Ready: false,
+      controlledImageV3Ready: true,
       credentialReady: true,
       controlledConfig
     })
@@ -5347,6 +5398,11 @@ const createProfileState = profile => {
     getAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || ''
   })
   const conversationNativeLane = nativeBountyExecutionRuntime.pollProtocol
+  const controlledImageV3SourceRuntime = createControlledImageV3SourceRuntime({
+    profile,
+    getAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || ''
+  })
+  const conversationControlledImageV3Lane = controlledImageV3SourceRuntime.pollProtocol
   const inbox = new PersistentCommandInbox({
     rootDir: config.commandInboxDir,
     profile,
@@ -5425,6 +5481,8 @@ const createProfileState = profile => {
     workspaceFilePollInFlight: false,
     conversationNativePollTimer: null,
     conversationNativePollInFlight: false,
+    conversationControlledImageV3PollTimer: null,
+    conversationControlledImageV3PollInFlight: false,
     reconnectTimer: null,
     reconnectAttempt: 0,
     reconnectStartedAt: 0,
@@ -5452,6 +5510,8 @@ const createProfileState = profile => {
     workspaceFileBridge,
     conversationNativeLane,
     nativeBountyExecutionRuntime,
+    conversationControlledImageV3Lane,
+    controlledImageV3SourceRuntime,
     workspaceFileRuntimeAuthHeader: '',
     processor: null,
     registration: new RegistrationAckObserver({
@@ -5638,6 +5698,7 @@ const handleMessage = async (profile, raw) => {
     state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
     startWorkspaceFilePoller(profile, state)
     startNativeConversationPoller(profile, state)
+    startControlledImageV3ConversationPoller(profile, state)
   }
   if (isLegacyInboundControlFrame(parsed)) {
     if (parsed.type === 'agent_message_saved') {
@@ -5741,6 +5802,7 @@ const resumeRegisteredProfile = (profile, state) => {
   state.processor.resume()
   startWorkspaceFilePoller(profile, state)
   startNativeConversationPoller(profile, state)
+  startControlledImageV3ConversationPoller(profile, state)
   state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
 }
 
@@ -5751,6 +5813,7 @@ const connectProfile = profile => {
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
   stopNativeConversationPoller(state)
+  stopControlledImageV3ConversationPoller(state)
   state.registration.disconnect()
   state.workspaceFileRuntimeAuthHeader = ''
   if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
@@ -5788,6 +5851,7 @@ const connectProfile = profile => {
     clearInterval(state.heartbeatTimer)
     stopWorkspaceFilePoller(state)
     stopNativeConversationPoller(state)
+    stopControlledImageV3ConversationPoller(state)
     state.processor.pause()
     if (!shuttingDown) doReconnect(profile)
   })
@@ -5832,6 +5896,7 @@ export const disposeProfileState = async (state, reason = 'profile removed') => 
   clearInterval(state.heartbeatTimer)
   stopWorkspaceFilePoller(state)
   stopNativeConversationPoller(state)
+  stopControlledImageV3ConversationPoller(state)
   state.registration.disconnect()
   state.workspaceFileRuntimeAuthHeader = ''
   sendStatus(profile, 'offline', { errorMessage: reason })
@@ -5936,6 +6001,7 @@ const shutdown = (exitCode = 0, reason = '') => {
       clearInterval(state?.heartbeatTimer)
       stopWorkspaceFilePoller(state)
       stopNativeConversationPoller(state)
+      stopControlledImageV3ConversationPoller(state)
       state?.registration.disconnect()
       if (state) adapterShutdowns.push(disposeAppServerState(state, { timeoutMs: 5000 }).catch(error => console.error(`app-server shutdown failed | profile=${profile.profileId} | ${error.message}`)))
       sendStatus(profile, 'offline')

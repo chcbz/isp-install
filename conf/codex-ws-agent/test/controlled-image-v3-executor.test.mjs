@@ -48,9 +48,9 @@ const materialized = (f, source, bytes = png, index = 1) => {
   return Object.freeze({ inputRef: `input_${index}`, relativePath, source, contentType,
     byteLength: String(bytes.length), sha256: sha(bytes) })
 }
-const make = (f, fetchFn) => new ControlledImageHttpExecutorV3({
+const make = (f, fetchFn, ledger = f.ledger) => new ControlledImageHttpExecutorV3({
   profile: { profileId: 'profile-a', agentId: 'agent-a' }, config: config(f.root),
-  credential: 'provider-secret', fetchFn, ledger: f.ledger
+  credential: 'provider-secret', fetchFn, ledger
 })
 
 const assertProviderBody = (options, expected) => {
@@ -105,7 +105,7 @@ test('workspace GENERATE and exact current-conversation EDIT route to JSON edits
   }
 })
 
-test('same command with changed operation and source is blocked by the original durable claim', async t => {
+test('same command with changed operation or source revision is blocked by the original durable claim', async t => {
   const f = fixture(t)
   let calls = 0
   const executor = make(f, async url => { calls++; return response(url) })
@@ -116,6 +116,11 @@ test('same command with changed operation and source is blocked by the original 
   const changed = command('command_same', 'EDIT_IMAGE')
   await assert.rejects(executor.execute({ command: changed, runDirectory: f.runDirectory,
     inputs: [{ ...workspace, source: assetSource }] }), error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')
+  const restartedLedger = new ControlledImageHttpLedger({ rootDir: resolve(f.root, 'ledger'), profileId: 'profile-a', agentId: 'agent-a' })
+  const restarted = make(f, async () => { calls++; return response(new URL('https://images.example.test/v1/images/edits')) }, restartedLedger)
+  await assert.rejects(restarted.execute({ command: first, runDirectory: f.runDirectory,
+    inputs: [{ ...workspace, source: { ...workspace.source, version: '4' } }] }),
+  error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')
   assert.equal(calls, 1)
   assert.deepEqual(JSON.parse(readFileSync(f.ledger.claimPath(first.commandId), 'utf8')), originalClaim)
 })
@@ -154,7 +159,9 @@ test('unknown network outcome retains the v3 claim and restart attempt never fet
   const executor = make(f, async () => { calls++; throw new Error('socket lost') })
   await assert.rejects(executor.execute({ command: selected, runDirectory: f.runDirectory, inputs: [] }),
     error => error.code === 'CONTROLLED_IMAGE_OUTCOME_UNKNOWN')
-  await assert.rejects(executor.execute({ command: selected, runDirectory: f.runDirectory, inputs: [] }),
+  const restartedLedger = new ControlledImageHttpLedger({ rootDir: resolve(f.root, 'ledger'), profileId: 'profile-a', agentId: 'agent-a' })
+  const restarted = make(f, async () => { calls++; throw new Error('must not fetch after restart') }, restartedLedger)
+  await assert.rejects(restarted.execute({ command: selected, runDirectory: f.runDirectory, inputs: [] }),
     error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')
   assert.equal(calls, 1)
   assert.equal(existsSync(f.ledger.claimPath(selected.commandId)), true)

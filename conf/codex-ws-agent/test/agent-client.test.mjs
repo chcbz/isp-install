@@ -697,6 +697,16 @@ test('typed inspection declaration is absent without measured contract readback 
   assert.deepEqual(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: ready }).typedInspection, declaration)
 })
 
+test('typed inspection CA bundle path survives exact profile and fallback normalization', () => {
+  const direct = normalizeProfile({ agentId: 'typed-ca-direct', typedInspectionCaBundlePath: '/etc/ssl/custom-ca.pem' })
+  assert.equal(direct.typedInspectionCaBundlePath, '/etc/ssl/custom-ca.pem')
+  const inherited = normalizeProfile({ agentId: 'typed-ca-inherited' }, { typedInspectionCaBundlePath: '/etc/pki/custom-ca.pem' })
+  assert.equal(inherited.typedInspectionCaBundlePath, '/etc/pki/custom-ca.pem')
+  const override = normalizeProfile({ agentId: 'typed-ca-override', typedInspectionCaBundlePath: '/opt/ca/override.pem' },
+    { typedInspectionCaBundlePath: '/etc/pki/custom-ca.pem' })
+  assert.equal(override.typedInspectionCaBundlePath, '/opt/ca/override.pem')
+})
+
 
 test('typed deliberation declaration binds the exact locally selected schema contract and defaults legacy', () => {
   const legacy = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4']; const native = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
