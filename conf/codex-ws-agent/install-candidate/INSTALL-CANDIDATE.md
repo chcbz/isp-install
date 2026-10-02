@@ -1,6 +1,6 @@
 # `wuyong` dual-mode install candidate
 
-This directory is an inert, redacted candidate for one existing `wuyong` identity. It does not create or bind an identity, issue a controlled-image binding, install a release, restart a service, or call a Provider. The existing persona binding `1` is identity evidence only and **must not** be used as the controlled-image provider binding. Persona bindings `1`, `2`, and `15` are rejected by the checker.
+This directory is an inert, redacted candidate for one existing `wuyong` identity. It does not create or bind an identity, issue a controlled-image binding, install a release, restart a service, or call a Provider. An existing persona binding is identity evidence only and is not provider-binding evidence. Numeric values are not globally unique across namespaces, so the checker does not blacklist historical IDs. A provider binding remains `UNVERIFIED` until a separately sourced controlled-image provider-binding receipt type, reference, and digest are frozen with the exact lane/binding/epoch/model tuple.
 
 ## Freeze inputs
 
@@ -14,6 +14,12 @@ Main and the API configuration Owner must separately freeze every placeholder be
 Do not place either secret in the profile, freeze JSON, registration capture, or logs. `producerRequestRevision` is server-owned under API contract commit `9ab62d6665c695a574b8b3bde9cfff3ea3ca13d4`; the Client profile, declaration, command, and freeze must not add or override it.
 
 The template's typed-inspection values are fixed to the accepted evidence: provider `gpt`, `https://codex.chcbz.net/v1`, model `gpt-5.6-terra`, restricted proxy, `/etc/pki/tls/certs/ca-bundle.crt`, profile/engine IDs, carrier evidence digest, and the `LOCAL_IMAGE` contract digest. `normalizeProfile` and the production declaration builders are used by `install-candidate-check.mjs`; no mock loader or hard-coded PASS is used.
+
+## Static scope and Client/API correspondence
+
+`verify-template` and `freeze` return `STATIC_VALID` only. Their enabled declarations are a **synthetic expected registration projection** produced through the production declaration builders with static stand-ins; they do not measure a live executor, poller, credential, socket, isolation run, or runtime readiness. Only post-start authenticated registration and presence readback can establish that the live process emitted the expected shapes.
+
+`controlled-image-api-policy.redacted.json` is deliberately marked `CONTROLLED_IMAGE_PROVIDER_PARTIAL_POLICY` and `fullInstallationReadiness=false`. It freezes only the provider-lane flags and exact operator policy represented by this Client handoff. It is not the complete product/API installation policy: formal-artifact, conversation-archive, selected-output, schema, exact API artifact/config, and full acceptance evidence remain required from Main/API owners and must not be inferred from this partial artifact.
 
 ## Client/API correspondence
 
@@ -43,7 +49,7 @@ node conf/codex-ws-agent/install-candidate/install-candidate-check.mjs freeze \
 chmod 0600 /private/wuyong-dual-mode.freeze.json
 ```
 
-The checker verifies every `release-manifest.sha256` entry byte-for-byte, release provenance/integrity, installer digest, source commit/tree, normalized non-secret profile and minimal environment, secret-reference names, CA bytes, carrier-evidence bytes, complete API properties, and exact declarations. The freeze digest excludes secret bytes, release-root paths, runtime instance IDs, process IDs, random ports, timestamps, nftables counters, and request/turn IDs. Thus another process using the identical source, payload, profile, policy, CA, and evidence has the same contract digest; native isolation remains a per-execution check and is not replaced by this freeze.
+The checker verifies every `release-manifest.sha256` entry byte-for-byte, release provenance/integrity, installer digest, source commit/tree, normalized non-secret profile and minimal environment, secret-reference names, CA bytes, carrier-evidence bytes, provider-local partial API properties, provider-binding evidence status, and the synthetic expected declarations. The freeze digest excludes secret bytes, release-root paths, runtime instance IDs, process IDs, random ports, timestamps, nftables counters, and request/turn IDs. Thus another process using the identical source, payload, profile, policy, CA, and evidence has the same contract digest; native isolation remains a per-execution check and is not replaced by this freeze.
 
 ## Post-start readback checklist (zero Provider calls)
 
@@ -60,8 +66,8 @@ The checker verifies every `release-manifest.sha256` entry byte-for-byte, releas
      --presence /private/agent-presence.redacted.json
    ```
 
-   PASS requires one matching runtime instance and exact enabled INSPECT, provider binding, GENERATE_IMAGE, and EDIT_IMAGE declarations. Any drift fails closed.
+   `READBACK_MATCH` requires one matching runtime instance and exact enabled INSPECT, provider binding, GENERATE_IMAGE, and EDIT_IMAGE declarations. Any drift fails closed.
 6. With an authenticated read-only API credential, capture `GET /agent/capabilities` and `GET /agent/tasks/{taskId}/point-and-start-controlled-image-capability?targetAgentId={frozenAgentId}`. Verify the registered target and exact policy tuple. Before explicit execution consent/grant, the task capability must remain consent-required/not executable and `paidExecutionAuthorized=false` (or the exact equivalent in the frozen API contract).
 7. Verify bootstrap created no command, lease, turn, Provider HTTP call, result, or ledger execution entry. Do not use a generation/edit call as a readiness check.
 
-Do not call readiness complete until the placeholders are frozen, the installed hashes match, the authenticated API accepts the registration, both live declarations match this freeze, and the API policy readback names the same target/provider/model/binding tuple.
+A readback match is not overall installation readiness. Do not call readiness complete until the placeholders are frozen, the installed hashes match, the authenticated API accepts the registration, both live declarations match this freeze, and the API policy readback names the same target/provider/model/binding tuple.

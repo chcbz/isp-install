@@ -28,7 +28,6 @@ const CANDIDATE_ENV_KEYS = Object.freeze([
   'CODEX_WORKSPACE_POLICIES_FILE', 'COMMAND_INBOX_DIR', 'COMMAND_INBOX_SUCCESS_POLICY',
   'CYF_CONVERSATION_HTTP_POLL_ENABLED', 'CYF_CONVERSATION_IMAGEGEN_ENABLED'
 ])
-const forbiddenPersonaBindings = new Set(['1', '2', '15'])
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const canonical = value => {
   if (Array.isArray(value)) return value.map(canonical)
@@ -139,7 +138,7 @@ const expectedTypedInspection = profile => {
   })
 }
 
-const readinessFor = (profile, env) => {
+const syntheticExpectedReadinessProjection = (profile, env) => {
   const controlledConfig = resolveControlledImageHttpConfig(profile, { env })
   const runtime = Object.freeze({
     adapterKind: PROVIDER_LANE,
@@ -154,8 +153,9 @@ const readinessFor = (profile, env) => {
   return { profile, runtime, online: true }
 }
 
-export const expectedDeclarations = (profile, env = { [PROVIDER_KEY_ENV]: 'redacted-test-credential' }) => {
-  const readiness = readinessFor(profile, env)
+/** Static expected wire projection only; this does not measure a live executor, poller, credential, or socket. */
+export const buildSyntheticExpectedDeclarations = (profile, env = { [PROVIDER_KEY_ENV]: 'redacted-test-credential' }) => {
+  const readiness = syntheticExpectedReadinessProjection(profile, env)
   return Object.freeze({
     nativeProviderCredentialBinding: buildNativeProviderCredentialBinding(readiness),
     controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration(readiness),
@@ -233,13 +233,34 @@ export const validateCandidate = ({ rawProfile, apiPolicy, env = { [PROVIDER_KEY
   requireText(profile.controlledImageHttpModelId, 'CONTROLLED_IMAGE_MODEL')
   requireText(profile.controlledImageHttpBindingId, 'CONTROLLED_IMAGE_BINDING_ID')
   requireText(profile.controlledImageHttpBindingEpoch, 'CONTROLLED_IMAGE_BINDING_EPOCH')
-  if (forbiddenPersonaBindings.has(profile.controlledImageHttpBindingId)) fail('PERSONA_BINDING_REUSE_FORBIDDEN')
-  const declarations = expectedDeclarations(profile, env)
-  if (declarations.nativeProviderCredentialBinding.enabled !== true
-      || declarations.controlledImageBountyExecutionV3.enabled !== true
-      || declarations.controlledImageBountyExecutionV3.operations.length !== 2) fail('DECLARATION_NOT_READY')
+  const syntheticExpectedDeclarations = buildSyntheticExpectedDeclarations(profile, env)
+  if (syntheticExpectedDeclarations.nativeProviderCredentialBinding.enabled !== true
+      || syntheticExpectedDeclarations.controlledImageBountyExecutionV3.enabled !== true
+      || syntheticExpectedDeclarations.controlledImageBountyExecutionV3.operations.length !== 2)
+    fail('EXPECTED_DECLARATION_PROJECTION_INVALID')
   if (!apiPolicy || apiPolicy.schemaVersion !== 1 || apiPolicy.sourceContractCommit !== API_SOURCE_CONTRACT_COMMIT
       || !apiPolicy.properties) fail('API_POLICY_INVALID')
+  exactKeySet(apiPolicy, Object.keys(readJson(policyTemplatePath)), 'API_POLICY_DOCUMENT')
+  if (apiPolicy.scope !== 'CONTROLLED_IMAGE_PROVIDER_PARTIAL_POLICY' || apiPolicy.fullInstallationReadiness !== false
+      || !Array.isArray(apiPolicy.requiredExternalReadinessEvidence)
+      || apiPolicy.requiredExternalReadinessEvidence.length < 4) fail('API_POLICY_SCOPE_INVALID')
+  const providerBindingEvidence = apiPolicy.providerBindingEvidence
+  exactKeySet(providerBindingEvidence, Object.keys(readJson(policyTemplatePath).providerBindingEvidence), 'PROVIDER_BINDING_EVIDENCE')
+  if (providerBindingEvidence.schemaVersion !== 1
+      || providerBindingEvidence.evidenceType !== 'CONTROLLED_IMAGE_PROVIDER_BINDING_EVIDENCE_V1'
+      || providerBindingEvidence.bindingNamespace !== 'CONTROLLED_IMAGE_PROVIDER_CREDENTIAL'
+      || providerBindingEvidence.providerLane !== PROVIDER_LANE
+      || providerBindingEvidence.bindingId !== profile.controlledImageHttpBindingId
+      || providerBindingEvidence.bindingEpoch !== profile.controlledImageHttpBindingEpoch
+      || providerBindingEvidence.modelId !== profile.controlledImageHttpModelId) fail('PROVIDER_BINDING_EVIDENCE_TUPLE_MISMATCH')
+  if (providerBindingEvidence.status === 'UNVERIFIED') {
+    if (providerBindingEvidence.sourceType !== null || providerBindingEvidence.sourceReference !== null
+        || providerBindingEvidence.sourceDigest !== null) fail('PROVIDER_BINDING_UNVERIFIED_SOURCE_INVALID')
+  } else if (providerBindingEvidence.status === 'VERIFIED') {
+    requireText(providerBindingEvidence.sourceType, 'PROVIDER_BINDING_SOURCE_TYPE')
+    requireText(providerBindingEvidence.sourceReference, 'PROVIDER_BINDING_SOURCE_REFERENCE')
+    if (!DIGEST.test(providerBindingEvidence.sourceDigest || '')) fail('PROVIDER_BINDING_SOURCE_DIGEST_INVALID')
+  } else fail('PROVIDER_BINDING_EVIDENCE_STATUS_INVALID')
   const properties = apiPolicy.properties
   exactKeySet(properties, Object.keys(readJson(policyTemplatePath).properties), 'API_POLICY')
   for (const key of [
@@ -265,7 +286,8 @@ export const validateCandidate = ({ rawProfile, apiPolicy, env = { [PROVIDER_KEY
       || properties[policyKey('max-outbound-request-attempts')] !== 1) fail('API_POLICY_FIXED_FENCE_MISMATCH')
   if (JSON.stringify(apiPolicy.forbiddenClientWireFields) !== JSON.stringify(['producerRequestRevision']))
     fail('SERVER_REVISION_AUTHORITY_NOT_FROZEN')
-  return Object.freeze({ profile, projection: normalizedProjection(profile), declarations })
+  return Object.freeze({ profile, projection: normalizedProjection(profile), syntheticExpectedDeclarations,
+    validationStatus: 'STATIC_VALID', providerBindingEvidenceStatus: providerBindingEvidence.status })
 }
 
 const installerPayload = installerPath => {
@@ -354,7 +376,9 @@ export const freezeCandidate = ({ rawProfile, apiPolicy, envText, releaseDir, so
       properties: apiPolicy.properties,
       forbiddenClientWireFields: apiPolicy.forbiddenClientWireFields
     },
-    expectedRegistration: validated.declarations
+    validation: { status: 'STATIC_VALID', projectionKind: 'SYNTHETIC_EXPECTED_REGISTRATION',
+      providerBindingEvidenceStatus: validated.providerBindingEvidenceStatus, fullInstallationReadiness: false },
+    syntheticExpectedRegistration: validated.syntheticExpectedDeclarations
   })
   return Object.freeze({ ...frozen, freezeDigest: digestObject(frozen) })
 }
@@ -362,7 +386,7 @@ export const freezeCandidate = ({ rawProfile, apiPolicy, envText, releaseDir, so
 const payload = value => value?.payload && typeof value.payload === 'object' ? value.payload : value
 export const verifyReadback = ({ freeze, registration, presence }) => {
   if (!freeze || freeze.freezeDigest !== digestObject(Object.fromEntries(Object.entries(freeze).filter(([key]) => key !== 'freezeDigest')))) fail('FREEZE_DIGEST_INVALID')
-  const expected = freeze.expectedRegistration
+  const expected = freeze.syntheticExpectedRegistration
   for (const [label, raw] of [['REGISTRATION', registration], ['PRESENCE', presence]]) {
     const value = payload(raw)
     if (!value || value.agentId !== freeze.normalizedNonSecretProfile.agentId) fail(`${label}_AGENT_ID_MISMATCH`)
@@ -374,7 +398,7 @@ export const verifyReadback = ({ freeze, registration, presence }) => {
   const presenceRuntime = presence.runtimeInstanceId ?? presence.payload?.runtimeInstanceId
   requireText(registrationRuntime, 'REGISTRATION_RUNTIME_INSTANCE_ID')
   if (registrationRuntime !== presenceRuntime) fail('READBACK_RUNTIME_INSTANCE_MISMATCH')
-  return Object.freeze({ status: 'PASS', agentId: freeze.normalizedNonSecretProfile.agentId,
+  return Object.freeze({ status: 'READBACK_MATCH', providerBindingEvidenceStatus: freeze.validation.providerBindingEvidenceStatus, agentId: freeze.normalizedNonSecretProfile.agentId,
     runtimeInstanceId: registrationRuntime, operations: expected.controlledImageBountyExecutionV3.operations.map(item => item.operation) })
 }
 
@@ -386,8 +410,10 @@ export const verifyRedactedTemplates = () => {
   const candidateEnv = validateCandidateEnvironment(envText, { allowPlaceholders: true })
   if (!envText.includes(`${OWNER_KEY_ENV}=__`) || !envText.includes(`${PROVIDER_KEY_ENV}=__`)
       || /(?:sk-|Bearer\s+)[A-Za-z0-9_-]{8,}/.test(envText)) fail('ENV_TEMPLATE_SECRET_LEAK')
-  return Object.freeze({ status: 'PASS', profile: result.projection, declarations: result.declarations,
-    apiPolicyDigest: digestObject(apiPolicy.properties), secretEnvironmentNames: candidateEnv.secretEnvironmentNames })
+  return Object.freeze({ status: 'STATIC_VALID', projectionKind: 'SYNTHETIC_EXPECTED_REGISTRATION',
+    providerBindingEvidenceStatus: result.providerBindingEvidenceStatus, fullInstallationReadiness: false,
+    profile: result.projection, syntheticExpectedDeclarations: result.syntheticExpectedDeclarations,
+    apiPolicyDigest: digestObject(apiPolicy), secretEnvironmentNames: candidateEnv.secretEnvironmentNames })
 }
 
 const option = (args, name) => {
@@ -409,7 +435,7 @@ const main = () => {
       sourceCommit: option(args, '--source-commit'), sourceTree: option(args, '--source-tree'),
       installerPath: resolve(option(args, '--installer')) })
     const output = option(args, '--output'); writeFileSync(output, `${JSON.stringify(frozen, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
-    console.log(JSON.stringify({ status: 'PASS', output, freezeDigest: frozen.freezeDigest }))
+    console.log(JSON.stringify({ status: 'STATIC_VALID', fullInstallationReadiness: false, output, freezeDigest: frozen.freezeDigest }))
     return
   }
   if (command === 'readback') {

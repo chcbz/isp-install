@@ -81,16 +81,19 @@ const frozenFixture = () => {
   return { root, freeze, rawProfile, apiPolicy, envText: candidateEnv() }
 }
 
-test('redacted templates normalize through production code and declare all three capabilities without secrets', () => {
+test('redacted templates are static-valid synthetic projections without secrets or readiness claims', () => {
   const verified = verifyRedactedTemplates()
-  assert.equal(verified.status, 'PASS')
+  assert.equal(verified.status, 'STATIC_VALID')
+  assert.equal(verified.projectionKind, 'SYNTHETIC_EXPECTED_REGISTRATION')
+  assert.equal(verified.fullInstallationReadiness, false)
+  assert.equal(verified.providerBindingEvidenceStatus, 'UNVERIFIED')
   assert.equal(verified.profile.profileId, 'wuyong')
-  assert.equal(verified.declarations.typedInspection.enabled, true)
-  assert.equal(verified.declarations.nativeProviderCredentialBinding.enabled, true)
-  assert.deepEqual(verified.declarations.controlledImageBountyExecutionV3.operations.map(value => value.operation), [
+  assert.equal(verified.syntheticExpectedDeclarations.typedInspection.enabled, true)
+  assert.equal(verified.syntheticExpectedDeclarations.nativeProviderCredentialBinding.enabled, true)
+  assert.deepEqual(verified.syntheticExpectedDeclarations.controlledImageBountyExecutionV3.operations.map(value => value.operation), [
     'GENERATE_IMAGE', 'EDIT_IMAGE'
   ])
-  assert.equal(JSON.stringify(verified.declarations).includes('producerRequestRevision'), false)
+  assert.equal(JSON.stringify(verified.syntheticExpectedDeclarations).includes('producerRequestRevision'), false)
   const env = readFileSync(resolve(clientRoot, 'install-candidate/wuyong-dual-mode.env.redacted'), 'utf8')
   assert.match(env, /^OPENCLAW_API_KEY=__/m)
   assert.match(env, /^CYF_CONTROLLED_IMAGE_API_KEY=__/m)
@@ -100,15 +103,38 @@ test('redacted templates normalize through production code and declare all three
   assert.throws(() => validateCandidateEnvironment(candidateEnv().replace('owner-secret-not-frozen', '__OWNER_SECRET__')), /ENV_SECRET_UNAVAILABLE/)
 })
 
-test('candidate rejects persona binding reuse and exact provider/policy drift', async t => {
+test('binding identity is namespace/source evidence based and exact provider/policy drift fails closed', async t => {
   for (const bindingId of ['1', '2', '15']) {
-    await t.test(`persona binding ${bindingId}`, () => {
+    await t.test(`numeric binding ${bindingId} is not rejected across namespaces`, () => {
       const { rawProfile, apiPolicy } = candidate()
       rawProfile[0].controlledImageHttpBindingId = bindingId
       apiPolicy.properties['agent.controlled-image-provider.operator-policies[0].binding-id'] = bindingId
-      assert.throws(() => validateCandidate({ rawProfile, apiPolicy }), /PERSONA_BINDING_REUSE_FORBIDDEN/)
+      apiPolicy.providerBindingEvidence.bindingId = bindingId
+      const result = validateCandidate({ rawProfile, apiPolicy })
+      assert.equal(result.validationStatus, 'STATIC_VALID')
+      assert.equal(result.providerBindingEvidenceStatus, 'UNVERIFIED')
     })
   }
+  await t.test('separately sourced provider binding can be VERIFIED', () => {
+    const { rawProfile, apiPolicy } = candidate()
+    Object.assign(apiPolicy.providerBindingEvidence, {
+      status: 'VERIFIED',
+      sourceType: 'API_OPERATOR_PROVIDER_BINDING_RECEIPT',
+      sourceReference: 'private-receipt/provider-binding-7',
+      sourceDigest: `sha256:${'7'.repeat(64)}`
+    })
+    assert.equal(validateCandidate({ rawProfile, apiPolicy }).providerBindingEvidenceStatus, 'VERIFIED')
+  })
+  await t.test('UNVERIFIED binding cannot carry pseudo-source evidence', () => {
+    const { rawProfile, apiPolicy } = candidate()
+    apiPolicy.providerBindingEvidence.sourceType = 'persona-binding-row'
+    assert.throws(() => validateCandidate({ rawProfile, apiPolicy }), /PROVIDER_BINDING_UNVERIFIED_SOURCE_INVALID/)
+  })
+  await t.test('provider binding evidence tuple drift', () => {
+    const { rawProfile, apiPolicy } = candidate()
+    apiPolicy.providerBindingEvidence.bindingEpoch = '8'
+    assert.throws(() => validateCandidate({ rawProfile, apiPolicy }), /PROVIDER_BINDING_EVIDENCE_TUPLE_MISMATCH/)
+  })
   await t.test('model drift', () => {
     const { rawProfile, apiPolicy } = candidate()
     apiPolicy.properties['agent.controlled-image-provider.operator-policies[0].model-id'] = 'different-model'
@@ -137,6 +163,10 @@ test('freeze is stable across release roots and binds source, payload, CA, evide
     })
     assert.deepEqual(freezes[0], freezes[1])
     const freeze = freezes[0]
+    assert.equal(freeze.validation.status, 'STATIC_VALID')
+    assert.equal(freeze.validation.projectionKind, 'SYNTHETIC_EXPECTED_REGISTRATION')
+    assert.equal(freeze.validation.providerBindingEvidenceStatus, 'UNVERIFIED')
+    assert.equal(freeze.validation.fullInstallationReadiness, false)
     assert.equal(freeze.source.commit, sourceCommit)
     assert.equal(freeze.source.tree, sourceTree)
     assert.equal(freeze.publicTrustAndEvidence.caBundleSha256, 'sha256:acd28b791f9f338d288efda11d7f192755d4e89f41f0f7c2999bb4d211779fe5')
@@ -164,12 +194,13 @@ test('readback accepts one exact live registration/presence pair and fails close
   try {
     const payload = {
       agentId: fixture.freeze.normalizedNonSecretProfile.agentId,
-      ...clone(fixture.freeze.expectedRegistration)
+      ...clone(fixture.freeze.syntheticExpectedRegistration)
     }
     const registration = { runtimeInstanceId: 'runtime-frozen-1', payload: clone(payload) }
     const presence = { runtimeInstanceId: 'runtime-frozen-1', payload: clone(payload) }
     assert.deepEqual(verifyReadback({ freeze: fixture.freeze, registration, presence }), {
-      status: 'PASS',
+      status: 'READBACK_MATCH',
+      providerBindingEvidenceStatus: 'UNVERIFIED',
       agentId: fixture.freeze.normalizedNonSecretProfile.agentId,
       runtimeInstanceId: 'runtime-frozen-1',
       operations: ['GENERATE_IMAGE', 'EDIT_IMAGE']

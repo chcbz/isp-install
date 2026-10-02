@@ -1,6 +1,27 @@
 {
   "schemaVersion": 1,
+  "scope": "CONTROLLED_IMAGE_PROVIDER_PARTIAL_POLICY",
+  "fullInstallationReadiness": false,
   "sourceContractCommit": "9ab62d6665c695a574b8b3bde9cfff3ea3ca13d4",
+  "requiredExternalReadinessEvidence": [
+    "formal-artifact policy/schema and acceptance evidence",
+    "conversation-archive policy/schema and acceptance evidence",
+    "selected-output policy/schema and acceptance evidence",
+    "exact API artifact/config/schema receipt and authenticated capability readback"
+  ],
+  "providerBindingEvidence": {
+    "schemaVersion": 1,
+    "status": "UNVERIFIED",
+    "evidenceType": "CONTROLLED_IMAGE_PROVIDER_BINDING_EVIDENCE_V1",
+    "bindingNamespace": "CONTROLLED_IMAGE_PROVIDER_CREDENTIAL",
+    "sourceType": null,
+    "sourceReference": null,
+    "sourceDigest": null,
+    "providerLane": "CONTROLLED_IMAGE_HTTP_V1",
+    "bindingId": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_ID__",
+    "bindingEpoch": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_EPOCH__",
+    "modelId": "__FROZEN_CONTROLLED_IMAGE_MODEL_ID__"
+  },
   "properties": {
     "agent.controlled-image-provider.bridge-enabled": true,
     "agent.controlled-image-provider.enabled": true,
