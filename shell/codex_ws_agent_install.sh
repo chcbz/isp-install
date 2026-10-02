@@ -5,16 +5,18 @@
 
 set -euo pipefail
 
+TEST_MODE="${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}"
+TEST_ISOLATION_CHECK=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 APP_NAME="codex-ws-agent"
-TEST_MODE="${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}"
 TEST_FULL="${CODEX_WS_AGENT_INSTALL_TEST_FULL:-0}"
 INSTANCE=""
 INSTANCE_SELECTED=0
 INSTALL_MODE="shared"
+TEST_FIXTURE_ROOT=""
 
 usage() {
     echo "Usage: $0 [--instance SAFE_SLUG]" >&2
@@ -26,6 +28,86 @@ validate_instance_slug() {
     [[ "$value" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
 }
 
+test_isolation_error() {
+    __red "TEST_ISOLATION_REQUIRED: $1"
+    return 1
+}
+
+validate_test_fixture_root() {
+    local raw="${CODEX_WS_AGENT_TEST_FIXTURE_ROOT:-}" canonical mode protected
+    [ -n "$raw" ] || { test_isolation_error 'CODEX_WS_AGENT_TEST_FIXTURE_ROOT is required'; return 1; }
+    [[ "$raw" = /* ]] || { test_isolation_error 'fixture root must be absolute'; return 1; }
+    [ -d "$raw" ] && [ ! -L "$raw" ] || { test_isolation_error 'fixture root must be an existing real directory'; return 1; }
+    canonical="$(realpath -e -- "$raw")" || { test_isolation_error 'fixture root cannot be resolved'; return 1; }
+    [ "$canonical" = "$raw" ] || { test_isolation_error 'fixture root must be canonical and cannot contain symlink components'; return 1; }
+    [ "$(stat -c '%u' -- "$canonical")" = "$(id -u)" ] || { test_isolation_error 'fixture root must be owned by the invoking uid'; return 1; }
+    mode="$(stat -c '%a' -- "$canonical")"
+    (( (8#$mode & 077) == 0 )) || { test_isolation_error 'fixture root must not grant group/other permissions'; return 1; }
+    for protected in /home/isp/apps /home/isp/bin /etc/systemd/system /proc; do
+        protected="$(realpath -m -- "$protected")"
+        case "$canonical/" in "$protected/"|"$protected/"*) test_isolation_error "fixture root overlaps protected path $protected"; return 1;; esac
+        case "$protected/" in "$canonical/"*) test_isolation_error "fixture root contains protected path $protected"; return 1;; esac
+    done
+    TEST_FIXTURE_ROOT="$canonical"
+}
+
+validate_test_path() {
+    local label="$1" value="$2" canonical
+    [ -n "$value" ] || { test_isolation_error "$label is required"; return 1; }
+    [[ "$value" = /* ]] || { test_isolation_error "$label must be absolute"; return 1; }
+    canonical="$(realpath -m -- "$value")" || { test_isolation_error "$label cannot be resolved"; return 1; }
+    [ "$canonical" = "$value" ] || { test_isolation_error "$label must be canonical and cannot traverse or contain symlink components"; return 1; }
+    case "$canonical/" in
+        "$TEST_FIXTURE_ROOT/"*) ;;
+        *) test_isolation_error "$label must be below CODEX_WS_AGENT_TEST_FIXTURE_ROOT"; return 1 ;;
+    esac
+    [ "$canonical" != "$TEST_FIXTURE_ROOT" ] || { test_isolation_error "$label cannot equal the fixture root"; return 1; }
+}
+
+validate_test_existing_directory() {
+    local label="$1" value="$2"
+    validate_test_path "$label" "$value" || return 1
+    [ -d "$value" ] && [ ! -L "$value" ] \
+        || { test_isolation_error "$label must be an existing non-symlink directory"; return 1; }
+}
+
+validate_test_executable() {
+    local label="$1" value="$2"
+    validate_test_path "$label" "$value" || return 1
+    [ -f "$value" ] && [ ! -L "$value" ] && [ -x "$value" ] \
+        || { test_isolation_error "$label must be an existing non-symlink executable"; return 1; }
+}
+
+validate_test_release_id() {
+    local value="${CODEX_WS_AGENT_TEST_RELEASE_ID:-}"
+    [ -z "$value" ] && return 0
+    [ "${#value}" -le 128 ] && [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]] \
+        || { test_isolation_error 'CODEX_WS_AGENT_TEST_RELEASE_ID must be one safe path component'; return 1; }
+}
+
+validate_test_isolation_contract() {
+    [ "$TEST_MODE" = "1" ] || return 0
+    validate_test_fixture_root || return 1
+    validate_test_path CODEX_WS_AGENT_TEST_APP_HOME "${CODEX_WS_AGENT_TEST_APP_HOME:-}" || return 1
+    validate_test_path CODEX_WS_AGENT_TEST_INSTANCE_ROOT "${CODEX_WS_AGENT_TEST_INSTANCE_ROOT:-}" || return 1
+    validate_test_path CODEX_WS_AGENT_TEST_SYSTEMD_DIR "${CODEX_WS_AGENT_TEST_SYSTEMD_DIR:-}" || return 1
+    validate_test_path CODEX_WS_AGENT_TEST_BIN_DIR "${CODEX_WS_AGENT_TEST_BIN_DIR:-}" || return 1
+    validate_test_existing_directory HOME "${HOME:-}" || return 1
+    validate_test_existing_directory TMPDIR "${TMPDIR:-}" || return 1
+    validate_test_existing_directory XDG_CACHE_HOME "${XDG_CACHE_HOME:-}" || return 1
+    validate_test_existing_directory XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-}" || return 1
+    validate_test_existing_directory XDG_STATE_HOME "${XDG_STATE_HOME:-}" || return 1
+    validate_test_existing_directory NPM_CONFIG_CACHE "${NPM_CONFIG_CACHE:-}" || return 1
+    validate_test_executable CODEX_WS_AGENT_TEST_SYSTEMCTL "${CODEX_WS_AGENT_TEST_SYSTEMCTL:-}" || return 1
+    validate_test_executable CODEX_WS_AGENT_TEST_NODE_BIN "${CODEX_WS_AGENT_TEST_NODE_BIN:-}" || return 1
+    validate_test_executable CODEX_WS_AGENT_TEST_NPM_BIN "${CODEX_WS_AGENT_TEST_NPM_BIN:-}" || return 1
+    validate_test_executable CODEX_WS_AGENT_TEST_PYTHON_BIN "${CODEX_WS_AGENT_TEST_PYTHON_BIN:-}" || return 1
+    validate_test_release_id || return 1
+    if [ -n "${CODEX_WS_AGENT_TEST_RESTART_MARKER:-}" ]; then
+        validate_test_path CODEX_WS_AGENT_TEST_RESTART_MARKER "$CODEX_WS_AGENT_TEST_RESTART_MARKER" || return 1
+    fi
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --instance)
@@ -33,6 +115,11 @@ while [ "$#" -gt 0 ]; do
             INSTANCE_SELECTED=1
             INSTANCE="$2"
             shift 2
+            ;;
+        --test-isolation-check)
+            [ "$TEST_MODE" = "1" ] || { usage; exit 2; }
+            TEST_ISOLATION_CHECK=1
+            shift
             ;;
         -h|--help)
             usage
@@ -53,17 +140,23 @@ if [ "$INSTANCE_SELECTED" = "1" ]; then
     INSTALL_MODE="instance"
 fi
 
-DEFAULT_APP_HOME="${ISP_APPS:-/home/isp/apps}/$APP_NAME"
-if [ "${CODEX_WS_AGENT_INSTALL_TEST_MODE:-0}" = "1" ] && [ -n "${CODEX_WS_AGENT_TEST_APP_HOME:-}" ] && [ "$INSTALL_MODE" = "shared" ]; then
-    DEFAULT_APP_HOME="$CODEX_WS_AGENT_TEST_APP_HOME"
+validate_test_isolation_contract
+if [ "$TEST_ISOLATION_CHECK" = "1" ]; then
+    exit 0
 fi
-INSTANCE_ROOT="${ISP_APPS:-/home/isp/apps}/${APP_NAME}-instances"
-SYSTEMD_DIR="/etc/systemd/system"
-SYSTEMCTL_BIN="systemctl"
+
 if [ "$TEST_MODE" = "1" ]; then
-    INSTANCE_ROOT="${CODEX_WS_AGENT_TEST_INSTANCE_ROOT:-$INSTANCE_ROOT}"
-    SYSTEMD_DIR="${CODEX_WS_AGENT_TEST_SYSTEMD_DIR:-$SYSTEMD_DIR}"
-    SYSTEMCTL_BIN="${CODEX_WS_AGENT_TEST_SYSTEMCTL:-$SYSTEMCTL_BIN}"
+    DEFAULT_APP_HOME="$CODEX_WS_AGENT_TEST_APP_HOME"
+    INSTANCE_ROOT="$CODEX_WS_AGENT_TEST_INSTANCE_ROOT"
+    SYSTEMD_DIR="$CODEX_WS_AGENT_TEST_SYSTEMD_DIR"
+    SYSTEMCTL_BIN="$CODEX_WS_AGENT_TEST_SYSTEMCTL"
+    TEST_BIN_DIR="$CODEX_WS_AGENT_TEST_BIN_DIR"
+else
+    DEFAULT_APP_HOME="${ISP_APPS:-/home/isp/apps}/$APP_NAME"
+    INSTANCE_ROOT="${ISP_APPS:-/home/isp/apps}/${APP_NAME}-instances"
+    SYSTEMD_DIR="/etc/systemd/system"
+    SYSTEMCTL_BIN="systemctl"
+    TEST_BIN_DIR=""
 fi
 CONF_SRC="$ROOT_DIR/conf/$APP_NAME"
 BIN_SRC="$ROOT_DIR/bin/codex_ws_agent.sh"
@@ -78,7 +171,11 @@ else
     SERVICE_NAME="$APP_NAME.service"
     SERVICE_SRC="$ROOT_DIR/systemd/$APP_NAME.service"
     SERVICE_DST="$SYSTEMD_DIR/$APP_NAME.service"
-    BIN_DST="${CODEX_WS_AGENT_TEST_BIN_DIR:-${ISP_BIN:-/home/isp/bin}}/codex_ws_agent.sh"
+    if [ "$TEST_MODE" = "1" ]; then
+        BIN_DST="$TEST_BIN_DIR/codex_ws_agent.sh"
+    else
+        BIN_DST="${ISP_BIN:-/home/isp/bin}/codex_ws_agent.sh"
+    fi
 fi
 RELEASES_DIR="$APP_HOME/releases"
 CURRENT_LINK="$APP_HOME/current"
@@ -778,9 +875,9 @@ collate_release() {
 }
 
 if [ "$TEST_MODE" = "1" ]; then
-    NODE_BIN="${CODEX_WS_AGENT_TEST_NODE_BIN:-$(command -v node || true)}"
-    NPM_BIN="${CODEX_WS_AGENT_TEST_NPM_BIN:-$(find_npm_bin "$NODE_BIN" || true)}"
-    PYTHON_BIN="${CODEX_WS_AGENT_TEST_PYTHON_BIN:-$(find_python_bin || true)}"
+    NODE_BIN="$CODEX_WS_AGENT_TEST_NODE_BIN"
+    NPM_BIN="$CODEX_WS_AGENT_TEST_NPM_BIN"
+    PYTHON_BIN="$CODEX_WS_AGENT_TEST_PYTHON_BIN"
     if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
         __red "测试模式未提供可执行 Node.js"
         exit 1

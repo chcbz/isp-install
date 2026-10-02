@@ -22,13 +22,28 @@ const prepareFixture = () => {
   const systemd = resolve(root, 'systemd')
   const instanceRoot = resolve(root, 'apps', 'codex-ws-agent-instances')
   const sharedRoot = resolve(root, 'shared-apps', 'codex-ws-agent')
+  const proc = resolve(root, 'proc')
+  const home = resolve(root, 'home')
+  const temp = resolve(root, 'tmp')
+  const cache = resolve(root, 'cache')
+  const npmCache = resolve(cache, 'npm')
+  const config = resolve(root, 'config')
+  const state = resolve(root, 'state')
   const systemctlLog = resolve(root, 'systemctl.log')
   mkdirSync(bin, { recursive: true })
   mkdirSync(systemd, { recursive: true })
+  mkdirSync(instanceRoot, { recursive: true })
   mkdirSync(sharedRoot, { recursive: true })
+  mkdirSync(proc, { recursive: true })
+  mkdirSync(home, { recursive: true })
+  mkdirSync(temp, { recursive: true })
+  mkdirSync(npmCache, { recursive: true })
+  mkdirSync(config, { recursive: true })
+  mkdirSync(state, { recursive: true })
   writeFileSync(resolve(sharedRoot, 'canary'), 'default-untouched\n')
   const node = resolve(bin, 'node')
   const npm = resolve(bin, 'npm')
+  const python = resolve(bin, 'python')
   const systemctl = resolve(bin, 'systemctl')
   writeFileSync(node, `#!/bin/bash
 set -e
@@ -37,30 +52,46 @@ if [[ "\${1:-}" == */agent-client.mjs && "\${2:-}" == --validate ]]; then exit 0
 exec ${JSON.stringify(process.execPath)} "$@"
 `)
   writeFileSync(npm, '#!/bin/bash\nset -e\nmkdir -p node_modules\n')
+  writeFileSync(python, '#!/bin/bash\nset -euo pipefail\nexit 0\n')
   writeFileSync(systemctl, `#!/bin/bash
 set -e
 printf '%s\\n' "$*" >> ${JSON.stringify(systemctlLog)}
 exit 0
 `)
-  for (const path of [node, npm, systemctl]) chmodSync(path, 0o755)
-  return { root, bin, systemd, instanceRoot, sharedRoot, systemctlLog, node, npm, systemctl }
+  for (const path of [node, npm, python, systemctl]) chmodSync(path, 0o755)
+  return { root, bin, systemd, instanceRoot, sharedRoot, proc, home, temp, cache, npmCache, config, state, systemctlLog, node, npm, python, systemctl }
 }
+
+const isolatedEnv = fixture => ({
+  PATH: '/usr/bin:/bin',
+  HOME: fixture.home,
+  TMPDIR: fixture.temp,
+  XDG_CACHE_HOME: fixture.cache,
+  XDG_CONFIG_HOME: fixture.config,
+  XDG_STATE_HOME: fixture.state,
+  NPM_CONFIG_CACHE: fixture.npmCache,
+  LANG: 'C.UTF-8',
+  LC_ALL: 'C.UTF-8'
+})
 
 const runInstaller = (fixture, instance, { release = `release-${instance}`, failPhase = '', extraEnv = {} } = {}) =>
   spawnSync('bash', [installer, '--instance', instance], {
     cwd: repositoryRoot,
     encoding: 'utf8',
     env: {
-      ...process.env,
+      ...isolatedEnv(fixture),
       ISP_APPS: resolve(fixture.root, 'shared-apps'),
       CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
       CODEX_WS_AGENT_INSTALL_TEST_FULL: '1',
+      CODEX_WS_AGENT_TEST_FIXTURE_ROOT: fixture.root,
+      CODEX_WS_AGENT_TEST_APP_HOME: fixture.sharedRoot,
       CODEX_WS_AGENT_TEST_INSTANCE_ROOT: fixture.instanceRoot,
       CODEX_WS_AGENT_TEST_SYSTEMD_DIR: fixture.systemd,
+      CODEX_WS_AGENT_TEST_BIN_DIR: fixture.bin,
       CODEX_WS_AGENT_TEST_SYSTEMCTL: fixture.systemctl,
       CODEX_WS_AGENT_TEST_NODE_BIN: fixture.node,
       CODEX_WS_AGENT_TEST_NPM_BIN: fixture.npm,
-      CODEX_WS_AGENT_TEST_PYTHON_BIN: process.execPath,
+      CODEX_WS_AGENT_TEST_PYTHON_BIN: fixture.python,
       CODEX_WS_AGENT_TEST_RELEASE_ID: release,
       CODEX_WS_AGENT_TEST_FAIL_PHASE: failPhase,
       CODEX_WS_AGENT_SOURCE_COMMIT: 'a'.repeat(40),
@@ -69,6 +100,104 @@ const runInstaller = (fixture, instance, { release = `release-${instance}`, fail
       ...extraEnv
     }
   })
+
+
+const installerContractEnv = fixture => ({
+  ...isolatedEnv(fixture),
+  CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
+  CODEX_WS_AGENT_TEST_FIXTURE_ROOT: fixture.root,
+  CODEX_WS_AGENT_TEST_APP_HOME: fixture.sharedRoot,
+  CODEX_WS_AGENT_TEST_INSTANCE_ROOT: fixture.instanceRoot,
+  CODEX_WS_AGENT_TEST_SYSTEMD_DIR: fixture.systemd,
+  CODEX_WS_AGENT_TEST_BIN_DIR: fixture.bin,
+  CODEX_WS_AGENT_TEST_SYSTEMCTL: fixture.systemctl,
+  CODEX_WS_AGENT_TEST_NODE_BIN: fixture.node,
+  CODEX_WS_AGENT_TEST_NPM_BIN: fixture.npm,
+  CODEX_WS_AGENT_TEST_PYTHON_BIN: fixture.python
+})
+
+const launcherContractEnv = fixture => ({
+  ...isolatedEnv(fixture),
+  CODEX_WS_AGENT_LAUNCHER_TEST_MODE: '1',
+  CODEX_WS_AGENT_TEST_FIXTURE_ROOT: fixture.root,
+  CODEX_WS_AGENT_DEFAULT_APP_HOME: fixture.sharedRoot,
+  CODEX_WS_AGENT_INSTANCE_ROOT: fixture.instanceRoot,
+  CODEX_WS_AGENT_SYSTEMD_DIR: fixture.systemd,
+  CODEX_WS_AGENT_PROC_ROOT: fixture.proc,
+  CODEX_WS_AGENT_SYSTEMCTL: fixture.systemctl,
+  CODEX_WS_AGENT_NODE_BIN: fixture.node
+})
+
+test('test modes require one explicit private fixture boundary before any operational path', async t => {
+  const fixture = prepareFixture()
+  try {
+    const installerEnv = installerContractEnv(fixture)
+    const installerValid = spawnSync('bash', [installer, '--test-isolation-check'], { encoding: 'utf8', env: installerEnv })
+    assert.equal(installerValid.status, 0, `${installerValid.stdout}\n${installerValid.stderr}`)
+    for (const key of [
+      'CODEX_WS_AGENT_TEST_FIXTURE_ROOT', 'CODEX_WS_AGENT_TEST_APP_HOME',
+      'CODEX_WS_AGENT_TEST_INSTANCE_ROOT', 'CODEX_WS_AGENT_TEST_SYSTEMD_DIR',
+      'CODEX_WS_AGENT_TEST_BIN_DIR', 'CODEX_WS_AGENT_TEST_SYSTEMCTL',
+      'CODEX_WS_AGENT_TEST_NODE_BIN', 'CODEX_WS_AGENT_TEST_NPM_BIN',
+      'CODEX_WS_AGENT_TEST_PYTHON_BIN', 'HOME', 'TMPDIR', 'XDG_CACHE_HOME',
+      'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'NPM_CONFIG_CACHE'
+    ]) {
+      await t.test(`installer rejects missing ${key}`, () => {
+        const env = { ...installerEnv }
+        delete env[key]
+        const result = spawnSync('bash', [installer, '--test-isolation-check'], { encoding: 'utf8', env })
+        assert.notEqual(result.status, 0)
+        assert.match(`${result.stdout}\n${result.stderr}`, /TEST_ISOLATION_REQUIRED/)
+      })
+    }
+
+    const invalidRelease = spawnSync('bash', [installer, '--test-isolation-check'], {
+      encoding: 'utf8', env: { ...installerEnv, CODEX_WS_AGENT_TEST_RELEASE_ID: '../escape' }
+    })
+    assert.notEqual(invalidRelease.status, 0)
+    assert.match(`${invalidRelease.stdout}\n${invalidRelease.stderr}`, /TEST_ISOLATION_REQUIRED/)
+    const outsideMarker = resolve(fixture.root, '..', `outside-marker-${process.pid}`)
+    const invalidMarker = spawnSync('bash', [installer, '--test-isolation-check'], {
+      encoding: 'utf8', env: { ...installerEnv, CODEX_WS_AGENT_TEST_RESTART_MARKER: outsideMarker }
+    })
+    assert.notEqual(invalidMarker.status, 0)
+    assert.match(`${invalidMarker.stdout}\n${invalidMarker.stderr}`, /TEST_ISOLATION_REQUIRED/)
+
+    const launcherEnv = launcherContractEnv(fixture)
+    const launcherValid = spawnSync('bash', [launcher, '--test-isolation-check'], { encoding: 'utf8', env: launcherEnv })
+    assert.equal(launcherValid.status, 0, `${launcherValid.stdout}\n${launcherValid.stderr}`)
+    for (const key of [
+      'CODEX_WS_AGENT_TEST_FIXTURE_ROOT', 'CODEX_WS_AGENT_DEFAULT_APP_HOME',
+      'CODEX_WS_AGENT_INSTANCE_ROOT', 'CODEX_WS_AGENT_SYSTEMD_DIR',
+      'CODEX_WS_AGENT_PROC_ROOT', 'CODEX_WS_AGENT_SYSTEMCTL', 'CODEX_WS_AGENT_NODE_BIN',
+      'HOME', 'TMPDIR', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME'
+    ]) {
+      await t.test(`launcher rejects missing ${key}`, () => {
+        const env = { ...launcherEnv }
+        delete env[key]
+        const result = spawnSync('bash', [launcher, '--test-isolation-check'], { encoding: 'utf8', env })
+        assert.notEqual(result.status, 0)
+        assert.match(`${result.stdout}\n${result.stderr}`, /TEST_ISOLATION_REQUIRED/)
+      })
+    }
+
+    const outside = temporaryRoot()
+    try {
+      const escape = resolve(fixture.root, 'escape')
+      symlinkSync(outside, escape)
+      const installerEscape = spawnSync('bash', [installer, '--test-isolation-check'], {
+        encoding: 'utf8', env: { ...installerEnv, CODEX_WS_AGENT_TEST_APP_HOME: escape }
+      })
+      assert.notEqual(installerEscape.status, 0)
+      assert.match(`${installerEscape.stdout}\n${installerEscape.stderr}`, /symlink|fixture root/)
+      const launcherEscape = spawnSync('bash', [launcher, '--test-isolation-check'], {
+        encoding: 'utf8', env: { ...launcherEnv, CODEX_WS_AGENT_PROC_ROOT: escape }
+      })
+      assert.notEqual(launcherEscape.status, 0)
+      assert.match(`${launcherEscape.stdout}\n${launcherEscape.stderr}`, /symlink|fixture root/)
+    } finally { rmSync(outside, { recursive: true, force: true }) }
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
 
 const appHome = (fixture, instance) => resolve(fixture.instanceRoot, instance)
 
@@ -218,13 +347,15 @@ test('instance launcher binds the selected unit/root and refuses a foreign MainP
     const installed = runInstaller(fixture, 'local-a')
     assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`)
     const home = appHome(fixture, 'local-a')
-    const procRoot = resolve(fixture.root, 'proc')
+    const procRoot = fixture.proc
     const stubLog = resolve(fixture.root, 'launcher.log')
     const stub = launcherSystemctl(fixture)
     const unit = 'codex-ws-agent@local-a.service'
     const commonEnv = {
-      ...process.env,
+      ...isolatedEnv(fixture),
       CODEX_WS_AGENT_LAUNCHER_TEST_MODE: '1',
+      CODEX_WS_AGENT_TEST_FIXTURE_ROOT: fixture.root,
+      CODEX_WS_AGENT_DEFAULT_APP_HOME: fixture.sharedRoot,
       CODEX_WS_AGENT_INSTANCE_ROOT: fixture.instanceRoot,
       CODEX_WS_AGENT_SYSTEMD_DIR: fixture.systemd,
       CODEX_WS_AGENT_SYSTEMCTL: stub,

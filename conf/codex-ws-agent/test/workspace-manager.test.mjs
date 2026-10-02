@@ -1301,9 +1301,55 @@ const runtimeModuleClosure = () => {
   return [...closure].sort()
 }
 
+const prepareInstallerIsolation = ({ root, appHome }) => {
+  const instanceRoot = resolve(root, 'instances')
+  const systemdDir = resolve(root, 'systemd')
+  const binDir = resolve(root, 'bin')
+  const home = resolve(root, 'home')
+  const temp = resolve(root, 'tmp')
+  const cache = resolve(root, 'cache')
+  const npmCache = resolve(cache, 'npm')
+  const config = resolve(root, 'config')
+  const state = resolve(root, 'state')
+  const systemctl = resolve(binDir, 'systemctl-stub')
+  const node = resolve(binDir, 'node-stub')
+  const npm = resolve(binDir, 'npm-stub')
+  const python = resolve(binDir, 'python-stub')
+  for (const directory of [appHome, instanceRoot, systemdDir, binDir, home, temp, npmCache, config, state]) mkdirSync(directory, { recursive: true })
+  writeFileSync(systemctl, '#!/bin/bash\nset -euo pipefail\nexit 0\n')
+  writeFileSync(node, `#!/bin/bash\nset -euo pipefail\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
+  writeFileSync(npm, '#!/bin/bash\nset -euo pipefail\nexit 0\n')
+  writeFileSync(python, '#!/bin/bash\nset -euo pipefail\nexit 0\n')
+  for (const executable of [systemctl, node, npm, python]) chmodSync(executable, 0o755)
+  return {
+    instanceRoot, systemdDir, binDir, systemctl, node, npm, python,
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: home,
+      TMPDIR: temp,
+      XDG_CACHE_HOME: cache,
+      XDG_CONFIG_HOME: config,
+      XDG_STATE_HOME: state,
+      NPM_CONFIG_CACHE: npmCache,
+      LANG: 'C.UTF-8',
+      LC_ALL: 'C.UTF-8',
+      CODEX_WS_AGENT_TEST_FIXTURE_ROOT: root,
+      CODEX_WS_AGENT_TEST_APP_HOME: appHome,
+      CODEX_WS_AGENT_TEST_INSTANCE_ROOT: instanceRoot,
+      CODEX_WS_AGENT_TEST_SYSTEMD_DIR: systemdDir,
+      CODEX_WS_AGENT_TEST_BIN_DIR: binDir,
+      CODEX_WS_AGENT_TEST_SYSTEMCTL: systemctl,
+      CODEX_WS_AGENT_TEST_NODE_BIN: node,
+      CODEX_WS_AGENT_TEST_NPM_BIN: npm,
+      CODEX_WS_AGENT_TEST_PYTHON_BIN: python
+    }
+  }
+}
+
 const runInstallerValidationGate = ({ policy, validateExit = 0, start = 'y' }) => {
-  const appHome = resolve(temporaryDirectory(), 'app')
-  mkdirSync(appHome)
+  const root = temporaryDirectory()
+  const appHome = resolve(root, 'app')
+  const isolation = prepareInstallerIsolation({ root, appHome })
   cpSync(policyChecker, resolve(appHome, 'install-policy-check.mjs'))
   if (policy !== undefined) writeFileSync(resolve(appHome, 'workspace-policies.json'), `${JSON.stringify(policy)}\n`)
   writeFileSync(resolve(appHome, 'agent-client.mjs'), 'process.exit(Number(process.env.A07_VALIDATE_EXIT || 0))\n')
@@ -1311,10 +1357,8 @@ const runInstallerValidationGate = ({ policy, validateExit = 0, start = 'y' }) =
   const result = spawnSync('bash', [installerScript], {
     encoding: 'utf8',
     env: {
-      ...process.env,
+      ...isolation.env,
       CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
-      CODEX_WS_AGENT_TEST_APP_HOME: appHome,
-      CODEX_WS_AGENT_TEST_NODE_BIN: process.execPath,
       CODEX_WS_AGENT_TEST_RESTART_MARKER: restartMarker,
       A07_VALIDATE_EXIT: String(validateExit),
       START_CODEX_WS_AGENT: start
@@ -1395,12 +1439,12 @@ const installerCollationFixture = ({ failPhase = '', configureAppHome = () => {}
   const root = temporaryDirectory()
   const { appHome } = prepareExistingInstallerRuntime(root)
   configureAppHome({ root, appHome })
-  const binDir = resolve(root, 'bin')
+  const isolation = prepareInstallerIsolation({ root, appHome })
+  const binDir = isolation.binDir
   const npmRecord = resolve(root, 'npm-record.txt')
   const sourceNodeModules = fileURLToPath(new URL('../node_modules', import.meta.url))
-  const nodeWrapper = resolve(binDir, 'node-wrapper')
-  const npmWrapper = resolve(binDir, 'npm-wrapper')
-  mkdirSync(binDir)
+  const nodeWrapper = isolation.node
+  const npmWrapper = isolation.npm
   writeFileSync(nodeWrapper, `#!/bin/bash\nif [[ "$1" == */agent-client.mjs && "$2" == --validate ]]; then exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
   writeFileSync(npmWrapper, `#!/bin/bash\nset -e\ntest -f skill-install-manager.mjs\ntest -f managed-host.mjs\ntest -f package-lock.json\ngrep -q '"yauzl"' package-lock.json\nprintf '%s\\n%s\\n' "$PWD" "$*" > ${JSON.stringify(npmRecord)}\ncp -a ${JSON.stringify(sourceNodeModules)} node_modules\n`)
   chmodSync(nodeWrapper, 0o755)
@@ -1408,14 +1452,11 @@ const installerCollationFixture = ({ failPhase = '', configureAppHome = () => {}
   const result = spawnSync('bash', [installerScript], {
     encoding: 'utf8',
     env: {
-      ...process.env,
       CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
       CODEX_WS_AGENT_INSTALL_TEST_COLLATE: '1',
       CODEX_WS_AGENT_TEST_FAIL_PHASE: failPhase,
       CODEX_WS_AGENT_TEST_RELEASE_ID: 'candidate-release',
-      CODEX_WS_AGENT_TEST_APP_HOME: appHome,
-      CODEX_WS_AGENT_TEST_NODE_BIN: nodeWrapper,
-      CODEX_WS_AGENT_TEST_NPM_BIN: npmWrapper,
+      ...isolation.env,
       START_CODEX_WS_AGENT: 'n'
     }
   })

@@ -2,6 +2,9 @@
 set -euo pipefail
 
 APP_NAME="codex-ws-agent"
+LAUNCHER_TEST_MODE="${CODEX_WS_AGENT_LAUNCHER_TEST_MODE:-0}"
+TEST_ISOLATION_CHECK=0
+TEST_FIXTURE_ROOT=""
 INSTANCE=""
 ACTION=""
 
@@ -15,6 +18,77 @@ validate_instance_slug() {
   [[ "$value" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
 }
 
+test_isolation_error() {
+  echo "TEST_ISOLATION_REQUIRED: $1" >&2
+  return 1
+}
+
+validate_test_fixture_root() {
+  local raw="${CODEX_WS_AGENT_TEST_FIXTURE_ROOT:-}" canonical mode protected
+  [ -n "$raw" ] || { test_isolation_error 'CODEX_WS_AGENT_TEST_FIXTURE_ROOT is required'; return 1; }
+  [[ "$raw" = /* ]] || { test_isolation_error 'fixture root must be absolute'; return 1; }
+  [ -d "$raw" ] && [ ! -L "$raw" ] || { test_isolation_error 'fixture root must be an existing real directory'; return 1; }
+  canonical="$(realpath -e -- "$raw")" || { test_isolation_error 'fixture root cannot be resolved'; return 1; }
+  [ "$canonical" = "$raw" ] || { test_isolation_error 'fixture root must be canonical and cannot contain symlink components'; return 1; }
+  [ "$(stat -c '%u' -- "$canonical")" = "$(id -u)" ] || { test_isolation_error 'fixture root must be owned by the invoking uid'; return 1; }
+  mode="$(stat -c '%a' -- "$canonical")"
+  (( (8#$mode & 077) == 0 )) || { test_isolation_error 'fixture root must not grant group/other permissions'; return 1; }
+  for protected in /home/isp/apps /home/isp/bin /etc/systemd/system /proc; do
+    protected="$(realpath -m -- "$protected")"
+    case "$canonical/" in "$protected/"|"$protected/"*) test_isolation_error "fixture root overlaps protected path $protected"; return 1;; esac
+    case "$protected/" in "$canonical/"*) test_isolation_error "fixture root contains protected path $protected"; return 1;; esac
+  done
+  TEST_FIXTURE_ROOT="$canonical"
+}
+
+validate_test_path() {
+  local label="$1" value="$2" canonical
+  [ -n "$value" ] || { test_isolation_error "$label is required"; return 1; }
+  [[ "$value" = /* ]] || { test_isolation_error "$label must be absolute"; return 1; }
+  canonical="$(realpath -m -- "$value")" || { test_isolation_error "$label cannot be resolved"; return 1; }
+  [ "$canonical" = "$value" ] || { test_isolation_error "$label must be canonical and cannot traverse or contain symlink components"; return 1; }
+  case "$canonical/" in
+    "$TEST_FIXTURE_ROOT/"*) ;;
+    *) test_isolation_error "$label must be below CODEX_WS_AGENT_TEST_FIXTURE_ROOT"; return 1 ;;
+  esac
+  [ "$canonical" != "$TEST_FIXTURE_ROOT" ] || { test_isolation_error "$label cannot equal the fixture root"; return 1; }
+}
+
+validate_test_existing_directory() {
+  local label="$1" value="$2"
+  validate_test_path "$label" "$value" || return 1
+  [ -d "$value" ] && [ ! -L "$value" ] \
+    || { test_isolation_error "$label must be an existing non-symlink directory"; return 1; }
+}
+
+validate_test_executable() {
+  local label="$1" value="$2"
+  validate_test_path "$label" "$value" || return 1
+  [ -f "$value" ] && [ ! -L "$value" ] && [ -x "$value" ] \
+    || { test_isolation_error "$label must be an existing non-symlink executable"; return 1; }
+}
+
+validate_test_isolation_contract() {
+  [ "$LAUNCHER_TEST_MODE" = "1" ] || return 0
+  validate_test_fixture_root || return 1
+  validate_test_existing_directory CODEX_WS_AGENT_DEFAULT_APP_HOME "${CODEX_WS_AGENT_DEFAULT_APP_HOME:-}" || return 1
+  validate_test_existing_directory CODEX_WS_AGENT_INSTANCE_ROOT "${CODEX_WS_AGENT_INSTANCE_ROOT:-}" || return 1
+  validate_test_existing_directory CODEX_WS_AGENT_SYSTEMD_DIR "${CODEX_WS_AGENT_SYSTEMD_DIR:-}" || return 1
+  validate_test_existing_directory CODEX_WS_AGENT_PROC_ROOT "${CODEX_WS_AGENT_PROC_ROOT:-}" || return 1
+  validate_test_existing_directory HOME "${HOME:-}" || return 1
+  validate_test_existing_directory TMPDIR "${TMPDIR:-}" || return 1
+  validate_test_existing_directory XDG_CACHE_HOME "${XDG_CACHE_HOME:-}" || return 1
+  validate_test_existing_directory XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-}" || return 1
+  validate_test_existing_directory XDG_STATE_HOME "${XDG_STATE_HOME:-}" || return 1
+  validate_test_executable CODEX_WS_AGENT_SYSTEMCTL "${CODEX_WS_AGENT_SYSTEMCTL:-}" || return 1
+  validate_test_executable CODEX_WS_AGENT_NODE_BIN "${CODEX_WS_AGENT_NODE_BIN:-}" || return 1
+}
+
+if [ "${1:-}" = "--test-isolation-check" ]; then
+  [ "$LAUNCHER_TEST_MODE" = "1" ] || { usage; exit 2; }
+  TEST_ISOLATION_CHECK=1
+  shift
+fi
 if [ "${1:-}" = "--instance" ]; then
   [ "$#" -ge 3 ] || { usage; exit 2; }
   INSTANCE="$2"
@@ -26,12 +100,26 @@ if [ "${1:-}" = "--instance" ]; then
 fi
 ACTION="${1:-start}"
 
-DEFAULT_APP_HOME="${CODEX_WS_AGENT_DEFAULT_APP_HOME:-/home/isp/apps/$APP_NAME}"
-INSTANCE_ROOT="${CODEX_WS_AGENT_INSTANCE_ROOT:-/home/isp/apps/${APP_NAME}-instances}"
-SYSTEMD_DIR="${CODEX_WS_AGENT_SYSTEMD_DIR:-/etc/systemd/system}"
-PROC_ROOT="${CODEX_WS_AGENT_PROC_ROOT:-/proc}"
-SYSTEMCTL_BIN="${CODEX_WS_AGENT_SYSTEMCTL:-systemctl}"
-NODE_BIN="${CODEX_WS_AGENT_NODE_BIN:-/home/isp/apps/node/bin/node}"
+validate_test_isolation_contract
+if [ "$TEST_ISOLATION_CHECK" = "1" ]; then
+  exit 0
+fi
+
+if [ "$LAUNCHER_TEST_MODE" = "1" ]; then
+  DEFAULT_APP_HOME="$CODEX_WS_AGENT_DEFAULT_APP_HOME"
+  INSTANCE_ROOT="$CODEX_WS_AGENT_INSTANCE_ROOT"
+  SYSTEMD_DIR="$CODEX_WS_AGENT_SYSTEMD_DIR"
+  PROC_ROOT="$CODEX_WS_AGENT_PROC_ROOT"
+  SYSTEMCTL_BIN="$CODEX_WS_AGENT_SYSTEMCTL"
+  NODE_BIN="$CODEX_WS_AGENT_NODE_BIN"
+else
+  DEFAULT_APP_HOME="${CODEX_WS_AGENT_DEFAULT_APP_HOME:-/home/isp/apps/$APP_NAME}"
+  INSTANCE_ROOT="${CODEX_WS_AGENT_INSTANCE_ROOT:-/home/isp/apps/${APP_NAME}-instances}"
+  SYSTEMD_DIR="${CODEX_WS_AGENT_SYSTEMD_DIR:-/etc/systemd/system}"
+  PROC_ROOT="${CODEX_WS_AGENT_PROC_ROOT:-/proc}"
+  SYSTEMCTL_BIN="${CODEX_WS_AGENT_SYSTEMCTL:-systemctl}"
+  NODE_BIN="${CODEX_WS_AGENT_NODE_BIN:-/home/isp/apps/node/bin/node}"
+fi
 
 if [ -n "$INSTANCE" ]; then
   APP_HOME="$INSTANCE_ROOT/$INSTANCE"
@@ -52,6 +140,7 @@ APP_ENTRY="agent-client.mjs"
 WORKSPACE_ENTRY="workspace-manager.mjs"
 VALIDATE_ARGS=(--validate)
 
+
 safe_absolute_path() {
   local value="$1"
   [[ "$value" =~ ^/[A-Za-z0-9_./-]+$ ]] || return 1
@@ -68,6 +157,10 @@ if [ -L "$APP_HOME" ] || { [ -e "$APP_HOME" ] && [ ! -d "$APP_HOME" ]; }; then
 fi
 
 if [ ! -x "$NODE_BIN" ]; then
+  if [ "$LAUNCHER_TEST_MODE" = "1" ]; then
+    echo "TEST_ISOLATION_REQUIRED: configured test node executable is no longer available" >&2
+    exit 1
+  fi
   NODE_BIN="$(command -v node || true)"
 fi
 if [ -z "${NODE_BIN:-}" ] || [ ! -x "$NODE_BIN" ]; then
@@ -350,6 +443,9 @@ workspace_action() {
           echo "refusing workspace archive while $SERVICE_NAME is running" >&2
           return 1
         }
+      elif [ "$LAUNCHER_TEST_MODE" = "1" ]; then
+        echo "TEST_ISOLATION_REQUIRED: launcher test mode forbids direct shared-process inspection" >&2
+        return 1
       elif [ -n "$(find_default_agent_pid || true)" ]; then
         echo "refusing workspace archive while codex-ws-agent is running; stop the service first" >&2
         return 1
@@ -373,6 +469,9 @@ case "$ACTION" in
       run_instance_systemd_action "$ACTION"
     elif has_systemd_service; then
       run_default_systemd_action "$ACTION"
+    elif [ "$LAUNCHER_TEST_MODE" = "1" ]; then
+      echo "TEST_ISOLATION_REQUIRED: launcher test mode forbids tmux/nohup/pgrep/kill fallback" >&2
+      exit 1
     else
       case "$ACTION" in
         start) start_default_agent ;;
