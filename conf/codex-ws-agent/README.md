@@ -22,6 +22,21 @@ journalctl -u codex-ws-agent -f
 
 The helper script `/home/isp/bin/codex_ws_agent.sh` now delegates to `systemd` automatically when the service is installed, and falls back to the legacy direct-start mode otherwise.
 
+### Isolated production instances
+
+The existing no-argument installer and shared service remain compatible. A new isolated instance uses a strict lowercase slug and the fixed production layout below:
+
+```bash
+shell/codex_ws_agent_install.sh --instance local-a
+/home/isp/apps/codex-ws-agent-instances/local-a/bin/codex_ws_agent.sh status
+```
+
+Each instance owns its application root, releases/current link, private `.env` and profile file, Codex Homes, workspace roots, inbox/outbox, state, PID record, logs, and provider ledger. The installer creates an **unconfigured** candidate and does not copy a live identity, credential, session, or task state. It never enables, starts, restarts, or registers an instance; an operations Owner must first configure and validate the exact identity and prove custody/idle state, then start it explicitly.
+
+Instance controls are systemd-only through `codex-ws-agent@<slug>.service`; there is no tmux/nohup fallback. Before status, stop, or restart can act on an active process, the launcher verifies the exact unit template, `MainPID` working root, absolute agent entrypoint token, and cgroup unit. A mismatch is treated as a foreign process and no stop is sent. The shared/default launcher retains its legacy fallback behavior.
+
+Do not use profile hot reload as a migration or drain mechanism. A changed busy profile may shut down the whole process, and disposal may terminate its child; identity migration and service cutover require a separate controlled maintenance action.
+
 Required:
 
 - Node.js 20 or newer with npm. The client always uses the declared `ws` dependency so authenticated upgrade headers behave consistently; the built-in WebSocket implementation is not used.
