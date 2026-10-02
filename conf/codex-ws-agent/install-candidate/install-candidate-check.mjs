@@ -19,6 +19,8 @@ const evidencePath = resolve(clientRoot, 'evidence/typed-inspection-local-image-
 const PLACEHOLDER = /^__[A-Z0-9_]+__$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const PROVIDER_LANE = 'CONTROLLED_IMAGE_HTTP_V1'
+const OPERATOR_BINDING_SOURCE_TYPE = 'API_OPERATOR_POLICY_FREEZE_FILE'
+const OPERATOR_BINDING_ARTIFACT_TYPE = 'CONTROLLED_IMAGE_OPERATOR_BINDING_FREEZE_V1'
 const ACCEPTED_CA_BUNDLE_SHA256 = 'acd28b791f9f338d288efda11d7f192755d4e89f41f0f7c2999bb4d211779fe5'
 const API_SOURCE_CONTRACT_COMMIT = '9ab62d6665c695a574b8b3bde9cfff3ea3ca13d4'
 const PROVIDER_KEY_ENV = 'CYF_CONTROLLED_IMAGE_API_KEY'
@@ -57,6 +59,51 @@ const requireText = (value, label) => {
   return value
 }
 const policyKey = name => `agent.controlled-image-provider.operator-policies[0].${name}`
+const operatorPolicyProjection = properties => Object.freeze({
+  tenantId: properties[policyKey('tenant-id')],
+  clientId: properties[policyKey('client-id')],
+  ownerJiacn: properties[policyKey('owner-jiacn')],
+  targetAgentId: properties[policyKey('target-agent-id')],
+  providerLane: properties[policyKey('provider-lane')],
+  bindingId: properties[policyKey('binding-id')],
+  bindingEpoch: String(properties[policyKey('binding-epoch')]),
+  modelId: properties[policyKey('model-id')],
+  custody: properties[policyKey('custody')],
+  issuer: properties[policyKey('issuer')],
+  policyRevision: properties[policyKey('policy-revision')],
+  expiresAt: String(properties[policyKey('expires-at')]),
+  allowUnpricedExternalAccount: properties[policyKey('allow-unpriced-external-account')],
+  maxOutboundRequestAttempts: properties[policyKey('max-outbound-request-attempts')]
+})
+
+const verifyOperatorBindingEvidence = ({ evidence, properties, operatorBindingFreezePath }) => {
+  if (evidence.status === 'UNVERIFIED') {
+    if (evidence.sourceType !== null || evidence.sourceReference !== null || evidence.sourceDigest !== null
+        || operatorBindingFreezePath) fail('PROVIDER_BINDING_UNVERIFIED_SOURCE_INVALID')
+    return Object.freeze({ status: 'UNVERIFIED' })
+  }
+  if (evidence.status !== 'VERIFIED') fail('PROVIDER_BINDING_EVIDENCE_STATUS_INVALID')
+  if (evidence.sourceType !== OPERATOR_BINDING_SOURCE_TYPE) fail('PROVIDER_BINDING_SOURCE_TYPE_INVALID')
+  requireText(evidence.sourceReference, 'PROVIDER_BINDING_SOURCE_REFERENCE')
+  if (!DIGEST.test(evidence.sourceDigest || '')) fail('PROVIDER_BINDING_SOURCE_DIGEST_INVALID')
+  if (typeof operatorBindingFreezePath !== 'string' || !isAbsolute(operatorBindingFreezePath)) {
+    fail('PROVIDER_BINDING_OPERATOR_FREEZE_REQUIRED')
+  }
+  const bytes = readRegular(operatorBindingFreezePath, 'PROVIDER_BINDING_OPERATOR_FREEZE')
+  if (`sha256:${sha256(bytes)}` !== evidence.sourceDigest) fail('PROVIDER_BINDING_SOURCE_DIGEST_MISMATCH')
+  let frozen
+  try { frozen = JSON.parse(bytes) } catch { fail('PROVIDER_BINDING_OPERATOR_FREEZE_INVALID') }
+  exactKeySet(frozen, ['schemaVersion', 'artifactType', 'sourceContractCommit', 'sourceReference', 'operatorPolicy'],
+    'PROVIDER_BINDING_OPERATOR_FREEZE')
+  if (frozen.schemaVersion !== 1 || frozen.artifactType !== OPERATOR_BINDING_ARTIFACT_TYPE
+      || frozen.sourceContractCommit !== API_SOURCE_CONTRACT_COMMIT
+      || frozen.sourceReference !== evidence.sourceReference) fail('PROVIDER_BINDING_OPERATOR_FREEZE_INVALID')
+  exactKeySet(frozen.operatorPolicy, Object.keys(operatorPolicyProjection(properties)), 'PROVIDER_BINDING_OPERATOR_POLICY')
+  exactJson(frozen.operatorPolicy, operatorPolicyProjection(properties), 'PROVIDER_BINDING_OPERATOR_POLICY')
+  return Object.freeze({ status: 'VERIFIED', sourceType: evidence.sourceType,
+    sourceReference: evidence.sourceReference, sourceDigest: evidence.sourceDigest })
+}
+
 const parseCandidateEnv = (text, { allowPlaceholders = false } = {}) => {
   const values = {}
   for (const [index, raw] of String(text).split(/\r?\n/).entries()) {
@@ -104,8 +151,8 @@ export const TEMPLATE_REPLACEMENTS = Object.freeze({
   __FROZEN_WORKSPACE_API_ORIGIN__: 'https://api.example.invalid',
   __FROZEN_CONTROLLED_IMAGE_HTTPS_ORIGIN__: 'https://images.example.invalid',
   __FROZEN_CONTROLLED_IMAGE_MODEL_ID__: 'frozen-image-model',
-  __SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_ID__: 'controlled-binding-frozen',
-  __SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_EPOCH__: '7',
+  __OPERATOR_CONFIGURED_CONTROLLED_IMAGE_BINDING_ID__: 'controlled-binding-frozen',
+  __OPERATOR_CONFIGURED_CONTROLLED_IMAGE_BINDING_EPOCH__: '7',
   __EXISTING_CHCBZ_CLIENT_ID__: 'frozen-client-id',
   __EXISTING_CHCBZ_OWNER_JIACN__: 'frozen-owner',
   __FROZEN_OPERATOR_CUSTODY__: 'OWNER_EXTERNAL_ACCOUNT',
@@ -209,7 +256,8 @@ const normalizedProjection = profile => Object.freeze({
   isDefault: profile.isDefault
 })
 
-export const validateCandidate = ({ rawProfile, apiPolicy, env = { [PROVIDER_KEY_ENV]: 'redacted-test-credential' } }) => {
+export const validateCandidate = ({ rawProfile, apiPolicy, operatorBindingFreezePath = null,
+  env = { [PROVIDER_KEY_ENV]: 'redacted-test-credential' } }) => {
   if (!Array.isArray(rawProfile) || rawProfile.length !== 1) fail('EXACTLY_ONE_PROFILE_REQUIRED')
   exactKeySet(rawProfile[0], Object.keys(readJson(templatePath)[0]), 'PROFILE')
   if (Object.hasOwn(rawProfile[0], 'apiKey')) fail('PROFILE_SECRET_BYTES_FORBIDDEN')
@@ -253,14 +301,6 @@ export const validateCandidate = ({ rawProfile, apiPolicy, env = { [PROVIDER_KEY
       || providerBindingEvidence.bindingId !== profile.controlledImageHttpBindingId
       || providerBindingEvidence.bindingEpoch !== profile.controlledImageHttpBindingEpoch
       || providerBindingEvidence.modelId !== profile.controlledImageHttpModelId) fail('PROVIDER_BINDING_EVIDENCE_TUPLE_MISMATCH')
-  if (providerBindingEvidence.status === 'UNVERIFIED') {
-    if (providerBindingEvidence.sourceType !== null || providerBindingEvidence.sourceReference !== null
-        || providerBindingEvidence.sourceDigest !== null) fail('PROVIDER_BINDING_UNVERIFIED_SOURCE_INVALID')
-  } else if (providerBindingEvidence.status === 'VERIFIED') {
-    requireText(providerBindingEvidence.sourceType, 'PROVIDER_BINDING_SOURCE_TYPE')
-    requireText(providerBindingEvidence.sourceReference, 'PROVIDER_BINDING_SOURCE_REFERENCE')
-    if (!DIGEST.test(providerBindingEvidence.sourceDigest || '')) fail('PROVIDER_BINDING_SOURCE_DIGEST_INVALID')
-  } else fail('PROVIDER_BINDING_EVIDENCE_STATUS_INVALID')
   const properties = apiPolicy.properties
   exactKeySet(properties, Object.keys(readJson(policyTemplatePath).properties), 'API_POLICY')
   for (const key of [
@@ -286,8 +326,11 @@ export const validateCandidate = ({ rawProfile, apiPolicy, env = { [PROVIDER_KEY
       || properties[policyKey('max-outbound-request-attempts')] !== 1) fail('API_POLICY_FIXED_FENCE_MISMATCH')
   if (JSON.stringify(apiPolicy.forbiddenClientWireFields) !== JSON.stringify(['producerRequestRevision']))
     fail('SERVER_REVISION_AUTHORITY_NOT_FROZEN')
+  const operatorBindingEvidence = verifyOperatorBindingEvidence({ evidence: providerBindingEvidence,
+    properties, operatorBindingFreezePath })
   return Object.freeze({ profile, projection: normalizedProjection(profile), syntheticExpectedDeclarations,
-    validationStatus: 'STATIC_VALID', providerBindingEvidenceStatus: providerBindingEvidence.status })
+    validationStatus: 'STATIC_VALID', providerBindingEvidenceStatus: operatorBindingEvidence.status,
+    operatorBindingEvidence })
 }
 
 const installerPayload = installerPath => {
@@ -333,9 +376,10 @@ const verifyIntegrity = releaseDir => {
   return sha256(Buffer.from(text, 'utf8'))
 }
 
-export const freezeCandidate = ({ rawProfile, apiPolicy, envText, releaseDir, sourceCommit, sourceTree, installerPath }) => {
+export const freezeCandidate = ({ rawProfile, apiPolicy, operatorBindingFreezePath = null,
+  envText, releaseDir, sourceCommit, sourceTree, installerPath }) => {
   if (!/^[a-f0-9]{40}$/.test(sourceCommit || '') || !/^[a-f0-9]{40}$/.test(sourceTree || '')) fail('SOURCE_IDENTITY_INVALID')
-  const validated = validateCandidate({ rawProfile, apiPolicy })
+  const validated = validateCandidate({ rawProfile, apiPolicy, operatorBindingFreezePath })
   const candidateEnv = validateCandidateEnvironment(envText)
   const frozenInstallerPath = requireText(installerPath, 'INSTALLER_PATH')
   const installer = installerPayload(frozenInstallerPath)
@@ -374,7 +418,8 @@ export const freezeCandidate = ({ rawProfile, apiPolicy, envText, releaseDir, so
       policyRevision: apiPolicy.properties[policyKey('policy-revision')],
       digest: digestObject(apiPolicy.properties),
       properties: apiPolicy.properties,
-      forbiddenClientWireFields: apiPolicy.forbiddenClientWireFields
+      forbiddenClientWireFields: apiPolicy.forbiddenClientWireFields,
+      operatorBindingEvidence: validated.operatorBindingEvidence
     },
     validation: { status: 'STATIC_VALID', projectionKind: 'SYNTHETIC_EXPECTED_REGISTRATION',
       providerBindingEvidenceStatus: validated.providerBindingEvidenceStatus, fullInstallationReadiness: false },
@@ -421,6 +466,10 @@ const option = (args, name) => {
   if (index < 0 || !args[index + 1]) fail(`MISSING_OPTION:${name}`)
   return args[index + 1]
 }
+const optional = (args, name) => {
+  const index = args.indexOf(name)
+  return index < 0 ? null : option(args, name)
+}
 
 const main = () => {
   const [command, ...args] = process.argv.slice(2)
@@ -431,9 +480,11 @@ const main = () => {
     const profile = readJson(option(args, '--profile'))
     const policy = readJson(option(args, '--api-policy'))
     const envText = readFileSync(option(args, '--env-file'), 'utf8')
+    const operatorBindingFreeze = optional(args, '--operator-binding-freeze')
     const frozen = freezeCandidate({ rawProfile: profile, apiPolicy: policy, envText, releaseDir: resolve(option(args, '--release')),
       sourceCommit: option(args, '--source-commit'), sourceTree: option(args, '--source-tree'),
-      installerPath: resolve(option(args, '--installer')) })
+      installerPath: resolve(option(args, '--installer')),
+      operatorBindingFreezePath: operatorBindingFreeze ? resolve(operatorBindingFreeze) : null })
     const output = option(args, '--output'); writeFileSync(output, `${JSON.stringify(frozen, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
     console.log(JSON.stringify({ status: 'STATIC_VALID', fullInstallationReadiness: false, output, freezeDigest: frozen.freezeDigest }))
     return
@@ -443,7 +494,7 @@ const main = () => {
       registration: readJson(option(args, '--registration')), presence: readJson(option(args, '--presence')) })
     console.log(JSON.stringify(result, null, 2)); return
   }
-  fail('usage: install-candidate-check.mjs verify-template | freeze --profile FILE --env-file FILE --api-policy FILE --release DIR --installer FILE --source-commit SHA --source-tree SHA --output NEW_FILE | readback --freeze FILE --registration FILE --presence FILE')
+  fail('usage: install-candidate-check.mjs verify-template | freeze --profile FILE --env-file FILE --api-policy FILE [--operator-binding-freeze FILE] --release DIR --installer FILE --source-commit SHA --source-tree SHA --output NEW_FILE | readback --freeze FILE --registration FILE --presence FILE')
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

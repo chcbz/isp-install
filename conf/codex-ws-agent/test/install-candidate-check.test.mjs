@@ -45,6 +45,42 @@ const candidate = () => {
   return { rawProfile, apiPolicy }
 }
 
+const operatorPolicyProjection = apiPolicy => {
+  const key = name => `agent.controlled-image-provider.operator-policies[0].${name}`
+  const properties = apiPolicy.properties
+  return {
+    tenantId: properties[key('tenant-id')], clientId: properties[key('client-id')],
+    ownerJiacn: properties[key('owner-jiacn')], targetAgentId: properties[key('target-agent-id')],
+    providerLane: properties[key('provider-lane')], bindingId: properties[key('binding-id')],
+    bindingEpoch: String(properties[key('binding-epoch')]), modelId: properties[key('model-id')],
+    custody: properties[key('custody')], issuer: properties[key('issuer')],
+    policyRevision: properties[key('policy-revision')], expiresAt: String(properties[key('expires-at')]),
+    allowUnpricedExternalAccount: properties[key('allow-unpriced-external-account')],
+    maxOutboundRequestAttempts: properties[key('max-outbound-request-attempts')]
+  }
+}
+
+const writeOperatorBindingFreeze = (root, apiPolicy, mutate = value => value) => {
+  const sourceReference = 'operator-freeze/wuyong-controlled-image-policy-r1'
+  const document = mutate({
+    schemaVersion: 1,
+    artifactType: 'CONTROLLED_IMAGE_OPERATOR_BINDING_FREEZE_V1',
+    sourceContractCommit: '9ab62d6665c695a574b8b3bde9cfff3ea3ca13d4',
+    sourceReference,
+    operatorPolicy: operatorPolicyProjection(apiPolicy)
+  })
+  const path = resolve(root, 'operator-binding-freeze.json')
+  const bytes = Buffer.from(`${JSON.stringify(document, null, 2)}\n`)
+  writeFileSync(path, bytes)
+  Object.assign(apiPolicy.providerBindingEvidence, {
+    status: 'VERIFIED',
+    sourceType: 'API_OPERATOR_POLICY_FREEZE_FILE',
+    sourceReference,
+    sourceDigest: `sha256:${sha256(bytes)}`
+  })
+  return path
+}
+
 const writeRelease = root => {
   mkdirSync(root, { recursive: true })
   const manifest = releasePayload.map(relative => {
@@ -103,7 +139,7 @@ test('redacted templates are static-valid synthetic projections without secrets 
   assert.throws(() => validateCandidateEnvironment(candidateEnv().replace('owner-secret-not-frozen', '__OWNER_SECRET__')), /ENV_SECRET_UNAVAILABLE/)
 })
 
-test('binding identity is namespace/source evidence based and exact provider/policy drift fails closed', async t => {
+test('binding identity is platform-operator fenced and independent freeze evidence fails closed', async t => {
   for (const bindingId of ['1', '2', '15']) {
     await t.test(`numeric binding ${bindingId} is not rejected across namespaces`, () => {
       const { rawProfile, apiPolicy } = candidate()
@@ -115,7 +151,7 @@ test('binding identity is namespace/source evidence based and exact provider/pol
       assert.equal(result.providerBindingEvidenceStatus, 'UNVERIFIED')
     })
   }
-  await t.test('separately sourced provider binding can be VERIFIED', () => {
+  await t.test('arbitrary non-empty receipt labels cannot become VERIFIED', () => {
     const { rawProfile, apiPolicy } = candidate()
     Object.assign(apiPolicy.providerBindingEvidence, {
       status: 'VERIFIED',
@@ -123,7 +159,61 @@ test('binding identity is namespace/source evidence based and exact provider/pol
       sourceReference: 'private-receipt/provider-binding-7',
       sourceDigest: `sha256:${'7'.repeat(64)}`
     })
-    assert.equal(validateCandidate({ rawProfile, apiPolicy }).providerBindingEvidenceStatus, 'VERIFIED')
+    assert.throws(() => validateCandidate({ rawProfile, apiPolicy }), /PROVIDER_BINDING_SOURCE_TYPE_INVALID/)
+  })
+  await t.test('VERIFIED requires the actual independent Operator freeze file', () => {
+    const { rawProfile, apiPolicy } = candidate()
+    Object.assign(apiPolicy.providerBindingEvidence, {
+      status: 'VERIFIED', sourceType: 'API_OPERATOR_POLICY_FREEZE_FILE',
+      sourceReference: 'operator-freeze/wuyong-controlled-image-policy-r1',
+      sourceDigest: `sha256:${'7'.repeat(64)}`
+    })
+    assert.throws(() => validateCandidate({ rawProfile, apiPolicy }), /PROVIDER_BINDING_OPERATOR_FREEZE_REQUIRED/)
+  })
+  await t.test('exact Operator freeze bytes and tuple can be VERIFIED', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'cyf-operator-freeze-'))
+    try {
+      const { rawProfile, apiPolicy } = candidate()
+      const path = writeOperatorBindingFreeze(root, apiPolicy)
+      const result = validateCandidate({ rawProfile, apiPolicy, operatorBindingFreezePath: path })
+      assert.equal(result.providerBindingEvidenceStatus, 'VERIFIED')
+      assert.deepEqual(result.operatorBindingEvidence, {
+        status: 'VERIFIED', sourceType: 'API_OPERATOR_POLICY_FREEZE_FILE',
+        sourceReference: 'operator-freeze/wuyong-controlled-image-policy-r1',
+        sourceDigest: apiPolicy.providerBindingEvidence.sourceDigest
+      })
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  await t.test('Operator freeze byte digest drift fails closed', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'cyf-operator-freeze-'))
+    try {
+      const { rawProfile, apiPolicy } = candidate()
+      const path = writeOperatorBindingFreeze(root, apiPolicy)
+      apiPolicy.providerBindingEvidence.sourceDigest = `sha256:${'7'.repeat(64)}`
+      assert.throws(() => validateCandidate({ rawProfile, apiPolicy, operatorBindingFreezePath: path }),
+        /PROVIDER_BINDING_SOURCE_DIGEST_MISMATCH/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  await t.test('Operator freeze source reference drift fails closed', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'cyf-operator-freeze-'))
+    try {
+      const { rawProfile, apiPolicy } = candidate()
+      const path = writeOperatorBindingFreeze(root, apiPolicy)
+      apiPolicy.providerBindingEvidence.sourceReference = 'operator-freeze/different-policy'
+      assert.throws(() => validateCandidate({ rawProfile, apiPolicy, operatorBindingFreezePath: path }),
+        /PROVIDER_BINDING_OPERATOR_FREEZE_INVALID/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  await t.test('Operator freeze tuple drift fails closed', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'cyf-operator-freeze-'))
+    try {
+      const { rawProfile, apiPolicy } = candidate()
+      const path = writeOperatorBindingFreeze(root, apiPolicy, value => {
+        value.operatorPolicy.bindingEpoch = '8'; return value
+      })
+      assert.throws(() => validateCandidate({ rawProfile, apiPolicy, operatorBindingFreezePath: path }),
+        /PROVIDER_BINDING_OPERATOR_POLICY_MISMATCH/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
   })
   await t.test('UNVERIFIED binding cannot carry pseudo-source evidence', () => {
     const { rawProfile, apiPolicy } = candidate()
@@ -187,6 +277,26 @@ test('freeze is stable across release roots and binds source, payload, CA, evide
   } finally {
     for (const root of roots) rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('freeze binds verified independent Operator evidence without persisting its private path', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'cyf-verified-freeze-'))
+  try {
+    const release = resolve(root, 'release')
+    writeRelease(release)
+    const { rawProfile, apiPolicy } = candidate()
+    const operatorBindingFreezePath = writeOperatorBindingFreeze(root, apiPolicy)
+    const freeze = freezeCandidate({ rawProfile, apiPolicy, operatorBindingFreezePath,
+      envText: candidateEnv(), releaseDir: release, sourceCommit, sourceTree, installerPath })
+    assert.equal(freeze.validation.status, 'STATIC_VALID')
+    assert.equal(freeze.validation.providerBindingEvidenceStatus, 'VERIFIED')
+    assert.deepEqual(freeze.apiPolicy.operatorBindingEvidence, {
+      status: 'VERIFIED', sourceType: 'API_OPERATOR_POLICY_FREEZE_FILE',
+      sourceReference: 'operator-freeze/wuyong-controlled-image-policy-r1',
+      sourceDigest: apiPolicy.providerBindingEvidence.sourceDigest
+    })
+    assert.equal(JSON.stringify(freeze).includes(operatorBindingFreezePath), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('readback accepts one exact live registration/presence pair and fails closed on drift', () => {

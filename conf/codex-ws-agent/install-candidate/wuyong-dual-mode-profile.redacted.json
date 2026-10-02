@@ -47,8 +47,8 @@
     "controlledImageHttpEndpoint": "__FROZEN_CONTROLLED_IMAGE_HTTPS_ORIGIN__",
     "controlledImageHttpApiKeyEnv": "CYF_CONTROLLED_IMAGE_API_KEY",
     "controlledImageHttpModelId": "__FROZEN_CONTROLLED_IMAGE_MODEL_ID__",
-    "controlledImageHttpBindingId": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_ID__",
-    "controlledImageHttpBindingEpoch": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_EPOCH__",
+    "controlledImageHttpBindingId": "__OPERATOR_CONFIGURED_CONTROLLED_IMAGE_BINDING_ID__",
+    "controlledImageHttpBindingEpoch": "__OPERATOR_CONFIGURED_CONTROLLED_IMAGE_BINDING_EPOCH__",
     "controlledImageHttpLedgerRoot": "/home/isp/apps/codex-ws-agent/data/controlled-image-ledger/wuyong",
     "enabled": true,
     "isDefault": true

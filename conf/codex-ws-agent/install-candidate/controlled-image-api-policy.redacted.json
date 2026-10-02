@@ -18,8 +18,8 @@
     "sourceReference": null,
     "sourceDigest": null,
     "providerLane": "CONTROLLED_IMAGE_HTTP_V1",
-    "bindingId": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_ID__",
-    "bindingEpoch": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_EPOCH__",
+    "bindingId": "__OPERATOR_CONFIGURED_CONTROLLED_IMAGE_BINDING_ID__",
+    "bindingEpoch": "__OPERATOR_CONFIGURED_CONTROLLED_IMAGE_BINDING_EPOCH__",
     "modelId": "__FROZEN_CONTROLLED_IMAGE_MODEL_ID__"
   },
   "properties": {
@@ -39,8 +39,8 @@
     "agent.controlled-image-provider.operator-policies[0].owner-jiacn": "__EXISTING_CHCBZ_OWNER_JIACN__",
     "agent.controlled-image-provider.operator-policies[0].target-agent-id": "__EXISTING_WUYONG_AGENT_ID__",
     "agent.controlled-image-provider.operator-policies[0].provider-lane": "CONTROLLED_IMAGE_HTTP_V1",
-    "agent.controlled-image-provider.operator-policies[0].binding-id": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_ID__",
-    "agent.controlled-image-provider.operator-policies[0].binding-epoch": "__SEPARATELY_ISSUED_CONTROLLED_IMAGE_BINDING_EPOCH__",
+    "agent.controlled-image-provider.operator-policies[0].binding-id": "__OPERATOR_CONFIGURED_CONTROLLED_IMAGE_BINDING_ID__",
+    "agent.controlled-image-provider.operator-policies[0].binding-epoch": "__OPERATOR_CONFIGURED_CONTROLLED_IMAGE_BINDING_EPOCH__",
     "agent.controlled-image-provider.operator-policies[0].model-id": "__FROZEN_CONTROLLED_IMAGE_MODEL_ID__",
     "agent.controlled-image-provider.operator-policies[0].custody": "__FROZEN_OPERATOR_CUSTODY__",
     "agent.controlled-image-provider.operator-policies[0].issuer": "__FROZEN_OPERATOR_ISSUER__",

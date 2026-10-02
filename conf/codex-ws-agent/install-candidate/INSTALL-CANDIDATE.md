@@ -1,13 +1,14 @@
 # `wuyong` dual-mode install candidate
 
-This directory is an inert, redacted candidate for one existing `wuyong` identity. It does not create or bind an identity, issue a controlled-image binding, install a release, restart a service, or call a Provider. An existing persona binding is identity evidence only and is not provider-binding evidence. Numeric values are not globally unique across namespaces, so the checker does not blacklist historical IDs. A provider binding remains `UNVERIFIED` until a separately sourced controlled-image provider-binding receipt type, reference, and digest are frozen with the exact lane/binding/epoch/model tuple.
+This directory is an inert, redacted candidate for one existing `wuyong` identity. It does not create or bind an identity, install a release, restart a service, or call a Provider. An existing persona binding is identity evidence only and is not controlled-image credential-binding evidence. Numeric values are not globally unique across namespaces, so the checker does not blacklist historical IDs. The controlled-image `bindingId` and positive decimal `bindingEpoch` are platform Operator-selected configuration fences: no upstream Provider binding-issuance API or external binding object is required. Evidence remains `UNVERIFIED` when only the Client/API declarations exist.
 
 ## Freeze inputs
 
 Main and the API configuration Owner must separately freeze every placeholder before installation:
 
 - existing `wuyong` agent ID, private Codex home, workspace/API origin, and WebSocket URL;
-- separately issued controlled-image HTTPS origin, model ID, binding ID, and positive decimal binding epoch;
+- controlled-image HTTPS origin and exact model ID supplied by the Provider/account custodian;
+- platform Operator-selected binding ID and positive decimal binding epoch, changed when the local credential/configuration fence is rotated;
 - exact API tenant/client/owner/target-agent policy, custody, issuer, revision, expiry, and the same model/binding tuple;
 - private `0600` values for `OPENCLAW_API_KEY` and `CYF_CONTROLLED_IMAGE_API_KEY`.
 
@@ -31,6 +32,20 @@ The template's typed-inspection values are fixed to the accepted evidence: provi
 
 Fixed fences are provider lane `CONTROLLED_IMAGE_HTTP_V1`, max inputs `16`, max outbound attempts `1`, and precall fence `1`. API scheduling/consent/grant/policy is authoritative; registration and presence only advertise the live Client's measured readiness.
 
+`bindingEpoch` is an exact positive-long equality fence, not an externally issued Provider version. The Client and API do not generate it or prove monotonicity; the Operator freezes one value in both configurations and changes it on a relevant rotation so stale consent/start state no longer matches.
+
+### Controlled image HTTP compatibility contract
+
+The configured endpoint is an HTTPS origin only. The production adapter appends `/v1/images/generations` or `/v1/images/edits` and sends Bearer-authenticated `application/json`. Generation sends `model`, `prompt`, `n: 1`, and `output_format: "png"`. Editing additionally requires JSON `images: [{"image_url":"data:image/...;base64,..."}]`; a Provider that only supports multipart image edits is not compatible with this adapter. The direct, non-redirected 200 response must contain exactly one canonical PNG in `data[0].b64_json`.
+
+This is not the Responses understanding contract. Static validation, model-list output, or a successful understanding request does not establish generation/edit compatibility; that remains unclaimed until supported by Provider contract evidence or a separately authorized real request.
+
+### Independent Operator freeze evidence
+
+`VERIFIED` is allowed only when `sourceType` is `API_OPERATOR_POLICY_FREEZE_FILE` and `freeze` receives `--operator-binding-freeze FILE`. The checker reads that regular non-symlink file, hashes its actual bytes, requires the digest and internal `sourceReference` to match the policy candidate, and compares its exact tenant/client/owner/target/lane/binding/epoch/model/custody/issuer/revision/expiry/attempt tuple with the API properties. The file is a non-secret platform Operator configuration freeze, not an upstream receipt and not a new signing requirement. Arbitrary non-empty source labels or a claimed SHA without the file cannot become `VERIFIED`.
+
+The independent file has exact top-level keys `schemaVersion`, `artifactType`, `sourceContractCommit`, `sourceReference`, and `operatorPolicy`; `artifactType` is `CONTROLLED_IMAGE_OPERATOR_BINDING_FREEZE_V1`. If that independently owned file is unavailable, keep all three source fields null and status `UNVERIFIED`.
+
 ## Stable payload freeze (no Provider request)
 
 Run from the exact source checkout against the exact collated release and installer used to create it. The output path must not already exist:
@@ -48,6 +63,8 @@ node conf/codex-ws-agent/install-candidate/install-candidate-check.mjs freeze \
   --output /private/wuyong-dual-mode.freeze.json
 chmod 0600 /private/wuyong-dual-mode.freeze.json
 ```
+
+For a policy explicitly marked `VERIFIED`, add `--operator-binding-freeze /private/operator-controlled-image-binding-freeze.json`. Do not add that option to an `UNVERIFIED` candidate.
 
 The checker verifies every `release-manifest.sha256` entry byte-for-byte, release provenance/integrity, installer digest, source commit/tree, normalized non-secret profile and minimal environment, secret-reference names, CA bytes, carrier-evidence bytes, provider-local partial API properties, provider-binding evidence status, and the synthetic expected declarations. The freeze digest excludes secret bytes, release-root paths, runtime instance IDs, process IDs, random ports, timestamps, nftables counters, and request/turn IDs. Thus another process using the identical source, payload, profile, policy, CA, and evidence has the same contract digest; native isolation remains a per-execution check and is not replaced by this freeze.
 
