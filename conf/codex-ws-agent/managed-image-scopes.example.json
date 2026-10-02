@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "authorizations": [
+    {
+      "tenantId": "replace-with-exact-tenant",
+      "clientId": "replace-with-exact-client",
+      "ownerJiacn": "replace-with-exact-owner",
+      "agentId": "agt_00000000000000000000000000000000",
+      "generation": "hri_00000000-0000-0000-0000-000000000000",
+      "profileId": "managed:agt_00000000000000000000000000000000:hri_00000000-0000-0000-0000-000000000000",
+      "nativeConversationHttpPollEnabled": true,
+      "controlledImageHttpEnabled": true,
+      "controlledImageHttpEndpoint": "https://images.example.test",
+      "controlledImageHttpApiKeyEnv": "MANAGED_IMAGE_EXAMPLE_API_KEY",
+      "controlledImageHttpModelId": "replace-with-explicit-model-id",
+      "controlledImageHttpBindingId": "replace-with-explicit-binding-id",
+      "controlledImageHttpBindingEpoch": "1",
+      "controlledImageHttpLedgerRoot": "/home/isp/apps/codex-ws-agent/data/managed-image-ledgers/replace-with-exact-scope"
+    }
+  ]
+}

@@ -92,6 +92,11 @@ test('managed profiles inherit only trusted runtime delivery capabilities', () =
   assert.equal(managed.workspaceFileApiOrigin, 'http://127.0.0.1:10018')
   assert.equal(managed.workspaceFileRootDir, '/srv/private-runs')
   assert.deepEqual(managed.executionReportCommandTypes, ['WORKSPACE_FILE_EXECUTE'])
+  assert.equal(managed.controlledImageHttpEnabled, false)
+  assert.equal(managed.controlledImageHttpEndpoint, '')
+  assert.equal(managed.controlledImageHttpApiKeyEnv, '')
+  assert.equal(managed.controlledImageHttpBindingId, '')
+  assert.equal(managed.controlledImageHttpLedgerRoot, '')
 })
 
 const command = number => ({

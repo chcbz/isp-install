@@ -225,6 +225,7 @@ export class ManagedHost {
       agentName: request.agentId, personaName: request.agentId, apiKey: request.apiKey, codexBin: this.codexBin,
       codexHome: paths.home, codexWorkdir: paths.workdir, codexSandbox: 'workspace-write', codexApproval: 'never',
       codexSessionMode: 'new', codexTimeoutMs: 900000, abilities: [], skills: [], enabled: true,
+      managedTenantId: request.tenantId, managedClientId: request.clientId,
       managedGeneration: request.intentId, managedOwnerJiacn: request.ownerJiacn,
       managedScopeKey: this.identityKey(request), managedProfileRef: `${request.agentId}/${request.intentId}`,
       workspacePolicyId: this.workspacePolicyId, workspaceRole: 'coder', workspaceNoTaskPolicy: 'reject', workspaceNonCodingCommandTypes: [] }

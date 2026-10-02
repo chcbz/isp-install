@@ -50,6 +50,11 @@ import { ControlledImageHttpLedger } from './controlled-image-http-ledger.mjs'
 import { ControlledImageHttpExecutor } from './controlled-image-http-executor.mjs'
 import { ControlledImageHttpExecutorV3 } from './controlled-image-http-executor-v3.mjs'
 import { buildNativeProviderCredentialBinding } from './controlled-image-http-provider-binding.mjs'
+import {
+  emptyManagedImageScopeAuthorizations,
+  loadManagedImageScopeAuthorizations,
+  managedImageScopeMatches
+} from './managed-image-scope-config.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import {
   AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
@@ -5166,23 +5171,30 @@ const terminateAllRuns = () => {
   }
 }
 
-export const inheritManagedRuntimeCapabilities = (profile, source = {}) => ({
-  ...profile,
-  workspaceFileApiOrigin: source.workspaceFileApiOrigin || '',
-  workspaceFileRootDir: source.workspaceFileRootDir || '',
-  nativeConversationHttpPollEnabled: source.nativeConversationHttpPollEnabled === true,
-  nativeConversationImageGenerationEnabled: source.nativeConversationImageGenerationEnabled === true,
-  controlledImageHttpEnabled: false,
-  controlledImageHttpEndpoint: '',
-  controlledImageHttpApiKeyEnv: '',
-  controlledImageHttpModelId: '',
-  controlledImageHttpBindingId: '',
-  controlledImageHttpBindingEpoch: '',
-  controlledImageHttpLedgerRoot: '',
-  executionReportCommandTypes: Array.isArray(source.executionReportCommandTypes)
-    ? [...source.executionReportCommandTypes]
-    : []
-})
+export const inheritManagedRuntimeCapabilities = (profile, source = {}, managedImageAuthorization = null) => {
+  const controlled = managedImageScopeMatches(profile, managedImageAuthorization) ? managedImageAuthorization : null
+  return {
+    ...profile,
+    workspaceFileApiOrigin: source.workspaceFileApiOrigin || '',
+    workspaceFileRootDir: source.workspaceFileRootDir || '',
+    nativeConversationHttpPollEnabled: controlled?.nativeConversationHttpPollEnabled === true ||
+      source.nativeConversationHttpPollEnabled === true,
+    nativeConversationImageGenerationEnabled: controlled ? false : source.nativeConversationImageGenerationEnabled === true,
+    controlledImageHttpEnabled: controlled?.controlledImageHttpEnabled === true,
+    controlledImageHttpEndpoint: controlled?.controlledImageHttpEndpoint || '',
+    controlledImageHttpApiKeyEnv: controlled?.controlledImageHttpApiKeyEnv || '',
+    controlledImageHttpModelId: controlled?.controlledImageHttpModelId || '',
+    controlledImageHttpBindingId: controlled?.controlledImageHttpBindingId || '',
+    controlledImageHttpBindingEpoch: controlled?.controlledImageHttpBindingEpoch || '',
+    controlledImageHttpLedgerRoot: controlled?.controlledImageHttpLedgerRoot || '',
+    executionReportCommandTypes: Array.isArray(source.executionReportCommandTypes)
+      ? [...source.executionReportCommandTypes]
+      : []
+  }
+}
+
+export const resolveManagedRuntimeProfile = (profile, source = {}, managedImageScopes = emptyManagedImageScopeAuthorizations()) =>
+  inheritManagedRuntimeCapabilities(profile, source, managedImageScopes?.resolve?.(profile) || null)
 
 /** Fully composed source-aware v3 runtime for production registration and polling. */
 export const createControlledImageV3SourceRuntime = ({
@@ -6093,6 +6105,15 @@ export const main = async () => {
           (resolve(profile.codexHome) === root || resolve(profile.codexHome).startsWith(`${root}/`) || root.startsWith(`${resolve(profile.codexHome)}/`)))) {
         throw new Error('Managed data root overlaps existing profiles')
       }
+      let managedImageScopes = emptyManagedImageScopeAuthorizations()
+      const managedImageScopesPath = process.env.AGENT_MANAGED_IMAGE_SCOPES_FILE
+      if (managedImageScopesPath) {
+        try {
+          managedImageScopes = loadManagedImageScopeAuthorizations(managedImageScopesPath, { reservedProfiles: config.profiles })
+        } catch (error) {
+          console.warn(`managed image scopes unavailable; controlled image remains disabled (${error.message})`)
+        }
+      }
       const host = new ManagedHost({ root, workspacePolicyId, templateHome: required('AGENT_MANAGED_HOST_TEMPLATE_HOME'),
         codexBin: required('AGENT_MANAGED_HOST_CODEX_BIN'), runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
         tenantId: required('AGENT_MANAGED_HOST_TENANT_ID'), clientId: required('AGENT_MANAGED_HOST_CLIENT_ID'),
@@ -6106,7 +6127,7 @@ export const main = async () => {
             runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
         },
         attachProfile: async (profile, engine) => {
-          profile = inheritManagedRuntimeCapabilities(profile, defaultProfile)
+          profile = resolveManagedRuntimeProfile(profile, defaultProfile, managedImageScopes)
           let state = profileStates.get(profile.agentId)
           if (state && (state.profile.managedOwnerJiacn !== profile.managedOwnerJiacn ||
               state.profile.managedGeneration !== profile.managedGeneration)) throw new Error('Managed profile collision')
