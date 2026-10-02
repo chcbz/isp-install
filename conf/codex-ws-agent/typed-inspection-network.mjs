@@ -235,6 +235,28 @@ export class RestrictedProviderEgress {
     this._assertOwner()
     return Object.freeze({ measured: true, providerAuthority: authority, connectEstablished: true, targetHost: provider.hostname, targetPort: Number(provider.port || 443) })
   }
+  async measureAllowedTls({ sandboxPath, sha256: expectedDigest }, { signal = this.lifecycle.signal } = {}) {
+    const owner = this._assertOwner(); const provider = new URL(this.policy.providerOrigin); const authority = this.policy.providerAuthority; const timeoutSeconds = this.networkConnectTimeoutMs / 1000
+    if (sandboxPath !== '/trust/ca-bundle.pem' || !/^sha256:[a-f0-9]{64}$/.test(expectedDigest || '')) fail('TYPED_INSPECTION_EGRESS_CA_BINDING_INVALID')
+    const caPath = `/proc/${owner.holder.pid}/root${sandboxPath}`
+    if (`sha256:${sha256File(caPath)}` !== expectedDigest) fail('TYPED_INSPECTION_EGRESS_CA_BINDING_INVALID')
+    const probe = `import socket,ssl,sys,json,hashlib
+t=${JSON.stringify(timeoutSeconds)};proxy=('10.0.2.2',${this.port});authority=${JSON.stringify(authority)};host=${JSON.stringify(provider.hostname)};ca=${JSON.stringify(caPath)}
+s=socket.create_connection(proxy,t);s.settimeout(t);s.sendall(('CONNECT '+authority+' HTTP/1.1\r\nHost: '+authority+'\r\n\r\n').encode('ascii'));d=b''
+while b'\r\n\r\n' not in d and len(d)<4096:
+ chunk=s.recv(4096)
+ if not chunk:break
+ d+=chunk
+if b' 200 ' not in d.split(b'\r\n',1)[0]:print(d[:128].decode('ascii','replace'));sys.exit(9)
+ctx=ssl.create_default_context(cafile=ca);tls=ctx.wrap_socket(s,server_hostname=host);cert=tls.getpeercert(binary_form=True);print(json.dumps({'protocol':tls.version(),'peerCertificateSha256':'sha256:'+hashlib.sha256(cert).hexdigest()}));tls.close()
+`
+    const tested = await this._nsenter(owner.holder.pid, [this.pythonBin, '-c', probe], { signal })
+    if (tested.status !== 0) fail('TYPED_INSPECTION_EGRESS_TLS_FAILED', `${tested.stdout || ''}${tested.stderr || ''}`.trim())
+    let readback; try { readback = JSON.parse(String(tested.stdout || '').trim()) } catch { fail('TYPED_INSPECTION_EGRESS_TLS_READBACK_INVALID') }
+    if (!/^TLSv1\.[23]$/.test(readback?.protocol || '') || !/^sha256:[a-f0-9]{64}$/.test(readback?.peerCertificateSha256 || '')) fail('TYPED_INSPECTION_EGRESS_TLS_READBACK_INVALID')
+    this._assertOwner()
+    return Object.freeze({ measured: true, providerAuthority: authority, tlsVerified: true, protocol: readback.protocol, peerCertificateSha256: readback.peerCertificateSha256, caBundleSha256: expectedDigest })
+  }
   async dispose() {
     if (!this.lifecycle.signal.aborted) this.lifecycle.abort()
     try { if (this.slirp?.exitCode === null) this.slirp.kill('SIGTERM') } catch {}

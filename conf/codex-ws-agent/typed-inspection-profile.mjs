@@ -30,9 +30,47 @@ const ensurePrivateDirectory = path => {
   if (lexical.isSymbolicLink() || !lexical.isDirectory() || (uid !== null && lexical.uid !== uid) || Number(lexical.mode & 0o777n) !== 0o700 || realpathSync(absolute) !== absolute) fail('TYPED_INSPECTION_PROFILE_DIRECTORY_UNSAFE')
   return absolute
 }
+const trustedPublicCaSource = profile => {
+  const configured = profile.typedInspectionCaBundlePath
+  const candidates = configured ? [configured] : DEFAULT_CA_BUNDLES
+  for (const candidate of candidates) {
+    if (!nonblank(candidate) || resolve(candidate) !== candidate || !existsSync(candidate)) continue
+    const absolute = realpathSync(candidate); const lexical = lstatSync(absolute, { bigint: true })
+    if (!lexical.isFile() || lexical.isSymbolicLink() || lexical.uid !== 0n || (lexical.mode & 0o022n) !== 0n) fail('TYPED_INSPECTION_CA_SOURCE_UNSAFE')
+    const bytes = readFileSync(absolute)
+    if (!bytes.includes(Buffer.from('-----BEGIN CERTIFICATE-----'))) fail('TYPED_INSPECTION_CA_SOURCE_INVALID')
+    const current = lstatSync(absolute, { bigint: true })
+    if (current.dev !== lexical.dev || current.ino !== lexical.ino || current.size !== lexical.size) fail('TYPED_INSPECTION_CA_SOURCE_DRIFT')
+    return Object.freeze({ sourcePath: candidate, resolvedSourcePath: absolute, bytes, sha256: `sha256:${sha256(bytes)}` })
+  }
+  fail('TYPED_INSPECTION_CA_SOURCE_REQUIRED')
+}
+const stageProviderCaTrust = (profile, stateRoot) => {
+  const source = trustedPublicCaSource(profile); const resources = ensurePrivateDirectory(resolve(stateRoot, 'profile-resources'))
+  const directory = ensurePrivateDirectory(mkdtempSync(resolve(resources, '.provider-ca-'))); const path = resolve(directory, 'ca-bundle.pem')
+  writeFileSync(path, source.bytes, { mode: 0o400, flag: 'wx' }); chmodSync(path, 0o400)
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) }; fsyncDirectory(directory)
+  const lexical = lstatSync(path, { bigint: true })
+  if (!lexical.isFile() || lexical.isSymbolicLink() || Number(lexical.mode & 0o777n) !== 0o400 || `sha256:${sha256File(path)}` !== source.sha256) fail('TYPED_INSPECTION_CA_STAGE_INVALID')
+  return Object.freeze({ directory, path, sandboxPath: PROVIDER_CA_SANDBOX_PATH, sha256: source.sha256, sourcePath: source.sourcePath, resolvedSourcePath: source.resolvedSourcePath, dev: String(lexical.dev), ino: String(lexical.ino), size: String(lexical.size) })
+}
+const verifyStagedCaTrust = trust => {
+  const lexical = lstatSync(trust.path, { bigint: true })
+  if (!lexical.isFile() || lexical.isSymbolicLink() || Number(lexical.mode & 0o777n) !== 0o400 || String(lexical.dev) !== trust.dev || String(lexical.ino) !== trust.ino || String(lexical.size) !== trust.size || `sha256:${sha256File(trust.path)}` !== trust.sha256) fail('TYPED_INSPECTION_CA_STAGE_DRIFT')
+}
+const verifyProviderTrustView = (pid, trust) => {
+  const path = resolve(`/proc/${pid}/root`, trust.sandboxPath.slice(1)); const lexical = lstatSync(path, { bigint: true })
+  if (!lexical.isFile() || lexical.isSymbolicLink() || Number(lexical.mode & 0o777n) !== 0o400 || `sha256:${sha256File(path)}` !== trust.sha256) fail('TYPED_INSPECTION_CA_VIEW_INVALID')
+  let writable = false; let fd = null
+  try { fd = openSync(path, constants.O_WRONLY | constants.O_NOFOLLOW); writable = true } catch (error) { if (!['EROFS', 'EACCES', 'EPERM'].includes(error?.code)) throw error } finally { if (fd !== null) closeSync(fd) }
+  if (writable) fail('TYPED_INSPECTION_CA_VIEW_WRITABLE')
+  return Object.freeze({ sandboxPath: trust.sandboxPath, sha256: trust.sha256, readable: true, mountReadOnly: true, writeDenied: true })
+}
 const within = (root, path) => path === root || path.startsWith(`${root}${sep}`)
 const overlaps = (left, right) => within(left, right) || within(right, left)
-const SANDBOX_MOUNTS = Object.freeze(['runtime:ro', 'request-inputs:ro', 'request-engine-state:rw', 'proc', 'dev', 'tmpfs:/tmp'])
+const SANDBOX_MOUNTS = Object.freeze(['runtime:ro', 'request-inputs:ro', 'request-engine-state:rw', 'provider-ca-trust:ro', 'proc', 'dev', 'tmpfs:/tmp'])
+const PROVIDER_CA_SANDBOX_PATH = '/trust/ca-bundle.pem'
+const DEFAULT_CA_BUNDLES = Object.freeze(['/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/certs/ca-certificates.crt'])
 const bwrapPolicy = identity => Object.freeze({ version: identity.version, sha256: identity.sha256 })
 const exactSupportedInputs = value => {
   if (!Array.isArray(value) || value.length === 0) fail('TYPED_INSPECTION_SUPPORTED_INPUTS_REQUIRED')
@@ -117,14 +155,17 @@ const verifyBwrapIdentity = identity => {
   if (!lexical.isFile() || lexical.isSymbolicLink() || String(lexical.dev) !== identity.dev || String(lexical.ino) !== identity.ino || String(lexical.size) !== identity.size || `sha256:${sha256(readFileSync(identity.path))}` !== identity.sha256) fail('TYPED_INSPECTION_BWRAP_IDENTITY_DRIFT')
 }
 const snapshotDirectory = measurement => dirname(dirname(measurement.snapshotPath))
-const sandboxArgs = ({ snapshot, stateRoot, inputDirectory, networkMode, proxyUrl = '' }) => {
+const sandboxArgs = ({ snapshot, stateRoot, inputDirectory, networkMode, proxyUrl = '', caTrust = null }) => {
   const args = ['--unshare-all']
   args.push('--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
     '--dir', '/runtime', '--ro-bind', snapshot, '/runtime', '--dir', '/state', '--bind', stateRoot, '/state',
     '--dir', '/inputs', '--ro-bind', inputDirectory, '/inputs')
-  if (networkMode === 'provider-restricted') args.push('--dir', '/etc', '--dir', '/etc/ssl', '--ro-bind-try', '/etc/ssl/certs', '/etc/ssl/certs')
+  if (networkMode === 'provider-restricted') {
+    if (!caTrust) fail('TYPED_INSPECTION_CA_SOURCE_REQUIRED')
+    verifyStagedCaTrust(caTrust); args.push('--dir', '/trust', '--ro-bind', caTrust.directory, '/trust')
+  }
   args.push('--setenv', 'HOME', '/state/home', '--setenv', 'CODEX_HOME', '/state/codex-home', '--setenv', 'PATH', '/runtime/bin')
-  if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', '', '--setenv', 'no_proxy', '')
+  if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', '', '--setenv', 'no_proxy', '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH)
   else args.push('--unsetenv', 'HTTP_PROXY', '--unsetenv', 'HTTPS_PROXY', '--unsetenv', 'ALL_PROXY', '--unsetenv', 'http_proxy', '--unsetenv', 'https_proxy', '--unsetenv', 'all_proxy')
   args.push('--chdir', '/inputs', '/runtime/bin/codex')
   return args
@@ -149,7 +190,8 @@ const stableExecutionNetworkAttestation = value => value ? Object.freeze({
   hostCanaryReachableControl: value.hostCanaryReachableControl === true, forbiddenConnectRejected: value.forbiddenConnectRejected === true,
   otherHostPortBlocked: value.otherHostPortBlocked === true, sandboxCanaryBlocked: value.sandboxCanaryBlocked === true,
   nftDefaultDropReadback: value.nftDefaultDropReadback === true, directInternetProbeBlocked: value.directInternetProbeBlocked === true,
-  directInternetBlocked: value.directInternetBlocked === true
+  directInternetBlocked: value.directInternetBlocked === true,
+  providerTls: value.providerTls ? Object.freeze({ measured: value.providerTls.measured === true, providerAuthority: value.providerTls.providerAuthority, tlsVerified: value.providerTls.tlsVerified === true, caBundleSha256: value.providerTls.caBundleSha256 }) : null
 }) : null
 export const buildTypedInspectionNativeAttestation = ({ schemaMeasurement, bwrap, view, isolatedConfigDigest, mcpCatalogCount, executionNetworkAttestation = null }) => Object.freeze({
   schemaVersion: 1,
@@ -181,6 +223,7 @@ export class TypedInspectionProfileRuntime {
     if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!Number.isSafeInteger(profile.typedInspectionNetworkConnectTimeoutMs) || profile.typedInspectionNetworkConnectTimeoutMs <= 0)) fail('TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_REQUIRED')
     if (overlaps(this.materializerRoot, this.stateRoot)) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
     for (const candidate of forbidden.filter(value => value && existsSync(resolve(value)))) if (overlaps(this.stateRoot, realpathSync(resolve(candidate)))) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
+    this.providerCaTrust = profile.typedInspectionProviderNetwork === 'restricted-proxy' ? stageProviderCaTrust(profile, this.stateRoot) : null
     this.bwrap = bwrapIdentity(bwrapBin); this.spawnFn = spawnFn; this.measureBinary = measureBinary; this.egressFactory = egressFactory; this.measurement = null; this.contractReadback = null; this.nativeReadback = null; this.activeAdapters = new Map()
   }
   _prepareEphemeralState(label) {
@@ -199,7 +242,7 @@ export class TypedInspectionProfileRuntime {
     const input = realpathSync(inputDirectory); if (!within(this.materializerRoot, input)) fail('TYPED_INSPECTION_INPUT_DIRECTORY_OUTSIDE_ROOT')
     const lexical = lstatSync(input, { bigint: true }); if (lexical.isSymbolicLink() || !lexical.isDirectory() || Number(lexical.mode & 0o777n) !== 0o700) fail('TYPED_INSPECTION_INPUT_DIRECTORY_UNSAFE')
     if (!engineState?.directory || !within(this.stateRoot, engineState.directory) || realpathSync(engineState.directory) !== engineState.directory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
-    const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: engineState.directory, inputDirectory: input, networkMode, proxyUrl })
+    const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: engineState.directory, inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust })
     const spawnWrapped = (_binary, commandArgs, options) => { verifyBwrapIdentity(this.bwrap); return this.spawnFn(this.bwrap.path, [...args, ...commandArgs], { ...options, cwd: '/', env: { LANG: 'C.UTF-8' } }) }
     const adapter = AppServerAdapter.spawn(this.profile, { cwd: '/inputs', schemaMeasurement, spawnFn: spawnWrapped, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
     adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
@@ -210,6 +253,7 @@ export class TypedInspectionProfileRuntime {
     const systemProxyEnabled = readback?.config?.config?.features?.respect_system_proxy === true
     if (adapter.typedInspectionNetworkMode === 'provider-restricted' && !systemProxyEnabled) fail('TYPED_INSPECTION_SYSTEM_PROXY_NOT_ENABLED')
     readback.providerSystemProxy = Object.freeze({ required: adapter.typedInspectionNetworkMode === 'provider-restricted', enabled: systemProxyEnabled })
+    readback.providerCaTrust = adapter.typedInspectionNetworkMode === 'provider-restricted' ? verifyProviderTrustView(pid, this.providerCaTrust) : null
     readback.credentialIsolation = sealCredential(adapter.typedInspectionEngineState, pid)
     return readback
   }
@@ -232,6 +276,8 @@ export class TypedInspectionProfileRuntime {
         try {
           await egress.bindOwner(executionAdapter.child, this.bwrap, schemaMeasurement.snapshotIdentity); executionNetworkAttestation = await egress.attach()
           executionReadback = await this._initializeAndSeal(executionAdapter)
+          const providerTls = await egress.measureAllowedTls(executionReadback.providerCaTrust)
+          executionNetworkAttestation = Object.freeze({ ...executionNetworkAttestation, providerTls })
           if (!emptyMcpCatalog(executionReadback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
         } finally { await executionAdapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose().catch(() => {}); rmSync(executionState.directory, { recursive: true, force: true }) }
       }
@@ -239,17 +285,17 @@ export class TypedInspectionProfileRuntime {
       const profileId = String(this.profile.typedInspectionProfileId || `${this.profile.profileId}-typed-inspection-v1`)
       const engineContractId = String(this.profile.typedInspectionEngineContractId || `codex-app-server-${schemaMeasurement.schemaContractId}-typed-inspection-v1`)
       const networkPolicy = this.profile.typedInspectionProviderNetwork === 'restricted-proxy' ? restrictedProviderNetworkPolicy(this.profile.typedInspectionProviderBaseUrl, { connectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs }) : null
-      const enginePolicyDigest = canonicalSha256({ schemaContractId: schemaMeasurement.schemaContractId, bundleSha256: schemaMeasurement.bundleSha256, binaryIdentityDigest: schemaMeasurement.binaryIdentityDigest, bwrap: bwrapPolicy(this.bwrap), mounts: SANDBOX_MOUNTS, networkPolicy, providerHttpRoute: 'respect_system_proxy=true/readback-required' })
+      const enginePolicyDigest = canonicalSha256({ schemaContractId: schemaMeasurement.schemaContractId, bundleSha256: schemaMeasurement.bundleSha256, binaryIdentityDigest: schemaMeasurement.binaryIdentityDigest, bwrap: bwrapPolicy(this.bwrap), mounts: SANDBOX_MOUNTS, networkPolicy, providerHttpRoute: 'respect_system_proxy=true/readback-required', providerCaTrustDigest: executionReadback?.providerCaTrust?.sha256 || null })
       const toolPolicyDigest = canonicalSha256({ policy: 'MANIFEST_READ_ONLY', mcpCatalogEmptyMeasured: true, mcpCatalogNotStrictNoToolsProof: true, webSearch: 'disabled', adapterDeniedRequests: 'command|file|permission|network|mcp|dynamic-tool|tool', bootstrapCredential: 'removed-before-model-turn', sandboxPolicy: { type: 'readOnly', networkAccess: false }, filesystem: SANDBOX_MOUNTS })
       const inputPolicyDigest = canonicalSha256({ sourcesStrictlyOrdered: true, requestDirectoryReadOnly: true, supportedInputs })
       const binding = Object.freeze({ profileId, engineContractId, enginePolicyDigest, toolPolicyDigest, inputPolicyDigest })
-      const nativeProbe = { schemaVersion: 1, schemaContractId: schemaMeasurement.schemaContractId, processExecutable: isolatedReadback.processExecutable, bwrap: this.bwrap, view, authSourceDigest: isolatedState.authDigest, isolatedConfigDigest: isolatedState.configDigest, credentialIsolation: isolatedReadback.credentialIsolation, executionNetworkReadback: executionNetworkAttestation, providerSystemProxyEnabled: executionReadback?.providerSystemProxy?.enabled === true, modelCount: Array.isArray(isolatedReadback.models?.data) ? isolatedReadback.models.data.length : null, mcpCatalogCount: isolatedReadback.tools.data.length }
+      const nativeProbe = { schemaVersion: 1, schemaContractId: schemaMeasurement.schemaContractId, processExecutable: isolatedReadback.processExecutable, bwrap: this.bwrap, view, authSourceDigest: isolatedState.authDigest, isolatedConfigDigest: isolatedState.configDigest, credentialIsolation: isolatedReadback.credentialIsolation, executionNetworkReadback: executionNetworkAttestation, providerSystemProxyEnabled: executionReadback?.providerSystemProxy?.enabled === true, providerCaTrust: executionReadback?.providerCaTrust || null, modelCount: Array.isArray(isolatedReadback.models?.data) ? isolatedReadback.models.data.length : null, mcpCatalogCount: isolatedReadback.tools.data.length }
       const nativeAttestation = buildTypedInspectionNativeAttestation({ schemaMeasurement, bwrap: this.bwrap, view, isolatedConfigDigest: isolatedState.configDigest, mcpCatalogCount: isolatedReadback.tools.data.length, executionNetworkAttestation })
       const nativeAttestationDigest = canonicalSha256(nativeAttestation)
       const carrierEvidence = loadCarrierEvidence(this.profile.typedInspectionCarrierEvidencePath, binding, supportedInputs, nativeAttestationDigest)
       this.nativeReadback = executionReadback
       this.contractReadback = carrierEvidence && executionReadback && executionNetworkAttestation ? Object.freeze({ schemaVersion: 1, measured: true, ...binding, toolPolicy: 'MANIFEST_READ_ONLY', recovery: 'durable-inbox-turn-readback-v1', supportedInputs }) : null
-      this.measurement = Object.freeze({ schemaVersion: 1, measured: true, binding, supportedInputs, nativeProbe: Object.freeze(nativeProbe), nativeAttestation, nativeAttestationDigest, nativeProbeDigest: nativeAttestationDigest, carrierEvidence, providerExecutionNetwork: executionNetworkAttestation ? 'restricted-proxy-measured-no-paid-turn' : 'isolated-measurement-only', providerExecutionNetworkAttestation: executionNetworkAttestation, providerSystemProxyEnabled: nativeProbe.providerSystemProxyEnabled, contractReady: Boolean(this.contractReadback) })
+      this.measurement = Object.freeze({ schemaVersion: 1, measured: true, binding, supportedInputs, nativeProbe: Object.freeze(nativeProbe), nativeAttestation, nativeAttestationDigest, nativeProbeDigest: nativeAttestationDigest, carrierEvidence, providerExecutionNetwork: executionNetworkAttestation ? 'restricted-proxy-measured-no-paid-turn' : 'isolated-measurement-only', providerExecutionNetworkAttestation: executionNetworkAttestation, providerSystemProxyEnabled: nativeProbe.providerSystemProxyEnabled, providerCaTrustDigest: nativeProbe.providerCaTrust?.sha256 || null, contractReady: Boolean(this.contractReadback) })
       return this.measurement
     } finally {
       await adapter.shutdown({ timeoutMs: 1000 }).catch(() => {})
@@ -283,6 +329,7 @@ export class TypedInspectionProfileRuntime {
   async dispose() {
     const active = [...this.activeAdapters.values()]; this.activeAdapters.clear()
     await Promise.all(active.map(async item => { await item.adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await item.egress?.dispose().catch(() => {}) }))
+    if (this.providerCaTrust?.directory) rmSync(this.providerCaTrust.directory, { recursive: true, force: true })
   }
   mapInputPath(hostPath, inputDirectory) {
     const root = realpathSync(inputDirectory); const path = realpathSync(hostPath); if (!within(root, path)) fail('TYPED_INSPECTION_INPUT_PATH_OUTSIDE_REQUEST')

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { resolve } from 'node:path'
@@ -21,6 +21,29 @@ test('restricted profile explicitly enables Codex system proxy routing without e
   assert.match(config, /\[model_providers\."gpt"\]/)
   assert.doesNotMatch(config, /HTTP_PROXY|HTTPS_PROXY|10\.0\.2\.2|bearer|api[_-]?key\s*=/i)
   assert.doesNotMatch(buildTypedInspectionCodexConfig({}), /respect_system_proxy/)
+})
+
+test('restricted profile resolves an absolute public CA symlink into private fixed bytes instead of exposing its host target tree', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-ca-stage-')); chmodSync(root, 0o700)
+  const materializerRoot = resolve(root, 'inputs'); const stateRoot = resolve(root, 'state'); const sourceRoot = resolve(root, 'source'); const targetRoot = resolve(root, 'target')
+  for (const directory of [materializerRoot, stateRoot, sourceRoot, targetRoot]) { mkdirSync(directory, { mode: 0o700 }); chmodSync(directory, 0o700) }
+  const target = resolve(targetRoot, 'public-ca.pem'); const link = resolve(sourceRoot, 'ca-bundle.crt')
+  const bytes = Buffer.from('-----BEGIN CERTIFICATE-----\nMIIB-public-test-only\n-----END CERTIFICATE-----\n')
+  writeFileSync(target, bytes, { mode: 0o444 }); chmodSync(target, 0o444); symlinkSync(target, link)
+  const runtime = new TypedInspectionProfileRuntime({
+    profile: { profileId: 'ca-stage', agentId: 'ca-stage-agent', codexBin: '/usr/local/bin/codex', codexHome: '/root/.codex',
+      typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderBaseUrl: 'https://provider.example/v1', typedInspectionNetworkConnectTimeoutMs: 1000,
+      typedInspectionCaBundlePath: link },
+    materializerRoot, stateRoot
+  })
+  try {
+    assert.equal(runtime.providerCaTrust.sourcePath, link)
+    assert.equal(runtime.providerCaTrust.resolvedSourcePath, target)
+    assert.deepEqual(readFileSync(runtime.providerCaTrust.path), bytes)
+    assert.equal(statSync(runtime.providerCaTrust.path).mode & 0o777, 0o400)
+    assert.equal(runtime.providerCaTrust.path.startsWith(`${stateRoot}/profile-resources/`), true)
+    assert.equal(runtime.providerCaTrust.path.startsWith(sourceRoot), false)
+  } finally { await runtime.dispose(); rmSync(root, { recursive: true, force: true }) }
 })
 
 test('provider-restricted initialization fails closed when native config readback does not enable system proxy routing', async () => {
@@ -46,6 +69,10 @@ test('native attestation digest excludes process and filesystem instance telemet
     forbiddenConnectRejected: true, otherHostPortBlocked: true, sandboxCanaryBlocked: true, nftDefaultDropReadback: true,
     nftRulesDigest: `sha256:${'6'.repeat(64)}`, directInternetProbeBlocked: true, directInternetBlocked: true }
   assert.equal(canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, nftRulesDigest: `sha256:${'7'.repeat(64)}` } })), canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: network })))
+  const providerTls = { measured: true, providerAuthority: 'provider.example:443', tlsVerified: true, protocol: 'TLSv1.3', peerCertificateSha256: `sha256:${'8'.repeat(64)}`, caBundleSha256: `sha256:${'9'.repeat(64)}` }
+  const withTls = canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, providerTls } }))
+  assert.equal(withTls, canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, providerTls: { ...providerTls, protocol: 'TLSv1.2', peerCertificateSha256: `sha256:${'a'.repeat(64)}` } } })))
+  assert.notEqual(withTls, canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, providerTls: { ...providerTls, caBundleSha256: `sha256:${'b'.repeat(64)}` } } })))
   assert.notEqual(canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, isolatedConfigDigest: 'sha256:' + '4'.repeat(64) })), first)
   assert.notEqual(canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, bwrap: { ...base.bwrap, sha256: 'sha256:' + '5'.repeat(64) } })), first)
 })
@@ -79,6 +106,11 @@ test('real bwrap profile performs a non-paid native app-server handshake with pr
     assert.equal(measured.nativeProbe.mcpCatalogCount, 0)
     assert.equal(measured.nativeProbe.providerSystemProxyEnabled, true)
     assert.equal(measured.providerSystemProxyEnabled, true)
+    assert.equal(measured.nativeProbe.providerCaTrust.readable, true)
+    assert.equal(measured.nativeProbe.providerCaTrust.mountReadOnly, true)
+    assert.equal(measured.nativeProbe.providerCaTrust.writeDenied, true)
+    assert.match(measured.providerCaTrustDigest, /^sha256:[a-f0-9]{64}$/)
+    assert.equal(measured.providerCaTrustDigest, measured.nativeProbe.providerCaTrust.sha256)
     assert.equal(measured.nativeAttestation.network.execution.measured, true)
     assert.equal(measured.nativeAttestation.network.execution.forbiddenConnectRejected, true)
     assert.equal(measured.nativeAttestation.network.execution.otherHostPortBlocked, true)
