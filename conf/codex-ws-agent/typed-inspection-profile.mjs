@@ -64,12 +64,16 @@ const providerConfig = profile => {
   const escaped = value => value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
   return `model_provider = "${escaped(id)}"\npreferred_auth_method = "apikey"\n[model_providers."${escaped(id)}"]\nname = "Typed Inspection Provider"\nbase_url = "${escaped(parsed.toString().replace(/\/$/, ''))}"\nwire_api = "${wireApi}"\nrequires_openai_auth = true\n`
 }
+export const buildTypedInspectionCodexConfig = profile => {
+  const systemProxy = profile?.typedInspectionProviderNetwork === 'restricted-proxy' ? '[features]\nrespect_system_proxy = true\n' : ''
+  return `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile)}${systemProxy}`
+}
 const stageCodexHome = (profile, stateRoot) => {
   const codexHome = ensurePrivateDirectory(resolve(stateRoot, 'codex-home')); ensurePrivateDirectory(resolve(stateRoot, 'home'))
   const sourceAuth = resolve(profile.codexHome || '', 'auth.json')
   if (!profile.codexHome || !existsSync(sourceAuth)) fail('TYPED_INSPECTION_AUTH_SOURCE_REQUIRED')
   const authDigest = copyCredentialFile(sourceAuth, resolve(codexHome, 'auth.json'))
-  const config = `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile)}`
+  const config = buildTypedInspectionCodexConfig(profile)
   const configPath = resolve(codexHome, 'config.toml'); const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(temporary, config, { mode: 0o600, flag: 'wx' }); chmodSync(temporary, 0o600)
   const configFd = openSync(temporary, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(configFd) } finally { closeSync(configFd) }
@@ -198,11 +202,14 @@ export class TypedInspectionProfileRuntime {
     const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: engineState.directory, inputDirectory: input, networkMode, proxyUrl })
     const spawnWrapped = (_binary, commandArgs, options) => { verifyBwrapIdentity(this.bwrap); return this.spawnFn(this.bwrap.path, [...args, ...commandArgs], { ...options, cwd: '/', env: { LANG: 'C.UTF-8' } }) }
     const adapter = AppServerAdapter.spawn(this.profile, { cwd: '/inputs', schemaMeasurement, spawnFn: spawnWrapped, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
-    adapter.typedInspectionEngineState = engineState; return adapter
+    adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
   }
   async _initializeAndSeal(adapter) {
     const readback = await adapter.initialize(); const pid = readback?.processExecutable?.pid
     if (!Number.isInteger(pid) || pid <= 0) fail('TYPED_INSPECTION_SANDBOX_PROCESS_REQUIRED')
+    const systemProxyEnabled = readback?.config?.config?.features?.respect_system_proxy === true
+    if (adapter.typedInspectionNetworkMode === 'provider-restricted' && !systemProxyEnabled) fail('TYPED_INSPECTION_SYSTEM_PROXY_NOT_ENABLED')
+    readback.providerSystemProxy = Object.freeze({ required: adapter.typedInspectionNetworkMode === 'provider-restricted', enabled: systemProxyEnabled })
     readback.credentialIsolation = sealCredential(adapter.typedInspectionEngineState, pid)
     return readback
   }
@@ -232,17 +239,17 @@ export class TypedInspectionProfileRuntime {
       const profileId = String(this.profile.typedInspectionProfileId || `${this.profile.profileId}-typed-inspection-v1`)
       const engineContractId = String(this.profile.typedInspectionEngineContractId || `codex-app-server-${schemaMeasurement.schemaContractId}-typed-inspection-v1`)
       const networkPolicy = this.profile.typedInspectionProviderNetwork === 'restricted-proxy' ? restrictedProviderNetworkPolicy(this.profile.typedInspectionProviderBaseUrl, { connectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs }) : null
-      const enginePolicyDigest = canonicalSha256({ schemaContractId: schemaMeasurement.schemaContractId, bundleSha256: schemaMeasurement.bundleSha256, binaryIdentityDigest: schemaMeasurement.binaryIdentityDigest, bwrap: bwrapPolicy(this.bwrap), mounts: SANDBOX_MOUNTS, networkPolicy })
+      const enginePolicyDigest = canonicalSha256({ schemaContractId: schemaMeasurement.schemaContractId, bundleSha256: schemaMeasurement.bundleSha256, binaryIdentityDigest: schemaMeasurement.binaryIdentityDigest, bwrap: bwrapPolicy(this.bwrap), mounts: SANDBOX_MOUNTS, networkPolicy, providerHttpRoute: 'respect_system_proxy=true/readback-required' })
       const toolPolicyDigest = canonicalSha256({ policy: 'MANIFEST_READ_ONLY', mcpCatalogEmptyMeasured: true, mcpCatalogNotStrictNoToolsProof: true, webSearch: 'disabled', adapterDeniedRequests: 'command|file|permission|network|mcp|dynamic-tool|tool', bootstrapCredential: 'removed-before-model-turn', sandboxPolicy: { type: 'readOnly', networkAccess: false }, filesystem: SANDBOX_MOUNTS })
       const inputPolicyDigest = canonicalSha256({ sourcesStrictlyOrdered: true, requestDirectoryReadOnly: true, supportedInputs })
       const binding = Object.freeze({ profileId, engineContractId, enginePolicyDigest, toolPolicyDigest, inputPolicyDigest })
-      const nativeProbe = { schemaVersion: 1, schemaContractId: schemaMeasurement.schemaContractId, processExecutable: isolatedReadback.processExecutable, bwrap: this.bwrap, view, authSourceDigest: isolatedState.authDigest, isolatedConfigDigest: isolatedState.configDigest, credentialIsolation: isolatedReadback.credentialIsolation, executionNetworkReadback: executionNetworkAttestation, modelCount: Array.isArray(isolatedReadback.models?.data) ? isolatedReadback.models.data.length : null, mcpCatalogCount: isolatedReadback.tools.data.length }
+      const nativeProbe = { schemaVersion: 1, schemaContractId: schemaMeasurement.schemaContractId, processExecutable: isolatedReadback.processExecutable, bwrap: this.bwrap, view, authSourceDigest: isolatedState.authDigest, isolatedConfigDigest: isolatedState.configDigest, credentialIsolation: isolatedReadback.credentialIsolation, executionNetworkReadback: executionNetworkAttestation, providerSystemProxyEnabled: executionReadback?.providerSystemProxy?.enabled === true, modelCount: Array.isArray(isolatedReadback.models?.data) ? isolatedReadback.models.data.length : null, mcpCatalogCount: isolatedReadback.tools.data.length }
       const nativeAttestation = buildTypedInspectionNativeAttestation({ schemaMeasurement, bwrap: this.bwrap, view, isolatedConfigDigest: isolatedState.configDigest, mcpCatalogCount: isolatedReadback.tools.data.length, executionNetworkAttestation })
       const nativeAttestationDigest = canonicalSha256(nativeAttestation)
       const carrierEvidence = loadCarrierEvidence(this.profile.typedInspectionCarrierEvidencePath, binding, supportedInputs, nativeAttestationDigest)
       this.nativeReadback = executionReadback
       this.contractReadback = carrierEvidence && executionReadback && executionNetworkAttestation ? Object.freeze({ schemaVersion: 1, measured: true, ...binding, toolPolicy: 'MANIFEST_READ_ONLY', recovery: 'durable-inbox-turn-readback-v1', supportedInputs }) : null
-      this.measurement = Object.freeze({ schemaVersion: 1, measured: true, binding, supportedInputs, nativeProbe: Object.freeze(nativeProbe), nativeAttestation, nativeAttestationDigest, nativeProbeDigest: nativeAttestationDigest, carrierEvidence, providerExecutionNetwork: executionNetworkAttestation ? 'restricted-proxy-measured-no-paid-turn' : 'isolated-measurement-only', providerExecutionNetworkAttestation: executionNetworkAttestation, contractReady: Boolean(this.contractReadback) })
+      this.measurement = Object.freeze({ schemaVersion: 1, measured: true, binding, supportedInputs, nativeProbe: Object.freeze(nativeProbe), nativeAttestation, nativeAttestationDigest, nativeProbeDigest: nativeAttestationDigest, carrierEvidence, providerExecutionNetwork: executionNetworkAttestation ? 'restricted-proxy-measured-no-paid-turn' : 'isolated-measurement-only', providerExecutionNetworkAttestation: executionNetworkAttestation, providerSystemProxyEnabled: nativeProbe.providerSystemProxyEnabled, contractReady: Boolean(this.contractReadback) })
       return this.measurement
     } finally {
       await adapter.shutdown({ timeoutMs: 1000 }).catch(() => {})

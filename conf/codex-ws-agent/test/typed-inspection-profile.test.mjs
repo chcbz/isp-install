@@ -5,11 +5,32 @@ import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
-import { buildTypedInspectionNativeAttestation, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
+import { buildTypedInspectionCodexConfig, buildTypedInspectionNativeAttestation, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
 import { RestrictedProviderEgress } from '../typed-inspection-network.mjs'
 
 const enabled = process.env.CYF_TYPED_INSPECTION_NATIVE_PROBE === '1'
 
+
+
+test('restricted profile explicitly enables Codex system proxy routing without embedding proxy endpoints or credentials', () => {
+  const config = buildTypedInspectionCodexConfig({
+    typedInspectionProviderId: 'gpt', typedInspectionProviderBaseUrl: 'https://provider.example/v1',
+    typedInspectionProviderWireApi: 'responses', typedInspectionProviderNetwork: 'restricted-proxy'
+  })
+  assert.equal(config.endsWith('[features]\nrespect_system_proxy = true\n'), true)
+  assert.match(config, /\[model_providers\."gpt"\]/)
+  assert.doesNotMatch(config, /HTTP_PROXY|HTTPS_PROXY|10\.0\.2\.2|bearer|api[_-]?key\s*=/i)
+  assert.doesNotMatch(buildTypedInspectionCodexConfig({}), /respect_system_proxy/)
+})
+
+test('provider-restricted initialization fails closed when native config readback does not enable system proxy routing', async () => {
+  const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+  const adapter = {
+    typedInspectionNetworkMode: 'provider-restricted',
+    initialize: async () => ({ processExecutable: { pid: process.pid }, config: { config: { features: { respect_system_proxy: false } } } })
+  }
+  await assert.rejects(() => runtime._initializeAndSeal(adapter), error => error.code === 'TYPED_INSPECTION_SYSTEM_PROXY_NOT_ENABLED')
+})
 
 test('native attestation digest excludes process and filesystem instance telemetry but changes with trusted policy', () => {
   const base = {
@@ -56,6 +77,8 @@ test('real bwrap profile performs a non-paid native app-server handshake with pr
     assert.equal(measured.nativeProbe.view.defaultRouteAbsent, true)
     assert.deepEqual(measured.nativeProbe.view.networkInterfaces, ['lo'])
     assert.equal(measured.nativeProbe.mcpCatalogCount, 0)
+    assert.equal(measured.nativeProbe.providerSystemProxyEnabled, true)
+    assert.equal(measured.providerSystemProxyEnabled, true)
     assert.equal(measured.nativeAttestation.network.execution.measured, true)
     assert.equal(measured.nativeAttestation.network.execution.forbiddenConnectRejected, true)
     assert.equal(measured.nativeAttestation.network.execution.otherHostPortBlocked, true)
