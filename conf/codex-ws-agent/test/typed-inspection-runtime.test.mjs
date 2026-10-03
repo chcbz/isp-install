@@ -335,3 +335,34 @@ test('recovery rejects mismatched terminal bindings and ambiguous model finals',
   await assert.rejects(() => attempt({ ...base, turnId: 'other-turn', turn: { ...base.turn, id: 'other-turn' } }), error => error.code === 'TYPED_INSPECTION_ENGINE_BINDING_MISMATCH')
   await assert.rejects(() => attempt({ ...base, turn: { ...base.turn, items: [...base.turn.items, ...base.turn.items] } }), error => error.code === 'TYPED_INSPECTION_RECOVERED_FINAL_INVALID')
 })
+
+
+test('inspection resolves exact INPUT and REFERENCE selectors and neutral conversation assets', () => {
+  const base = sourceFor().selector
+  const valid = [{ ...base, purpose: 'INPUT' }, base,
+    { kind: 'CURRENT_CONVERSATION_ASSET', fileId: null, version: null, purpose: null, assetId: 'asset-1', assetRevision: '9007199254740993' }]
+  for (const selector of valid) {
+    const value = resolveTypedInspectionRequest(profile, messageFor(sourceFor(undefined, { selector })))
+    assert.deepEqual(value.manifest.sources[0].selector, selector)
+  }
+  for (const selector of [{ ...base, purpose: 'OUTPUT' }, { ...base, purpose: 'input' }, { ...base, version: '2147483648' },
+    { ...base, version: '02' }, { ...base, assetId: 'asset-1' }, { ...valid[2], purpose: 'REFERENCE' }, { ...base, kind: 'UNKNOWN' }]) {
+    assert.throws(() => resolveTypedInspectionRequest(profile, messageFor(sourceFor(undefined, { selector }))),
+      error => error.code === 'TYPED_INSPECTION_MANIFEST_INVALID')
+  }
+})
+
+test('inspection resolves the complete 32-item catalogue without truncation', () => {
+  const message = structuredClone(messageFor()); const typed = message.contextSnapshot.facts.typedInspection
+  typed.manifest.sources = Array.from({ length: 32 }, (_, index) => sourceFor(undefined, {
+    sourceRefId: `source-${String(index).padStart(2, '0')}`,
+    selector: { ...sourceFor().selector, fileId: `file-${index}`, purpose: index % 2 ? 'REFERENCE' : 'INPUT' }
+  }))
+  typed.discussionFacts.availableSources = typed.manifest.sources.map(source => ({ sourceRefId: source.sourceRefId, kind: 'TASK_WORKSPACE_FILE', mediaType: 'text' }))
+  typed.manifestDigest = canonicalSha256(typed.manifest)
+  assert.equal(resolveTypedInspectionRequest(profile, message).manifest.sources.length, 32)
+  const excess = structuredClone(message); const extra = excess.contextSnapshot.facts.typedInspection
+  extra.manifest.sources.push(sourceFor(undefined, { sourceRefId: 'source-32' }))
+  extra.manifestDigest = canonicalSha256(extra.manifest)
+  assert.throws(() => resolveTypedInspectionRequest(profile, excess), error => error.code === 'TYPED_INSPECTION_MANIFEST_INVALID')
+})

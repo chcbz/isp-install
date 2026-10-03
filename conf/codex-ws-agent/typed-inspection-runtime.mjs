@@ -64,8 +64,13 @@ const sourcePath = ({ requestId, turnId, sourceRefId }) => `/internal/agent/chat
 
 const assertSelector = selector => {
   if (!exactKeys(selector, ['kind', 'fileId', 'version', 'purpose', 'assetId', 'assetRevision'])) fail('TYPED_INSPECTION_MANIFEST_INVALID')
-  if (!nonblank(selector.kind) || !nonblank(selector.purpose)) fail('TYPED_INSPECTION_MANIFEST_INVALID')
-  for (const key of ['fileId', 'version', 'assetId', 'assetRevision']) if (selector[key] !== null && !nonblank(selector[key])) fail('TYPED_INSPECTION_MANIFEST_INVALID')
+  const positiveLong = value => typeof value === 'string' && /^[1-9][0-9]*$/.test(value) && BigInt(value) <= 9223372036854775807n
+  if (selector.kind === 'TASK_LINKED_WORKSPACE_VERSION' && nonblank(selector.fileId) &&
+      positiveLong(selector.version) && BigInt(selector.version) <= 2147483647n && ['INPUT', 'REFERENCE'].includes(selector.purpose) &&
+      selector.assetId === null && selector.assetRevision === null) return
+  if (selector.kind === 'CURRENT_CONVERSATION_ASSET' && nonblank(selector.assetId) && positiveLong(selector.assetRevision) &&
+      selector.fileId === null && selector.version === null && selector.purpose === null) return
+  fail('TYPED_INSPECTION_MANIFEST_INVALID')
 }
 const assertProfile = profile => {
   if (!exactKeys(profile, ['profileId', 'engineContractId', 'enginePolicyDigest', 'toolPolicyDigest', 'inputPolicyDigest']) ||
@@ -94,7 +99,7 @@ export const resolveTypedInspectionRequest = (profile, message) => {
   if (!exactKeys(typed, keys) || typed.schemaVersion !== 1 || typed.contract !== 'juyiting-typed-inspection-v1' || typed.purpose !== 'INSPECT' ||
       !object(typed.discussionFacts) || !object(typed.manifest) || !DIGEST.test(typed.manifestDigest) || !AUTHORIZATION.test(typed.authorizationId)) fail('TYPED_INSPECTION_MARKER_INVALID')
   const manifest = typed.manifest
-  if (!exactKeys(manifest, ['schemaVersion', 'purpose', 'scope', 'profile', 'sources']) || manifest.schemaVersion !== 1 || manifest.purpose !== 'INSPECT' || !Array.isArray(manifest.sources) || manifest.sources.length === 0) fail('TYPED_INSPECTION_MANIFEST_INVALID')
+  if (!exactKeys(manifest, ['schemaVersion', 'purpose', 'scope', 'profile', 'sources']) || manifest.schemaVersion !== 1 || manifest.purpose !== 'INSPECT' || !Array.isArray(manifest.sources) || manifest.sources.length === 0 || manifest.sources.length > 32) fail('TYPED_INSPECTION_MANIFEST_INVALID')
   assertScope(manifest.scope); assertProfile(manifest.profile)
   let previous = null
   for (const source of manifest.sources) { assertSource(source); if (previous !== null && source.sourceRefId <= previous) fail('TYPED_INSPECTION_SOURCE_ORDER_INVALID'); previous = source.sourceRefId }
