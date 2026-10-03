@@ -198,3 +198,33 @@ test('cancelled typed turn and unknown acceptance publish no success sidecar and
   await assert.rejects(() => runFastChat(profile, typedMessage(), { adapter: unknown, bindingStore: { get: () => null, put: () => {}, markRecovery: (...args) => recovered.push(args) }, chatWorkdir: '/chat', sendProtocolFn: () => assert.fail('must not publish') }), error => error.code === 'TURN_ACCEPTANCE_UNKNOWN')
   assert.equal(runs, 2); assert.equal(recovered.length, 1)
 })
+
+
+test('v3 runs through native CHAT schema, streams only text and emits action sidecar without tools or v1 downgrade', async () => {
+  const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+  const { ACTION_OUTCOME_SCHEMA } = await import('../juyiting-action-outcome.mjs')
+  const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts })
+  const calls = []; const frames = []
+  const adapter = {
+    closed: false, readback: measuredReadback(),
+    startOrResumeThread: async (_prior, policy) => { calls.push(policy); return { threadId: 'v3-thread' } },
+    runTurn: async options => {
+      assert.deepEqual(options.policy.outputSchema, ACTION_OUTCOME_SCHEMA)
+      assert.equal(options.policy.cwd, '/empty-chat')
+      const raw = JSON.stringify(v3.outcomes[2]); options.onAccepted({ threadId: 'v3-thread', turnId: 'v3-turn' })
+      for (const content of [raw.slice(0, 40), raw.slice(40)]) options.onDelta({ content })
+      return { threadId: 'v3-thread', turnId: 'v3-turn', content: raw }
+    }, interrupt: async () => {}
+  }
+  const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+  assert.equal(result.status, 'completed')
+  assert.equal(calls[0].config.network, false)
+  assert.match(calls[0].developerInstructions, /ACTION_REQUEST is not a grant/)
+  assert.equal(frames.at(-1).payload.outcomeContractVersion, 3)
+  assert.deepEqual(frames.at(-1).payload.interactionOutcome, v3.outcomes[2])
+  assert.equal(frames.filter(f => f.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA).map(f => f.payload.content).join(''), v3.outcomes[2].text)
+  assert.equal(frames.some(f => f.type !== MESSAGE_TYPES.CHAT_MESSAGE && f.type !== MESSAGE_TYPES.CHAT_MESSAGE_DELTA), false)
+
+  adapter.runTurn = async () => ({ threadId: 'v3-thread', turnId: 'v3-turn', content: JSON.stringify(fixture.outcomes[0]) })
+  await assert.rejects(() => runFastChat(profile, message, { adapter, chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish downgraded final') }), /ACTION_OUTCOME_INVALID/)
+})

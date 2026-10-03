@@ -67,6 +67,7 @@ import {
   AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
   measureCodexAppServerBinary, resolveCodexAppServerSchemaContract
 } from './app-server-adapter.mjs'
+import { ACTION_OUTCOME_SCHEMA, ACTION_OUTCOME_INSTRUCTIONS, ACTION_OUTCOME_CONTRACT_DIGEST, resolveActionChatRequest, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import {
   TYPED_DELIBERATION_CONTRACT_DIGEST, TYPED_DELIBERATION_INSTRUCTIONS, TYPED_DELIBERATION_OUTPUT_SCHEMA,
   buildTypedDeliberationDeclaration, resolveTypedDeliberationRequest, typedDeliberationAdapterReady, validateTypedInteractionOutcome
@@ -4370,7 +4371,11 @@ export const runFastChat = async (profile, message, {
   if (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedDeliberation')) {
     try { validateChatDispatch(message) } catch (error) { throw new AgentProtocolError(error.code || 'TYPED_DELIBERATION_BINDING_INVALID', error.message || 'Invalid typed deliberation dispatch binding') }
   }
-  const typedRequest = resolveTypedDeliberationRequest(profile, message)
+  const actionRequest = resolveActionChatRequest(profile, message)
+  const typedRequest = actionRequest || resolveTypedDeliberationRequest(profile, message)
+  const outputSchema = actionRequest ? ACTION_OUTCOME_SCHEMA : TYPED_DELIBERATION_OUTPUT_SCHEMA
+  const outcomeInstructions = actionRequest ? ACTION_OUTCOME_INSTRUCTIONS : TYPED_DELIBERATION_INSTRUCTIONS
+  const outcomeContractDigest = actionRequest ? ACTION_OUTCOME_CONTRACT_DIGEST : TYPED_DELIBERATION_CONTRACT_DIGEST
   if (!profile.fastChatEnabled || !profile.appServerEnabled) {
     throw new AgentProtocolError('FAST_CHAT_FEATURE_DISABLED', 'Modern durable CHAT is disabled for this profile; legacy workspace execution is forbidden')
   }
@@ -4393,8 +4398,8 @@ export const runFastChat = async (profile, message, {
   }
   if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
   const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
-  const developerInstructions = typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${TYPED_DELIBERATION_INSTRUCTIONS}` : FAST_CHAT_INSTRUCTIONS
-  const typedContractBinding = typedRequest ? { contractDigest: TYPED_DELIBERATION_CONTRACT_DIGEST, dispatchFacts: typedRequest, outputSchema: TYPED_DELIBERATION_OUTPUT_SCHEMA } : null
+  const developerInstructions = typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}` : FAST_CHAT_INSTRUCTIONS
+  const typedContractBinding = typedRequest ? { contractDigest: outcomeContractDigest, dispatchFacts: typedRequest, outputSchema } : null
   const effectiveEnginePolicyHash = enginePolicyHash
     ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
     : canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {}, ...(typedRequest ? { typedContractBinding } : {}) })
@@ -4415,7 +4420,7 @@ export const runFastChat = async (profile, message, {
   try {
     const result = await selectedAdapter.runTurn({
       threadId: binding.threadId, clientUserMessageId: message.messageId, input: JSON.stringify(envelope),
-      policy: { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, ...(typedRequest ? { outputSchema: TYPED_DELIBERATION_OUTPUT_SCHEMA } : {}) },
+      policy: { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, ...(typedRequest ? { outputSchema } : {}) },
       onAccepted: accepted => { acceptedTurn = accepted; controls.markRunning(() => selectedAdapter.interrupt(accepted.threadId, accepted.turnId), accepted) },
       onDelta: event => {
         if (!profile.trueDeltaEnabled || !event.content || controls.isCancelled() || typedStreamError) return
@@ -4435,14 +4440,14 @@ export const runFastChat = async (profile, message, {
     if (controls.isCancelled()) return { status: 'cancelled', turnId: result.turnId, routeUsed: 'CHAT_FAST', metrics }
     metrics.finalAt = Date.now()
     if (typedRequest) {
-      const outcome = validateTypedInteractionOutcome(result.content, typedRequest)
+      const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest) : validateTypedInteractionOutcome(result.content, typedRequest)
       if (profile.trueDeltaEnabled) {
         const suffix = decoder.finish(outcome.text)
         if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn) }
       }
       sendChatFinal(profile, message, outcome.text, {
         status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key,
-        resourceReadback: readbackSummary, outcomeContractVersion: 1, interactionOutcome: outcome
+        resourceReadback: readbackSummary, outcomeContractVersion: outcome.schemaVersion, interactionOutcome: outcome
       }, sendProtocolFn)
     } else {
       sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)

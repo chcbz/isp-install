@@ -1,3 +1,4 @@
+import { ACTION_OUTCOME_SCHEMA, ACTION_OUTCOME_INSTRUCTIONS, validateActionFacts, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import { createHash } from 'node:crypto'
 import {
   chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
@@ -98,11 +99,16 @@ export const resolveTypedInspectionRequest = (profile, message) => {
   const keys = ['schemaVersion', 'contract', 'purpose', 'discussionFacts', 'manifest', 'manifestDigest', 'authorizationId']
   if (!exactKeys(typed, keys) || typed.schemaVersion !== 1 || typed.contract !== 'juyiting-typed-inspection-v1' || typed.purpose !== 'INSPECT' ||
       !object(typed.discussionFacts) || !object(typed.manifest) || !DIGEST.test(typed.manifestDigest) || !AUTHORIZATION.test(typed.authorizationId)) fail('TYPED_INSPECTION_MARKER_INVALID')
+  if (typed.discussionFacts.schemaVersion === 3) validateActionFacts(typed.discussionFacts)
   const manifest = typed.manifest
   if (!exactKeys(manifest, ['schemaVersion', 'purpose', 'scope', 'profile', 'sources']) || manifest.schemaVersion !== 1 || manifest.purpose !== 'INSPECT' || !Array.isArray(manifest.sources) || manifest.sources.length === 0 || manifest.sources.length > 32) fail('TYPED_INSPECTION_MANIFEST_INVALID')
   assertScope(manifest.scope); assertProfile(manifest.profile)
   let previous = null
   for (const source of manifest.sources) { assertSource(source); if (previous !== null && source.sourceRefId <= previous) fail('TYPED_INSPECTION_SOURCE_ORDER_INVALID'); previous = source.sourceRefId }
+  if (typed.discussionFacts.schemaVersion === 3) {
+    const catalog = new Map(typed.discussionFacts.availableSources.map(source => [source.sourceRefId, source]))
+    if (manifest.sources.some(source => catalog.get(source.sourceRefId)?.mediaType !== source.mediaKind)) fail('ACTION_INSPECTION_CATALOG_MISMATCH')
+  }
   if (canonicalSha256(manifest) !== typed.manifestDigest) fail('TYPED_INSPECTION_MANIFEST_DIGEST_MISMATCH')
   const route = message.route === undefined ? message.routing?.interactionMode : message.route
   const scope = manifest.scope
@@ -290,11 +296,26 @@ const carrierSource = (source, profileRuntime = null, inputDirectory = '') => {
   if (source.carrier === 'PARSED_TEXT') return { ...base, parser: source.parser, parsedText: source.parsedText }
   return base
 }
+// Outer manifest/receipt authorization stays unchanged. Output version is explicit
+// in the server-frozen discussion facts, never inferred from model prose.
+const inspectionOutcomeContract = typed => typed.discussionFacts.schemaVersion === 3 ? {
+  instructions: ACTION_OUTCOME_INSTRUCTIONS, outputSchema: ACTION_OUTCOME_SCHEMA,
+  validate: raw => {
+    const outcome = validateActionOutcome(raw, typed.discussionFacts)
+    const descriptor = outcome.action && typed.discussionFacts.availableActions.find(item => item.actionId === outcome.action.actionId)
+    const provided = new Set([...typed.discussionFacts.inspectedSourceRefIds, ...typed.manifest.sources.map(item => item.sourceRefId)])
+    if (descriptor?.kind === 'INSPECT_INPUTS' && outcome.action.sourceRefIds.every(id => provided.has(id))) fail('ACTION_INSPECTION_NO_PROGRESS')
+    return outcome
+  }
+} : {
+  instructions: TYPED_INSPECTION_INSTRUCTIONS, outputSchema: TYPED_INSPECTION_OUTPUT_SCHEMA,
+  validate: raw => validateTypedInspectionOutcome(raw, typed.discussionFacts)
+}
 const inspectionEnvelopeInput = message => ({ type: 'text', text: JSON.stringify(buildContextEnvelope(message)) })
 const inspectionPolicyHashes = (typed, adapter) => ({
   enginePolicyHash: typed.manifest.profile.enginePolicyDigest,
   toolPolicyHash: typed.manifest.profile.toolPolicyDigest,
-  instructionSourceHash: canonicalSha256({ source: 'runtime-static', instructions: TYPED_INSPECTION_INSTRUCTIONS, outputSchema: TYPED_INSPECTION_OUTPUT_SCHEMA }),
+  instructionSourceHash: canonicalSha256({ source: 'runtime-static', instructions: inspectionOutcomeContract(typed).instructions, outputSchema: inspectionOutcomeContract(typed).outputSchema, discussionFacts: typed.discussionFacts }),
   modelConfigHash: canonicalSha256({ model: adapter?.readback?.models || {}, config: adapter?.readback?.config || {}, contract: typed.manifest.profile.engineContractId })
 })
 const inspectionEngineStateBinding = (message, typed, requestKey) => freeze({
@@ -326,7 +347,7 @@ const inspectionFinalPreimage = finalPrepared => ({
   extra: finalPrepared.extra, result: finalPrepared.result
 })
 const buildPreparedInspectionFinal = ({ message, typed, rawOutcome, receiptDraft, engineThreadId, engineTurnId, threadKey }) => {
-  const outcome = validateTypedInspectionOutcome(rawOutcome, typed.discussionFacts)
+  const outcome = inspectionOutcomeContract(typed).validate(rawOutcome)
   const receipt = finalizeTypedInspectionInputReceipt({ receiptDraft, engineThreadId, engineTurnId })
   const identityDigest = canonicalSha256({
     contract: typed.contract, authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest,
@@ -336,7 +357,7 @@ const buildPreparedInspectionFinal = ({ message, typed, rawOutcome, receiptDraft
   const outboundMessageId = `inspection_final_${identityDigest.slice('sha256:'.length)}`
   const extra = {
     status: 'completed', routeUsed: 'INSPECT_NATIVE', productPolicy: 'fixed-manifest-read-only', threadGeneration: threadKey,
-    outcomeContractVersion: 2, interactionOutcome: outcome, inspectionInputReceipt: receipt, outboundMessageId
+    outcomeContractVersion: outcome.schemaVersion, interactionOutcome: outcome, inspectionInputReceipt: receipt, outboundMessageId
   }
   const result = {
     status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed',
@@ -357,14 +378,14 @@ const validatePreparedInspectionFinal = ({ finalPrepared, message, typed }) => {
       !/^inspection_final_[a-f0-9]{64}$/.test(finalPrepared.outboundMessageId) || !nonblank(finalPrepared.content) ||
       !object(finalPrepared.extra) || !object(finalPrepared.result) || !DIGEST.test(finalPrepared.finalDigest) ||
       canonicalSha256(inspectionFinalPreimage(finalPrepared)) !== finalPrepared.finalDigest) fail('TYPED_INSPECTION_FINAL_PREPARED_INVALID')
-  const outcome = validateTypedInspectionOutcome(finalPrepared.extra.interactionOutcome, typed.discussionFacts)
+  const outcome = inspectionOutcomeContract(typed).validate(finalPrepared.extra.interactionOutcome)
   const receipt = finalPrepared.extra.inspectionInputReceipt
   if (!object(receipt)) fail('TYPED_INSPECTION_FINAL_PREPARED_INVALID')
   const { engineThreadId, engineTurnId, ...receiptDraft } = receipt
   const trustedReceipt = finalizeTypedInspectionInputReceipt({ receiptDraft, engineThreadId, engineTurnId })
   const expectedExtra = {
     status: 'completed', routeUsed: 'INSPECT_NATIVE', productPolicy: 'fixed-manifest-read-only', threadGeneration: finalPrepared.result.threadKey,
-    outcomeContractVersion: 2, interactionOutcome: outcome, inspectionInputReceipt: trustedReceipt, outboundMessageId: finalPrepared.outboundMessageId
+    outcomeContractVersion: outcome.schemaVersion, interactionOutcome: outcome, inspectionInputReceipt: trustedReceipt, outboundMessageId: finalPrepared.outboundMessageId
   }
   const expectedResult = {
     status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed',
@@ -432,14 +453,14 @@ export const runTypedInspection = async (profile, message, {
     const prior = bindingStore?.get(key)
     if (prior?.state === 'RECOVERY_REQUIRED') fail('TURN_ACCEPTANCE_UNKNOWN')
     binding = await selectedAdapter.startOrResumeThread(prior, {
-      cwd: profileRuntime ? '/inputs' : materialized.directory, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions: TYPED_INSPECTION_INSTRUCTIONS
+      cwd: profileRuntime ? '/inputs' : materialized.directory, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions: inspectionOutcomeContract(typed).instructions
     })
     bindingStore?.put(key, binding)
     controls.markPrepared(preparedRecord({ typed, converted, directory: materialized.directory, threadKey: key, engineThreadId: binding.threadId }))
     const result = await selectedAdapter.runTurn({
       threadId: binding.threadId, clientUserMessageId: message.messageId,
       input: [inspectionEnvelopeInput(message), ...converted.nativeInputs],
-      policy: { cwd: profileRuntime ? '/inputs' : materialized.directory, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, outputSchema: TYPED_INSPECTION_OUTPUT_SCHEMA },
+      policy: { cwd: profileRuntime ? '/inputs' : materialized.directory, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, outputSchema: inspectionOutcomeContract(typed).outputSchema },
       onAccepted: value => { accepted = value; controls.markRunning(() => selectedAdapter.interrupt(value.threadId, value.turnId), value) }
     })
     if (controls.isCancelled()) return { status: 'cancelled', threadId: result.threadId, turnId: result.turnId, threadKey: key }

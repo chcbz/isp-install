@@ -366,3 +366,66 @@ test('inspection resolves the complete 32-item catalogue without truncation', ()
   extra.manifestDigest = canonicalSha256(extra.manifest)
   assert.throws(() => resolveTypedInspectionRequest(profile, excess), error => error.code === 'TYPED_INSPECTION_MANIFEST_INVALID')
 })
+
+
+const actionMessage = () => {
+  const message = structuredClone(messageFor())
+  message.contextSnapshot.facts.typedInspection.discussionFacts = {
+    schemaVersion: 3, availableSources: structuredClone(discussionFacts.availableSources), inspectedSourceRefIds: [],
+    availableActions: [
+      { actionId: 'inspect', kind: 'INSPECT_INPUTS', operation: 'INSPECT_INPUTS', inputMediaTypes: ['text', 'image', 'audio', 'file'], minSources: 1, maxSources: 32 },
+      { actionId: 'document', kind: 'EXECUTE', operation: 'CREATE_DOCUMENT', inputMediaTypes: ['text', 'image', 'audio', 'file'], minSources: 0, maxSources: 32 }
+    ]
+  }
+  message.factsManifest = message.contextSnapshot.facts
+  message.contextHash = canonicalSha256({ sourceVector: message.sourceVector, facts: message.factsManifest }); message.contextSnapshot.contextHash = message.contextHash
+  return validateChatDispatch(message)
+}
+
+test('v3 native INSPECT returns non-image action with bound receipt; durable replay publishes only, never starts provider', async () => {
+  const { ACTION_OUTCOME_SCHEMA } = await import('../juyiting-action-outcome.mjs')
+  const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message); const frames = []
+  const outcome = { schemaVersion: 3, kind: 'ACTION_REQUEST', text: '已查阅资料，现在生成报告。', clarification: null, action: { actionId: 'document', instruction: '整理资料为报告', sourceRefIds: ['source-1'] } }
+  let starts = 0; let finalPrepared = null
+  const adapter = {
+    closed: false, readback: adapterReadback(),
+    startOrResumeThread: async (_prior, policy) => { assert.match(policy.developerInstructions, /version-3/); return { threadId: 'v3-inspect-thread' } },
+    runTurn: async options => {
+      starts++; assert.deepEqual(options.policy.outputSchema, ACTION_OUTCOME_SCHEMA)
+      assert.equal(options.input[1].type, 'text')
+      options.onAccepted({ threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn' })
+      return { threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn', content: JSON.stringify(outcome) }
+    }
+  }
+  const result = await runTypedInspection(profile, message, {
+    adapter, isolationReadback: readback(typed),
+    materializer: { materialize: async () => ({ directory: '/private/v3-inspect', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) }, nativeInputAdapters: {},
+    controls: { markPrepared: () => {}, markRunning: () => {}, markFinalPrepared: value => { finalPrepared = value }, markFinalPublication: () => {}, isCancelled: () => false },
+    sendFinal: (_profile, _message, content, extra) => { frames.push({ content, extra }); return false }
+  })
+  assert.equal(result.serverPersistence, 'unconfirmed')
+  assert.equal(frames[0].extra.outcomeContractVersion, 3)
+  assert.deepEqual(frames[0].extra.interactionOutcome, outcome)
+  assert.equal(frames[0].extra.inspectionInputReceipt.engineTurnId, 'v3-inspect-turn')
+  await recoverTypedInspection(profile, message, { finalPrepared }, {
+    adapter: { runTurn: () => assert.fail('must not restart generation') },
+    controls: { markFinalPublication: () => {} }, sendFinal: (_profile, _message, content, extra) => { frames.push({ content, extra }); return true }
+  })
+  assert.deepEqual(frames[1], frames[0]); assert.equal(starts, 1)
+})
+
+test('v3 rejects catalogue mismatch before fetching and prevents an inspection loop over already-provided inputs', async () => {
+  const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message)
+  const changed = structuredClone(message); changed.contextSnapshot.facts.typedInspection.discussionFacts.availableSources[0].mediaType = 'audio'
+  assert.throws(() => resolveTypedInspectionRequest(profile, changed), /ACTION_INSPECTION_CATALOG_MISMATCH/)
+  const adapter = {
+    closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'loop-thread' }),
+    runTurn: async () => ({ threadId: 'loop-thread', turnId: 'loop-turn', content: JSON.stringify({ schemaVersion: 3, kind: 'ACTION_REQUEST', text: 'read again', clarification: null,
+      action: { actionId: 'inspect', instruction: 'read the same input', sourceRefIds: ['source-1'] } }) })
+  }
+  await assert.rejects(() => runTypedInspection(profile, message, {
+    adapter, isolationReadback: readback(typed), materializer: { materialize: async () => ({ directory: '/private/v3-loop', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) }, nativeInputAdapters: {},
+    controls: { markPrepared: () => {}, markRunning: () => {}, markFinalPrepared: () => assert.fail('must not save invalid action'), isCancelled: () => false },
+    sendFinal: () => assert.fail('must not publish invalid action')
+  }), /ACTION_INSPECTION_NO_PROGRESS/)
+})
