@@ -200,12 +200,12 @@ export const typedDeliberationAdapterReady = (profile, adapter) => {
 export const buildTypedDeliberationDeclaration = (profile, adapter) => {
   if (profile?.typedDeliberationEnabled !== true) return null
   return freeze({
-    schemaVersion: 1,
+    schemaVersion: 3,
     state: profile.fastChatEnabled === true && profile.appServerEnabled === true && profile.chatEngine === 'app-server' &&
       profile.chatSandbox === 'read-only' && profile.chatToolPolicy === 'read-only-constrained' && typedDeliberationAdapterReady(profile, adapter) ? 'READY' : 'UNAVAILABLE',
-    carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V1',
+    carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V3',
     referenceModes: ['NONE', 'AVAILABLE'],
-    outcomeKinds: ['ANSWER', 'CLARIFY', 'EXECUTION_PROPOSAL'],
+    outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST'],
     engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA',
     strictNoToolsVerified: false,
     toolPolicy: 'read-only-constrained'
