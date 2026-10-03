@@ -202,6 +202,7 @@ RELEASE_PAYLOAD=(
     "contracts/probes/api-long-history-wire.mjs"
     "controlled-image-bounty-capability.mjs"
     "controlled-image-bounty-v3-capability.mjs"
+    "controlled-image-delivery-retention-v3.mjs"
     "controlled-image-gpt-cli-config.mjs"
     "controlled-image-gpt-cli-egress-gate.mjs"
     "controlled-image-gpt-cli-executor-v3.mjs"

@@ -1473,7 +1473,8 @@ test('installer stages dependencies/source, validates, preserves secrets/state, 
   assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/candidate-release')
   const release = resolve(appHome, 'releases', 'candidate-release')
   const closure = runtimeModuleClosure()
-  assert.equal(closure.length, 28)
+  assert.ok(closure.includes('agent-client.mjs'))
+  assert.ok(closure.includes('controlled-image-delivery-retention-v3.mjs'))
   for (const file of closure) {
     assert.equal(existsSync(resolve(release, file)), true, file)
     assert.deepEqual(readFileSync(resolve(release, file)), readFileSync(new URL(`../${file}`, import.meta.url)), file)

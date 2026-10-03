@@ -204,7 +204,7 @@ const appHome = (fixture, instance) => resolve(fixture.instanceRoot, instance)
 const manifestMap = releaseRoot => new Map(readFileSync(resolve(releaseRoot, 'release-manifest.sha256'), 'utf8')
   .trim().split('\n').map(line => [line.slice(66), line.slice(0, 64)]))
 
-test('two explicit instances install isolated roots and preserve the fixed 54-file release proof', () => {
+test('two explicit instances install isolated roots and preserve the fixed 55-file release proof', () => {
   const fixture = prepareFixture()
   try {
     const alpha = runInstaller(fixture, 'local-a', { extraEnv: { START_CODEX_WS_AGENT: 'y' } })
@@ -245,10 +245,11 @@ test('two explicit instances install isolated roots and preserve the fixed 54-fi
       }
       const releaseRoot = resolve(home, readlinkSync(resolve(home, 'current')))
       const manifest = manifestMap(releaseRoot)
-      assert.equal(manifest.size, 54)
+      assert.equal(manifest.size, 55)
+      assert.equal(manifest.get('controlled-image-delivery-retention-v3.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/controlled-image-delivery-retention-v3.mjs')))
       for (const [relative, digest] of manifest) assert.equal(sha256(resolve(releaseRoot, relative)), digest, relative)
       const provenance = JSON.parse(readFileSync(resolve(releaseRoot, 'release-provenance.json'), 'utf8'))
-      assert.equal(provenance.payloadCount, 54)
+      assert.equal(provenance.payloadCount, 55)
       assert.equal(provenance.sourceCommit, 'a'.repeat(40))
       assert.equal(provenance.sourceTree, 'b'.repeat(40))
       assert.equal(provenance.payloadManifestSha256, sha256(resolve(releaseRoot, 'release-manifest.sha256')))
