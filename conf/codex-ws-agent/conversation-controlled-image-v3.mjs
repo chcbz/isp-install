@@ -5,7 +5,7 @@ import { isAbsolute, resolve } from 'node:path'
 import { buildOutputCommit } from './workspace-file-bridge.mjs'
 import { NativeConversationError, validateNativeConversationOutput } from './conversation-native.mjs'
 import { materializeControlledImageV3Inputs, parseControlledImageV3Inputs } from './conversation-reference-inputs-v3.mjs'
-import { retainControlledImageDeliveryV3 } from './controlled-image-delivery-retention-v3.mjs'
+import { retainControlledImageDeliveryV3, retainedControlledImageDeliveriesV3, acknowledgeRetainedControlledImageDeliveryV3 } from './controlled-image-delivery-retention-v3.mjs'
 
 const BASE = '/internal/agent/tasks'
 const INBOX = `${BASE}/conversation-executions/controlled-image-v3-commands`
@@ -80,6 +80,7 @@ const checkDirect = (reply, endpoint, status) => {
 }
 
 export class ControlledImageConversationLaneV3 {
+  #recoveryAttempted = new Set(); #retainedExecutions = new Set()
   #origin; #root; #fetch; #agentId; #instanceId; #auth; #execute; #controlledConfig; #active = false
   constructor ({ apiOrigin, rootDir, fetchFn = globalThis.fetch, agentId, runtimeInstanceId, getAuth, execute = null, controlledConfig } = {}) {
     this.#origin = originOf(apiOrigin)
@@ -167,16 +168,52 @@ export class ControlledImageConversationLaneV3 {
     if (!sameProviderExecution(providerExecution, command.providerExecution) || !this.#matchesConfig(providerExecution))
       deny('CONVERSATION_PROVIDER_START_UNCERTAIN')
   }
+  async #recoverStagedResults () {
+    let recovered = 0
+    const retained = retainedControlledImageDeliveriesV3({ rootDirectory: this.#root,
+      apiOrigin: this.#origin, agentId: this.#agentId })
+    for (const item of retained) {
+      const command = parseControlledImageV3ConversationCommand(item.record.command)
+      this.#retainedExecutions.add(command.executionId) // Retained paid outputs never return to START.
+      const key = `${item.runDirectory}\n${item.receiptSha256}`
+      if (item.acknowledged || this.#recoveryAttempted.has(key)) continue
+      const proof = item.record.output
+      const { manifestId } = buildOutputCommit({ taskId: command.taskId, runId: command.runId,
+        uploads: [{ outputId: proof.outputId, sha256: proof.sha256, length: proof.byteLength }] })
+      // One reconciliation attempt per immutable record/process. An uncertain/error reply retains
+      // bytes and requires attributable remediation, not repeated blind HTTP or a Provider retry.
+      this.#recoveryAttempted.add(key)
+      const committed = await this.#request(`${BASE}/${command.taskId}/runs/${command.runId}/conversation/result-commits/${manifestId}`,
+        'POST', { schemaVersion: 1, executionId: command.executionId, commandId: command.commandId,
+          messageId: command.messageId, inputSnapshotDigest: command.inputSnapshotDigest,
+          outputs: [{ outputId: proof.outputId, sha256: proof.sha256, length: proof.byteLength }] })
+      if (!object(committed) || committed.state !== 'COMMITTED' || committed.manifestId !== manifestId
+          || !Array.isArray(committed.items) || committed.items.length !== 1
+          || committed.items[0].outputId !== proof.outputId || committed.items[0].sha256 !== proof.sha256
+          || committed.items[0].byteLength !== proof.byteLength || committed.items[0].contentMimeType !== proof.contentType) {
+        deny('CONVERSATION_COMMIT_UNCERTAIN')
+      }
+      acknowledgeRetainedControlledImageDeliveryV3({ retained: item, manifestId,
+        apiOrigin: this.#origin, agentId: this.#agentId })
+      recovered++
+    }
+    return recovered
+  }
   async poll () {
     if (this.#active) return { processed: 0, busy: true }
     this.#active = true
     try {
+      const recovered = await this.#recoverStagedResults()
       const envelope = await this.#request(INBOX, 'GET')
       if (!object(envelope) || Object.keys(envelope).join() !== 'items' || !Array.isArray(envelope.items)
           || envelope.items.length > 16) deny('CONVERSATION_INBOX_INVALID')
       let processed = 0
-      for (const raw of envelope.items) { await this.#process(parseControlledImageV3ConversationCommand(raw)); processed++ }
-      return { processed }
+      for (const raw of envelope.items) {
+        const command = parseControlledImageV3ConversationCommand(raw)
+        if (this.#retainedExecutions.has(command.executionId)) continue
+        await this.#process(command); processed++
+      }
+      return recovered ? { processed, recovered } : { processed }
     } finally { this.#active = false }
   }
   async #process (command) {

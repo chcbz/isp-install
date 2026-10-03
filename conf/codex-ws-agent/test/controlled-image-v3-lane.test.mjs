@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, readdirSync, readFileSync, lstatSync, mkdirSync, symlinkSync, chmodSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, readFileSync, lstatSync, mkdirSync, symlinkSync, chmodSync, writeFileSync, linkSync, unlinkSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
 import { ControlledImageConversationLaneV3 } from '../conversation-controlled-image-v3.mjs'
-import { retainControlledImageDeliveryV3 } from '../controlled-image-delivery-retention-v3.mjs'
+import { retainControlledImageDeliveryV3, retainedControlledImageDeliveriesV3 } from '../controlled-image-delivery-retention-v3.mjs'
 import { controlledImageV3InputDigest } from '../conversation-reference-inputs-v3.mjs'
 
 const png = Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), Buffer.alloc(24, 9)])
@@ -49,7 +49,7 @@ const build = ({ operation = 'EDIT_IMAGE', sources = null, suffix = 'edit' } = {
 }
 
 const setup = (t, candidate, { receipt = candidate.receipt, startMode = 'success', stageMode = 'success',
-  commitMode = 'success', executeHook = () => {}, outputBytes = png } = {}) => {
+  commitMode = 'success', recoveryMode = 'success', executeHook = () => {}, outputBytes = png } = {}) => {
   const root = mkdtempSync(resolve(tmpdir(), 'controlled-v3-lane-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const calls = []
@@ -73,6 +73,20 @@ const setup = (t, candidate, { receipt = candidate.receipt, startMode = 'success
       return json(url, { outputId: 'output_1', state: 'STAGED',
         sha256: stageMode === 'drift' ? 'f'.repeat(64) : init.body.get('sha256'), byteLength: Number(init.body.get('length')) }, 201)
     }
+    if (url.pathname.includes('/result-commits/')) {
+      const body = JSON.parse(init.body); const item = body.outputs[0]
+      assert.equal(body.schemaVersion, 1); assert.equal(body.executionId, candidate.command.executionId)
+      assert.equal(body.commandId, candidate.command.commandId); assert.equal(body.messageId, candidate.command.messageId)
+      assert.equal(body.inputSnapshotDigest, candidate.command.inputSnapshotDigest); assert.equal(body.fence, undefined)
+      assert.equal(item.sha256, sha(png)); assert.equal(item.length, png.length)
+      const expected = `pwe_m_${sha(Buffer.from(`${candidate.command.taskId}\n${candidate.command.runId}\noutput_1\n${sha(png)}\n${png.length}\n`))}`
+      assert.equal(url.pathname.split('/').at(-1), expected)
+      if (recoveryMode === 'lost') throw Error('result ACK lost')
+      if (recoveryMode === '404') return json(url, { unavailable: true }, 404)
+      return json(url, { state: 'COMMITTED', manifestId: expected, items: [{ outputId: 'output_1',
+        sha256: recoveryMode === 'drift' ? 'e'.repeat(64) : item.sha256,
+        byteLength: item.length, contentMimeType: 'image/png' }] })
+    }
     if (url.pathname.includes('/output-commits/')) {
       if (commitMode === 'lost') throw Error('commit ACK lost')
       const body = JSON.parse(init.body)
@@ -91,7 +105,7 @@ const setup = (t, candidate, { receipt = candidate.receipt, startMode = 'success
       assert.deepEqual(args.inputs.map(input => input.source), candidate.snapshot.inputs.map(input => input.source))
       executeHook(args)
       return { outputId: 'output_1', contentType: 'image/png', bytes: outputBytes } } })
-  return { lane, calls, root, executeCalls: () => executeCalls }
+  return { lane, calls, root, fetchFn, executeCalls: () => executeCalls }
 }
 
 test('v3 lane uses the independent inbox, inputs-v3, exact asset source, one START, then existing PNG commit', async t => {
@@ -245,5 +259,67 @@ test('retention refuses unsafe roots and never overwrites an existing receipt', 
     assert.throws(() => retainControlledImageDeliveryV3(args), /CONVERSATION_OUTPUT_PERSISTENCE_UNCERTAIN/)
     if (first) assert.deepEqual(readFileSync(resolve(actual, 'delivery/receipt.json')), first)
     else assert.deepEqual(readdirSync(actual), [])
+  })
+})
+
+
+const preserved = (fixture, candidate) => {
+  const rootDirectory = resolve(fixture.root, 'conversation-runs/controlled-agent')
+  const runDirectory = resolve(rootDirectory, `${candidate.command.runId}-retained`)
+  mkdirSync(runDirectory, { recursive: true, mode: 0o700 })
+  retainControlledImageDeliveryV3({ runDirectory, command: candidate.command,
+    output: { outputId: 'output_1', contentType: 'image/png', bytes: png },
+    apiOrigin: 'http://127.0.0.1:10018', agentId: 'controlled-agent' })
+  return { rootDirectory, runDirectory, receipt: readFileSync(resolve(runDirectory, 'delivery/receipt.json')) }
+}
+
+test('retained paid result recovers server STAGED/COMMITTED receipt with zero executor, START, input or upload calls', async t => {
+  const candidate = build(); const fixture = setup(t, candidate); const saved = preserved(fixture, candidate)
+  assert.deepEqual(await fixture.lane.poll(), { processed: 0, recovered: 1 })
+  assert.equal(fixture.executeCalls(), 0)
+  assert.equal(fixture.calls.filter(x => x.path.includes('/result-commits/')).length, 1)
+  assert.ok(fixture.calls.every(x => x.path.includes('/result-commits/') || x.path.endsWith('/controlled-image-v3-commands')))
+  assert.deepEqual(readFileSync(resolve(saved.runDirectory, 'delivery/receipt.json')), saved.receipt)
+  assert.deepEqual(readFileSync(resolve(saved.runDirectory, 'delivery/output_1.png')), png)
+  assert.ok(existsSync(resolve(saved.runDirectory, 'delivery/committed.json')))
+  assert.deepEqual(await fixture.lane.poll(), { processed: 0 })
+  const restarted = new ControlledImageConversationLaneV3({ apiOrigin: 'http://127.0.0.1:10018', rootDir: fixture.root,
+    fetchFn: fixture.fetchFn, agentId: 'controlled-agent', runtimeInstanceId: 'replacement-runtime', getAuth: () => auth,
+    controlledConfig: { ...config, bindingId: 'changed-provider-binding' }, execute: async () => assert.fail('no executor') })
+  assert.deepEqual(await restarted.poll(), { processed: 0 })
+  assert.equal(fixture.calls.filter(x => x.path.includes('/result-commits/')).length, 1)
+})
+
+test('uncertain result reconciliation preserves all bytes, stops blind retries and never falls back to generation', async t => {
+  for (const recoveryMode of ['lost', '404', 'drift']) await t.test(recoveryMode, async t => {
+    const candidate = build(); const fixture = setup(t, candidate, { recoveryMode }); const saved = preserved(fixture, candidate)
+    await assert.rejects(fixture.lane.poll(), /CONVERSATION_(OUTCOME_UNKNOWN|RESPONSE_UNAVAILABLE|COMMIT_UNCERTAIN)/)
+    assert.deepEqual(readFileSync(resolve(saved.runDirectory, 'delivery/receipt.json')), saved.receipt)
+    assert.deepEqual(readFileSync(resolve(saved.runDirectory, 'delivery/output_1.png')), png)
+    assert.equal(existsSync(resolve(saved.runDirectory, 'delivery/committed.json')), false)
+    assert.deepEqual(await fixture.lane.poll(), { processed: 0 })
+    assert.equal(fixture.calls.filter(x => x.path.includes('/result-commits/')).length, 1)
+    assert.equal(fixture.executeCalls(), 0)
+  })
+})
+
+test('recovery reader rejects wrong origin, Agent, byte proof, links, public modes and forged ACK', async t => {
+  for (const variant of ['origin', 'agent', 'bytes', 'symlink', 'hardlink', 'public-mode', 'command', 'ack']) await t.test(variant, async t => {
+    const candidate = build(); const fixture = setup(t, candidate); const saved = preserved(fixture, candidate)
+    const file = resolve(saved.runDirectory, 'delivery/output_1.png')
+    const receipt = resolve(saved.runDirectory, 'delivery/receipt.json')
+    const args = { rootDirectory: saved.rootDirectory, apiOrigin: 'http://127.0.0.1:10018', agentId: 'controlled-agent' }
+    if (variant === 'origin') args.apiOrigin = 'https://other.invalid'
+    if (variant === 'agent') args.agentId = 'other-agent'
+    if (variant === 'bytes') writeFileSync(file, Buffer.from('damaged'), { mode: 0o600 })
+    if (variant === 'symlink') { unlinkSync(file); symlinkSync(receipt, file) }
+    if (variant === 'hardlink') linkSync(file, resolve(saved.runDirectory, 'second-link'))
+    if (variant === 'public-mode') chmodSync(file, 0o644)
+    if (variant === 'command') { const x = JSON.parse(saved.receipt); x.command.taskId = 'other-task'; writeFileSync(receipt, JSON.stringify(x), { mode: 0o600 }) }
+    if (variant === 'ack') writeFileSync(resolve(saved.runDirectory, 'delivery/committed.json'), JSON.stringify({ schemaVersion: 1,
+      state: 'COMMITTED', receiptSha256: sha(saved.receipt), commandSha256: JSON.parse(saved.receipt).commandSha256,
+      sha256: sha(png), byteLength: png.length, manifestId: `pwe_m_${'0'.repeat(64)}` }), { mode: 0o600 })
+    assert.throws(() => retainedControlledImageDeliveriesV3(args), /CONVERSATION_OUTPUT_PERSISTENCE_UNCERTAIN/)
+    assert.equal(fixture.calls.length, 0); assert.equal(fixture.executeCalls(), 0)
   })
 })
