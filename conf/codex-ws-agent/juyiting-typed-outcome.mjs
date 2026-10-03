@@ -161,7 +161,7 @@ const boundedIdentifier = value => {
 export const validateTypedDeliberationFacts = value => {
   if (!exactKeys(value, DISPATCH_KEYS) || value.schemaVersion !== 1 || !['NONE', 'AVAILABLE'].includes(value.referenceMode)) fail('TYPED_DELIBERATION_FACTS_INVALID')
   if (!Array.isArray(value.supportedOperations) || new Set(value.supportedOperations).size !== value.supportedOperations.length || value.supportedOperations.some(item => !OPERATIONS.has(item))) fail('TYPED_DELIBERATION_OPERATIONS_INVALID')
-  if (!Array.isArray(value.availableSources) || value.availableSources.length > 16) fail('TYPED_DELIBERATION_SOURCES_INVALID')
+  if (!Array.isArray(value.availableSources) || value.availableSources.length > 32) fail('TYPED_DELIBERATION_SOURCES_INVALID')
   const ids = new Set(); const sources = value.availableSources.map(source => {
     if (!exactKeys(source, SOURCE_KEYS) || !boundedIdentifier(source.sourceRefId) || !SOURCE_KINDS.has(source.kind) || !MEDIA_TYPES.has(source.mediaType) || ids.has(source.sourceRefId)) fail('TYPED_DELIBERATION_SOURCES_INVALID')
     ids.add(source.sourceRefId); return freeze({ sourceRefId: source.sourceRefId, kind: source.kind, mediaType: source.mediaType })

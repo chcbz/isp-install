@@ -89,3 +89,27 @@ test('typed declaration is default-off, unavailable until exact measured live ad
     outcomeKinds: ['ANSWER', 'CLARIFY', 'EXECUTION_PROPOSAL'], engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA', strictNoToolsVerified: false, toolPolicy: 'read-only-constrained'
   })
 })
+
+
+test('unified materials preserves all 32 mixed sources without adding executable authority', () => {
+  const input = facts()
+  input.supportedOperations = []
+  input.referenceMode = 'AVAILABLE'
+  input.availableSources = Array.from({ length: 32 }, (_, index) => ({
+    sourceRefId: `source_${index}`, kind: 'TASK_WORKSPACE_FILE',
+    mediaType: ['image', 'file', 'audio', 'text'][index % 4]
+  }))
+  const result = validateTypedDeliberationFacts(input)
+  assert.equal(result.availableSources.length, 32)
+  assert.deepEqual(result.availableSources, input.availableSources)
+  assert.deepEqual(result.supportedOperations, [])
+  assert.ok(Object.isFrozen(result.availableSources))
+  const answer = { schemaVersion: 1, kind: 'ANSWER', text: '可以先讨论需求。', clarification: null, proposal: null }
+  assert.deepEqual(validateTypedInteractionOutcome(answer, result), answer)
+  assert.throws(() => validateTypedDeliberationFacts({ ...input,
+    availableSources: [...input.availableSources, { sourceRefId: 'source_32', kind: 'TASK_WORKSPACE_FILE', mediaType: 'file' }]
+  }), /TYPED_DELIBERATION_SOURCES_INVALID/)
+  assert.throws(() => validateTypedDeliberationFacts({ ...input,
+    availableSources: [...input.availableSources.slice(0, 31), input.availableSources[0]]
+  }), /TYPED_DELIBERATION_SOURCES_INVALID/)
+})
