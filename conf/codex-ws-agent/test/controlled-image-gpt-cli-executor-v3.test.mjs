@@ -162,3 +162,28 @@ actual('an existing direct HTTP lane claim blocks CLI execution for the same com
     error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')
   assert.equal(upstream, 0)
 })
+
+actual('ordinary workspace INPUT edit and mixed generation preserve selected bytes through the actual CLI', async t => {
+  for (const [operation, sources] of [
+    ['EDIT_IMAGE', [{ ...workspaceSource, purpose: 'INPUT' }]],
+    ['GENERATE_IMAGE', [{ ...workspaceSource, purpose: 'INPUT' }, assetSource]],
+    ['GENERATE_IMAGE', [assetSource]]
+  ]) {
+    await t.test(`${operation}-${sources.length}-${sources[0].kind}`, async t => {
+      const f = fixture(t); let upstream = 0
+      const selected = command('ordinary_materials', operation)
+      const inputs = sources.map((source, index) => materialized(f, source, index + 1))
+      const executor = make(f, async (url, init) => {
+        upstream++
+        assert.equal(url.pathname, '/v1/images/edits')
+        const body = Buffer.from(init.body)
+        assert.equal(body.includes(png), true, 'real PNG input bytes reach the fake upstream')
+        assert.equal((body.toString('latin1').match(/filename="input_[12]\.png"/g) || []).length, sources.length)
+        return response(200)
+      })
+      assert.deepEqual((await executor.execute({ command: selected, runDirectory: f.runDirectory, inputs })).bytes, png)
+      assert.equal(upstream, 1)
+      assert.deepEqual(inputs.map(input => input.source), sources)
+    })
+  }
+})

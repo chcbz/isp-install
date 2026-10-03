@@ -133,3 +133,38 @@ test('workspace, conversation, and asset source revisions are bound into the inp
   }
   assert.equal(new Set(changedDigests).size, changedDigests.length)
 })
+
+test('ordinary INPUT images and conversation assets support workspace edit and mixed generation without role rewriting', () => {
+  const workspace = fixture.validCases.find(item => item.caseId === 'generate_workspace')
+  const asset = fixture.validCases.find(item => item.caseId === 'edit_exact_asset')
+  for (const operation of ['GENERATE_IMAGE', 'EDIT_IMAGE']) {
+    for (const kind of ['workspace-input', 'workspace-reference', 'asset', ...(operation === 'GENERATE_IMAGE' ? ['mixed'] : [])]) {
+      const command = { ...workspace.command, operation }
+      const file = clone(workspace.inputSnapshot.inputs[0])
+      file.source.purpose = kind === 'workspace-reference' ? 'REFERENCE' : 'INPUT'
+      const picture = clone(asset.inputSnapshot.inputs[0])
+      picture.source.conversationId = command.conversationId
+      const inputs = kind === 'asset' ? [picture] : kind === 'mixed' ? [file, picture] : [file]
+      inputs.forEach((input, index) => { input.inputRef = `input_${index + 1}` })
+      command.inputSnapshotDigest = controlledImageV3InputDigest({ command, noReferencedMaterials: false, inputs }).sha256
+      const parsed = parseControlledImageV3Inputs({ ...workspace.inputSnapshot, operation, inputs,
+        executionId: command.executionId, inputSnapshotDigest: command.inputSnapshotDigest }, command, 1)
+      assert.deepEqual(parsed.inputs.map(input => input.source), inputs.map(input => input.source), `${operation}/${kind}`)
+      if (kind.startsWith('workspace') || kind === 'mixed') assert.equal(parsed.inputs[0].source.purpose, file.source.purpose)
+    }
+  }
+})
+
+test('new material union still rejects foreign assets, non-input roles and changed purpose even with otherwise valid snapshots', () => {
+  const item = fixture.validCases.find(item => item.caseId === 'generate_workspace')
+  for (const purpose of ['OUTPUT', 'DELIVERABLE', '', null]) {
+    const command = clone(item.command), snapshot = clone(item.inputSnapshot)
+    snapshot.inputs[0].source.purpose = purpose
+    command.inputSnapshotDigest = controlledImageV3InputDigest({ command, noReferencedMaterials: false, inputs: snapshot.inputs }).sha256
+    snapshot.inputSnapshotDigest = command.inputSnapshotDigest
+    assert.throws(() => parseControlledImageV3Inputs(snapshot, command, 1), /CONTROLLED_IMAGE_V3_INPUTS_UNAVAILABLE/)
+  }
+  const changed = clone(item.inputSnapshot)
+  changed.inputs[0].source.purpose = 'INPUT'
+  assert.throws(() => parseControlledImageV3Inputs(changed, item.command, 1), /CONTROLLED_IMAGE_V3_INPUTS_UNAVAILABLE/)
+})

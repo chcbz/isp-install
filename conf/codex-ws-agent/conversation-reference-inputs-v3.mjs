@@ -38,13 +38,13 @@ const sha256 = value => createHash('sha256').update(value, 'utf8').digest('hex')
 const parseSource = (source, operation, conversationId) => {
   if (!object(source) || typeof source.kind !== 'string') deny()
   if (source.kind === 'TASK_LINKED_WORKSPACE_VERSION') {
-    if (!exactFields(source, WORKSPACE_FIELDS) || operation !== 'GENERATE_IMAGE'
+    if (!exactFields(source, WORKSPACE_FIELDS) || !['GENERATE_IMAGE', 'EDIT_IMAGE'].includes(operation)
         || !validId(source.fileId) || !isCanonicalPositiveJavaLong(source.version)
-        || source.purpose !== 'REFERENCE') deny()
+        || !['INPUT', 'REFERENCE'].includes(source.purpose)) deny()
     return Object.freeze({ kind: source.kind, fileId: source.fileId, version: source.version, purpose: source.purpose })
   }
   if (source.kind === 'CURRENT_CONVERSATION_ASSET') {
-    if (!exactFields(source, ASSET_FIELDS) || operation !== 'EDIT_IMAGE'
+    if (!exactFields(source, ASSET_FIELDS) || !['GENERATE_IMAGE', 'EDIT_IMAGE'].includes(operation)
         || source.conversationId !== conversationId
         || !isCanonicalPositiveJavaLong(source.conversationGeneration)
         || !isCanonicalPositiveJavaLong(source.assetRevision)
@@ -89,12 +89,12 @@ export const controlledImageV3InputDigest = ({ command, noReferencedMaterials, i
 const sourceDescriptorValid = (source, operation, conversationId = null) => {
   if (!object(source)) return false
   if (source.kind === 'TASK_LINKED_WORKSPACE_VERSION') {
-    return operation === 'GENERATE_IMAGE' && exactFields(source, WORKSPACE_FIELDS)
+    return ['GENERATE_IMAGE', 'EDIT_IMAGE'].includes(operation) && exactFields(source, WORKSPACE_FIELDS)
       && validId(source.fileId) && isCanonicalPositiveJavaLong(source.version)
-      && source.purpose === 'REFERENCE'
+      && ['INPUT', 'REFERENCE'].includes(source.purpose)
   }
   if (source.kind === 'CURRENT_CONVERSATION_ASSET') {
-    return operation === 'EDIT_IMAGE' && exactFields(source, ASSET_FIELDS)
+    return ['GENERATE_IMAGE', 'EDIT_IMAGE'].includes(operation) && exactFields(source, ASSET_FIELDS)
       && (conversationId === null || source.conversationId === conversationId)
       && validId(source.conversationId) && isCanonicalPositiveJavaLong(source.conversationGeneration)
       && isCanonicalPositiveJavaLong(source.assetRevision)

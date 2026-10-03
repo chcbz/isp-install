@@ -130,6 +130,21 @@ test('v3 lane uses the independent inbox, inputs-v3, exact asset source, one STA
     providerExecution, fence: { version: 1, token } })
 })
 
+test('ordinary mixed sources traverse real lane materialization, one START and output commit; workspace INPUT edit uses the same path', async t => {
+  const workspace = { kind: 'TASK_LINKED_WORKSPACE_VERSION', fileId: 'file_input', version: '2', purpose: 'INPUT' }
+  const asset = build().snapshot.inputs[0].source
+  for (const [operation, sources] of [['GENERATE_IMAGE', [workspace, asset]], ['EDIT_IMAGE', [workspace]]]) {
+    await t.test(operation, async t => {
+      const candidate = build({ operation, suffix: `ordinary-${operation}`, sources })
+      const fixture = setup(t, candidate)
+      assert.deepEqual(await fixture.lane.poll(), { processed: 1 })
+      assert.equal(fixture.executeCalls(), 1)
+      assert.equal(fixture.calls.filter(call => call.path.endsWith('/provider-start-controlled-image-v3')).length, 1)
+      assert.equal(fixture.calls.filter(call => /\/inputs\/input_/.test(call.path)).length, sources.length)
+    })
+  }
+})
+
 test('START ACK loss, conflict, or receipt operation/digest drift yields zero executor calls', async t => {
   const candidate = build({ operation: 'GENERATE_IMAGE', suffix: 'generate' })
   for (const selected of ['lost', 'conflict', 'operation', 'digest']) {
@@ -144,11 +159,11 @@ test('START ACK loss, conflict, or receipt operation/digest drift yields zero ex
   }
 })
 
-test('17 inputs and operation/source mismatches reject before download, START, or executor', async t => {
+test('17 inputs and non-input task purposes reject before download, START, or executor', async t => {
   const workspace = index => ({ kind: 'TASK_LINKED_WORKSPACE_VERSION', fileId: `file_${index}`,
     version: String(index), purpose: 'REFERENCE' })
   const over = build({ operation: 'GENERATE_IMAGE', suffix: 'over', sources: Array.from({ length: 17 }, (_, i) => workspace(i + 1)) })
-  const wrong = build({ operation: 'EDIT_IMAGE', suffix: 'wrong', sources: [workspace(1)] })
+  const wrong = build({ operation: 'EDIT_IMAGE', suffix: 'wrong', sources: [{ ...workspace(1), purpose: 'DELIVERABLE' }] })
   for (const candidate of [over, wrong]) {
     await t.test(candidate.command.commandId, async t => {
       const fixture = setup(t, candidate)

@@ -84,7 +84,9 @@ test('v3 empty generation durably claims before one exact generations request', 
 test('workspace GENERATE and exact current-conversation EDIT route to JSON edits with source-aware claims', async t => {
   for (const scenario of [
     { id: 'workspace', operation: 'GENERATE_IMAGE', source: workspaceSource(), bytes: jpeg },
-    { id: 'asset', operation: 'EDIT_IMAGE', source: assetSource, bytes: png }
+    { id: 'asset', operation: 'EDIT_IMAGE', source: assetSource, bytes: png },
+    { id: 'workspace_input_edit', operation: 'EDIT_IMAGE', source: { ...workspaceSource(), purpose: 'INPUT' }, bytes: png },
+    { id: 'asset_generate', operation: 'GENERATE_IMAGE', source: assetSource, bytes: png }
   ]) {
     await t.test(scenario.id, async t => {
       const f = fixture(t)

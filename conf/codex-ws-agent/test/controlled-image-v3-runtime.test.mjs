@@ -134,10 +134,10 @@ const enabledDeclaration = {
   commandSchemaVersions: [3], leaseProtocolVersions: [1], providerStartFenceVersions: [3],
   resultCommitProtocolVersions: [1], operations: [
     { operation: 'GENERATE_IMAGE', inputManifest: { schemaVersion: 3, minItems: 0, maxItems: 16,
-      mimeTypes: ['image/jpeg', 'image/png'], sourceKinds: ['TASK_LINKED_WORKSPACE_VERSION'] },
+      mimeTypes: ['image/jpeg', 'image/png'], sourceKinds: ['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET'] },
     resultManifest: { schemaVersion: 1, minItems: 1, maxItems: 1, outputId: 'output_1', mimeTypes: ['image/png'] } },
     { operation: 'EDIT_IMAGE', inputManifest: { schemaVersion: 3, minItems: 1, maxItems: 1,
-      mimeTypes: ['image/jpeg', 'image/png'], sourceKinds: ['CURRENT_CONVERSATION_ASSET'] },
+      mimeTypes: ['image/jpeg', 'image/png'], sourceKinds: ['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET'] },
     resultManifest: { schemaVersion: 1, minItems: 1, maxItems: 1, outputId: 'output_1', mimeTypes: ['image/png'] } }
   ]
 }

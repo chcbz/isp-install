@@ -20,14 +20,14 @@ const resultManifest = () => Object.freeze({
   mimeTypes: freezeArray(['image/png'])
 })
 
-const operation = (name, minItems, maxItems, sourceKind) => Object.freeze({
+const operation = (name, minItems, maxItems) => Object.freeze({
   operation: name,
   inputManifest: Object.freeze({
     schemaVersion: 3,
     minItems,
     maxItems,
     mimeTypes: freezeArray(['image/jpeg', 'image/png']),
-    sourceKinds: freezeArray([sourceKind])
+    sourceKinds: freezeArray(['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET'])
   }),
   resultManifest: resultManifest()
 })
@@ -64,8 +64,8 @@ export const buildControlledImageBountyExecutionV3Declaration = readiness => {
     providerStartFenceVersions: freezeArray([3]),
     resultCommitProtocolVersions: freezeArray([1]),
     operations: enabled ? freezeArray([
-      operation('GENERATE_IMAGE', 0, 16, 'TASK_LINKED_WORKSPACE_VERSION'),
-      operation('EDIT_IMAGE', 1, 1, 'CURRENT_CONVERSATION_ASSET')
+      operation('GENERATE_IMAGE', 0, 16),
+      operation('EDIT_IMAGE', 1, 1)
     ]) : freezeArray([])
   })
 }
