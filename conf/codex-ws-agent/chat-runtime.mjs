@@ -10,7 +10,6 @@ import { fileURLToPath } from 'node:url'
 export const CHAT_CONTEXT_ENVELOPE_VERSION = 2
 export const MAX_CONTEXT_SNAPSHOT_BYTES = 256 * 1024
 export const MAX_CONTEXT_FACTS = 256
-export const MAX_CONTEXT_FACT_BYTES = 8192
 export const MAX_CONTEXT_FACT_KEY_BYTES = 128
 export const MAX_CHAT_CONTENT_BYTES = 64 * 1024
 export const MAX_LONG_DECIMAL = 9223372036854775807n
@@ -93,18 +92,21 @@ export function verifyHostedWireContract({
 }
 export const hostedWireContractReadback = () => verifiedHostedWireContract
 
+// The complete snapshot is byte-bounded before recursion. A second 8 KiB cap on
+// each nested object rejects valid 32-source manifests and long action text.
+// Keep structural/type limits here; never truncate signed facts or raise the wire cap.
 const validateJsonValue = (value, name, depth = 0) => {
   if (depth > 8) throw new Error(`${name}_DEPTH_INVALID`)
   if (value === null || typeof value === 'boolean') return
   if (typeof value === 'number') { if (!Number.isSafeInteger(value)) throw new Error(`${name}_VALUE_INVALID`); return }
-  if (typeof value === 'string') { if (Buffer.byteLength(value) > MAX_CONTEXT_FACT_BYTES) throw new Error(`${name}_VALUE_TOO_LARGE`); return }
+  if (typeof value === 'string') return
   if (Array.isArray(value)) {
-    if (value.length > MAX_CONTEXT_FACTS || bytes(value) > MAX_CONTEXT_FACT_BYTES) throw new Error(`${name}_VALUE_TOO_LARGE`)
+    if (value.length > MAX_CONTEXT_FACTS) throw new Error(`${name}_VALUE_TOO_LARGE`)
     for (const item of value) validateJsonValue(item, name, depth + 1)
     return
   }
   if (!object(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new Error(`${name}_VALUE_INVALID`)
-  if (Object.keys(value).length > MAX_CONTEXT_FACTS || bytes(value) > MAX_CONTEXT_FACT_BYTES) throw new Error(`${name}_VALUE_TOO_LARGE`)
+  if (Object.keys(value).length > MAX_CONTEXT_FACTS) throw new Error(`${name}_VALUE_TOO_LARGE`)
   for (const [key, item] of Object.entries(value)) {
     if (!visible(key, MAX_CONTEXT_FACT_KEY_BYTES)) throw new Error(`${name}_KEY_INVALID`)
     validateJsonValue(item, name, depth + 1)

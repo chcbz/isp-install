@@ -1,11 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
-import { canonicalSha256, buildThreadKey, PersistentChatInbox, validateChatDispatch } from '../chat-runtime.mjs'
+import { canonicalSha256, buildContextEnvelope, buildThreadKey, PersistentChatInbox, validateChatDispatch } from '../chat-runtime.mjs'
+import { normalizeInboundMessage } from '../agent-client.mjs'
 import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
 import {
   BUILTIN_TYPED_INSPECTION_DECODERS, TypedInspectionMaterializer, decodePngInspectionInput, decodeWavInspectionInput,
@@ -352,7 +353,7 @@ test('inspection resolves exact INPUT and REFERENCE selectors and neutral conver
   }
 })
 
-test('inspection resolves the complete 32-item catalogue without truncation', () => {
+test('inspection full dispatch and envelope preserve the complete 32-item catalogue and long action without truncation', () => {
   const message = structuredClone(messageFor()); const typed = message.contextSnapshot.facts.typedInspection
   typed.manifest.sources = Array.from({ length: 32 }, (_, index) => sourceFor(undefined, {
     sourceRefId: `source-${String(index).padStart(2, '0')}`,
@@ -360,7 +361,19 @@ test('inspection resolves the complete 32-item catalogue without truncation', ()
   }))
   typed.discussionFacts.availableSources = typed.manifest.sources.map(source => ({ sourceRefId: source.sourceRefId, kind: 'TASK_WORKSPACE_FILE', mediaType: 'text' }))
   typed.manifestDigest = canonicalSha256(typed.manifest)
-  assert.equal(resolveTypedInspectionRequest(profile, message).manifest.sources.length, 32)
+  message.contextSnapshot.facts.actionContinuation = {
+    schemaVersion: 3, origin: 'AGENT_ACTION', originalUserMessageId: '901',
+    instruction: '逐项核对所选资料。'.repeat(800)
+  }
+  message.factsManifest = message.contextSnapshot.facts
+  message.contextHash = canonicalSha256({ sourceVector: message.sourceVector, facts: message.factsManifest })
+  message.contextSnapshot.contextHash = message.contextHash
+  const admitted = validateChatDispatch(JSON.parse(JSON.stringify(message)))
+  const envelope = buildContextEnvelope(admitted)
+  assert.equal(resolveTypedInspectionRequest(profile, admitted).manifest.sources.length, 32)
+  assert.deepEqual(envelope.authoritative.facts.typedInspection.manifest.sources, typed.manifest.sources)
+  assert.equal(envelope.authoritative.facts.actionContinuation.instruction, message.factsManifest.actionContinuation.instruction)
+  assert.equal(envelope.currentUserMessage.content, message.content)
   const excess = structuredClone(message); const extra = excess.contextSnapshot.facts.typedInspection
   extra.manifest.sources.push(sourceFor(undefined, { sourceRefId: 'source-32' }))
   extra.manifestDigest = canonicalSha256(extra.manifest)
@@ -419,4 +432,88 @@ test('v3 rejects catalogue mismatch before fetching, without a speculative no-re
   const changed = structuredClone(message); changed.contextSnapshot.facts.typedInspection.discussionFacts.availableSources[0].mediaType = 'audio'
   assert.throws(() => resolveTypedInspectionRequest(profile, changed), /ACTION_INSPECTION_CATALOG_MISMATCH/)
   assert.doesNotThrow(() => resolveTypedInspectionRequest(profile, message))
+})
+
+
+test('full v3 wire carries 32 mixed actual material bytes through native preparation and receipts', async () => {
+  // Real PNG/WAV decode and private file I/O. HTTP responses and native engine are fixtures;
+  // this does not assert installed-engine multimedia capability or call a Provider.
+  const crc32 = bytes => { let crc = 0xffffffff; for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0) } return (crc ^ 0xffffffff) >>> 0 }
+  const chunk = (type, data) => { const n = Buffer.alloc(4); n.writeUInt32BE(data.length); const body = Buffer.concat([Buffer.from(type), data]); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body)); return Buffer.concat([n, body, crc]) }
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4); ihdr[8] = 8; ihdr[9] = 6
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(Buffer.from([0, 255, 0, 0, 255]))), chunk('IEND', Buffer.alloc(0))])
+  const wav = Buffer.alloc(46); wav.write('RIFF'); wav.writeUInt32LE(38, 4); wav.write('WAVE', 8); wav.write('fmt ', 12); wav.writeUInt32LE(16, 16)
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34)
+  wav.write('data', 36); wav.writeUInt32LE(2, 40); wav.writeInt16LE(1234, 44)
+  const variants = [
+    { mediaKind: 'text', mimeType: 'text/plain', carrier: 'DIRECT_TEXT', bytes: Buffer.from('bird notes') },
+    { mediaKind: 'image', mimeType: 'image/png', carrier: 'LOCAL_IMAGE', bytes: png },
+    { mediaKind: 'audio', mimeType: 'audio/wav', carrier: 'LOCAL_AUDIO', bytes: wav },
+    { mediaKind: 'file', mimeType: 'application/json', carrier: 'PARSED_TEXT', bytes: Buffer.from('{"topic":"bird document"}') }
+  ]
+  const message = structuredClone(actionMessage()); const marker = message.contextSnapshot.facts.typedInspection
+  const materialBytes = new Map()
+  marker.manifest.sources = Array.from({ length: 32 }, (_, index) => {
+    const { bytes, ...format } = variants[index % variants.length]
+    const source = sourceFor(bytes, { ...format, sourceRefId: `source-${String(index).padStart(2, '0')}`,
+      selector: { ...sourceFor().selector, fileId: `file-${index}`, purpose: index % 2 ? 'REFERENCE' : 'INPUT' } })
+    materialBytes.set(source.sourceRefId, bytes); return source
+  })
+  marker.discussionFacts.availableSources = marker.manifest.sources.map(s => ({ sourceRefId: s.sourceRefId, kind: 'TASK_WORKSPACE_FILE', mediaType: s.mediaKind }))
+  marker.manifestDigest = canonicalSha256(marker.manifest)
+  message.contextSnapshot.facts.actionContinuation = { schemaVersion: 3, origin: 'AGENT_ACTION', originalUserMessageId: '901', instruction: '核对每份资料。'.repeat(1000) }
+  message.factsManifest = message.contextSnapshot.facts
+  message.contextHash = canonicalSha256({ sourceVector: message.sourceVector, facts: message.factsManifest }); message.contextSnapshot.contextHash = message.contextHash
+  // Exercise the same JSON normalization and durable admission boundary as an inbound frame.
+  const normalized = normalizeInboundMessage(JSON.stringify(message))
+  const typed = resolveTypedInspectionRequest(profile, normalized)
+  const isolation = readback(typed)
+  isolation.supportedInputs = isolation.supportedInputs.slice(0, 4)
+  const root = mkdtempSync(resolve(tmpdir(), 'mixed-inspection-wire-')); chmodSync(root, 0o700)
+  const fetched = []; const finals = []; let calls = 0
+  try {
+    const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example/', rootDir: root,
+      getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`, agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1',
+      parsers: { 'application/json': { parserConfigDigest: prefixed('json-topic-parser'), parse: ({ bytes }) => JSON.parse(bytes.toString('utf8')).topic } },
+      fetchFn: async (url, options) => {
+        const source = marker.manifest.sources.find(s => url.endsWith(`/${s.sourceRefId}/content`))
+        assert.ok(source, url); fetched.push(source.sourceRefId)
+        assert.equal(options.headers['X-Inspection-Manifest-Digest'], typed.manifestDigest)
+        return response({ url, bytes: materialBytes.get(source.sourceRefId), mimeType: source.mimeType })
+      }
+    })
+    const adapter = { closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'mixed-thread' }),
+      runTurn: async options => {
+        calls++; assert.equal(options.input.length, 33)
+        const envelope = JSON.parse(options.input[0].text)
+        assert.equal(envelope.currentUserMessage.content, message.content)
+        assert.deepEqual(envelope.authoritative.facts.typedInspection.manifest.sources, marker.manifest.sources)
+        assert.equal(envelope.authoritative.facts.actionContinuation.instruction, message.factsManifest.actionContinuation.instruction)
+        options.input.slice(1).forEach((input, index) => {
+          const variant = index % 4
+          if (variant === 1 || variant === 2) {
+            assert.equal(input.type, variant === 1 ? 'localImage' : 'localAudio')
+            assert.deepEqual(readFileSync(input.path), variants[variant].bytes)
+          } else {
+            assert.equal(input.type, 'text'); assert.match(input.text, /^UNTRUSTED INSPECTION MATERIAL/)
+            assert.ok(input.text.includes(variant === 0 ? 'bird notes' : 'bird document'))
+          }
+        })
+        options.onAccepted({ threadId: 'mixed-thread', turnId: 'mixed-turn' })
+        return { threadId: 'mixed-thread', turnId: 'mixed-turn', content: JSON.stringify({ schemaVersion: 3, kind: 'ANSWER', text: '已整理资料。', clarification: null, action: null }) }
+      }
+    }
+    await runTypedInspection(profile, normalized, { adapter, materializer, isolationReadback: isolation,
+      nativeInputAdapters: {
+        localImage: { supportedMimeTypes: ['image/png'], toNativeInput: ({ path }) => ({ type: 'localImage', path }) },
+        localAudio: { supportedMimeTypes: ['audio/wav'], toNativeInput: ({ path }) => ({ type: 'localAudio', path }) }
+      },
+      controls: { markPrepared: () => {}, markRunning: () => {}, markFinalPrepared: () => {}, markFinalPublication: () => {}, isCancelled: () => false },
+      sendFinal: (_profile, _message, content, extra) => { finals.push({ content, extra }); return false }
+    })
+    assert.equal(calls, 1); assert.deepEqual(fetched, marker.manifest.sources.map(s => s.sourceRefId))
+    assert.equal(finals.length, 1); assert.equal(finals[0].extra.inspectionInputReceipt.sources.length, 32)
+    assert.deepEqual(finals[0].extra.inspectionInputReceipt.sources.map(s => s.sha256), marker.manifest.sources.map(s => s.sha256))
+    assert.equal(finals[0].extra.inspectionInputReceipt.engineTurnId, 'mixed-turn')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

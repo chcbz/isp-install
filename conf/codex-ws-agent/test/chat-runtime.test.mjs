@@ -10,7 +10,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import {
   buildContextEnvelope, canonicalSha256, validateChatDispatch, buildChatDispatchAck, PersistentChatInbox,
-  ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, verifyHostedWireContract
+  ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, MAX_CONTEXT_SNAPSHOT_BYTES, verifyHostedWireContract
 } from '../chat-runtime.mjs'
 import {
   AppServerAdapter, CODEX_APP_SERVER_SCHEMA, CODEX_APP_SERVER_SCHEMA_CONTRACTS,
@@ -769,4 +769,33 @@ test('automatic Agent continuation preserves original user content and never pro
   assert.ok(envelope.instructionPolicy.untrustedDataSources.includes('actionContinuation.instruction'))
   assert.match(envelope.instructionPolicy.rule, /prior Agent action text/)
   assert.equal(envelope.authoritative.facts.actionContinuation.origin, 'AGENT_ACTION')
+})
+
+
+test('full snapshot byte boundary replaces nested byte caps without weakening structure or hashes', () => {
+  const original = apiWire()
+  const wireWith = facts => {
+    const wire = structuredClone(original)
+    const contextHash = canonicalSha256({ sourceVector: wire.sourceVector, facts })
+    wire.factsManifest = facts; wire.contextHash = contextHash
+    wire.contextSnapshot = { ...wire.contextSnapshot, facts, contextHash }
+    return wire
+  }
+  const facts = { actionContinuation: { origin: 'AGENT_ACTION', instruction: '核对资料。'.repeat(1600) } }
+  const wire = wireWith(facts)
+  assert.ok(Buffer.byteLength(facts.actionContinuation.instruction) > 8192)
+  assert.equal(buildContextEnvelope(validateChatDispatch(wire)).authoritative.facts.actionContinuation.instruction,
+    facts.actionContinuation.instruction)
+  // Fit the actual serialized snapshot exactly, including JSON syntax and metadata.
+  const empty = wireWith({ padding: '' })
+  const capacity = MAX_CONTEXT_SNAPSHOT_BYTES - Buffer.byteLength(JSON.stringify(empty.contextSnapshot))
+  assert.doesNotThrow(() => validateChatDispatch(wireWith({ padding: 'a'.repeat(capacity) })))
+  assert.throws(() => validateChatDispatch(wireWith({ padding: 'a'.repeat(capacity + 1) })), /CONTEXT_SNAPSHOT_TOO_LARGE_OR_INVALID/)
+  // Count UTF-8 bytes, not JS characters; all enclosing facts still share one bound.
+  assert.throws(() => validateChatDispatch(wireWith({ padding: '鸟'.repeat(capacity / 3 + 1) })), /CONTEXT_SNAPSHOT_TOO_LARGE_OR_INVALID/)
+  assert.throws(() => validateChatDispatch(wireWith({ nested: Array.from({ length: 257 }, () => 1) })), /CONTEXT_FACTS_VALUE_TOO_LARGE/)
+  assert.throws(() => validateChatDispatch(wireWith({ nested: { invalid: 1.5 } })), /CONTEXT_FACTS_VALUE_INVALID/)
+  const changed = structuredClone(wire); changed.factsManifest.actionContinuation.instruction += '改'
+  changed.contextSnapshot.facts = changed.factsManifest
+  assert.throws(() => validateChatDispatch(changed), /CONTEXT_HASH_MISMATCH/)
 })
