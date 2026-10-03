@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import {
   APPROVED_ARCHIVE_PACKAGE_SHA256,
+  ARCHIVE_NATIVE_UNCERTAINTY,
   ArchiveMaintenanceNativeClient,
   validateArchiveMaintenanceCommand
 } from './archive-maintenance-native.mjs'
@@ -16,6 +17,28 @@ const jsonCanonical = value => {
 }
 const sameJson = (left, right) => jsonCanonical(left) === jsonCanonical(right)
 const operationKey = (command, action) => `archive-${action}-${createHash('sha256').update(`${command.commandId}\0${command.runId}\0${command.executionEpoch}\0${action}`).digest('hex')}`
+const blockOperationKey = (command, blockKey) => `archive-block-${createHash('sha256').update(`${command.commandId}\0${command.runId}\0${command.executionEpoch}\0${blockKey}`).digest('hex')}`
+const compatibleDraft = (content, target) => {
+  if (!content || !target || !Array.isArray(content.blocks) || !Array.isArray(target.blocks)
+    || !Array.isArray(content.excludedSourceRanges) || !Array.isArray(target.excludedSourceRanges)) return false
+  const targetByKey = new Map()
+  for (const block of target.blocks) {
+    if (!block || typeof block.blockKey !== 'string' || targetByKey.has(block.blockKey)) return false
+    targetByKey.set(block.blockKey, block)
+  }
+  const seen = new Set()
+  for (const block of content.blocks) {
+    if (!block || typeof block.blockKey !== 'string' || seen.has(block.blockKey)
+      || !targetByKey.has(block.blockKey) || !sameJson(block, targetByKey.get(block.blockKey))) return false
+    seen.add(block.blockKey)
+  }
+  const initialEmptyExclusions = content.blocks.length === 0 && content.excludedSourceRanges.length === 0
+  return initialEmptyExclusions || sameJson(content.excludedSourceRanges, target.excludedSourceRanges)
+}
+const exactBlockCommitted = (content, target, blockKey) => compatibleDraft(content, target)
+  && content.blocks.some(block => block.blockKey === blockKey && sameJson(block,
+    target.blocks.find(candidate => candidate.blockKey === blockKey)))
+
 const safeFailureCode = code => {
   const normalized = String(code || 'RUNNER_REJECTED').toUpperCase().replace(/[^A-Z0-9_]/g, '_')
   return (`ARCHIVE_${normalized}`).slice(0, 64)
@@ -25,6 +48,7 @@ const asOutcome = result => result.runState === 'COMPLETED'
   : { status: 'failed', exitCode: null, errorMessage: result.failureCode || 'ARCHIVE_EXECUTION_FAILED', authoritative: true, result }
 const recovery = error => ({ status: 'recovery_required', exitCode: null,
   errorMessage: `ARCHIVE_RECOVERY_REQUIRED: ${error?.code || 'ARCHIVE_OUTCOME_UNKNOWN'}`, authoritative: false })
+const requestOutcomeUnknown = error => error?.uncertainty === ARCHIVE_NATIVE_UNCERTAINTY.REQUEST_OUTCOME_UNKNOWN
 
 const loadApprovedDiagnoser = async installation => {
   const parseBytes = installation.files.get('scripts/parse-text.mjs')
@@ -161,28 +185,45 @@ export class ArchiveMaintenanceRunner {
       return recovery({ code: 'ARCHIVE_DRAFT_SNAPSHOT_CHANGED' })
     }
     if (!sameJson(draft.content, diagnosis.draft)) {
-      const initialEmpty = draft.revision === '0' && sameJson(draft.content, { blocks: [], excludedSourceRanges: [] })
-      if (!initialEmpty) return recovery({ code: 'ARCHIVE_DRAFT_CONFLICT' })
-      try {
-        draft = await this.client.putDraft(command, context.draftRevision, operationKey(command, 'draft'), diagnosis.draft)
-        if (draft.draftId !== context.draftId || !sameJson(draft.content, diagnosis.draft)) {
-          return recovery({ code: 'ARCHIVE_DRAFT_COMMIT_MISMATCH' })
-        }
-      } catch (error) {
+      if (!compatibleDraft(draft.content, diagnosis.draft)) return recovery({ code: 'ARCHIVE_DRAFT_CONFLICT' })
+      for (const block of diagnosis.draft.blocks) {
+        if (draft.content.blocks.some(existing => existing.blockKey === block.blockKey
+          && sameJson(existing, block))) continue
+        const body = { blocks: [block], excludedSourceRanges: diagnosis.draft.excludedSourceRanges }
         try {
-          draft = await this.client.draft(command)
-          if (draft.draftId !== context.draftId || !sameJson(draft.content, diagnosis.draft)) return recovery(error)
-        } catch { return recovery(error) }
+          draft = await this.client.putBlock(command, block.blockKey, draft.revision,
+            blockOperationKey(command, block.blockKey), body)
+          if (draft.draftId !== context.draftId || !exactBlockCommitted(
+            draft.content, diagnosis.draft, block.blockKey)) {
+            return recovery({ code: 'ARCHIVE_DRAFT_COMMIT_MISMATCH' })
+          }
+        } catch (error) {
+          try {
+            draft = await this.client.draft(command)
+            if (draft.draftId !== context.draftId || !exactBlockCommitted(
+              draft.content, diagnosis.draft, block.blockKey)) return recovery(error)
+          } catch { return recovery(error) }
+        }
+      }
+      if (!sameJson(draft.content, diagnosis.draft)) {
+        return recovery({ code: 'ARCHIVE_DRAFT_COMMIT_MISMATCH' })
       }
     }
     this._assertLive()
 
     let validation
     if (draft.validationId && draft.validatedRevision === draft.revision) {
-      try { validation = await this.client.validation(command) } catch (error) { return recovery(error) }
+      try { validation = await this.client.validation(command, draft.validationId) } catch (error) { return recovery(error) }
     } else {
-      try { validation = await this.client.validate(command, draft.revision, operationKey(command, 'validate')) } catch (error) {
-        try { validation = await this.client.validation(command) } catch { return recovery(error) }
+      const validateKey = operationKey(command, 'validate')
+      try {
+        validation = await this.client.validate(command, draft.draftId, draft.revision, validateKey)
+      } catch (error) {
+        if (error?.operationId && requestOutcomeUnknown(error)) {
+          try { validation = await this.client.validation(command, error.operationId) } catch { return recovery(error) }
+        } else if (!error?.operationId && requestOutcomeUnknown(error)) {
+          try { validation = await this.client.validation(command) } catch { return recovery(error) }
+        } else return recovery(error)
       }
     }
     if (validation.draftId !== draft.draftId || validation.draftRevision !== draft.revision) return recovery({ code: 'ARCHIVE_VALIDATION_CHANGED' })
@@ -199,7 +240,7 @@ export class ArchiveMaintenanceRunner {
         try {
           const terminal = await this._terminal(command)
           if (terminal) return terminal
-          if (error?.uncertain !== true) return recovery(error)
+          if (!requestOutcomeUnknown(error)) return recovery(error)
           await this.client.publish(publishCommand, draft.revision, operationKey(command, 'publish'), body)
         } catch { return recovery(error) }
       }

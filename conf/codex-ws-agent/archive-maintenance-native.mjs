@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto'
 export const ARCHIVE_MAINTENANCE_PROTOCOL = 'ARCHIVE_MAINTENANCE_EXECUTE/v1'
 export const ARCHIVE_MAINTENANCE_TYPE = 'ARCHIVE_MAINTENANCE_EXECUTE'
 export const APPROVED_ARCHIVE_PACKAGE_SHA256 = '8894d96341067dd7f9e2f45696eef44057dc61346255a0323b2d713a3c7ea081'
+export const ARCHIVE_NATIVE_UNCERTAINTY = Object.freeze({
+  DEFINITE: 'DEFINITE',
+  REQUEST_OUTCOME_UNKNOWN: 'REQUEST_OUTCOME_UNKNOWN'
+})
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/u
 const SHA256 = /^[0-9a-f]{64}$/u
@@ -17,6 +21,7 @@ const CONTEXT_FIELDS = ['agentId', 'appointmentId', 'appointmentRevision', 'bind
 const SKILL_FIELDS = ['key', 'packageSha256', 'version']
 const DRAFT_FIELDS = ['content', 'contentSha256', 'draftId', 'jobId', 'revision', 'state', 'validatedRevision', 'validationId']
 const VALIDATION_FIELDS = ['draftId', 'draftRevision', 'findings', 'outcome', 'validationDigest', 'validationId']
+const VALIDATION_RECEIPT_FIELDS = ['jobId', 'operationId', 'state']
 const PUBLICATION_FIELDS = ['draftRevision', 'editionId', 'jobId', 'manifestSha256', 'publicationId', 'readbackState', 'sourceSha256', 'state', 'workId']
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -39,12 +44,14 @@ const loopback = hostname => {
 }
 
 export class ArchiveMaintenanceNativeError extends Error {
-  constructor(code, message = code, { status = null, uncertain = true } = {}) {
+  constructor(code, message = code, { status = null, uncertainty = ARCHIVE_NATIVE_UNCERTAINTY.DEFINITE, operationId = null } = {}) {
     super(message)
     this.name = 'ArchiveMaintenanceNativeError'
     this.code = code
     this.status = status
-    this.uncertain = uncertain
+    this.uncertainty = uncertainty
+    this.uncertain = uncertainty === ARCHIVE_NATIVE_UNCERTAINTY.REQUEST_OUTCOME_UNKNOWN
+    this.operationId = operationId
   }
 }
 
@@ -116,14 +123,15 @@ const readBounded = async (response, maxBytes, exactLength, signal) => {
     try { reader.releaseLock() } catch {}
   }
 }
-const parseJson = async (response, signal) => {
+const parseJson = async (response, expectedStatus, signal) => {
   requireValue(contentType(response) === JSON_CONTENT, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+  const bytes = await readBounded(response, MAX_JSON_BYTES, null, signal)
   let value
-  try { value = JSON.parse((await readBounded(response, MAX_JSON_BYTES, null, signal)).toString('utf8')) } catch (error) {
-    if (error instanceof ArchiveMaintenanceNativeError) throw error
+  try { value = JSON.parse(bytes.toString('utf8')) } catch {
     throw new ArchiveMaintenanceNativeError('ARCHIVE_NATIVE_RESPONSE_INVALID')
   }
-  requireValue(exactKeys(value, ['code', 'data', 'msg', 'status']) && value.code === 'E0' && value.msg === 'ok' && value.status === 200, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+  requireValue(exactKeys(value, ['code', 'data', 'msg', 'status']) && value.code === 'E0'
+    && value.msg === 'ok' && value.status === expectedStatus, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
   return value.data
 }
 const requireResult = (value, command) => {
@@ -159,6 +167,23 @@ const requireValidation = value => {
     && value.findings.every(finding => typeof finding === 'string'), 'ARCHIVE_NATIVE_RESPONSE_INVALID')
   return Object.freeze(value)
 }
+const requireValidationReceipt = (value, command) => {
+  requireValue(exactKeys(value, VALIDATION_RECEIPT_FIELDS) && id(value.operationId)
+    && value.jobId === command.jobId && value.state === 'COMMITTED', 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+  return Object.freeze(value)
+}
+const validationLocation = (requestUrl, response, command, operationId) => {
+  const raw = response.headers?.get('location')
+  requireValue(typeof raw === 'string' && raw.length > 0, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+  let location
+  try { location = new URL(raw, requestUrl) } catch { throw new ArchiveMaintenanceNativeError('ARCHIVE_NATIVE_RESPONSE_INVALID') }
+  const expectedPath = `/internal/archive/v1/jobs/${command.jobId}/runs/${command.runId}/validation`
+  requireValue(location.origin === requestUrl.origin && !location.username && !location.password && !location.hash
+    && location.pathname === expectedPath && [...location.searchParams.keys()].length === 1
+    && location.searchParams.getAll('operationId').length === 1
+    && location.searchParams.get('operationId') === operationId, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+  return location
+}
 const requirePublication = (value, command) => {
   requireValue(exactKeys(value, PUBLICATION_FIELDS) && value.jobId === command.jobId && id(value.publicationId)
     && id(value.workId) && id(value.editionId) && decimal(value.draftRevision) && SHA256.test(value.manifestSha256)
@@ -183,20 +208,25 @@ export class ArchiveMaintenanceNativeClient {
       'X-Archive-Execution-Epoch': command.executionEpoch, Accept: JSON_CONTENT, ...extra }
   }
 
-  async _request(command, suffix, { method = 'GET', body, headers = {}, producer = false, source = false } = {}) {
+  async _request(command, suffix, { method = 'GET', body, headers = {}, producer = false,
+    source = false, expectedStatus = 200, query = null } = {}) {
     if (this.sessionSignal?.aborted) throw abortReason(this.sessionSignal, 'ARCHIVE_NATIVE_ABORTED')
     if (producer && this.now() >= command.expiresAt) throw new ArchiveMaintenanceNativeError('ARCHIVE_EXECUTION_EXPIRED')
     const url = endpoint(this.wsUrl, command, suffix)
+    if (query !== null) {
+      requireValue(object(query) && Object.keys(query).length === 1 && id(query.operationId), 'ARCHIVE_NATIVE_FORBIDDEN')
+      url.searchParams.set('operationId', query.operationId)
+    }
     const remaining = producer ? command.expiresAt - this.now() : this.maxCallMs
     const timeoutMs = Math.max(1, Math.min(this.maxCallMs, remaining))
-    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(new ArchiveMaintenanceNativeError('ARCHIVE_NATIVE_TIMEOUT')), timeoutMs)
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(new ArchiveMaintenanceNativeError('ARCHIVE_NATIVE_TIMEOUT', 'ARCHIVE_NATIVE_TIMEOUT', { uncertainty: ARCHIVE_NATIVE_UNCERTAINTY.REQUEST_OUTCOME_UNKNOWN })), timeoutMs)
     const onAbort = () => controller.abort(abortReason(this.sessionSignal, 'ARCHIVE_NATIVE_ABORTED'))
     this.sessionSignal?.addEventListener('abort', onAbort, { once: true })
     try {
       const response = await this.fetchFn(url, { method, redirect: 'error', credentials: 'omit', signal: controller.signal,
         headers: this._headers(command, headers), ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
       requireValue(exactResponse(response, url), 'ARCHIVE_NATIVE_FORBIDDEN')
-      if (response.status !== 200) throw new ArchiveMaintenanceNativeError('ARCHIVE_NATIVE_DENIED', 'ARCHIVE_NATIVE_DENIED', { status: response.status, uncertain: false })
+      if (response.status !== expectedStatus) throw new ArchiveMaintenanceNativeError('ARCHIVE_NATIVE_DENIED', 'ARCHIVE_NATIVE_DENIED', { status: response.status })
       if (source) {
         requireValue(contentType(response) === 'text/plain', 'ARCHIVE_NATIVE_RESPONSE_INVALID')
         const length = response.headers?.get('content-length')
@@ -204,11 +234,11 @@ export class ArchiveMaintenanceNativeClient {
         requireValue(response.headers?.get('x-archive-source-sha256') === command.sourceSha256, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
         return readBounded(response, MAX_ARCHIVE_SOURCE_BYTES, Number(length), controller.signal)
       }
-      return { data: await parseJson(response, controller.signal), etag: response.headers?.get('etag') || '' }
+      return { data: await parseJson(response, expectedStatus, controller.signal), etag: response.headers?.get('etag') || '', headers: response.headers, url }
     } catch (error) {
       if (error instanceof ArchiveMaintenanceNativeError) throw error
       if (controller.signal.aborted) throw abortReason(controller.signal, 'ARCHIVE_NATIVE_ABORTED')
-      throw new ArchiveMaintenanceNativeError('ARCHIVE_NATIVE_TRANSPORT')
+      throw new ArchiveMaintenanceNativeError('ARCHIVE_NATIVE_TRANSPORT', 'ARCHIVE_NATIVE_TRANSPORT', { uncertainty: ARCHIVE_NATIVE_UNCERTAINTY.REQUEST_OUTCOME_UNKNOWN })
     } finally {
       clearTimeout(timeout); this.sessionSignal?.removeEventListener('abort', onAbort)
     }
@@ -223,14 +253,39 @@ export class ArchiveMaintenanceNativeClient {
     const response = await this._request(command, 'draft', { producer: true }); const draft = requireDraft(response.data, command)
     requireValue(response.etag === `"v${draft.revision}"`, 'ARCHIVE_NATIVE_RESPONSE_INVALID'); return draft
   }
-  async putDraft(command, revision, operationKey, draft) {
-    const response = await this._request(command, 'draft', { method: 'PUT', producer: true, headers: { 'Content-Type': JSON_CONTENT,
-      'Idempotency-Key': operationKey, 'If-Match': `"v${revision}"` }, body: draft })
-    const result = requireDraft(response.data, command); requireValue(response.etag === `"v${result.revision}"`, 'ARCHIVE_NATIVE_RESPONSE_INVALID'); return result
+  async putBlock(command, blockKey, revision, operationKey, body) {
+    requireValue(id(blockKey) && exactKeys(body, ['blocks', 'excludedSourceRanges'])
+      && Array.isArray(body.blocks) && body.blocks.length === 1
+      && body.blocks[0]?.blockKey === blockKey && Array.isArray(body.excludedSourceRanges), 'ARCHIVE_COMMAND_INVALID')
+    const response = await this._request(command, `blocks/${blockKey}`, { method: 'PUT', producer: true,
+      headers: { 'Content-Type': JSON_CONTENT, 'Idempotency-Key': operationKey, 'If-Match': `"v${revision}"` }, body })
+    const result = requireDraft(response.data, command)
+    requireValue(response.etag === `"v${result.revision}"`, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+    return result
   }
-  async validate(command, revision, operationKey) { return requireValidation((await this._request(command, 'validate', { method: 'POST', producer: true,
-    headers: { 'Idempotency-Key': operationKey, 'If-Match': `"v${revision}"` } })).data) }
-  async validation(command) { return requireValidation((await this._request(command, 'validation', { producer: true })).data) }
+  async validate(command, draftId, revision, operationKey) {
+    requireValue(id(draftId) && decimal(String(revision)), 'ARCHIVE_COMMAND_INVALID')
+    const accepted = await this._request(command, 'validate', { method: 'POST', producer: true,
+      expectedStatus: 202, headers: { 'Idempotency-Key': operationKey, 'If-Match': `"v${revision}"` } })
+    const receipt = requireValidationReceipt(accepted.data, command)
+    validationLocation(accepted.url, accepted, command, receipt.operationId)
+    try {
+      const value = await this.validation(command, receipt.operationId)
+      requireValue(value.validationId === receipt.operationId && value.draftId === draftId
+        && value.draftRevision === String(revision), 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+      return value
+    } catch (error) {
+      if (error instanceof ArchiveMaintenanceNativeError) error.operationId = receipt.operationId
+      throw error
+    }
+  }
+  async validation(command, operationId = null) {
+    requireValue(operationId === null || id(operationId), 'ARCHIVE_COMMAND_INVALID')
+    const value = requireValidation((await this._request(command, 'validation', {
+      query: operationId === null ? null : { operationId } })).data)
+    if (operationId !== null) requireValue(value.validationId === operationId, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+    return value
+  }
   async publish(command, revision, operationKey, body) {
     const value = requirePublication((await this._request(command, 'publish', { method: 'POST', producer: true,
       headers: { 'Content-Type': JSON_CONTENT, 'Idempotency-Key': operationKey, 'If-Match': `"v${revision}"` }, body })).data,

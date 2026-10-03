@@ -75,48 +75,106 @@ const terminalResult = (wire, state, mode, validationId = null) => ({ jobId: 'jo
   failurePhase: state === 'FAILED' ? 'RUNNER' : null, failureCode: state === 'FAILED' ? 'ARCHIVE_LOCAL_PARSE_FAILED' : null,
   failureRetryable: state === 'FAILED' ? false : null })
 
-const startApi = async ({ wire, mode = 'MANUAL', denyResult = false, publishDenied = false, loseResponseAt = '', sourceBytes = Buffer.from('第一章\n正文内容\n', 'utf8'), initialDraft = { blocks: [], excludedSourceRanges: [] }, initialRevision = '0' }) => {
+const startApi = async ({ wire, mode = 'MANUAL', denyResult = false, publishDenied = false, loseResponseAt = '', validateAcceptanceFault = '', sourceBytes = Buffer.from('第一章\n正文内容\n', 'utf8'), initialDraft = { blocks: [], excludedSourceRanges: [] }, initialRevision = '0' }) => {
   const source = sourceBytes; const sourceSha = sha(source)
-  const calls = []; let runState = 'AUTHORIZED'; let jobState = 'EXECUTION_REQUESTED'; let draft = initialDraft; let revision = initialRevision; let validationId = null; let responseLost = false
+  const calls = []; let runState = 'AUTHORIZED'; let jobState = 'EXECUTION_REQUESTED'; let draft = structuredClone(initialDraft); let revision = initialRevision; let validationId = null; let responseLost = false
+  const validationById = new Map(); const validationByRevision = new Map(); const blockOperations = new Map(); const validationOperations = new Map()
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk); const body = Buffer.concat(chunks).toString('utf8')
     calls.push({ method: request.method, url: request.url, body, headers: request.headers })
+    const requestUrl = new URL(request.url, 'http://127.0.0.1')
+    const path = requestUrl.pathname
     const expectedHeaders = { authorization: `AgentRuntime ${'a'.repeat(32)}`, 'x-agent-id': 'agent-a', 'x-agent-runtime-id': 'runtime-a',
       'x-archive-grant-ref': 'grant-a', 'x-archive-execution-ref': 'execution-a', 'x-archive-command-id': wire.commandId,
       'x-archive-command-attempt': '1', 'x-archive-execution-epoch': '1' }
     for (const [name, value] of Object.entries(expectedHeaders)) assert.equal(request.headers[name], value, name)
-    const send = (data, headers = {}) => { const bytes = Buffer.from(JSON.stringify({ msg: 'ok', code: 'E0', status: 200, data })); response.writeHead(200, { 'Content-Type': 'application/json;charset=UTF-8', 'Content-Length': bytes.length, ...headers }); response.end(bytes) }
+    const send = (data, headers = {}, status = 200, envelopeStatus = status) => {
+      const bytes = Buffer.from(JSON.stringify({ msg: 'ok', code: 'E0', status: envelopeStatus, data }))
+      response.writeHead(status, { 'Content-Type': 'application/json;charset=UTF-8', 'Content-Length': bytes.length, ...headers }); response.end(bytes)
+    }
     const lose = action => { if (loseResponseAt !== action || responseLost) return false; responseLost = true; response.destroy(); return true }
-    if (denyResult && request.url.endsWith('/result')) { response.writeHead(404, { 'Content-Type': 'application/json' }); response.end('{}'); return }
-    if (request.url.endsWith('/result')) return send(terminalResult(wire, runState, mode, validationId))
-    if (request.url.endsWith('/start')) { assert.deepEqual(JSON.parse(body), { commandId: wire.commandId, messageId: wire.messageId, attempt: '1', executionEpoch: '1' }); runState = 'RUNNING'; jobState = 'RUNNING'; if (lose('start')) return; return send(terminalResult(wire, runState, mode)) }
-    if (request.url.endsWith('/context')) return send({ jobId: 'job-a', runId: wire.payload.runId, collectionId: 'collection-a', workId: 'work-a', operation: 'REVISE_WORK',
+    if (denyResult && path.endsWith('/result')) { response.writeHead(404, { 'Content-Type': 'application/json' }); response.end('{}'); return }
+    if (path.endsWith('/result')) return send(terminalResult(wire, runState, mode, validationId))
+    if (path.endsWith('/start')) { assert.deepEqual(JSON.parse(body), { commandId: wire.commandId, messageId: wire.messageId, attempt: '1', executionEpoch: '1' }); runState = 'RUNNING'; jobState = 'RUNNING'; if (lose('start')) return; return send(terminalResult(wire, runState, mode)) }
+    if (path.endsWith('/context')) return send({ jobId: 'job-a', runId: wire.payload.runId, collectionId: 'collection-a', workId: 'work-a', operation: 'REVISE_WORK',
       expectedWorkRevision: '4', expectedActiveEditionId: 'edition-old', appointmentId: 'appointment-a', appointmentRevision: '1', agentId: 'agent-a', bindingVersion: '7',
       permissionProfile: mode === 'AUTO' ? 'PUBLISH_VALIDATED' : 'DRAFT_ONLY', publicationMode: mode, state: jobState, waitReason: null,
       requiredSkill: { key: 'archive-maintainer', version: '1.0.0', packageSha256: sha(approved) }, sourceId: 'source-a', sourceSha256: sourceSha,
       sourceSummary: 'fixed source', rightsBasis: 'authorized', draftId: 'draft-a', draftRevision: revision })
-    if (request.url.endsWith('/sources/source-a/content')) { assert.equal(request.headers.accept, 'text/plain'); response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': source.length, 'X-Archive-Source-Sha256': sourceSha }); response.end(source); return }
-    if (request.url.endsWith('/draft') && request.method === 'GET') return send({ draftId: 'draft-a', jobId: 'job-a', revision, state: validationId ? 'VALIDATED' : 'EDITABLE', content: draft,
+    if (path.endsWith('/sources/source-a/content')) { assert.equal(request.headers.accept, 'text/plain'); response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': source.length, 'X-Archive-Source-Sha256': sourceSha }); response.end(source); return }
+    if (path.endsWith('/draft') && request.method === 'GET') return send({ draftId: 'draft-a', jobId: 'job-a', revision, state: validationId ? 'VALIDATED' : 'EDITABLE', content: draft,
       contentSha256: 'c'.repeat(64), validatedRevision: validationId ? revision : null, validationId }, { ETag: `"v${revision}"` })
-    if (request.url.endsWith('/draft') && request.method === 'PUT') { assert.equal(request.headers['if-match'], '"v0"'); assert.match(request.headers['idempotency-key'], /^archive-draft-/); draft = JSON.parse(body); revision = '1'; if (lose('draft')) return; return send({ draftId: 'draft-a', jobId: 'job-a', revision, state: 'EDITABLE', content: draft, contentSha256: 'c'.repeat(64), validatedRevision: null, validationId: null }, { ETag: '"v1"' }) }
-    if (request.url.endsWith('/validate') && request.method === 'POST') { assert.equal(request.headers['if-match'], '"v1"'); validationId = 'validation-a'; jobState = 'AWAITING_PUBLISH'; if (mode === 'MANUAL') runState = 'COMPLETED'; if (lose('validate')) return; return send({ validationId, draftId: 'draft-a', draftRevision: '1', outcome: 'PASSED', validationDigest: 'b'.repeat(64), findings: [] }) }
-    if (request.url.endsWith('/validation')) return send({ validationId, draftId: 'draft-a', draftRevision: '1', outcome: 'PASSED', validationDigest: 'b'.repeat(64), findings: [] })
-    if (request.url.endsWith('/publish')) {
-      assert.equal(mode, 'AUTO')
+    const blockMatch = /\/blocks\/([A-Za-z0-9][A-Za-z0-9._:-]{0,99})$/u.exec(path)
+    if (blockMatch && request.method === 'PUT') {
+      const blockKey = blockMatch[1]; const key = request.headers['idempotency-key']; const parsed = JSON.parse(body)
+      assert.deepEqual(Object.keys(parsed).sort(), ['blocks', 'excludedSourceRanges'])
+      assert.equal(parsed.blocks.length, 1); assert.equal(parsed.blocks[0].blockKey, blockKey)
+      assert.match(key, /^archive-block-/); assert.equal(request.headers['if-match'], `"v${revision}"`)
+      const prior = blockOperations.get(key)
+      if (prior) {
+        assert.equal(prior.blockKey, blockKey); assert.deepEqual(prior.body, parsed)
+      } else {
+        assert.equal(draft.blocks.some(block => block.blockKey === blockKey), false)
+        draft = { blocks: [...draft.blocks, parsed.blocks[0]], excludedSourceRanges: parsed.excludedSourceRanges }
+        revision = String(BigInt(revision) + 1n); validationId = null
+        blockOperations.set(key, { blockKey, body: parsed })
+      }
+      if (lose('block')) return
+      return send({ draftId: 'draft-a', jobId: 'job-a', revision, state: 'EDITABLE', content: draft, contentSha256: 'c'.repeat(64), validatedRevision: null, validationId: null }, { ETag: `"v${revision}"` })
+    }
+    if (path.endsWith('/validate') && request.method === 'POST') {
+      const key = request.headers['idempotency-key']; const expected = `"v${revision}"`
+      assert.equal(request.headers['if-match'], expected); assert.match(key, /^archive-validate-/)
+      let receipt = validationOperations.get(key)
+      if (!receipt) {
+        validationId = 'validation-a'
+        const validation = { validationId, draftId: 'draft-a', draftRevision: revision, outcome: 'PASSED', validationDigest: 'b'.repeat(64), findings: [] }
+        validationById.set(validationId, validation); validationByRevision.set(revision, validation)
+        receipt = { operationId: validationId, jobId: 'job-a', state: 'COMMITTED' }; validationOperations.set(key, receipt)
+        jobState = 'AWAITING_PUBLISH'; if (mode === 'MANUAL') runState = 'COMPLETED'
+      }
+      if (lose('validate')) return
+      if (loseResponseAt === 'validate-body' && !responseLost) {
+        responseLost = true
+        const location = `/internal/archive/v1/jobs/job-a/runs/${wire.payload.runId}/validation?operationId=${receipt.operationId}`
+        const bytes = Buffer.from(JSON.stringify({ msg: 'ok', code: 'E0', status: 202, data: receipt }))
+        response.writeHead(202, { 'Content-Type': 'application/json;charset=UTF-8', 'Content-Length': bytes.length, Location: location })
+        response.flushHeaders()
+        response.write(bytes.subarray(0, Math.max(1, Math.floor(bytes.length / 2))))
+        setImmediate(() => response.destroy())
+        return
+      }
+      const responseReceipt = validateAcceptanceFault === 'receipt' ? { ...receipt, draftId: 'draft-a' } : receipt
+      const responseLocation = validateAcceptanceFault === 'location'
+        ? `/internal/archive/v1/jobs/job-a/runs/${wire.payload.runId}/validation?operationId=validation-other`
+        : `/internal/archive/v1/jobs/job-a/runs/${wire.payload.runId}/validation?operationId=${receipt.operationId}`
+      return send(responseReceipt, { Location: responseLocation }, 202, validateAcceptanceFault === 'envelope' ? 200 : 202)
+    }
+    if (path.endsWith('/validation') && request.method === 'GET') {
+      const operationIds = requestUrl.searchParams.getAll('operationId')
+      assert.equal([...requestUrl.searchParams.keys()].every(key => key === 'operationId'), true)
+      assert.ok(operationIds.length <= 1)
+      const validation = operationIds.length === 1 ? validationById.get(operationIds[0]) : validationByRevision.get(revision)
+      if (!validation) { response.writeHead(404, { 'Content-Type': 'application/json' }); response.end('{}'); return }
+      return send(validation)
+    }
+    if (path.endsWith('/publish')) {
+      assert.equal(mode, 'AUTO'); assert.equal(request.headers['if-match'], `"v${revision}"`)
       assert.deepEqual(JSON.parse(body), { validationId: 'validation-a', expectedActiveEditionId: 'edition-old', expectedWorkRevision: '4' })
       if (publishDenied) { response.writeHead(409, { 'Content-Type': 'application/json' }); response.end('{}'); return }
       runState = 'COMPLETED'; jobState = 'PUBLISHED'
       if (lose('publish')) return
-      return send({ publicationId: 'publication-a', jobId: 'job-a', workId: 'work-a', editionId: 'edition-a', draftRevision: '1', manifestSha256: 'd'.repeat(64), sourceSha256: sourceSha, state: 'PUBLISHED', readbackState: 'VERIFIED' })
+      return send({ publicationId: 'publication-a', jobId: 'job-a', workId: 'work-a', editionId: 'edition-a', draftRevision: revision, manifestSha256: 'd'.repeat(64), sourceSha256: sourceSha, state: 'PUBLISHED', readbackState: 'VERIFIED' })
     }
-    if (request.url.endsWith('/failure')) {
-      assert.deepEqual(JSON.parse(body), { phase: 'RUNNER', code: 'ARCHIVE_LEADING_BODY_WITHOUT_HEADING', retryable: false })
+    if (path.endsWith('/failure')) {
+      const failure = JSON.parse(body)
+      assert.equal(failure.retryable, false); assert.ok(['RUNNER', 'VALIDATION'].includes(failure.phase))
       runState = 'FAILED'; jobState = 'FAILED'; if (lose('failure')) return; return send(terminalResult(wire, runState, mode))
     }
     response.writeHead(404); response.end()
   })
   await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise))
-  return { calls, close: () => new Promise(resolvePromise => server.close(resolvePromise)), wsUrl: `ws://127.0.0.1:${server.address().port}/ws` }
+  return { calls, currentValidationAvailable: () => validationByRevision.has(revision), close: () => new Promise(resolvePromise => server.close(resolvePromise)), wsUrl: `ws://127.0.0.1:${server.address().port}/ws` }
 }
 
 for (const mode of ['MANUAL', 'AUTO']) test(`approved package runner follows authenticated ${mode} lifecycle without Codex or shell fallback`, async () => {
@@ -128,6 +186,11 @@ for (const mode of ['MANUAL', 'AUTO']) test(`approved package runner follows aut
       skillInstallManager: { execute: async () => assert.fail('legacy install path') }, runCodexFn: async () => { codex++; return { status: 'completed' } } })
     assert.equal(outcome.status, 'completed', outcome.errorMessage)
     assert.equal(codex, 0)
+    assert.equal(api.calls.filter(call => /\/blocks\/chapter-1$/u.test(call.url) && call.method === 'PUT').length, 1)
+    assert.equal(api.calls.filter(call => call.url.endsWith('/draft') && call.method === 'PUT').length, 0)
+    assert.equal(api.calls.filter(call => call.url.includes('/draft/blocks/')).length, 0)
+    assert.equal(api.calls.filter(call => call.url.endsWith('/validate') && call.method === 'POST').length, 1)
+    assert.equal(api.calls.filter(call => call.url.endsWith('/validation?operationId=validation-a') && call.method === 'GET').length, 1)
     assert.equal(api.calls.filter(call => call.url.endsWith('/publish')).length, mode === 'AUTO' ? 1 : 0)
     if (mode === 'AUTO') assert.deepEqual(JSON.parse(api.calls.find(call => call.url.endsWith('/publish')).body), { validationId: 'validation-a', expectedActiveEditionId: 'edition-old', expectedWorkRevision: '4' })
     assert.equal(runner.reconcileCommandOutcome(wire)?.authoritative, true)
@@ -219,7 +282,7 @@ for (const scenario of ['completed', 'failed']) test(`routed processor persists 
 
 for (const scenario of [
   { action: 'start', mode: 'MANUAL', expected: 'completed' },
-  { action: 'draft', mode: 'MANUAL', expected: 'completed' },
+  { action: 'block', mode: 'MANUAL', expected: 'completed' },
   { action: 'validate', mode: 'MANUAL', expected: 'completed' },
   { action: 'publish', mode: 'AUTO', expected: 'completed' },
   { action: 'failure', mode: 'MANUAL', expected: 'failed', sourceBytes: Buffer.from('正文内容\n', 'utf8') }
@@ -231,10 +294,109 @@ for (const scenario of [
     const outcome = await runManagedCommand({ profile, message: wire, platformSkillRuntime: { execute: message => runner.execute(message) },
       skillInstallManager: {}, runCodexFn: async () => assert.fail('Codex fallback') })
     assert.equal(outcome.status, scenario.expected, outcome.errorMessage)
-    const suffix = `/${scenario.action === 'draft' ? 'draft' : scenario.action}`
-    const method = scenario.action === 'draft' ? 'PUT' : 'POST'
-    assert.equal(api.calls.filter(call => call.url.endsWith(suffix) && call.method === method).length, 1)
+    const method = scenario.action === 'block' ? 'PUT' : 'POST'
+    const matching = scenario.action === 'block'
+      ? api.calls.filter(call => /\/blocks\/chapter-1$/u.test(call.url) && call.method === method)
+      : api.calls.filter(call => call.url.endsWith(`/${scenario.action}`) && call.method === method)
+    assert.equal(matching.length, 1)
+    if (scenario.action === 'validate') {
+      assert.equal(api.calls.filter(call => call.url.endsWith('/validation') && call.method === 'GET').length, 1)
+      assert.equal(api.calls.some(call => call.url.includes('/validation?operationId=')), false)
+    }
   } finally { await api.close() }
+})
+
+test('truncated accepted validate response body recovers from current validation without retrying the producer POST', async () => {
+  const root = temporaryDirectory(); const manager = await installManager(root); const wire = archiveWire()
+  const api = await startApi({ wire, mode: 'MANUAL', loseResponseAt: 'validate-body' })
+  try {
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl,
+      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+    const outcome = await runManagedCommand({ profile, message: wire,
+      platformSkillRuntime: { execute: message => runner.execute(message) }, skillInstallManager: {},
+      runCodexFn: async () => assert.fail('Codex fallback') })
+    assert.equal(outcome.status, 'completed', outcome.errorMessage)
+    assert.equal(api.currentValidationAvailable(), true)
+    const validatePosts = api.calls.filter(call => call.url.endsWith('/validate') && call.method === 'POST')
+    assert.equal(validatePosts.length, 1)
+    const expectedKey = `archive-validate-${sha(Buffer.from(`${wire.commandId}\0${wire.payload.runId}\0${wire.payload.executionEpoch}\0validate`))}`
+    assert.equal(validatePosts[0].headers['idempotency-key'], expectedKey)
+    assert.equal(api.calls.filter(call => call.url.endsWith('/validation') && call.method === 'GET').length, 1)
+    assert.equal(api.calls.some(call => call.url.includes('/validation?operationId=')), false)
+  } finally { await api.close() }
+})
+
+for (const validateAcceptanceFault of ['envelope', 'receipt', 'location']) test(`runner fails closed on received invalid validate ${validateAcceptanceFault} without current-validation fallback or later writes`, async () => {
+  const root = temporaryDirectory(); const manager = await installManager(root); const wire = archiveWire()
+  const api = await startApi({ wire, mode: 'AUTO', validateAcceptanceFault })
+  try {
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl,
+      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+    const outcome = await runManagedCommand({ profile, message: wire,
+      platformSkillRuntime: { execute: message => runner.execute(message) }, skillInstallManager: {},
+      runCodexFn: async () => assert.fail('Codex fallback') })
+    assert.equal(outcome.status, 'recovery_required')
+    assert.equal(api.currentValidationAvailable(), true)
+    const validateIndex = api.calls.findIndex(call => call.url.endsWith('/validate') && call.method === 'POST')
+    assert.notEqual(validateIndex, -1)
+    assert.equal(api.calls.filter(call => call.url.includes('/validation') && call.method === 'GET').length, 0)
+    assert.equal(api.calls.filter(call => call.url.endsWith('/publish') && call.method === 'POST').length, 0)
+    assert.equal(api.calls.filter(call => call.url.endsWith('/failure') && call.method === 'POST').length, 0)
+    assert.deepEqual(api.calls.slice(validateIndex + 1), [])
+  } finally { await api.close() }
+})
+
+test('native validate requires strict 202 receipt, scoped Location and matching 200 result identity', async () => {
+  const now = Date.now(); const wire = archiveWire({ now })
+  const command = validateArchiveMaintenanceCommand(wire, runtimeScope, now)
+  const receipt = { operationId: 'validation-a', jobId: 'job-a', state: 'COMMITTED' }
+  const validation = { validationId: 'validation-a', draftId: 'draft-a', draftRevision: '1', outcome: 'PASSED', validationDigest: 'b'.repeat(64), findings: [] }
+  const response = (url, httpStatus, envelopeStatus, data, headers = {}) => {
+    const bytes = Buffer.from(JSON.stringify({ msg: 'ok', code: 'E0', status: envelopeStatus, data }))
+    return { redirected: false, url: url.href, status: httpStatus,
+      headers: new Headers({ 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), ...headers }), body: new Response(bytes).body }
+  }
+  const invoke = async responder => {
+    let call = 0
+    const client = new ArchiveMaintenanceNativeClient({ runtimeScope, wsUrl: 'ws://127.0.0.1:18080/ws',
+      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`,
+      fetchFn: async (url, options) => responder(++call, url, options), now: () => now })
+    return client.validate(command, 'draft-a', '1', 'validate-key')
+  }
+  const location = '/internal/archive/v1/jobs/job-a/runs/run-a/validation?operationId=validation-a'
+
+  await assert.rejects(invoke(async (call, url) => {
+    assert.equal(call, 1)
+    return response(url, 200, 200, validation)
+  }), error => error?.code === 'ARCHIVE_NATIVE_DENIED' && error?.status === 200)
+
+  for (const malformed of [
+    { name: 'envelope status', receipt, envelopeStatus: 200, location },
+    { name: 'receipt keys', receipt: { ...receipt, draftId: 'draft-a' }, envelopeStatus: 202, location },
+    { name: 'Location operation', receipt, envelopeStatus: 202,
+      location: '/internal/archive/v1/jobs/job-a/runs/run-a/validation?operationId=validation-other' }
+  ]) {
+    await assert.rejects(invoke(async (call, url) => {
+      assert.equal(call, 1, malformed.name)
+      return response(url, 202, malformed.envelopeStatus, malformed.receipt, { Location: malformed.location })
+    }), error => error?.code === 'ARCHIVE_NATIVE_RESPONSE_INVALID'
+      && error?.uncertainty === 'DEFINITE' && error?.uncertain === false)
+  }
+
+  for (const mismatched of [
+    { ...validation, validationId: 'validation-other' },
+    { ...validation, draftId: 'draft-other' },
+    { ...validation, draftRevision: '2' }
+  ]) {
+    await assert.rejects(invoke(async (call, url, options) => {
+      if (call === 1) return response(url, 202, 202, receipt, { Location: location })
+      assert.equal(call, 2); assert.equal(options.method, 'GET')
+      assert.equal(url.searchParams.get('operationId'), 'validation-a')
+      return response(url, 200, 200, mismatched)
+    }), error => error?.code === 'ARCHIVE_NATIVE_RESPONSE_INVALID'
+      && error?.operationId === 'validation-a' && error?.uncertainty === 'DEFINITE'
+      && error?.uncertain === false)
+  }
 })
 
 test('expired producer authority cannot write while the exact terminal result remains readable', async () => {
@@ -243,11 +405,16 @@ test('expired producer authority cannot write while the exact terminal result re
   let fetches = 0
   const client = new ArchiveMaintenanceNativeClient({ runtimeScope, wsUrl: 'ws://127.0.0.1:18080/ws',
     authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, fetchFn: async (url, options) => {
-      fetches += 1; assert.equal(options.method, 'GET'); assert.equal(url.pathname.endsWith('/result'), true)
-      const bytes = Buffer.from(JSON.stringify({ msg: 'ok', code: 'E0', status: 200, data: terminalResult(wire, 'COMPLETED', 'MANUAL', 'validation-a') }))
+      fetches += 1; assert.equal(options.method, 'GET')
+      const data = url.pathname.endsWith('/result')
+        ? terminalResult(wire, 'COMPLETED', 'MANUAL', 'validation-a')
+        : { validationId: 'validation-a', draftId: 'draft-a', draftRevision: '1', outcome: 'PASSED', validationDigest: 'b'.repeat(64), findings: [] }
+      assert.equal(url.pathname.endsWith('/result') || url.pathname.endsWith('/validation'), true)
+      const bytes = Buffer.from(JSON.stringify({ msg: 'ok', code: 'E0', status: 200, data }))
       return { redirected: false, url: url.href, status: 200, headers: new Headers({ 'Content-Type': 'application/json', 'Content-Length': String(bytes.length) }), body: new Response(bytes).body }
     }, now: () => Date.now() })
   assert.equal((await client.result(command)).runState, 'COMPLETED')
+  assert.equal((await client.validation(command, 'validation-a')).outcome, 'PASSED')
   await assert.rejects(client.start(command), error => error?.code === 'ARCHIVE_EXECUTION_EXPIRED')
-  assert.equal(fetches, 1)
+  assert.equal(fetches, 2)
 })
