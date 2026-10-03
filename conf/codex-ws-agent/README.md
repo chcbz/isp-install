@@ -549,3 +549,22 @@ Provider has proven a strict no-tools boundary (`strictNoToolsVerified=false`).
 input materialization, and Provider isolation have been independently verified. Existing `PRIVATE`/
 `TASK` compatibility and native START availability are reported only under `legacyCompatibility`; they
 are not evidence of new EXECUTE orchestration admission.
+
+### Controlled-image v3: retain produced bytes when delivery is uncertain
+
+After a validated PNG returns, the v3 lane writes `delivery/output_1.png` and then
+`delivery/receipt.json` inside its private run directory, fsyncing the files and
+directories before upload. The receipt binds the exact command, Agent, API origin,
+byte length and SHA-256; it contains no runtime credential. Directories are 0700,
+files 0600, and existing/symlink destinations are rejected rather than overwritten.
+
+Upload errors, lost/mismatched commit acknowledgements, expired leases and local
+persistence errors retain the run for investigation. A transport error after an
+image was produced is not reported as an ordinary execution failure. Only a
+validated commit acknowledgement permits normal run-directory cleanup.
+
+Retention is **not** automatic recovery: no Provider call is retried, no paid claim
+is deleted, and the receipt grants no API authority. The current start lease/inbox
+cannot reclaim a provider-started execution. A separately authorized result-only
+recovery contract is required for retransmission after restart or lease expiry.
+Images deleted by older clients cannot be recreated from the claim or receipt.

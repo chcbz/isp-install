@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { NativeConversationError, validateNativeConversationOutput } from './conversation-native.mjs'
 import { materializeControlledImageV3Inputs, parseControlledImageV3Inputs } from './conversation-reference-inputs-v3.mjs'
+import { retainControlledImageDeliveryV3 } from './controlled-image-delivery-retention-v3.mjs'
 
 const BASE = '/internal/agent/tasks'
 const INBOX = `${BASE}/conversation-executions/controlled-image-v3-commands`
@@ -193,7 +194,7 @@ export class ControlledImageConversationLaneV3 {
         if (running) timer = setTimeout(() => { void renew() }, Math.max(1, Math.floor((next.expiresAt - Date.now()) / 2)))
       } catch (error) { renewalError = error }
     }
-    let runDirectory
+    let runDirectory; let outputProduced = false; let commitConfirmed = false
     try {
       const snapshot = await this.#request(`${path}/inputs-v3`, 'POST', fence)
       const parsed = parseControlledImageV3Inputs(snapshot, command, fence.version)
@@ -217,9 +218,14 @@ export class ControlledImageConversationLaneV3 {
       this.#parseStartReceipt(receipt, command, lease)
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       const output = await this.#execute(Object.freeze({ command, runDirectory, inputs }))
-      if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       if (!object(output) || output.outputId !== 'output_1' || output.contentType !== 'image/png'
           || !validateNativeConversationOutput('image/png', output.bytes)) deny('CONVERSATION_OUTPUT_INVALID')
+      // The paid result must survive an expired lease, failed upload or lost commit ACK.
+      // Persist before checking the lease again; retained bytes never permit Provider replay.
+      outputProduced = true
+      retainControlledImageDeliveryV3({ runDirectory, command, output,
+        apiOrigin: this.#origin, agentId: this.#agentId })
+      if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       const outputSha = SHA(output.bytes)
       const form = new FormData()
       form.set('file', new Blob([output.bytes], { type: output.contentType }), 'output.png')
@@ -237,8 +243,12 @@ export class ControlledImageConversationLaneV3 {
           || committed.items[0].outputId !== 'output_1' || committed.items[0].sha256 !== outputSha) {
         deny('CONVERSATION_COMMIT_UNCERTAIN')
       }
+      commitConfirmed = true
       return { committed: true }
     } catch (error) {
+      // Do not mark a produced image failed just because result transport failed.
+      // Preserve the exact run and propagate uncertainty; there is no automatic retry.
+      if (outputProduced) throw error
       const code = typeof error?.code === 'string'
         && (error.code.startsWith('CONVERSATION_') || error.code.startsWith('CONTROLLED_IMAGE_'))
         ? error.code : 'CONVERSATION_EXECUTION_FAILED'
@@ -251,7 +261,7 @@ export class ControlledImageConversationLaneV3 {
       return { failed: true, code }
     } finally {
       running = false; clearTimeout(timer)
-      if (runDirectory) rmSync(runDirectory, { recursive: true, force: false })
+      if (runDirectory && (!outputProduced || commitConfirmed)) rmSync(runDirectory, { recursive: true, force: false })
     }
   }
 }
