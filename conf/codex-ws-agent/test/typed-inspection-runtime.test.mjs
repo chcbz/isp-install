@@ -414,18 +414,9 @@ test('v3 native INSPECT returns non-image action with bound receipt; durable rep
   assert.deepEqual(frames[1], frames[0]); assert.equal(starts, 1)
 })
 
-test('v3 rejects catalogue mismatch before fetching and prevents an inspection loop over already-provided inputs', async () => {
-  const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message)
+test('v3 rejects catalogue mismatch before fetching, without a speculative no-reread gate', () => {
+  const message = actionMessage()
   const changed = structuredClone(message); changed.contextSnapshot.facts.typedInspection.discussionFacts.availableSources[0].mediaType = 'audio'
   assert.throws(() => resolveTypedInspectionRequest(profile, changed), /ACTION_INSPECTION_CATALOG_MISMATCH/)
-  const adapter = {
-    closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'loop-thread' }),
-    runTurn: async () => ({ threadId: 'loop-thread', turnId: 'loop-turn', content: JSON.stringify({ schemaVersion: 3, kind: 'ACTION_REQUEST', text: 'read again', clarification: null,
-      action: { actionId: 'inspect', instruction: 'read the same input', sourceRefIds: ['source-1'] } }) })
-  }
-  await assert.rejects(() => runTypedInspection(profile, message, {
-    adapter, isolationReadback: readback(typed), materializer: { materialize: async () => ({ directory: '/private/v3-loop', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) }, nativeInputAdapters: {},
-    controls: { markPrepared: () => {}, markRunning: () => {}, markFinalPrepared: () => assert.fail('must not save invalid action'), isCancelled: () => false },
-    sendFinal: () => assert.fail('must not publish invalid action')
-  }), /ACTION_INSPECTION_NO_PROGRESS/)
+  assert.doesNotThrow(() => resolveTypedInspectionRequest(profile, message))
 })

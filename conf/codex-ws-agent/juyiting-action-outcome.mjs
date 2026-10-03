@@ -93,7 +93,6 @@ export const validateActionOutcome = (raw, dispatchFacts) => {
     const selected = value.action.sourceRefIds
     if (!uniqueStrings(selected, id => typeof id === 'string' && catalog.has(id) && descriptor.inputMediaTypes.includes(catalog.get(id).mediaType)) ||
         selected.length < descriptor.minSources || selected.length > descriptor.maxSources) fail('ACTION_SELECTION_INVALID')
-    if (descriptor.kind === 'INSPECT_INPUTS' && selected.every(id => facts.inspectedSourceRefIds.includes(id))) fail('ACTION_INSPECTION_NO_PROGRESS')
     action = { actionId: descriptor.actionId, instruction: value.action.instruction, sourceRefIds: [...selected] }
   } else fail('ACTION_OUTCOME_KIND_INVALID')
   return frozen({ schemaVersion: 3, kind: value.kind, text: value.text, clarification, action })

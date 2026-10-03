@@ -41,7 +41,7 @@ test('rejects unadvertised action, injected grant/path, wrong branch, source, du
   assert.throws(() => validateActionOutcome(malformed, facts()))
 })
 
-test('capability and read-progress facts are exact; inspection cannot request only already-read inputs', () => {
+test('capability and read facts are exact; previous reading does not add an unsupported rejection gate', () => {
   for (const mutate of [
     f => { f.availableActions.push(f.availableActions[0]) }, f => { f.availableActions[0].maxSources = 33 },
     f => { f.availableActions[0].kind = 'EXECUTE' }, f => { f.availableActions[0].minSources = 0 },
@@ -49,7 +49,7 @@ test('capability and read-progress facts are exact; inspection cannot request on
     f => { f.availableSources.push(f.availableSources[0]) }, f => { f.grant = 'forged' }
   ]) { const f = facts(); mutate(f); assert.throws(() => validateActionFacts(f)) }
   const f = facts(); f.inspectedSourceRefIds = f.availableSources.map(s => s.sourceRefId)
-  assert.throws(() => validateActionOutcome(action(), f), /ACTION_INSPECTION_NO_PROGRESS/)
+  assert.doesNotThrow(() => validateActionOutcome(action(), f))
   f.inspectedSourceRefIds.pop()
   assert.doesNotThrow(() => validateActionOutcome(action(), f))
 })

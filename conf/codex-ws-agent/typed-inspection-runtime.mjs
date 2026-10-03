@@ -300,13 +300,7 @@ const carrierSource = (source, profileRuntime = null, inputDirectory = '') => {
 // in the server-frozen discussion facts, never inferred from model prose.
 const inspectionOutcomeContract = typed => typed.discussionFacts.schemaVersion === 3 ? {
   instructions: ACTION_OUTCOME_INSTRUCTIONS, outputSchema: ACTION_OUTCOME_SCHEMA,
-  validate: raw => {
-    const outcome = validateActionOutcome(raw, typed.discussionFacts)
-    const descriptor = outcome.action && typed.discussionFacts.availableActions.find(item => item.actionId === outcome.action.actionId)
-    const provided = new Set([...typed.discussionFacts.inspectedSourceRefIds, ...typed.manifest.sources.map(item => item.sourceRefId)])
-    if (descriptor?.kind === 'INSPECT_INPUTS' && outcome.action.sourceRefIds.every(id => provided.has(id))) fail('ACTION_INSPECTION_NO_PROGRESS')
-    return outcome
-  }
+  validate: raw => validateActionOutcome(raw, typed.discussionFacts)
 } : {
   instructions: TYPED_INSPECTION_INSTRUCTIONS, outputSchema: TYPED_INSPECTION_OUTPUT_SCHEMA,
   validate: raw => validateTypedInspectionOutcome(raw, typed.discussionFacts)
