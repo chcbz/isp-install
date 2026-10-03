@@ -74,7 +74,10 @@ const setup = (t, candidate, { receipt = candidate.receipt, startMode = 'success
         sha256: stageMode === 'drift' ? 'f'.repeat(64) : init.body.get('sha256'), byteLength: Number(init.body.get('length')) }, 201)
     }
     if (url.pathname.includes('/result-commits/')) {
-      const body = JSON.parse(init.body); const item = body.outputs[0]
+      assert.ok(init.body instanceof FormData)
+      const body = JSON.parse(init.body.get('proof')); const item = body.outputs[0]
+      const file = init.body.get('file')
+      assert.equal(file.type, 'image/png'); assert.deepEqual(Buffer.from(await file.arrayBuffer()), png)
       assert.equal(body.schemaVersion, 1); assert.equal(body.executionId, candidate.command.executionId)
       assert.equal(body.commandId, candidate.command.commandId); assert.equal(body.messageId, candidate.command.messageId)
       assert.equal(body.inputSnapshotDigest, candidate.command.inputSnapshotDigest); assert.equal(body.fence, undefined)
@@ -288,7 +291,7 @@ const preserved = (fixture, candidate) => {
   return { rootDirectory, runDirectory, receipt: readFileSync(resolve(runDirectory, 'delivery/receipt.json')) }
 }
 
-test('retained paid result recovers server STAGED/COMMITTED receipt with zero executor, START, input or upload calls', async t => {
+test('retained result uploads exact spool bytes with zero executor, START or source input calls', async t => {
   const candidate = build(); const fixture = setup(t, candidate); const saved = preserved(fixture, candidate)
   assert.deepEqual(await fixture.lane.poll(), { processed: 0, recovered: 1 })
   assert.equal(fixture.executeCalls(), 0)
@@ -337,4 +340,20 @@ test('recovery reader rejects wrong origin, Agent, byte proof, links, public mod
     assert.throws(() => retainedControlledImageDeliveriesV3(args), /CONVERSATION_OUTPUT_PERSISTENCE_UNCERTAIN/)
     assert.equal(fixture.calls.length, 0); assert.equal(fixture.executeCalls(), 0)
   })
+})
+
+for (const stageMode of ['lost', '404', 'drift']) test(`failed initial upload (${stageMode}) recovers retained bytes without replaying START`, async t => {
+  const candidate = build(); const fixture = setup(t, candidate, { stageMode })
+  await assert.rejects(fixture.lane.poll(), /CONVERSATION_(OUTCOME_UNKNOWN|RESPONSE_UNAVAILABLE|STAGE_UNCERTAIN)/)
+  assert.equal(fixture.executeCalls(), 1)
+  const oldCalls = fixture.calls.length
+  const restarted = new ControlledImageConversationLaneV3({ apiOrigin: 'http://127.0.0.1:10018', rootDir: fixture.root,
+    fetchFn: fixture.fetchFn, agentId: 'controlled-agent', runtimeInstanceId: 'replacement-runtime', getAuth: () => auth,
+    controlledConfig: { ...config, bindingId: 'changed-provider-binding' }, execute: async () => assert.fail('no executor replay') })
+  assert.deepEqual(await restarted.poll(), { processed: 0, recovered: 1 })
+  const recovery = fixture.calls.slice(oldCalls)
+  assert.equal(recovery.filter(x => x.path.includes('/result-commits/')).length, 1)
+  assert.ok(recovery.every(x => x.path.includes('/result-commits/') || x.path.endsWith('/controlled-image-v3-commands')))
+  assert.equal(fixture.executeCalls(), 1)
+  assert.equal(fixture.calls.filter(x => x.path.endsWith('/provider-start-controlled-image-v3')).length, 1)
 })

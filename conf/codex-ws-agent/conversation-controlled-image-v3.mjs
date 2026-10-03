@@ -168,7 +168,7 @@ export class ControlledImageConversationLaneV3 {
     if (!sameProviderExecution(providerExecution, command.providerExecution) || !this.#matchesConfig(providerExecution))
       deny('CONVERSATION_PROVIDER_START_UNCERTAIN')
   }
-  async #recoverStagedResults () {
+  async #recoverRetainedResults () {
     let recovered = 0
     const retained = retainedControlledImageDeliveriesV3({ rootDirectory: this.#root,
       apiOrigin: this.#origin, agentId: this.#agentId })
@@ -183,10 +183,15 @@ export class ControlledImageConversationLaneV3 {
       // One reconciliation attempt per immutable record/process. An uncertain/error reply retains
       // bytes and requires attributable remediation, not repeated blind HTTP or a Provider retry.
       this.#recoveryAttempted.add(key)
+      const form = new FormData()
+      form.set('proof', JSON.stringify({ schemaVersion: 1, executionId: command.executionId,
+        commandId: command.commandId, messageId: command.messageId, inputSnapshotDigest: command.inputSnapshotDigest,
+        outputs: [{ outputId: proof.outputId, sha256: proof.sha256, length: proof.byteLength }] }))
+      // Send only verified retained output, never source materials. This exact authenticated route
+      // checks the consumed START even if the previous upload never reached server storage.
+      form.set('file', new Blob([item.bytes], { type: proof.contentType }), proof.filename)
       const committed = await this.#request(`${BASE}/${command.taskId}/runs/${command.runId}/conversation/result-commits/${manifestId}`,
-        'POST', { schemaVersion: 1, executionId: command.executionId, commandId: command.commandId,
-          messageId: command.messageId, inputSnapshotDigest: command.inputSnapshotDigest,
-          outputs: [{ outputId: proof.outputId, sha256: proof.sha256, length: proof.byteLength }] })
+        'POST', form)
       if (!object(committed) || committed.state !== 'COMMITTED' || committed.manifestId !== manifestId
           || !Array.isArray(committed.items) || committed.items.length !== 1
           || committed.items[0].outputId !== proof.outputId || committed.items[0].sha256 !== proof.sha256
@@ -203,7 +208,7 @@ export class ControlledImageConversationLaneV3 {
     if (this.#active) return { processed: 0, busy: true }
     this.#active = true
     try {
-      const recovered = await this.#recoverStagedResults()
+      const recovered = await this.#recoverRetainedResults()
       const envelope = await this.#request(INBOX, 'GET')
       if (!object(envelope) || Object.keys(envelope).join() !== 'items' || !Array.isArray(envelope.items)
           || envelope.items.length > 16) deny('CONVERSATION_INBOX_INVALID')

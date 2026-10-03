@@ -114,7 +114,7 @@ export const retainedControlledImageDeliveriesV3 = ({ rootDirectory, apiOrigin, 
             || ack.byteLength !== record.output.byteLength || ack.manifestId !== manifestId) fail()
         acknowledged = true
       }
-      result.push(Object.freeze({ runDirectory, receiptSha256, record, acknowledged }))
+      result.push(Object.freeze({ runDirectory, receiptSha256, record, acknowledged, bytes }))
     }
     return result
   } catch { fail() }
