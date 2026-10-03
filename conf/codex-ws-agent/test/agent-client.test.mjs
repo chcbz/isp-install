@@ -730,7 +730,13 @@ test('typed deliberation declaration binds the exact locally selected schema con
     appServerSchemaContractId: native.contractId
   })
   const liveNative = adapter(native)
-  assert.equal(buildAgentRegistrationPayload(configured, null, true, liveNative).typedDeliberation.state, 'READY')
+  const declaration = {
+    schemaVersion: 3, state: 'READY', carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V3', referenceModes: ['NONE', 'AVAILABLE'],
+    outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST'], engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA',
+    strictNoToolsVerified: false, toolPolicy: 'read-only-constrained'
+  }
+  assert.deepEqual(buildAgentRegistrationPayload(configured, null, true, liveNative).typedDeliberation, declaration)
+  assert.deepEqual(buildAgentPresencePayload(configured, 'online', { appServerAdapter: liveNative }).typedDeliberation, declaration)
   assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: adapter(legacy) }).typedDeliberation.state, 'UNAVAILABLE')
   assert.equal(buildAgentPresencePayload({ ...configured, appServerSchemaContractId: legacy.contractId }, 'online', { appServerAdapter: liveNative }).typedDeliberation.state, 'UNAVAILABLE')
   assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...liveNative, closed: true } }).typedDeliberation.state, 'UNAVAILABLE')
