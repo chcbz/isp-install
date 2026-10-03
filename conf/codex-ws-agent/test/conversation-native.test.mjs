@@ -51,8 +51,12 @@ const setup = ({ execute, response, inputSnapshot, referenceBytes = bytes,
     }
     if (path.endsWith('/failure')) return json(url, { executionId: 'exec-1', state: 'FAILED' })
     if (path.endsWith('/content')) return json(url, { outputId: 'output_1', state: 'STAGED', sha256: digest, byteLength: bytes.length }, 201)
-    if (path.includes('/output-commits/')) return json(url, { manifestId: path.split('/').at(-1), state: 'COMMITTED',
-      items: [{ outputId: 'output_1', sha256: digest }] })
+    if (path.includes('/output-commits/')) {
+      const wire = `${command.taskId}\n${command.runId}\noutput_1\n${digest}\n${bytes.length}\n`
+      assert.equal(path.split('/').at(-1), `pwe_m_${createHash('sha256').update(wire).digest('hex')}`, 'server manifest contract')
+      return json(url, { manifestId: path.split('/').at(-1), state: 'COMMITTED',
+        items: [{ outputId: 'output_1', sha256: digest }] })
+    }
     throw new Error('Unexpected API endpoint')
   }
   const lane = new NativeConversationLane({ apiOrigin: 'http://127.0.0.1:10018', rootDir: root,

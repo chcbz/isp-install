@@ -76,6 +76,10 @@ const setup = (t, candidate, { receipt = candidate.receipt, startMode = 'success
     if (url.pathname.includes('/output-commits/')) {
       if (commitMode === 'lost') throw Error('commit ACK lost')
       const body = JSON.parse(init.body)
+      // Match the API manifest wire independently, not the requested URL echoed back.
+      const item = body.outputs[0]
+      const expected = `pwe_m_${sha(Buffer.from(`${candidate.command.taskId}\n${candidate.command.runId}\n${item.outputId}\n${item.sha256}\n${item.length}\n`))}`
+      assert.equal(url.pathname.split('/').at(-1), expected, 'server manifest contract')
       return json(url, { state: 'COMMITTED', manifestId: url.pathname.split('/').at(-1),
         items: [{ outputId: 'output_1', sha256: commitMode === 'drift' ? 'e'.repeat(64) : body.outputs[0].sha256 }] })
     }
@@ -102,8 +106,8 @@ test('v3 lane uses the independent inbox, inputs-v3, exact asset source, one STA
     '/internal/agent/tasks/task_1/runs/run_edit/conversation/inputs/input_1/content',
     '/internal/agent/tasks/task_1/runs/run_edit/conversation/provider-start-controlled-image-v3',
     '/internal/agent/tasks/task_1/runs/run_edit/conversation/outputs/output_1/content',
-    `/internal/agent/tasks/task_1/runs/run_edit/conversation/output-commits/native_${sha(Buffer.from(
-      `${candidate.command.executionId}\noutput_1\n${sha(png)}`)).slice(0, 40)}`
+    `/internal/agent/tasks/task_1/runs/run_edit/conversation/output-commits/pwe_m_${sha(Buffer.from(
+      `task_1\nrun_edit\noutput_1\n${sha(png)}\n${png.length}\n`))}`
   ])
   const start = fixture.calls.find(call => call.path.endsWith('/provider-start-controlled-image-v3'))
   assert.deepEqual(JSON.parse(start.body), { schemaVersion: 3, commandId: candidate.command.commandId,

@@ -5,6 +5,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
+import { buildOutputCommit } from './workspace-file-bridge.mjs'
 import { NativeConversationError, validateNativeConversationOutput } from './conversation-native.mjs'
 import { materializeNativeConversationInputs, parseNativeConversationInputs } from './conversation-reference-inputs.mjs'
 
@@ -219,7 +220,9 @@ export class ControlledImageConversationLane {
       for (const [key, value] of Object.entries({ version: String(fence.version), token: fence.token, sha256, length: String(output.bytes.length) })) form.set(key, value)
       const staged = await this.#request(`${path}/outputs/output_1/content`, 'POST', form, 201)
       if (!object(staged) || staged.outputId !== 'output_1' || staged.sha256 !== sha256 || staged.byteLength !== output.bytes.length || staged.state !== 'STAGED') deny('CONVERSATION_STAGE_UNCERTAIN')
-      const manifestId = `native_${SHA(Buffer.from(`${lease.executionId}\noutput_1\n${sha256}`)).slice(0, 40)}`
+      // Reuse the API task/run/output/hash/length manifest; keep conversation fencing.
+      const { manifestId } = buildOutputCommit({ taskId: command.taskId, runId: command.runId,
+        uploads: [{ outputId: 'output_1', sha256: sha256, length: output.bytes.length }] })
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       const committed = await this.#request(`${path}/output-commits/${manifestId}`, 'POST', { fence, outputs: [{ outputId: 'output_1', sha256, length: output.bytes.length }] })
       if (!object(committed) || committed.state !== 'COMMITTED' || committed.manifestId !== manifestId || !Array.isArray(committed.items) || committed.items.length !== 1 || committed.items[0].outputId !== 'output_1' || committed.items[0].sha256 !== sha256) deny('CONVERSATION_COMMIT_UNCERTAIN')

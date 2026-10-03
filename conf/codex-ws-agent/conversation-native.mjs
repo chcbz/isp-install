@@ -8,6 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
+import { buildOutputCommit } from './workspace-file-bridge.mjs'
 import { materializeNativeConversationInputs, parseNativeConversationInputs } from './conversation-reference-inputs.mjs'
 
 const BASE = '/internal/agent/tasks'
@@ -206,7 +207,9 @@ export class NativeConversationLane {
       const staged = await this.#request(`${path}/outputs/${command.outputId}/content`, 'POST', form, 201)
       if (!object(staged) || staged.outputId !== command.outputId || staged.sha256 !== sha256
           || staged.byteLength !== output.bytes.length || staged.state !== 'STAGED') deny('CONVERSATION_STAGE_UNCERTAIN')
-      const manifestId = `native_${SHA(Buffer.from(`${lease.executionId}\n${command.outputId}\n${sha256}`)).slice(0, 40)}`
+      // Reuse the API task/run/output/hash/length manifest; keep conversation fencing.
+      const { manifestId } = buildOutputCommit({ taskId: command.taskId, runId: command.runId,
+        uploads: [{ outputId: command.outputId, sha256: sha256, length: output.bytes.length }] })
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       const committed = await this.#request(`${path}/output-commits/${manifestId}`, 'POST', {
         fence, outputs: [{ outputId: command.outputId, sha256, length: output.bytes.length }]
