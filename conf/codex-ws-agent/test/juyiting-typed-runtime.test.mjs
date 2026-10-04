@@ -272,3 +272,27 @@ test('native CHAT preserves parent-bound text append and refuses fabricated pare
   outcome.deliveryRelation.parentOutcomeId = 'fabricated'
   await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish fabricated final') }), /ACTION_DELIVERY_PARENT_INVALID/)
 })
+
+
+test('native CHAT retains the original text parent across API-verified clarification replies, never the immediate question', async () => {
+  const groups = JSON.parse(readFileSync(new URL('./fixtures/clarified-text-delivery-v3.json', import.meta.url), 'utf8'))
+  const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+  for (const group of groups) {
+    const admission = group.admissionFacts
+    const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts; facts.typedDeliberationAdmission = admission })
+    const view = group.updated.outcome
+    const outcome = { schemaVersion: 3, kind: view.kind, text: view.text, clarification: null, action: null, deliverable: true, deliveryRelation: view.deliveryRelation }
+    const frames = []
+    const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'clarified-thread' }),
+      runTurn: async options => { options.onAccepted({ threadId: 'clarified-thread', turnId: 'clarified-turn' }); return { threadId: 'clarified-thread', turnId: 'clarified-turn', content: JSON.stringify(outcome) } }, interrupt: async () => {} }
+    const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+    assert.equal(result.status, 'completed'); assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+    assert.equal(outcome.deliveryRelation.parentOutcomeId, group.initial.outcome.outcomeId)
+    assert.notEqual(outcome.deliveryRelation.parentOutcomeId, admission.parentOutcomeId)
+    for (const mutate of [bad => { bad.deliveryRelation.parentOutcomeId = admission.parentOutcomeId }, bad => { bad.deliveryRelation.parentFinalDigest = group.clarifications.at(-1).outcome.finalDigest }]) {
+      const bad = structuredClone(outcome); mutate(bad)
+      adapter.runTurn = async options => { options.onAccepted({ threadId: 'clarified-thread', turnId: 'clarified-turn' }); return { threadId: 'clarified-thread', turnId: 'clarified-turn', content: JSON.stringify(bad) } }
+      await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish question as a deliverable parent') }), /ACTION_DELIVERY_PARENT_INVALID/)
+    }
+  }
+})
