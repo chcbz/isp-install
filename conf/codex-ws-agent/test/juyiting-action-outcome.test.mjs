@@ -84,3 +84,34 @@ test('explicit text deliverable marker is durable Boolean data, not inferred fro
   }
   assert.throws(() => validateActionOutcome({ ...answer, deliverable: true, grant: 'fake' }, facts()), /ACTION_OUTCOME_INVALID/)
 })
+
+
+test('explicit text relations require the exact advertised durable parent and never infer from linkage', () => {
+  const parent = { outcomeId: 'original-text', finalDigest: `sha256:${'a'.repeat(64)}` }
+  for (const mode of ['APPEND', 'REPLACE', 'RESET']) {
+    const value = { schemaVersion: 3, kind: 'ANSWER', text: '原文改稿  ', clarification: null, action: null, deliverable: true,
+      deliveryRelation: { mode, parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest } }
+    assert.deepEqual(validateActionOutcome(value, facts(), parent), value)
+    assert.equal(Object.isFrozen(validateActionOutcome(value, facts(), parent).deliveryRelation), true)
+    assert.throws(() => validateActionOutcome(value, facts()), /ACTION_DELIVERY_PARENT_INVALID/)
+    assert.throws(() => validateActionOutcome(value, facts(), { ...parent, finalDigest: `sha256:${'b'.repeat(64)}` }), /ACTION_DELIVERY_PARENT_INVALID/)
+    assert.throws(() => validateActionOutcome({ ...value, deliverable: false }, facts(), parent), /ACTION_DELIVERY_PARENT_INVALID/)
+  }
+  const old = { schemaVersion: 3, kind: 'ANSWER', text: '文字成果', clarification: null, action: null, deliverable: true }
+  assert.deepEqual(validateActionOutcome({ ...old, deliveryRelation: null }, facts(), parent), old)
+  assert.equal(Object.hasOwn(validateActionOutcome(old, facts(), parent), 'deliveryRelation'), false)
+})
+
+
+test('actual API read fixture preserves identical explicit parent identity across all text relation modes', () => {
+  const groups = JSON.parse(readFileSync(new URL('./fixtures/text-delivery-relations-v3.json', import.meta.url), 'utf8'))
+  for (const group of groups) {
+    const original = group.initial.outcome; const current = group.updated.outcome
+    const parent = { outcomeId: original.outcomeId, finalDigest: original.finalDigest }
+    const native = { schemaVersion: 3, kind: current.kind, text: current.text, clarification: null, action: null,
+      deliverable: current.deliverable, deliveryRelation: current.deliveryRelation }
+    const result = validateActionOutcome(native, facts(), parent)
+    assert.deepEqual(result, native); assert.equal(result.deliveryRelation.mode, group.mode)
+    assert.equal(result.text, '修改原文  ')
+  }
+})

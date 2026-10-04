@@ -256,3 +256,19 @@ test('v3 native CHAT preserves the explicit text delivery marker in its durable 
     assert.equal(frames.some(frame => frame.type !== MESSAGE_TYPES.CHAT_MESSAGE && frame.type !== MESSAGE_TYPES.CHAT_MESSAGE_DELTA), false)
   }
 })
+
+
+test('native CHAT preserves parent-bound text append and refuses fabricated parent before final publication', async () => {
+  const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+  const parent = { outcomeId: 'parent-text', finalDigest: `sha256:${'a'.repeat(64)}` }
+  const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts; facts.typedDeliberationAdmission = { deliveryParent: parent } })
+  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: '新增段落\n  ', clarification: null, action: null, deliverable: true,
+    deliveryRelation: { mode: 'APPEND', parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest } }
+  const frames = []
+  const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'append-thread' }),
+    runTurn: async options => { options.onAccepted({ threadId: 'append-thread', turnId: 'append-turn' }); return { threadId: 'append-thread', turnId: 'append-turn', content: JSON.stringify(outcome) } }, interrupt: async () => {} }
+  const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+  assert.equal(result.status, 'completed'); assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+  outcome.deliveryRelation.parentOutcomeId = 'fabricated'
+  await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish fabricated final') }), /ACTION_DELIVERY_PARENT_INVALID/)
+})
