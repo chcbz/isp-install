@@ -228,3 +228,31 @@ test('v3 runs through native CHAT schema, streams only text and emits action sid
   adapter.runTurn = async () => ({ threadId: 'v3-thread', turnId: 'v3-turn', content: JSON.stringify(fixture.outcomes[0]) })
   await assert.rejects(() => runFastChat(profile, message, { adapter, chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish downgraded final') }), /ACTION_OUTCOME_INVALID/)
 })
+
+test('v3 native CHAT preserves the explicit text delivery marker in its durable final sidecar', async () => {
+  const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+  const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts })
+  for (const deliverable of [false, true]) {
+    const frames = []; let starts = 0
+    const outcome = { schemaVersion: 3, kind: 'ANSWER', text: '中文最终文字\n第二行\n  ', clarification: null, action: null, deliverable }
+    const adapter = {
+      closed: false, readback: measuredReadback(), startOrResumeThread: async (_prior, policy) => {
+        assert.match(policy.developerInstructions, /Greetings.*deliverable=false/)
+        return { threadId: 'delivery-thread' }
+      },
+      runTurn: async options => {
+        starts++; assert.ok(options.policy.outputSchema.required.includes('deliverable'))
+        options.onAccepted({ threadId: 'delivery-thread', turnId: 'delivery-turn' })
+        const content = JSON.stringify(outcome); options.onDelta({ content })
+        return { threadId: 'delivery-thread', turnId: 'delivery-turn', content }
+      }, interrupt: async () => {}
+    }
+    const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
+      sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+    assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+    assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+    assert.equal(frames.at(-1).payload.content, outcome.text)
+    assert.equal(frames.at(-1).payload.outcomeContractVersion, 3)
+    assert.equal(frames.some(frame => frame.type !== MESSAGE_TYPES.CHAT_MESSAGE && frame.type !== MESSAGE_TYPES.CHAT_MESSAGE_DELTA), false)
+  }
+})

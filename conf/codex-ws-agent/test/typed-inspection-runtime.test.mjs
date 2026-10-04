@@ -517,3 +517,21 @@ test('full v3 wire carries 32 mixed actual material bytes through native prepara
     assert.equal(finals[0].extra.inspectionInputReceipt.engineTurnId, 'mixed-turn')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('v3 material-reading ANSWER cannot mark itself as the task deliverable', async () => {
+  const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message)
+  let starts = 0; let finals = 0
+  const adapter = { closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'inspect-marker-thread' }),
+    runTurn: async options => {
+      starts++; options.onAccepted({ threadId: 'inspect-marker-thread', turnId: 'inspect-marker-turn' })
+      return { threadId: 'inspect-marker-thread', turnId: 'inspect-marker-turn', content: JSON.stringify({
+        schemaVersion: 3, kind: 'ANSWER', text: '已阅读资料', clarification: null, action: null, deliverable: true }) }
+    }
+  }
+  await assert.rejects(() => runTypedInspection(profile, message, { adapter, isolationReadback: readback(typed),
+    materializer: { materialize: async () => ({ directory: '/private/marker-inspect', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) },
+    nativeInputAdapters: {}, controls: { markPrepared: () => {}, markRunning: () => {}, markFinalPrepared: () => {}, markFinalPublication: () => {}, isCancelled: () => false },
+    sendFinal: () => { finals++ }
+  }), /ACTION_FINAL_DELIVERABLE_ROUTE_INVALID/)
+  assert.equal(starts, 1); assert.equal(finals, 0)
+})

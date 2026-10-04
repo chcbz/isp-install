@@ -299,8 +299,12 @@ const carrierSource = (source, profileRuntime = null, inputDirectory = '') => {
 // Outer manifest/receipt authorization stays unchanged. Output version is explicit
 // in the server-frozen discussion facts, never inferred from model prose.
 const inspectionOutcomeContract = typed => typed.discussionFacts.schemaVersion === 3 ? {
-  instructions: ACTION_OUTCOME_INSTRUCTIONS, outputSchema: ACTION_OUTCOME_SCHEMA,
-  validate: raw => validateActionOutcome(raw, typed.discussionFacts)
+  instructions: ACTION_OUTCOME_INSTRUCTIONS + ' In INSPECT, deliverable must be false: this material-reading reply is not the task delivery.', outputSchema: ACTION_OUTCOME_SCHEMA,
+  validate: raw => {
+    const outcome = validateActionOutcome(raw, typed.discussionFacts)
+    if (outcome.deliverable === true) fail('ACTION_FINAL_DELIVERABLE_ROUTE_INVALID')
+    return outcome
+  }
 } : {
   instructions: TYPED_INSPECTION_INSTRUCTIONS, outputSchema: TYPED_INSPECTION_OUTPUT_SCHEMA,
   validate: raw => validateTypedInspectionOutcome(raw, typed.discussionFacts)

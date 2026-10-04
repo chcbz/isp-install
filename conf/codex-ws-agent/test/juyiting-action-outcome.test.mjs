@@ -66,3 +66,21 @@ test('v3 CHAT dispatch binds exact task/conversation/generation/target; unknown 
   message.contextSnapshot.facts.typedInspection = {}
   assert.throws(() => resolveActionChatRequest(profile, message), /ACTION_MARKER_CONFLICT/)
 })
+
+test('explicit text deliverable marker is durable Boolean data, not inferred from ANSWER or permission', () => {
+  const answer = structuredClone(fixture.outcomes[0])
+  assert.equal(Object.hasOwn(validateActionOutcome(answer, facts()), 'deliverable'), false)
+  assert.equal(ACTION_OUTCOME_SCHEMA.properties.deliverable.type, 'boolean')
+  assert.ok(ACTION_OUTCOME_SCHEMA.required.includes('deliverable'))
+  for (const deliverable of [false, true]) {
+    assert.deepEqual(validateActionOutcome({ ...answer, deliverable }, facts()), { ...answer, deliverable })
+  }
+  for (const deliverable of [null, 1, 'true', { grant: true }]) {
+    assert.throws(() => validateActionOutcome({ ...answer, deliverable }, facts()), /ACTION_OUTCOME_INVALID/)
+  }
+  for (const outcome of fixture.outcomes.filter(item => item.kind !== 'ANSWER')) {
+    assert.throws(() => validateActionOutcome({ ...outcome, deliverable: true }, facts()), /ACTION_OUTCOME_UNION_INVALID/)
+    assert.equal(validateActionOutcome({ ...outcome, deliverable: false }, facts()).deliverable, false)
+  }
+  assert.throws(() => validateActionOutcome({ ...answer, deliverable: true, grant: 'fake' }, facts()), /ACTION_OUTCOME_INVALID/)
+})
