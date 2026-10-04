@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test, { afterEach } from 'node:test'
 
 import { ArchiveMaintenanceNativeClient, validateArchiveMaintenanceCommand } from '../archive-maintenance-native.mjs'
 import { ArchiveMaintenanceRunner } from '../archive-maintenance-runner.mjs'
+import { ArchiveMaintenanceCheckpointStore, archiveBlockDigest } from '../archive-maintenance-checkpoints.mjs'
 import { AgentMessageProcessor, AckOutbox, DurableDedupeLedger, PersistentCommandInbox, runManagedCommand } from '../agent-client.mjs'
 import { PlatformSkillManager } from '../platform-skill-manager.mjs'
+import { platformSkillApiOrigin } from '../platform-skill-native.mjs'
 
 const roots = []
 afterEach(() => { while (roots.length) rmSync(roots.pop(), { recursive: true, force: true }) })
@@ -18,6 +20,9 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const approved = readFileSync(new URL('./fixtures/archive-maintainer-1.0.0-approved.zip', import.meta.url))
 const runtimeScope = { scheme: 'native-runtime-v1', tenantId: '0', clientId: 'client-a', ownerJiacn: 'owner-a', agentId: 'agent-a', runtimeInstanceId: 'runtime-a' }
 const profile = { profileId: 'profile-a', agentId: 'agent-a', agentName: 'Agent A', personaName: 'Agent A' }
+const checkpointStore = ({ root, scope = runtimeScope, wsUrl = 'wss://api.example.invalid/ws', ...options }) =>
+  new ArchiveMaintenanceCheckpointStore({ root, runtimeScope: scope, profileId: profile.profileId,
+    serviceOrigin: platformSkillApiOrigin(wsUrl), ...options })
 const identity = path => { const stat = lstatSync(path, { bigint: true }); return { path: resolve(path), dev: stat.dev.toString(), ino: stat.ino.toString(), kind: stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : stat.isSymbolicLink() ? 'symlink' : 'other' } }
 const sameIdentity = (left, right) => left && right && left.path === right.path && left.dev === right.dev && left.ino === right.ino && left.kind === right.kind
 const fakeAtomic = { renameNoReplace(source, target, expected = {}) {
@@ -29,11 +34,11 @@ const fakeAtomic = { renameNoReplace(source, target, expected = {}) {
 } }
 
 const platformCommandId = installationId => `cmd_controlled_${sha(Buffer.from(['0', 'client-a', 'owner-a', installationId, 'agent-a', 'PLATFORM_SKILL_INSTALL'].join('\0')))}`
-const installManager = async root => {
+const installManager = async (root, scope = runtimeScope, stateName = 'platform-state') => {
   const codexHome = resolve(root, 'codex-home'); mkdirSync(codexHome, { recursive: true })
   const now = Date.now()
-  const manager = new PlatformSkillManager({ profile: { ...profile, codexHome }, runtimeScope,
-    stateRoot: resolve(root, 'platform-state'), wsUrl: 'wss://api.example.invalid/ws', enabled: true,
+  const manager = new PlatformSkillManager({ profile: { ...profile, codexHome }, runtimeScope: scope,
+    stateRoot: resolve(root, stateName), wsUrl: 'wss://api.example.invalid/ws', enabled: true,
     atomicFs: fakeAtomic, now: () => now, createId: (() => { let id = 0; return () => `id-${++id}` })(),
     authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, downloadFn: async () => approved,
     sendResultFn: async ({ command, outcome, errorCode }) => ({ installationId: command.installationId,
@@ -52,19 +57,19 @@ const installManager = async root => {
   return manager
 }
 
-const archiveWire = ({ now = Date.now(), runId = 'run-a' } = {}) => {
+const archiveWire = ({ now = Date.now(), runId = 'run-a', executionEpoch = '1' } = {}) => {
   const commandId = `cmd_controlled_${sha(Buffer.from(['0', 'client-a', 'owner-a', runId, 'agent-a', 'ARCHIVE_MAINTENANCE_EXECUTE'].join('\0')))}`
   return { schemaVersion: 1, messageType: 'command.dispatch', messageId: 'archive-message', commandId,
     correlationId: 'job-a', causationId: runId, tenantId: '0', clientId: 'client-a', ownerJiacn: 'owner-a', taskId: 'job-a',
     workItemId: null, targetAgentId: 'agent-a', commandType: 'ARCHIVE_MAINTENANCE_EXECUTE', issuedAt: now - 1000, expiresAt: now + 60000,
-    attempt: 1, fencingToken: '1', deliveryEpoch: '1', executionEpoch: '1', payload: { schemaVersion: 1, jobId: 'job-a', runId,
-      executionEpoch: '1', appointmentId: 'appointment-a', appointmentRevision: '1', managerAuthorizationRevision: '3', bindingVersion: '7',
+    attempt: 1, fencingToken: '1', deliveryEpoch: '1', executionEpoch, payload: { schemaVersion: 1, jobId: 'job-a', runId,
+      executionEpoch, appointmentId: 'appointment-a', appointmentRevision: '1', managerAuthorizationRevision: '3', bindingVersion: '7',
       grantRef: 'grant-a', executionRef: 'execution-a', dispatchKey: 'dispatch-a', skillInstallationId: 'installation-a',
       skillPackageSha256: sha(approved), contextRef: `/internal/archive/v1/jobs/job-a/runs/${runId}/context` } }
 }
 
 const terminalResult = (wire, state, mode, validationId = null) => ({ jobId: 'job-a', runId: wire.payload.runId, commandId: wire.commandId,
-  attempt: '1', executionEpoch: '1', runState: state, runRevision: state === 'AUTHORIZED' ? '1' : state === 'RUNNING' ? '2' : '3',
+  attempt: '1', executionEpoch: String(wire.payload.executionEpoch), runState: state, runRevision: state === 'AUTHORIZED' ? '1' : state === 'RUNNING' ? '2' : '3',
   jobState: state === 'COMPLETED' ? mode === 'AUTO' ? 'PUBLISHED' : 'AWAITING_PUBLISH' : state === 'FAILED' ? 'FAILED' : state === 'AUTHORIZED' ? 'EXECUTION_REQUESTED' : 'RUNNING',
   jobRevision: state === 'AUTHORIZED' ? '1' : state === 'RUNNING' ? '2' : '3',
   stage: state === 'AUTHORIZED' ? 'READY_TO_START' : state === 'RUNNING' ? 'RUNNING' : state === 'COMPLETED' ? mode === 'AUTO' ? 'COMPLETED' : 'AWAITING_HUMAN_RELEASE' : 'FAILED',
@@ -75,18 +80,25 @@ const terminalResult = (wire, state, mode, validationId = null) => ({ jobId: 'jo
   failurePhase: state === 'FAILED' ? 'RUNNER' : null, failureCode: state === 'FAILED' ? 'ARCHIVE_LOCAL_PARSE_FAILED' : null,
   failureRetryable: state === 'FAILED' ? false : null })
 
-const startApi = async ({ wire, mode = 'MANUAL', denyResult = false, publishDenied = false, loseResponseAt = '', validateAcceptanceFault = '', sourceBytes = Buffer.from('第一章\n正文内容\n', 'utf8'), initialDraft = { blocks: [], excludedSourceRanges: [] }, initialRevision = '0' }) => {
+const startApi = async ({ wire, mode = 'MANUAL', denyResult = false, publishDenied = false, loseResponseAt = '', denyFirstLostBlockReadback = false, validateAcceptanceFault = '', sourceBytes = Buffer.from('第一章\n正文内容\n', 'utf8'), initialDraft = { blocks: [], excludedSourceRanges: [] }, initialRevision = '0', runtimeInstanceIdProvider = () => runtimeScope.runtimeInstanceId }) => {
   const source = sourceBytes; const sourceSha = sha(source)
-  const calls = []; let runState = 'AUTHORIZED'; let jobState = 'EXECUTION_REQUESTED'; let draft = structuredClone(initialDraft); let revision = initialRevision; let validationId = null; let responseLost = false
+  const calls = []; let runState = 'AUTHORIZED'; let jobState = 'EXECUTION_REQUESTED'; let draft = structuredClone(initialDraft); let revision = initialRevision; let validationId = null; let responseLost = false; let denyDraftReadback = false
   const validationById = new Map(); const validationByRevision = new Map(); const blockOperations = new Map(); const validationOperations = new Map()
+  const draftCheckpoints = () => draft.blocks.map(block => ({ blockKey: block.blockKey,
+    draftRevision: revision, digest: archiveBlockDigest(block),
+    byteLength: String(Buffer.byteLength(JSON.stringify({ blockType: block.blockType,
+      blockKey: block.blockKey, ordinal: block.ordinal, title: block.title,
+      titleSourceRanges: (block.titleSourceRanges || []).map(range => ({ startByte: range.startByte, endByte: range.endByte })),
+      paragraphs: (block.paragraphs || []).map(paragraph => ({ ordinal: paragraph.ordinal, text: paragraph.text,
+        sourceRanges: (paragraph.sourceRanges || []).map(range => ({ startByte: range.startByte, endByte: range.endByte })) })) }))) }))
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk); const body = Buffer.concat(chunks).toString('utf8')
     calls.push({ method: request.method, url: request.url, body, headers: request.headers })
     const requestUrl = new URL(request.url, 'http://127.0.0.1')
     const path = requestUrl.pathname
-    const expectedHeaders = { authorization: `AgentRuntime ${'a'.repeat(32)}`, 'x-agent-id': 'agent-a', 'x-agent-runtime-id': 'runtime-a',
+    const expectedHeaders = { authorization: `AgentRuntime ${'a'.repeat(32)}`, 'x-agent-id': 'agent-a', 'x-agent-runtime-id': runtimeInstanceIdProvider(),
       'x-archive-grant-ref': 'grant-a', 'x-archive-execution-ref': 'execution-a', 'x-archive-command-id': wire.commandId,
-      'x-archive-command-attempt': '1', 'x-archive-execution-epoch': '1' }
+      'x-archive-command-attempt': '1', 'x-archive-execution-epoch': String(wire.payload.executionEpoch) }
     for (const [name, value] of Object.entries(expectedHeaders)) assert.equal(request.headers[name], value, name)
     const send = (data, headers = {}, status = 200, envelopeStatus = status) => {
       const bytes = Buffer.from(JSON.stringify({ msg: 'ok', code: 'E0', status: envelopeStatus, data }))
@@ -95,15 +107,19 @@ const startApi = async ({ wire, mode = 'MANUAL', denyResult = false, publishDeni
     const lose = action => { if (loseResponseAt !== action || responseLost) return false; responseLost = true; response.destroy(); return true }
     if (denyResult && path.endsWith('/result')) { response.writeHead(404, { 'Content-Type': 'application/json' }); response.end('{}'); return }
     if (path.endsWith('/result')) return send(terminalResult(wire, runState, mode, validationId))
-    if (path.endsWith('/start')) { assert.deepEqual(JSON.parse(body), { commandId: wire.commandId, messageId: wire.messageId, attempt: '1', executionEpoch: '1' }); runState = 'RUNNING'; jobState = 'RUNNING'; if (lose('start')) return; return send(terminalResult(wire, runState, mode)) }
+    if (path.endsWith('/start')) { assert.deepEqual(JSON.parse(body), { commandId: wire.commandId, messageId: wire.messageId, attempt: '1', executionEpoch: String(wire.payload.executionEpoch) }); runState = 'RUNNING'; jobState = 'RUNNING'; if (lose('start')) return; return send(terminalResult(wire, runState, mode)) }
     if (path.endsWith('/context')) return send({ jobId: 'job-a', runId: wire.payload.runId, collectionId: 'collection-a', workId: 'work-a', operation: 'REVISE_WORK',
       expectedWorkRevision: '4', expectedActiveEditionId: 'edition-old', appointmentId: 'appointment-a', appointmentRevision: '1', agentId: 'agent-a', bindingVersion: '7',
       permissionProfile: mode === 'AUTO' ? 'PUBLISH_VALIDATED' : 'DRAFT_ONLY', publicationMode: mode, state: jobState, waitReason: null,
       requiredSkill: { key: 'archive-maintainer', version: '1.0.0', packageSha256: sha(approved) }, sourceId: 'source-a', sourceSha256: sourceSha,
       sourceSummary: 'fixed source', rightsBasis: 'authorized', draftId: 'draft-a', draftRevision: revision })
     if (path.endsWith('/sources/source-a/content')) { assert.equal(request.headers.accept, 'text/plain'); response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': source.length, 'X-Archive-Source-Sha256': sourceSha }); response.end(source); return }
-    if (path.endsWith('/draft') && request.method === 'GET') return send({ draftId: 'draft-a', jobId: 'job-a', revision, state: validationId ? 'VALIDATED' : 'EDITABLE', content: draft,
-      contentSha256: 'c'.repeat(64), validatedRevision: validationId ? revision : null, validationId }, { ETag: `"v${revision}"` })
+    if (path.endsWith('/draft') && request.method === 'GET') {
+      if (denyDraftReadback) { denyDraftReadback = false; response.writeHead(503, { 'Content-Type': 'application/json' }); response.end('{}'); return }
+      return send({ draftId: 'draft-a', jobId: 'job-a', revision, state: validationId ? 'VALIDATED' : 'EDITABLE', content: draft,
+      contentSha256: 'c'.repeat(64), validatedRevision: validationId ? revision : null, validationId,
+      checkpoints: draftCheckpoints() }, { ETag: `"v${revision}"` })
+    }
     const blockMatch = /\/blocks\/([A-Za-z0-9][A-Za-z0-9._:-]{0,99})$/u.exec(path)
     if (blockMatch && request.method === 'PUT') {
       const blockKey = blockMatch[1]; const key = request.headers['idempotency-key']; const parsed = JSON.parse(body)
@@ -119,8 +135,9 @@ const startApi = async ({ wire, mode = 'MANUAL', denyResult = false, publishDeni
         revision = String(BigInt(revision) + 1n); validationId = null
         blockOperations.set(key, { blockKey, body: parsed })
       }
-      if (lose('block')) return
-      return send({ draftId: 'draft-a', jobId: 'job-a', revision, state: 'EDITABLE', content: draft, contentSha256: 'c'.repeat(64), validatedRevision: null, validationId: null }, { ETag: `"v${revision}"` })
+      if (lose('block')) { denyDraftReadback = denyFirstLostBlockReadback; return }
+      return send({ draftId: 'draft-a', jobId: 'job-a', revision, state: 'EDITABLE', content: draft, contentSha256: 'c'.repeat(64), validatedRevision: null, validationId: null,
+        checkpoints: draftCheckpoints() }, { ETag: `"v${revision}"` })
     }
     if (path.endsWith('/validate') && request.method === 'POST') {
       const key = request.headers['idempotency-key']; const expected = `"v${revision}"`
@@ -343,6 +360,158 @@ for (const validateAcceptanceFault of ['envelope', 'receipt', 'location']) test(
     assert.equal(api.calls.filter(call => call.url.endsWith('/publish') && call.method === 'POST').length, 0)
     assert.equal(api.calls.filter(call => call.url.endsWith('/failure') && call.method === 'POST').length, 0)
     assert.deepEqual(api.calls.slice(validateIndex + 1), [])
+  } finally { await api.close() }
+})
+
+test('durable chapter checkpoint survives a real runtime instance restart without granting stale runtime authority', async () => {
+  const root = temporaryDirectory(); const wire = archiveWire()
+  const firstManager = await installManager(resolve(root, 'runtime-a-manager'), runtimeScope)
+  const runtimeB = { ...runtimeScope, runtimeInstanceId: 'runtime-b' }
+  const secondManager = await installManager(resolve(root, 'runtime-b-manager'), runtimeB)
+  let activeRuntimeInstanceId = runtimeScope.runtimeInstanceId
+  const api = await startApi({ wire, loseResponseAt: 'block', denyFirstLostBlockReadback: true,
+    runtimeInstanceIdProvider: () => activeRuntimeInstanceId })
+  const checkpointRoot = resolve(root, 'archive-checkpoints')
+  try {
+    const first = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl,
+      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: firstManager,
+      checkpointRoot, checkpointProfileId: profile.profileId })
+    const uncertain = await first.execute(wire)
+    assert.equal(uncertain.status, 'recovery_required')
+    activeRuntimeInstanceId = runtimeB.runtimeInstanceId
+    const second = new ArchiveMaintenanceRunner({ runtimeScope: runtimeB, wsUrl: api.wsUrl,
+      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: secondManager,
+      checkpointRoot, checkpointProfileId: profile.profileId })
+    const recovered = await second.execute(wire)
+    assert.equal(recovered.status, 'completed', recovered.errorMessage)
+    assert.equal(api.calls.filter(call => /\/blocks\/chapter-1$/u.test(call.url) && call.method === 'PUT').length, 1)
+  } finally { await api.close() }
+})
+
+test('checkpoint save permits expected directory metadata changes and atomically loads the committed record', () => {
+  const root = temporaryDirectory()
+  const store = checkpointStore({ root: resolve(root, 'checkpoints'),
+    createId: () => 'normal-temp' })
+  const command = validateArchiveMaintenanceCommand(archiveWire(), runtimeScope, Date.now())
+  const block = { blockType: 'CHAPTER', blockKey: 'chapter-1', ordinal: 1, title: '第一章',
+    titleSourceRanges: [], paragraphs: [{ ordinal: 1, text: '正文', sourceRanges: [] }] }
+  const saved = store.save(command, block.blockKey, { blockDigest: archiveBlockDigest(block),
+    draftId: 'draft-a', draftRevision: '0', operationKey: 'operation-a', state: 'PENDING' })
+  assert.deepEqual(store.load(command, block.blockKey), saved)
+})
+
+test('stable checkpoint scope preserves the exact same run fact across runtime instances', () => {
+  const root = temporaryDirectory(); const checkpointRoot = resolve(root, 'checkpoints')
+  const runtimeB = { ...runtimeScope, runtimeInstanceId: 'runtime-b' }
+  const commandA = validateArchiveMaintenanceCommand(archiveWire(), runtimeScope, Date.now())
+  const commandB = validateArchiveMaintenanceCommand(archiveWire(), runtimeB, Date.now())
+  const first = checkpointStore({ root: checkpointRoot, scope: runtimeScope })
+  const saved = first.save(commandA, 'chapter-1', { blockDigest: 'a'.repeat(64), draftId: 'draft-a',
+    draftRevision: '0', operationKey: 'operation-a', state: 'PENDING' })
+  const restarted = checkpointStore({ root: checkpointRoot, scope: runtimeB })
+  assert.equal(restarted.scopeDigest, first.scopeDigest)
+  assert.deepEqual(restarted.load(commandB, 'chapter-1'), saved)
+  assert.equal(Object.hasOwn(restarted.scope, 'runtimeInstanceId'), false)
+  assert.notEqual(checkpointStore({ root: checkpointRoot, scope: runtimeB,
+    wsUrl: 'wss://other.example.invalid/ws' }).scopeDigest, restarted.scopeDigest)
+  assert.notEqual(checkpointStore({ root: checkpointRoot, scope: runtimeB,
+    profileId: 'profile-b' }).scopeDigest, restarted.scopeDigest)
+})
+
+test('local checkpoint cannot skip or write when current server authorization is unavailable', async () => {
+  const root = temporaryDirectory(); const wire = archiveWire(); const checkpointRoot = resolve(root, 'checkpoints')
+  const commandA = validateArchiveMaintenanceCommand(wire, runtimeScope, Date.now())
+  checkpointStore({ root: checkpointRoot, scope: runtimeScope }).save(commandA, 'chapter-1', {
+    blockDigest: 'a'.repeat(64), draftId: 'draft-a', draftRevision: '0',
+    operationKey: 'operation-a', state: 'COMMITTED' })
+  const runtimeB = { ...runtimeScope, runtimeInstanceId: 'runtime-b' }
+  const commandB = validateArchiveMaintenanceCommand(wire, runtimeB, Date.now())
+  const persisted = checkpointStore({ root: checkpointRoot, scope: runtimeB })
+  assert.equal(persisted.load(commandB, 'chapter-1').state, 'COMMITTED')
+  let checkpointWrites = 0; let blockWrites = 0
+  const guardedStore = { load: (...arguments_) => persisted.load(...arguments_), save: (...arguments_) => {
+    checkpointWrites += 1; return persisted.save(...arguments_)
+  } }
+  const denied = Object.assign(new Error('current runtime authorization unavailable'), { code: 'ARCHIVE_NATIVE_UNAUTHENTICATED' })
+  const runner = new ArchiveMaintenanceRunner({ runtimeScope: runtimeB, wsUrl: 'wss://api.example.invalid/ws',
+    authorizationProvider: () => '', platformSkillManager: { resolveApprovedArchiveInstallation: () => assert.fail('installation must not be reached') },
+    checkpointStore: guardedStore, nativeClientFactory: () => ({
+      result: async () => { throw denied }, start: async () => { throw denied },
+      putBlock: async () => { blockWrites += 1; throw denied }
+    }) })
+  const outcome = await runner.execute(wire)
+  assert.equal(outcome.status, 'recovery_required')
+  assert.equal(checkpointWrites, 0)
+  assert.equal(blockWrites, 0)
+  assert.equal(persisted.load(commandB, 'chapter-1').state, 'COMMITTED')
+})
+
+test('new execution epoch cannot load or reuse a prior pending operation key', () => {
+  const root = temporaryDirectory(); const store = checkpointStore({ root: resolve(root, 'checkpoints') })
+  const epochOne = validateArchiveMaintenanceCommand(archiveWire({ executionEpoch: '1' }), runtimeScope, Date.now())
+  const epochTwo = validateArchiveMaintenanceCommand(archiveWire({ executionEpoch: '2' }), runtimeScope, Date.now())
+  store.save(epochOne, 'chapter-1', { blockDigest: 'a'.repeat(64), draftId: 'draft-a', draftRevision: '0',
+    operationKey: 'operation-epoch-1', state: 'PENDING' })
+  assert.equal(store.load(epochTwo, 'chapter-1'), null)
+  const second = store.save(epochTwo, 'chapter-1', { blockDigest: 'a'.repeat(64), draftId: 'draft-a', draftRevision: '0',
+    operationKey: 'operation-epoch-2', state: 'PENDING' })
+  assert.equal(second.operationKey, 'operation-epoch-2')
+  assert.equal(store.load(epochOne, 'chapter-1').operationKey, 'operation-epoch-1')
+})
+
+test('checkpoint save rejects a replaced epoch directory before committing the temporary record', () => {
+  const root = temporaryDirectory(); const checkpointRoot = resolve(root, 'checkpoints')
+  const command = validateArchiveMaintenanceCommand(archiveWire(), runtimeScope, Date.now())
+  let store
+  store = checkpointStore({ root: checkpointRoot, createId: () => {
+    const epochDirectory = resolve(checkpointRoot, 'v1', store.scopeDigest, command.jobId, command.runId,
+      command.executionEpoch)
+    renameSync(epochDirectory, `${epochDirectory}-displaced`)
+    mkdirSync(epochDirectory, { mode: 0o700 }); chmodSync(epochDirectory, 0o700)
+    return 'replaced-parent-temp'
+  } })
+  const block = { blockType: 'CHAPTER', blockKey: 'chapter-1', ordinal: 1, title: '第一章',
+    titleSourceRanges: [], paragraphs: [{ ordinal: 1, text: '正文', sourceRanges: [] }] }
+  assert.throws(() => store.save(command, block.blockKey, { blockDigest: archiveBlockDigest(block),
+    draftId: 'draft-a', draftRevision: '0', operationKey: 'operation-a', state: 'PENDING' }),
+  error => error?.code === 'ARCHIVE_CHECKPOINT_CORRUPT' && /parent inode changed/u.test(error.message))
+  assert.equal(store.load(command, block.blockKey), null)
+})
+
+test('checkpoint state rejects corrupt local JSON instead of granting a chapter skip', () => {
+  const root = temporaryDirectory()
+  const store = checkpointStore({ root: resolve(root, 'checkpoints'),
+    createId: () => 'fixed-temp' })
+  const command = validateArchiveMaintenanceCommand(archiveWire(), runtimeScope, Date.now())
+  const block = { blockType: 'CHAPTER', blockKey: 'chapter-1', ordinal: 1, title: '第一章',
+    titleSourceRanges: [], paragraphs: [{ ordinal: 1, text: '正文', sourceRanges: [] }] }
+  const saved = store.save(command, block.blockKey, { blockDigest: archiveBlockDigest(block),
+    draftId: 'draft-a', draftRevision: '0', operationKey: 'operation-a', state: 'PENDING' })
+  const path = resolve(root, 'checkpoints', 'v1', saved.scopeDigest, command.jobId, command.runId,
+    command.executionEpoch, `${sha(Buffer.from(block.blockKey))}.json`)
+  const descriptor = openSync(path, 'w'); writeFileSync(descriptor, '{broken', 'utf8'); closeSync(descriptor)
+  assert.throws(() => store.load(command, block.blockKey), error => error?.code === 'ARCHIVE_CHECKPOINT_CORRUPT')
+})
+
+test('committed local checkpoint never hides a missing or changed server chapter', async () => {
+  const root = temporaryDirectory(); const manager = await installManager(root); const wire = archiveWire()
+  const api = await startApi({ wire })
+  const checkpointRoot = resolve(root, 'archive-checkpoints')
+  const store = checkpointStore({ root: checkpointRoot, wsUrl: api.wsUrl })
+  const command = validateArchiveMaintenanceCommand(wire, runtimeScope, Date.now())
+  const block = { blockType: 'CHAPTER', blockKey: 'chapter-1', ordinal: 1, title: '第一章',
+    titleSourceRanges: [{ startByte: 0, endByte: 9 }], paragraphs: [{ ordinal: 1,
+      text: '正文内容', sourceRanges: [{ startByte: 10, endByte: 22 }] }] }
+  const operationKey = `archive-block-${createHash('sha256').update(`${command.commandId}\0${command.runId}\0${command.executionEpoch}\0${block.blockKey}`).digest('hex')}`
+  store.save(command, block.blockKey, { blockDigest: archiveBlockDigest(block), draftId: 'draft-a',
+    draftRevision: '0', operationKey, state: 'COMMITTED' })
+  try {
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl,
+      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager, checkpointRoot, checkpointProfileId: profile.profileId })
+    const outcome = await runner.execute(wire)
+    assert.equal(outcome.status, 'recovery_required')
+    assert.match(outcome.errorMessage, /ARCHIVE_SERVER_CHECKPOINT_CHANGED/u)
+    assert.equal(api.calls.filter(call => /\/blocks\/chapter-1$/u.test(call.url) && call.method === 'PUT').length, 0)
   } finally { await api.close() }
 })
 

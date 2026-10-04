@@ -19,7 +19,8 @@ const WIRE_FIELDS = ['attempt', 'causationId', 'clientId', 'commandId', 'command
 const RESULT_FIELDS = ['attempt', 'commandId', 'draftRevision', 'editionId', 'executionEpoch', 'failureCode', 'failurePhase', 'failureRetryable', 'jobId', 'jobRevision', 'jobState', 'publicationId', 'publicationState', 'runId', 'runRevision', 'runState', 'stage', 'validationDigest', 'validationId', 'validationOutcome', 'workId']
 const CONTEXT_FIELDS = ['agentId', 'appointmentId', 'appointmentRevision', 'bindingVersion', 'collectionId', 'draftId', 'draftRevision', 'expectedActiveEditionId', 'expectedWorkRevision', 'jobId', 'operation', 'permissionProfile', 'publicationMode', 'requiredSkill', 'rightsBasis', 'runId', 'sourceId', 'sourceSha256', 'sourceSummary', 'state', 'waitReason', 'workId']
 const SKILL_FIELDS = ['key', 'packageSha256', 'version']
-const DRAFT_FIELDS = ['content', 'contentSha256', 'draftId', 'jobId', 'revision', 'state', 'validatedRevision', 'validationId']
+const DRAFT_FIELDS = ['checkpoints', 'content', 'contentSha256', 'draftId', 'jobId', 'revision', 'state', 'validatedRevision', 'validationId']
+const CHECKPOINT_FIELDS = ['blockKey', 'byteLength', 'digest', 'draftRevision']
 const VALIDATION_FIELDS = ['draftId', 'draftRevision', 'findings', 'outcome', 'validationDigest', 'validationId']
 const VALIDATION_RECEIPT_FIELDS = ['jobId', 'operationId', 'state']
 const PUBLICATION_FIELDS = ['draftRevision', 'editionId', 'jobId', 'manifestSha256', 'publicationId', 'readbackState', 'sourceSha256', 'state', 'workId']
@@ -158,8 +159,17 @@ const requireContext = (value, command) => {
 const requireDraft = (value, command) => {
   requireValue(exactKeys(value, DRAFT_FIELDS) && value.jobId === command.jobId && id(value.draftId) && decimal(value.revision)
     && object(value.content) && Array.isArray(value.content.blocks) && Array.isArray(value.content.excludedSourceRanges)
-    && SHA256.test(value.contentSha256), 'ARCHIVE_NATIVE_RESPONSE_INVALID')
-  return Object.freeze(value)
+    && SHA256.test(value.contentSha256) && Array.isArray(value.checkpoints)
+    && value.checkpoints.length === value.content.blocks.length, 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+  const keys = new Set()
+  for (const checkpoint of value.checkpoints) {
+    requireValue(exactKeys(checkpoint, CHECKPOINT_FIELDS) && id(checkpoint.blockKey)
+      && checkpoint.draftRevision === value.revision && SHA256.test(checkpoint.digest)
+      && decimal(checkpoint.byteLength) && !keys.has(checkpoint.blockKey), 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+    keys.add(checkpoint.blockKey)
+  }
+  requireValue(value.content.blocks.every(block => keys.has(block?.blockKey)), 'ARCHIVE_NATIVE_RESPONSE_INVALID')
+  return Object.freeze({ ...value, checkpoints: Object.freeze(value.checkpoints.map(item => Object.freeze({ ...item }))) })
 }
 const requireValidation = value => {
   requireValue(exactKeys(value, VALIDATION_FIELDS) && id(value.validationId) && id(value.draftId) && decimal(value.draftRevision)

@@ -6,6 +6,8 @@ import {
   ArchiveMaintenanceNativeClient,
   validateArchiveMaintenanceCommand
 } from './archive-maintenance-native.mjs'
+import { ArchiveMaintenanceCheckpointStore, archiveBlockDigest } from './archive-maintenance-checkpoints.mjs'
+import { platformSkillApiOrigin } from './platform-skill-native.mjs'
 
 const terminalResult = result => result?.runState === 'COMPLETED' || result?.runState === 'FAILED'
 const jsonCanonical = value => {
@@ -66,12 +68,16 @@ const loadApprovedDiagnoser = async installation => {
 
 export class ArchiveMaintenanceRunner {
   constructor({ runtimeScope, wsUrl, authorizationProvider, platformSkillManager, fetchFn = globalThis.fetch,
-    now = () => Date.now(), maxCallMs = 30000, sessionSignal = null, nativeClientFactory = options => new ArchiveMaintenanceNativeClient(options) }) {
+    now = () => Date.now(), maxCallMs = 30000, sessionSignal = null, checkpointRoot = null,
+    checkpointProfileId = null, checkpointStore = null, nativeClientFactory = options => new ArchiveMaintenanceNativeClient(options) }) {
     this.runtimeScope = Object.freeze({ ...runtimeScope })
     this.now = now
     this.sessionSignal = sessionSignal
     this.manager = platformSkillManager
     this.client = nativeClientFactory({ wsUrl, runtimeScope, authorizationProvider, fetchFn, now, maxCallMs, sessionSignal })
+    this.checkpoints = checkpointStore || (checkpointRoot
+      ? new ArchiveMaintenanceCheckpointStore({ root: checkpointRoot, runtimeScope, profileId: checkpointProfileId,
+        serviceOrigin: platformSkillApiOrigin(wsUrl) }) : null)
     this.terminal = new Map()
     this.inFlight = new Map()
   }
@@ -184,30 +190,54 @@ export class ArchiveMaintenanceRunner {
     if (draft.draftId !== context.draftId || draft.revision !== context.draftRevision) {
       return recovery({ code: 'ARCHIVE_DRAFT_SNAPSHOT_CHANGED' })
     }
-    if (!sameJson(draft.content, diagnosis.draft)) {
-      if (!compatibleDraft(draft.content, diagnosis.draft)) return recovery({ code: 'ARCHIVE_DRAFT_CONFLICT' })
-      for (const block of diagnosis.draft.blocks) {
-        if (draft.content.blocks.some(existing => existing.blockKey === block.blockKey
-          && sameJson(existing, block))) continue
-        const body = { blocks: [block], excludedSourceRanges: diagnosis.draft.excludedSourceRanges }
-        try {
-          draft = await this.client.putBlock(command, block.blockKey, draft.revision,
-            blockOperationKey(command, block.blockKey), body)
-          if (draft.draftId !== context.draftId || !exactBlockCommitted(
-            draft.content, diagnosis.draft, block.blockKey)) {
-            return recovery({ code: 'ARCHIVE_DRAFT_COMMIT_MISMATCH' })
-          }
-        } catch (error) {
-          try {
-            draft = await this.client.draft(command)
-            if (draft.draftId !== context.draftId || !exactBlockCommitted(
-              draft.content, diagnosis.draft, block.blockKey)) return recovery(error)
-          } catch { return recovery(error) }
+    if (!compatibleDraft(draft.content, diagnosis.draft)) return recovery({ code: 'ARCHIVE_DRAFT_CONFLICT' })
+    for (const block of diagnosis.draft.blocks) {
+      const targetDigest = archiveBlockDigest(block)
+      const operation = blockOperationKey(command, block.blockKey)
+      const exactContent = draft.content.blocks.some(existing => existing.blockKey === block.blockKey
+        && sameJson(existing, block))
+      const serverCheckpoint = draft.checkpoints.find(item => item.blockKey === block.blockKey)
+      const exactServerCheckpoint = exactContent && serverCheckpoint?.digest === targetDigest
+        && serverCheckpoint.draftRevision === draft.revision
+      let local = this.checkpoints?.load(command, block.blockKey) || null
+      if (exactServerCheckpoint) {
+        if (local && (local.blockDigest !== targetDigest || local.draftId !== draft.draftId
+          || local.operationKey !== operation)) return recovery({ code: 'ARCHIVE_CHECKPOINT_CONFLICT' })
+        if (this.checkpoints) this.checkpoints.save(command, block.blockKey, { blockDigest: targetDigest,
+          draftId: draft.draftId, draftRevision: draft.revision, operationKey: operation, state: 'COMMITTED' })
+        continue
+      }
+      if (exactContent) return recovery({ code: 'ARCHIVE_SERVER_CHECKPOINT_MISMATCH' })
+      if (local?.state === 'COMMITTED') return recovery({ code: 'ARCHIVE_SERVER_CHECKPOINT_CHANGED' })
+      const expectedRevision = local?.state === 'PENDING' ? local.draftRevision : draft.revision
+      if (String(expectedRevision) !== String(draft.revision)) return recovery({ code: 'ARCHIVE_DRAFT_CONFLICT' })
+      if (this.checkpoints) local = this.checkpoints.save(command, block.blockKey, { blockDigest: targetDigest,
+        draftId: draft.draftId, draftRevision: expectedRevision, operationKey: operation, state: 'PENDING' })
+      const body = { blocks: [block], excludedSourceRanges: diagnosis.draft.excludedSourceRanges }
+      try {
+        draft = await this.client.putBlock(command, block.blockKey, expectedRevision, operation, body)
+        const committed = draft.checkpoints.find(item => item.blockKey === block.blockKey)
+        if (draft.draftId !== context.draftId || !exactBlockCommitted(
+          draft.content, diagnosis.draft, block.blockKey) || committed?.digest !== targetDigest
+          || committed.draftRevision !== draft.revision) {
+          return recovery({ code: 'ARCHIVE_DRAFT_COMMIT_MISMATCH' })
         }
+        if (this.checkpoints) this.checkpoints.save(command, block.blockKey, { blockDigest: targetDigest,
+          draftId: draft.draftId, draftRevision: draft.revision, operationKey: operation, state: 'COMMITTED' })
+      } catch (error) {
+        try {
+          draft = await this.client.draft(command)
+          const committed = draft.checkpoints.find(item => item.blockKey === block.blockKey)
+          if (draft.draftId !== context.draftId || !exactBlockCommitted(
+            draft.content, diagnosis.draft, block.blockKey) || committed?.digest !== targetDigest
+            || committed.draftRevision !== draft.revision) return recovery(error)
+          if (this.checkpoints) this.checkpoints.save(command, block.blockKey, { blockDigest: targetDigest,
+            draftId: draft.draftId, draftRevision: draft.revision, operationKey: operation, state: 'COMMITTED' })
+        } catch { return recovery(error) }
       }
-      if (!sameJson(draft.content, diagnosis.draft)) {
-        return recovery({ code: 'ARCHIVE_DRAFT_COMMIT_MISMATCH' })
-      }
+    }
+    if (!sameJson(draft.content, diagnosis.draft)) {
+      return recovery({ code: 'ARCHIVE_DRAFT_COMMIT_MISMATCH' })
     }
     this._assertLive()
 

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
 import { ARCHIVE_MAINTENANCE_PROTOCOL, ARCHIVE_MAINTENANCE_TYPE } from './archive-maintenance-native.mjs'
+import { defaultArchiveMaintenanceCheckpointRoot } from './archive-maintenance-checkpoints.mjs'
 import { ArchiveMaintenanceRunner } from './archive-maintenance-runner.mjs'
 import { LINUX_ATOMIC_FS } from './skill-install-manager.mjs'
 import { PlatformSkillManager, defaultPlatformSkillStateRoot } from './platform-skill-manager.mjs'
@@ -109,11 +110,13 @@ export class PlatformSkillRuntime {
     const generation = this.generation
     const controller = new AbortController()
     this.controller = controller
+    const stateRoot = defaultPlatformSkillStateRoot(this.commandInboxDir, this.profile,
+      runtimeScope, this.wsUrl)
     const manager = this.managerFactory({
       ...this.managerOptions,
       profile: this.profile,
       runtimeScope,
-      stateRoot: defaultPlatformSkillStateRoot(this.commandInboxDir, this.profile, runtimeScope, this.wsUrl),
+      stateRoot,
       wsUrl: this.wsUrl,
       enabled: this.enabled,
       authorizationProvider: arguments_ => {
@@ -154,6 +157,8 @@ export class PlatformSkillRuntime {
           return this.authorizationProvider()
         },
         platformSkillManager: manager,
+        checkpointRoot: defaultArchiveMaintenanceCheckpointRoot(this.commandInboxDir, this.profile),
+        checkpointProfileId: this.profile.profileId,
         sessionSignal: controller.signal
       })
     }

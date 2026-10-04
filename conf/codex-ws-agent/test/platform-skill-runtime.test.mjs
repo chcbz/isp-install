@@ -57,6 +57,34 @@ test('archive protocol is advertised only when explicitly enabled and its produc
   assert.deepEqual(await unsupported.activateAndRecover(runtimeScope), { active: false, recovered: [] })
 })
 
+test('process restart rotates platform proof state but retains the stable archive checkpoint namespace', async () => {
+  const managerOptions = []; const runnerOptions = []
+  const build = () => base({
+    archiveEnabled: true,
+    archiveAvailability: () => true,
+    managerFactory: options => {
+      managerOptions.push(options)
+      return { initialize: () => {}, reconcileCommandOutcome: () => null }
+    },
+    archiveRunnerFactory: options => {
+      runnerOptions.push(options)
+      return { execute: async () => ({ status: 'completed' }), reconcileCommandOutcome: () => null }
+    }
+  })
+  const first = build(); const second = build()
+  assert.equal((await first.activateAndRecover(runtimeScope)).active, true)
+  const runtimeB = { ...runtimeScope, runtimeInstanceId: 'runtime-b' }
+  assert.equal((await second.activateAndRecover(runtimeB)).active, true)
+  assert.notEqual(managerOptions[0].stateRoot, managerOptions[1].stateRoot)
+  assert.equal(runnerOptions[0].checkpointRoot, runnerOptions[1].checkpointRoot)
+  assert.equal(runnerOptions[0].checkpointProfileId, profile.profileId)
+  assert.equal(runnerOptions[1].checkpointProfileId, profile.profileId)
+  assert.equal(runnerOptions[0].runtimeScope.runtimeInstanceId, 'runtime-a')
+  assert.equal(runnerOptions[1].runtimeScope.runtimeInstanceId, 'runtime-b')
+  assert.equal(runnerOptions[0].checkpointRoot.startsWith(managerOptions[0].stateRoot), false)
+  assert.equal(runnerOptions[1].checkpointRoot.startsWith(managerOptions[1].stateRoot), false)
+})
+
 test('enabled runtime advertises only PLATFORM_SKILL_INSTALL/v1 and routes after recovery', async () => {
   const calls = []
   let options

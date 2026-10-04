@@ -1360,7 +1360,7 @@ const installerCollationFixture = ({ failPhase = '', configureAppHome = () => {}
   const npmWrapper = resolve(binDir, 'npm-wrapper')
   mkdirSync(binDir)
   writeFileSync(nodeWrapper, `#!/bin/bash\nif [[ "$1" == */agent-client.mjs && "$2" == --validate ]]; then exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
-  writeFileSync(npmWrapper, `#!/bin/bash\nset -e\ntest -f skill-install-manager.mjs\ntest -f platform-skill-manager.mjs\ntest -f platform-skill-native.mjs\ntest -f platform-skill-runtime.mjs\ntest -f archive-maintenance-native.mjs\ntest -f archive-maintenance-runner.mjs\ntest -f managed-host.mjs\ntest -f package-lock.json\ngrep -q '"yauzl"' package-lock.json\nprintf '%s\\n%s\\n' "$PWD" "$*" > ${JSON.stringify(npmRecord)}\ncp -a ${JSON.stringify(sourceNodeModules)} node_modules\n`)
+  writeFileSync(npmWrapper, `#!/bin/bash\nset -e\ntest -f skill-install-manager.mjs\ntest -f platform-skill-manager.mjs\ntest -f platform-skill-native.mjs\ntest -f platform-skill-runtime.mjs\ntest -f archive-maintenance-native.mjs\ntest -f archive-maintenance-checkpoints.mjs\ntest -f archive-maintenance-runner.mjs\ntest -f managed-host.mjs\ntest -f package-lock.json\ngrep -q '"yauzl"' package-lock.json\nprintf '%s\\n%s\\n' "$PWD" "$*" > ${JSON.stringify(npmRecord)}\ncp -a ${JSON.stringify(sourceNodeModules)} node_modules\n`)
   chmodSync(nodeWrapper, 0o755)
   chmodSync(npmWrapper, 0o755)
   const result = spawnSync('bash', [installerScript], {
@@ -1386,7 +1386,7 @@ test('installer stages dependencies/source, validates, preserves secrets/state, 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/candidate-release')
   const release = resolve(appHome, 'releases', 'candidate-release')
-  for (const file of ['agent-client.mjs', 'report-outbox.mjs', 'registration-ack.mjs', 'skill-install-manager.mjs', 'platform-skill-manager.mjs', 'platform-skill-native.mjs', 'platform-skill-runtime.mjs', 'archive-maintenance-native.mjs', 'archive-maintenance-runner.mjs', 'managed-host.mjs', 'workspace-manager.mjs', 'workspace-file-bridge.mjs', 'package.json', 'package-lock.json']) {
+  for (const file of ['agent-client.mjs', 'report-outbox.mjs', 'registration-ack.mjs', 'skill-install-manager.mjs', 'platform-skill-manager.mjs', 'platform-skill-native.mjs', 'platform-skill-runtime.mjs', 'archive-maintenance-native.mjs', 'archive-maintenance-checkpoints.mjs', 'archive-maintenance-runner.mjs', 'managed-host.mjs', 'workspace-manager.mjs', 'workspace-file-bridge.mjs', 'package.json', 'package-lock.json']) {
     assert.equal(existsSync(resolve(release, file)), true, file)
     assert.deepEqual(readFileSync(resolve(release, file)), readFileSync(new URL(`../${file}`, import.meta.url)), file)
   }
