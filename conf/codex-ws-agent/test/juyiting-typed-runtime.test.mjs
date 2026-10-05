@@ -408,3 +408,33 @@ test('native CHAT uses the actual completed media final as causal basis while re
   await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
     sendProtocolFn: () => assert.fail('cannot publish media as text replacement') }), /ACTION_DELIVERY_TARGET_INVALID/)
 })
+
+
+test('native CHAT receives only API retained edited media targets and keeps their terminal causal parent for later text revision', async () => {
+  const group = JSON.parse(readFileSync(new URL('./fixtures/mixed-media-edit-v3.json', import.meta.url), 'utf8'))
+  const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+  const basis = { outcomeId: group.editTwo.outcome.outcomeId, finalDigest: group.editTwo.outcome.finalDigest }
+  const text = group.targetsFinal.find(target => Object.hasOwn(target, 'text'))
+  const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts
+    facts.typedDeliberationAdmission = { deliveryParent: basis, deliveryTargets: group.targetsFinal } })
+  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: '只改原文字并保留改后的媒体', clarification: null, action: null, deliverable: true,
+    deliveryRelation: { mode: 'REPLACE', parentOutcomeId: basis.outcomeId, parentFinalDigest: basis.finalDigest,
+      targetOutcomeId: text.outcomeId, targetFinalDigest: text.finalDigest } }
+  const frames = []; let starts = 0
+  const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'mixed-edit-thread' }),
+    runTurn: async options => {
+      starts++; const envelope = JSON.stringify(JSON.parse(options.input))
+      for (const target of group.targetsFinal) { assert.ok(envelope.includes(target.finalDigest))
+        if (target.outputSource) assert.ok(envelope.includes(target.outputSource.outputId)) }
+      assert.equal(group.targetsFinal.some(target => target.outputSource?.requestId === group.editOne.actionProgress.childRequestId), false)
+      options.onAccepted({ threadId: 'mixed-edit-thread', turnId: 'mixed-edit-turn' })
+      return { threadId: 'mixed-edit-thread', turnId: 'mixed-edit-turn', content: JSON.stringify(outcome) }
+    }, interrupt: async () => {} }
+  const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
+    sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+  assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+  assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+  outcome.deliveryRelation.targetOutcomeId = group.initial.outcome.outcomeId; outcome.deliveryRelation.targetFinalDigest = group.initial.outcome.finalDigest
+  await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
+    sendProtocolFn: () => assert.fail('cannot target replaced historical text') }), /ACTION_DELIVERY_TARGET_INVALID/)
+})
