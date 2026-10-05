@@ -225,6 +225,7 @@ RELEASE_PAYLOAD=(
     "install-candidate/wuyong-dual-mode.env.redacted"
     "install-candidate/wuyong-dual-mode-profile.redacted.json"
     "install-policy-check.mjs"
+    "juyiting-action-outcome.mjs"
     "juyiting-typed-outcome-stream.mjs"
     "juyiting-typed-outcome.mjs"
     "managed-host.mjs"
