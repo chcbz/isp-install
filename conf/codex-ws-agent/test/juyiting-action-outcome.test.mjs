@@ -151,3 +151,23 @@ test('only exact advertised EXECUTE may append or reset its future batch; planni
     assert.throws(() => validateActionOutcome(value, facts(), parent), /ACTION_DELIVERY_PARENT_INVALID/)
   }
 })
+
+
+test('media basis advertises exact retained outputs without treating them as textual replacement targets', () => {
+  const parent = { outcomeId: 'media-causal', finalDigest: `sha256:${'b'.repeat(64)}` }
+  const text = { outcomeId: 'original-text', finalDigest: `sha256:${'a'.repeat(64)}`, text: '原文' }
+  const outputs = ['bird', 'tree'].map(outputId => ({ ...parent, outputSource: { requestId: 'media-child', stepId: 'original-step', outputId, sha256: 'c'.repeat(64) } }))
+  const targets = [text, ...outputs]
+  const value = { schemaVersion: 3, kind: 'ANSWER', text: '改稿', clarification: null, action: null, deliverable: true,
+    deliveryRelation: { mode: 'REPLACE', parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest,
+      targetOutcomeId: text.outcomeId, targetFinalDigest: text.finalDigest } }
+  assert.deepEqual(validateActionOutcome(value, facts(), parent, targets), value)
+  const mediaTarget = structuredClone(value); mediaTarget.deliveryRelation.targetOutcomeId = parent.outcomeId; mediaTarget.deliveryRelation.targetFinalDigest = parent.finalDigest
+  assert.throws(() => validateActionOutcome(mediaTarget, facts(), parent, targets), /ACTION_DELIVERY_TARGET_INVALID/)
+  for (const bad of [targets.concat(outputs[0]), [text, { ...outputs[0], outputSource: { ...outputs[0].outputSource, sha256: 'bad' } }],
+    [text, { ...outputs[0], outputSource: { ...outputs[0].outputSource, outputId: '../foreign' } }], [text, { ...outputs[0], grant: true }]]) {
+    assert.throws(() => validateActionOutcome(value, facts(), parent, bad), /ACTION_DELIVERY_TARGET_INVALID/)
+  }
+  const reversed = { ...outputs[0], outputSource: { sha256: outputs[0].outputSource.sha256, outputId: 'bird', stepId: 'original-step', requestId: 'media-child' } }
+  assert.throws(() => validateActionOutcome(value, facts(), parent, [...targets, reversed]), /ACTION_DELIVERY_TARGET_INVALID/)
+})

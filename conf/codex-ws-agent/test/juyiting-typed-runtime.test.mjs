@@ -376,3 +376,35 @@ test('native CHAT keeps API batch append/reset metadata on EXECUTE sidecar, not 
     await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish stale batch parent') }), /ACTION_DELIVERY_PARENT_INVALID/)
   }
 })
+
+
+test('native CHAT uses the actual completed media final as causal basis while replacing only retained earlier text', async () => {
+  const group = JSON.parse(readFileSync(new URL('./fixtures/media-basis-delivery-v3.json', import.meta.url), 'utf8'))
+  const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+  const basis = { outcomeId: group.mediaTwo.outcome.outcomeId, finalDigest: group.mediaTwo.outcome.finalDigest }
+  const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts
+    facts.typedDeliberationAdmission = { deliveryParent: basis, deliveryTargets: group.targetsBeforeEdit } })
+  const view = group.updated.outcome
+  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: view.text, clarification: null, action: null,
+    deliverable: true, deliveryRelation: view.deliveryRelation }
+  const frames = []; let starts = 0
+  const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'mixed-thread' }),
+    runTurn: async options => {
+      starts++; const input = JSON.stringify(JSON.parse(options.input))
+      for (const target of group.targetsBeforeEdit) {
+        assert.ok(input.includes(target.finalDigest))
+        if (target.outputSource) { assert.ok(input.includes(target.outputSource.requestId)); assert.ok(input.includes(target.outputSource.sha256)) }
+      }
+      options.onAccepted({ threadId: 'mixed-thread', turnId: 'mixed-turn' })
+      return { threadId: 'mixed-thread', turnId: 'mixed-turn', content: JSON.stringify(outcome) }
+    }, interrupt: async () => {} }
+  const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
+    sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+  assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+  assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+  assert.equal(outcome.deliveryRelation.parentOutcomeId, basis.outcomeId)
+  assert.equal(outcome.deliveryRelation.targetOutcomeId, group.initial.outcome.outcomeId)
+  outcome.deliveryRelation.targetOutcomeId = basis.outcomeId; outcome.deliveryRelation.targetFinalDigest = basis.finalDigest
+  await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
+    sendProtocolFn: () => assert.fail('cannot publish media as text replacement') }), /ACTION_DELIVERY_TARGET_INVALID/)
+})
