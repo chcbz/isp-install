@@ -134,3 +134,20 @@ test('earlier retained replacement requires the exact advertised target while ke
     assert.throws(() => validateActionOutcome(outcome, facts(), ad.deliveryParent, targets), /ACTION_DELIVERY_TARGET_INVALID/)
   }
 })
+
+
+test('only exact advertised EXECUTE may append or reset its future batch; planning prose stays false', () => {
+  const parent = { outcomeId: 'text-parent', finalDigest: `sha256:${'a'.repeat(64)}` }
+  for (const mode of ['APPEND', 'RESET']) {
+    const value = structuredClone(fixture.outcomes[3]); value.deliverable = false
+    value.deliveryRelation = { mode, parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest }
+    assert.deepEqual(validateActionOutcome(value, facts(), parent), value)
+    assert.throws(() => validateActionOutcome(value, facts()), /ACTION_DELIVERY_PARENT_INVALID/)
+    assert.throws(() => validateActionOutcome(value, facts(), { ...parent, finalDigest: `sha256:${'b'.repeat(64)}` }), /ACTION_DELIVERY_PARENT_INVALID/)
+    assert.throws(() => validateActionOutcome({ ...value, deliverable: true }, facts(), parent), /ACTION_OUTCOME_UNION_INVALID/)
+    const inspection = action(); inspection.deliverable = false; inspection.deliveryRelation = value.deliveryRelation
+    assert.throws(() => validateActionOutcome(inspection, facts(), parent), /ACTION_DELIVERY_PARENT_INVALID/)
+    value.deliveryRelation.mode = 'REPLACE'
+    assert.throws(() => validateActionOutcome(value, facts(), parent), /ACTION_DELIVERY_PARENT_INVALID/)
+  }
+})

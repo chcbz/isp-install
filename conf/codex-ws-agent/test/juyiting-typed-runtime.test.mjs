@@ -349,3 +349,30 @@ test('native CHAT retains the frozen earlier target through clarification and ne
   outcome.deliveryRelation.targetOutcomeId = group.question.outcome.outcomeId
   await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish unadvertised target') }), /ACTION_DELIVERY_TARGET_INVALID/)
 })
+
+
+test('native CHAT keeps API batch append/reset metadata on EXECUTE sidecar, not action prose as deliverable', async () => {
+  const groups = JSON.parse(readFileSync(new URL('./fixtures/execution-batch-delivery-v3.json', import.meta.url), 'utf8'))
+  const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+  for (const group of groups) {
+    const parent = { outcomeId: group.initial.outcome.outcomeId, finalDigest: group.initial.outcome.finalDigest }
+    const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts; facts.typedDeliberationAdmission = { deliveryParent: parent } })
+    const view = group.completed.outcome
+    const outcome = { schemaVersion: 3, kind: view.kind, text: view.text, clarification: null,
+      action: { actionId: view.action.actionId, instruction: view.action.instruction, sourceRefIds: view.action.sourceRefIds },
+      deliverable: false, deliveryRelation: view.deliveryRelation }
+    let starts = 0; const frames = []
+    const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'batch-thread' }),
+      runTurn: async options => {
+        starts++; assert.ok(options.policy.outputSchema.required.includes('deliveryRelation'))
+        options.onAccepted({ threadId: 'batch-thread', turnId: 'batch-turn' })
+        return { threadId: 'batch-thread', turnId: 'batch-turn', content: JSON.stringify(outcome) }
+      }, interrupt: async () => {} }
+    const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+    assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+    assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+    assert.equal(frames.some(frame => frame.type !== MESSAGE_TYPES.CHAT_MESSAGE && frame.type !== MESSAGE_TYPES.CHAT_MESSAGE_DELTA), false)
+    outcome.deliveryRelation.parentFinalDigest = `sha256:${'0'.repeat(64)}`
+    await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish stale batch parent') }), /ACTION_DELIVERY_PARENT_INVALID/)
+  }
+})
