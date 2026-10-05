@@ -296,3 +296,30 @@ test('native CHAT retains the original text parent across API-verified clarifica
     }
   }
 })
+
+
+test('native CHAT proposes the existing image edit using exact API-advertised committed asset, never a fabricated source', async () => {
+  const context = JSON.parse(readFileSync(new URL('./fixtures/media-context-v3.json', import.meta.url), 'utf8'))
+  const source = context.sourceCatalog[0]
+  assert.deepEqual(source.selector, context.selector)
+  assert.equal(source.parentRequestId, 'media-original'); assert.equal(source.parentStepId, 'step-original')
+  assert.deepEqual(context.facts.inspectedSourceRefIds, [])
+  const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = context.facts })
+  const outcome = { schemaVersion: 3, kind: 'ACTION_REQUEST', text: '修改原图的小鸟颜色。', clarification: null,
+    action: { actionId: 'edit-image', instruction: '把原图的小鸟改成蓝色，保留其他内容。', sourceRefIds: [source.sourceRefId] } }
+  let starts = 0; const frames = []
+  const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'media-context-thread' }),
+    runTurn: async options => {
+      starts++; const envelope = JSON.parse(options.input)
+      assert.ok(JSON.stringify(envelope).includes(source.sourceRefId))
+      options.onAccepted({ threadId: 'media-context-thread', turnId: 'media-context-turn' })
+      return { threadId: 'media-context-thread', turnId: 'media-context-turn', content: JSON.stringify(outcome) }
+    }, interrupt: async () => {} }
+  const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+  assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+  assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+  assert.equal(frames.at(-1).payload.outcomeContractVersion, 3)
+  assert.equal(frames.some(frame => frame.type !== MESSAGE_TYPES.CHAT_MESSAGE && frame.type !== MESSAGE_TYPES.CHAT_MESSAGE_DELTA), false)
+  outcome.action.sourceRefIds = ['fabricated-latest-image']
+  await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish fabricated source') }), /ACTION_SELECTION_INVALID/)
+})
