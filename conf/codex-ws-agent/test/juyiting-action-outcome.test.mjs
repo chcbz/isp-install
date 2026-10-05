@@ -115,3 +115,22 @@ test('actual API read fixture preserves identical explicit parent identity acros
     assert.equal(result.text, '修改原文  ')
   }
 })
+
+
+test('earlier retained replacement requires the exact advertised target while keeping its causal basis', () => {
+  const group = JSON.parse(readFileSync(new URL('./fixtures/retained-text-delivery-v3.json', import.meta.url), 'utf8'))
+  const ad = group.admissionFacts; const view = group.updated.outcome
+  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: view.text, clarification: null, action: null, deliverable: true, deliveryRelation: view.deliveryRelation }
+  assert.deepEqual(validateActionOutcome(outcome, facts(), ad.deliveryParent, ad.deliveryTargets), outcome)
+  assert.notEqual(outcome.deliveryRelation.targetOutcomeId, outcome.deliveryRelation.parentOutcomeId)
+  assert.throws(() => validateActionOutcome(outcome, facts(), ad.deliveryParent), /ACTION_DELIVERY_TARGET_INVALID/)
+  for (const patch of [{ targetOutcomeId: 'discarded' }, { targetFinalDigest: `sha256:${'0'.repeat(64)}` }, { mode: 'APPEND' }, { mode: 'RESET' }]) {
+    const bad = structuredClone(outcome); Object.assign(bad.deliveryRelation, patch)
+    assert.throws(() => validateActionOutcome(bad, facts(), ad.deliveryParent, ad.deliveryTargets), /ACTION_DELIVERY_TARGET_INVALID/)
+  }
+  const missing = structuredClone(outcome); delete missing.deliveryRelation.targetFinalDigest
+  assert.throws(() => validateActionOutcome(missing, facts(), ad.deliveryParent, ad.deliveryTargets), /ACTION_DELIVERY_PARENT_INVALID/)
+  for (const targets of [ad.deliveryTargets.concat(ad.deliveryTargets[0]), [{ ...ad.deliveryTargets[0], text: 123 }], [{ ...ad.deliveryTargets[0], outcomeId: 123 }], [{ ...ad.deliveryTargets[0], grant: 'fake' }]]) {
+    assert.throws(() => validateActionOutcome(outcome, facts(), ad.deliveryParent, targets), /ACTION_DELIVERY_TARGET_INVALID/)
+  }
+})

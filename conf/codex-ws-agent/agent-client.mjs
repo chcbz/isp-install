@@ -4440,7 +4440,7 @@ export const runFastChat = async (profile, message, {
     if (controls.isCancelled()) return { status: 'cancelled', turnId: result.turnId, routeUsed: 'CHAT_FAST', metrics }
     metrics.finalAt = Date.now()
     if (typedRequest) {
-      const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null) : validateTypedInteractionOutcome(result.content, typedRequest)
+      const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? []) : validateTypedInteractionOutcome(result.content, typedRequest)
       if (profile.trueDeltaEnabled) {
         const suffix = decoder.finish(outcome.text)
         if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn) }

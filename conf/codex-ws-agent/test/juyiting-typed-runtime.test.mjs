@@ -323,3 +323,29 @@ test('native CHAT proposes the existing image edit using exact API-advertised co
   outcome.action.sourceRefIds = ['fabricated-latest-image']
   await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish fabricated source') }), /ACTION_SELECTION_INVALID/)
 })
+
+
+test('native CHAT retains the frozen earlier target through clarification and never substitutes the immediate question or latest text', async () => {
+  const group = JSON.parse(readFileSync(new URL('./fixtures/retained-text-delivery-v3.json', import.meta.url), 'utf8'))
+  const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+  const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts; facts.typedDeliberationAdmission = group.admissionFacts })
+  const view = group.updated.outcome
+  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: view.text, clarification: null, action: null, deliverable: true, deliveryRelation: view.deliveryRelation }
+  const frames = []; let starts = 0
+  const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'retained-thread' }),
+    runTurn: async options => {
+      starts++; const envelope = JSON.parse(options.input)
+      assert.ok(JSON.stringify(envelope).includes(group.initial.outcome.finalDigest))
+      assert.ok(options.policy.outputSchema.properties.deliveryRelation.anyOf.some(branch => branch.required?.includes('targetOutcomeId')))
+      options.onAccepted({ threadId: 'retained-thread', turnId: 'retained-turn' })
+      return { threadId: 'retained-thread', turnId: 'retained-turn', content: JSON.stringify(outcome) }
+    }, interrupt: async () => {} }
+  const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+  assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+  assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+  assert.equal(outcome.deliveryRelation.targetOutcomeId, group.initial.outcome.outcomeId)
+  assert.equal(outcome.deliveryRelation.parentOutcomeId, group.appended.outcome.outcomeId)
+  assert.notEqual(outcome.deliveryRelation.parentOutcomeId, group.question.outcome.outcomeId)
+  outcome.deliveryRelation.targetOutcomeId = group.question.outcome.outcomeId
+  await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish unadvertised target') }), /ACTION_DELIVERY_TARGET_INVALID/)
+})
