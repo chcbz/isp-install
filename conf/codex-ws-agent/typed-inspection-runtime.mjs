@@ -1,3 +1,4 @@
+import { parseNativeApiOrigin } from './workspace-file-bridge.mjs'
 import { ACTION_OUTCOME_SCHEMA, ACTION_OUTCOME_INSTRUCTIONS, validateActionFacts, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import { createHash } from 'node:crypto'
 import {
@@ -56,10 +57,7 @@ const responseBytes = async response => {
   fail('TYPED_INSPECTION_CONTENT_BODY_INVALID')
 }
 const fixedOrigin = raw => {
-  let parsed
-  try { parsed = new URL(raw) } catch { fail('TYPED_INSPECTION_ORIGIN_INVALID') }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/') fail('TYPED_INSPECTION_ORIGIN_INVALID')
-  return parsed.origin
+  try { return parseNativeApiOrigin(raw) } catch { fail('TYPED_INSPECTION_ORIGIN_INVALID') }
 }
 const sourcePath = ({ requestId, turnId, sourceRefId }) => `/internal/agent/chat/requests/${encodeURIComponent(requestId)}/turns/${encodeURIComponent(turnId)}/inspection/inputs/${encodeURIComponent(sourceRefId)}/content`
 

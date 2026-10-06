@@ -226,7 +226,6 @@ const normalizedProjection = profile => Object.freeze({
   appServerEnabled: profile.appServerEnabled,
   appServerSchemaContractId: profile.appServerSchemaContractId,
   typedInspectionEnabled: profile.typedInspectionEnabled,
-  typedInspectionApiOrigin: profile.typedInspectionApiOrigin,
   typedInspectionRootDir: profile.typedInspectionRootDir,
   typedInspectionStateRoot: profile.typedInspectionStateRoot,
   typedInspectionProfileId: profile.typedInspectionProfileId,

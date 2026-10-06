@@ -535,3 +535,19 @@ test('v3 material-reading ANSWER cannot mark itself as the task deliverable', as
   }), /ACTION_FINAL_DELIVERABLE_ROUTE_INVALID/)
   assert.equal(starts, 1); assert.equal(finals, 0)
 })
+
+
+test('materializer reuses native origin validation, permitting configured loopback ports but never remote plaintext or escaped origins', () => {
+  const rootDir = mkdtempSync(resolve(tmpdir(), 'typed-inspection-shared-origin-'))
+  try {
+    const construct = apiOrigin => new TypedInspectionMaterializer({ apiOrigin, rootDir,
+      getRuntimeAuth: () => '', agentId: 'fixture-agent', runtimeInstanceId: 'fixture-runtime',
+      fetchFn: () => assert.fail('Origin configuration check must not fetch') })
+    for (const apiOrigin of ['http://127.0.0.1:19001', 'http://[::1]:28082', 'https://native.example.test:9443'])
+      assert.equal(construct(apiOrigin).origin, apiOrigin)
+    for (const apiOrigin of ['http://remote.example.test:19001', 'https://user:secret@native.example.test',
+      'https://native.example.test/internal', 'https://native.example.test?token=secret',
+      'https://native.example.test#fragment', 'file:///tmp/api'])
+      assert.throws(() => construct(apiOrigin), { code: 'TYPED_INSPECTION_ORIGIN_INVALID' })
+  } finally { rmSync(rootDir, { recursive: true, force: true }) }
+})

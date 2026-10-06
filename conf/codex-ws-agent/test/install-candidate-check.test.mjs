@@ -262,7 +262,7 @@ test('freeze is stable across release roots and binds source, payload, CA, evide
     assert.equal(freeze.publicTrustAndEvidence.caBundleSha256, 'sha256:acd28b791f9f338d288efda11d7f192755d4e89f41f0f7c2999bb4d211779fe5')
     assert.equal(freeze.publicTrustAndEvidence.carrierEvidenceSha256, 'sha256:d22de19b1b86c988c81deadb2697e5a577fdbc9abb4982ddc015fefa7fd6bdab')
     assert.equal(freeze.apiPolicy.sourceContractCommit, '9ab62d6665c695a574b8b3bde9cfff3ea3ca13d4')
-    assert.equal(freeze.release.payload.length, 55)
+    assert.equal(freeze.release.payload.length, releasePayload.length)
     assert.deepEqual(freeze.secretEnvironmentNames, ['OPENCLAW_API_KEY', 'CYF_CONTROLLED_IMAGE_API_KEY'])
     assert.equal(freeze.normalizedNonSecretEnvironment.DEFAULT_CODEX_PROFILE, 'wuyong')
     assert.equal(freeze.normalizedNonSecretEnvironment.WS_URL, 'wss://api.example.invalid/ws/agent/channel')

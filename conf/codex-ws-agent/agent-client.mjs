@@ -596,6 +596,8 @@ const parseOptionalPositiveInteger = value => {
 }
 
 export const normalizeProfile = (profile, fallback = {}, index = 0) => {
+  if (Object.hasOwn(profile, 'typedInspectionApiOrigin') || Object.hasOwn(fallback, 'typedInspectionApiOrigin') || process.env.CODEX_TYPED_INSPECTION_API_ORIGIN)
+    throw new Error('Separate typedInspectionApiOrigin is not supported; configure workspaceFileApiOrigin for all native lanes')
   const agentId = profile.agentId || fallback.agentId || `local-codex-${index + 1}`
   const status = String(profile.status || fallback.status || '').trim().toLowerCase()
   return {
@@ -624,7 +626,6 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
     typedDeliberationEnabled: parseEnabledFlag(profile.typedDeliberationEnabled ?? fallback.typedDeliberationEnabled),
     typedInspectionEnabled: parseEnabledFlag(profile.typedInspectionEnabled ?? fallback.typedInspectionEnabled),
-    typedInspectionApiOrigin: String(profile.typedInspectionApiOrigin ?? fallback.typedInspectionApiOrigin ?? '').trim(),
     typedInspectionRootDir: String(profile.typedInspectionRootDir ?? fallback.typedInspectionRootDir ?? '').trim(),
     typedInspectionStateRoot: String(profile.typedInspectionStateRoot ?? fallback.typedInspectionStateRoot ?? '').trim(),
     typedInspectionProfileId: String(profile.typedInspectionProfileId ?? fallback.typedInspectionProfileId ?? '').trim(),
@@ -695,7 +696,6 @@ const legacyProfile = () => normalizeProfile({
   trueDeltaEnabled: process.env.CODEX_TRUE_DELTA_ENABLED || false,
   typedDeliberationEnabled: process.env.CODEX_TYPED_DELIBERATION_ENABLED || false,
   typedInspectionEnabled: process.env.CODEX_TYPED_INSPECTION_ENABLED || false,
-  typedInspectionApiOrigin: process.env.CODEX_TYPED_INSPECTION_API_ORIGIN || '',
   typedInspectionRootDir: process.env.CODEX_TYPED_INSPECTION_ROOT_DIR || '',
   typedInspectionStateRoot: process.env.CODEX_TYPED_INSPECTION_STATE_ROOT || '',
   typedInspectionProfileId: process.env.CODEX_TYPED_INSPECTION_PROFILE_ID || '',
@@ -4540,8 +4540,8 @@ const profileConfigurationErrors = profile => {
   if (profile.fastChatEnabled && (profile.chatSandbox !== 'read-only' || profile.chatToolPolicy !== 'read-only-constrained')) {
     errors.push('Fast CHAT requires chatSandbox=read-only and chatToolPolicy=read-only-constrained; approval never is not deny-all')
   }
-  const typedInspectionControls = [profile.typedInspectionApiOrigin, profile.typedInspectionRootDir, profile.typedInspectionStateRoot]
-  if (typedInspectionControls.some(value => Boolean(value)) && typedInspectionControls.some(value => !value)) errors.push('typedInspectionApiOrigin, typedInspectionRootDir and typedInspectionStateRoot must be configured together')
+  const typedInspectionControls = [profile.workspaceFileApiOrigin, profile.typedInspectionRootDir, profile.typedInspectionStateRoot]
+  if ([profile.typedInspectionRootDir, profile.typedInspectionStateRoot].some(Boolean) && !typedInspectionControls.every(Boolean)) errors.push('INSPECT requires the shared workspaceFileApiOrigin and distinct private input/state roots')
   if (profile.typedInspectionEnabled && (!profile.appServerEnabled || !typedInspectionControls.every(Boolean) || !profile.typedInspectionSupportedInputs.length)) errors.push('typedInspectionEnabled requires appServerEnabled plus fixed API origin plus distinct private input/state roots; runtime remains unavailable until isolation measurement is attached')
   if (!['isolated', 'restricted-proxy'].includes(profile.typedInspectionProviderNetwork)) errors.push('typedInspectionProviderNetwork must be isolated or restricted-proxy')
   if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an exact provider id and HTTPS base URL')
@@ -5505,9 +5505,9 @@ const createProfileState = profile => {
     rootDir: resolve(config.commandInboxDir, 'chat-workdirs'), profile,
     forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
   })
-  const typedInspectionMaterializer = profile.typedInspectionApiOrigin && profile.typedInspectionRootDir
+  const typedInspectionMaterializer = profile.workspaceFileApiOrigin && profile.typedInspectionRootDir
     ? new TypedInspectionMaterializer({
-      apiOrigin: profile.typedInspectionApiOrigin,
+      apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
       fetchFn: globalThis.fetch,
       getRuntimeAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || '',

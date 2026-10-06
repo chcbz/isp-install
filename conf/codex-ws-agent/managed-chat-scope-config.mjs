@@ -1,5 +1,6 @@
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve, sep } from 'node:path'
+import { parseNativeApiOrigin } from './workspace-file-bridge.mjs'
 import { resolveCodexAppServerSchemaContract } from './app-server-adapter.mjs'
 
 const fields = ['tenantId', 'clientId', 'ownerJiacn', 'agentId', 'generation', 'profileId']
@@ -11,7 +12,7 @@ const scope = profile => ({ tenantId: profile.managedTenantId, clientId: profile
   generation: profile.managedGeneration, profileId: profile.profileId })
 const key = value => fields.map(field => value[field]).join('\0')
 export const emptyManagedChatScopes = () => Object.freeze({ count: 0, resolve: () => null })
-const inspectionFields = ['apiOrigin', 'inputRoot', 'stateRoot', 'profileId', 'providerId', 'providerBaseUrl',
+const inspectionFields = ['inputRoot', 'stateRoot', 'profileId', 'providerId', 'providerBaseUrl',
   'providerWireApi', 'model', 'networkConnectTimeoutMs', 'carrierEvidencePath', 'carrierEvidenceDigest', 'supportedInputs']
 const digest = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value)
 const canonicalPath = value => text(value) && isAbsolute(value) && resolve(value) === value
@@ -20,11 +21,8 @@ const trustedUrl = (value, originOnly = false) => {
   try { const url = new URL(value); return text(value) && url.protocol === 'https:' && !url.username && !url.password &&
     !url.search && !url.hash && (!originOnly || url.origin === value) } catch { return false }
 }
-// Same-host native API uses a literal loopback origin; public /internal routes stay closed.
-// Do not accept DNS aliases, alternate ports, URL normalization or plaintext remote origins.
-const trustedInspectionApiOrigin = value => value === 'http://127.0.0.1:10018' || trustedUrl(value, true)
 const parseInspection = value => {
-  if (!exactKeys(value, inspectionFields) || !trustedInspectionApiOrigin(value.apiOrigin) || !trustedUrl(value.providerBaseUrl) ||
+  if (!exactKeys(value, inspectionFields) || !trustedUrl(value.providerBaseUrl) ||
     !['responses', 'chat'].includes(value.providerWireApi) || !['inputRoot', 'stateRoot', 'carrierEvidencePath'].every(key => canonicalPath(value[key])) ||
     overlaps(value.inputRoot, value.stateRoot) || !['profileId', 'providerId', 'model'].every(key => text(value[key])) ||
     !Number.isSafeInteger(value.networkConnectTimeoutMs) || value.networkConnectTimeoutMs <= 0 ||
@@ -78,9 +76,12 @@ export const applyManagedChatScope = (profile, source, scopes = emptyManagedChat
   const inspection = authorized.inspection
   const model = profile.chatModel || source.chatModel || source.codexModel || ''
   if (inspection && model && model !== inspection.model) throw new Error('Scoped INSPECT model differs from existing managed model')
+  // The trusted operator source supplies the single native API origin for every lane.
+  // Scope authorization selects INSPECT identity/policy, never a second credential destination.
+  if (inspection) parseNativeApiOrigin(profile.workspaceFileApiOrigin)
   const inspectionControls = inspection ? {
     typedInspectionEnabled: profile.typedInspectionEnabled ?? true,
-    typedInspectionApiOrigin: inspection.apiOrigin, typedInspectionRootDir: inspection.inputRoot, typedInspectionStateRoot: inspection.stateRoot,
+    typedInspectionRootDir: inspection.inputRoot, typedInspectionStateRoot: inspection.stateRoot,
     typedInspectionProfileId: inspection.profileId, typedInspectionProviderId: inspection.providerId,
     typedInspectionProviderBaseUrl: inspection.providerBaseUrl, typedInspectionProviderWireApi: inspection.providerWireApi,
     typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionNetworkConnectTimeoutMs: inspection.networkConnectTimeoutMs,

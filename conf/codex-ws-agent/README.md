@@ -580,3 +580,10 @@ managed identities do not inherit global CHAT activation. CHAT cwd is allocated
 from the managed profile identity, not copied from a template. A scope enables
 measurement, not READY: the installed binary/schema and initialized adapter
 still determine readiness. This does not enable INSPECT or image generation.
+
+
+### 原生 API 单一地址（2026-10-06）
+
+接应程序的 `workspaceFileApiOrigin` 是所有原生 HTTP lane 的唯一 API 地址，包含任务文件、受控执行和 INSPECT 资料读取；由操作员的来源 profile 配置，managed profile 不得覆盖。复用相同 origin 校验：远端 HTTPS，或同机显式 loopback HTTP；不含凭据、路径、query 或 fragment，不硬编码端口，不通过公开业务 proxy 暴露 `/internal`。
+
+精确 managed CHAT scope 的 `inspection` 只包含身份授权下的输入/状态目录、测量 profile、provider 和 carrier policy，不再包含 `apiOrigin`。旧独立字段 `inspection.apiOrigin`、`typedInspectionApiOrigin` 必须移除，不能双轨兼容。既有 private roots、AgentRuntime 身份与manifest/字节完整性、provider HTTPS及隔离测量不变。

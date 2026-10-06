@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseManagedChatScopes, loadManagedChatScopes } from '../managed-chat-scope-config.mjs'
-import { resolveManagedRuntimeProfile, prepareChatWorkdir, publishMeasuredRuntimeCapabilities, observeTypedRuntimeAuthentication } from '../agent-client.mjs'
+import { normalizeProfile, resolveManagedRuntimeProfile, prepareChatWorkdir, publishMeasuredRuntimeCapabilities, observeTypedRuntimeAuthentication } from '../agent-client.mjs'
 import { buildTypedDeliberationDeclaration } from '../juyiting-typed-outcome.mjs'
 const authorization = { tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner',
   agentId: 'agt_00000000000000000000000000000001', generation: 'hri_00000000-0000-0000-0000-000000000001', profileId: 'managed:fixture:agent:generation', appServerSchemaContractId: 'codex-cli-0.160.0' }
@@ -107,13 +107,13 @@ test('typed native diagnostics never queries another scope, disabled profile, or
 })
 
 
-const inspection = { apiOrigin:'https://api.example.test', inputRoot:'/private/inspect-inputs', stateRoot:'/private/inspect-state',
+const inspection = { inputRoot:'/private/inspect-inputs', stateRoot:'/private/inspect-state',
   profileId:'measured-inspection', providerId:'configured-provider', providerBaseUrl:'https://provider.example.test/v1',
   providerWireApi:'responses', model:'existing-model', networkConnectTimeoutMs:15000, carrierEvidencePath:'/private/carrier.json',
   carrierEvidenceDigest:`sha256:${'1'.repeat(64)}`, supportedInputs:[{mediaKind:'image',mimeType:'image/png',carrier:'LOCAL_IMAGE',carrierContractDigest:`sha256:${'2'.repeat(64)}`}] }
 test('scoped INSPECT controls apply only to the exact authorized managed identity and preserve measurement gate', () => {
   const grants = parseManagedChatScopes(doc([{ ...authorization, inspection }]))
-  const result = resolveManagedRuntimeProfile(profile, {codexModel:'existing-model'}, undefined, grants)
+  const result = resolveManagedRuntimeProfile(profile, {codexModel:'existing-model', workspaceFileApiOrigin:'http://127.0.0.1:19001'}, undefined, grants)
   assert.equal(result.typedInspectionEnabled,true)
   assert.equal(result.typedInspectionProfileId,inspection.profileId)
   assert.equal(result.typedInspectionProviderNetwork,'restricted-proxy')
@@ -129,7 +129,7 @@ test('scoped INSPECT controls apply only to the exact authorized managed identit
 })
 test('scoped INSPECT does not override an explicit disabled profile or switch the existing model', () => {
   const grants=parseManagedChatScopes(doc([{...authorization,inspection}]))
-  assert.equal(resolveManagedRuntimeProfile({...profile,typedInspectionEnabled:false},{codexModel:'existing-model'},undefined,grants).typedInspectionEnabled,false)
+  assert.equal(resolveManagedRuntimeProfile({...profile,typedInspectionEnabled:false},{codexModel:'existing-model', workspaceFileApiOrigin:'http://127.0.0.1:19001'},undefined,grants).typedInspectionEnabled,false)
   assert.throws(()=>resolveManagedRuntimeProfile(profile,{codexModel:'other-model'},undefined,grants),/differs from existing/)
 })
 test('scoped INSPECT fails closed on malformed controls, overlapping roots, unmeasured carrier or unsupported format', () => {
@@ -142,25 +142,36 @@ test('scoped INSPECT fails closed on malformed controls, overlapping roots, unme
 })
 
 
-test('same-host INSPECT accepts only the literal native loopback origin without relaxing provider TLS or identity', () => {
-  const grants = parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection, apiOrigin: 'http://127.0.0.1:10018' } }]))
-  const enabled = resolveManagedRuntimeProfile(profile, { codexModel: 'existing-model' }, undefined, grants)
-  assert.equal(enabled.typedInspectionApiOrigin, 'http://127.0.0.1:10018')
-  assert.equal(enabled.typedInspectionProviderBaseUrl, inspection.providerBaseUrl)
-  assert.equal(enabled.typedInspectionCarrierEvidenceDigest, inspection.carrierEvidenceDigest)
-  for (const field of ['managedTenantId', 'managedClientId', 'managedOwnerJiacn', 'agentId', 'managedGeneration', 'profileId']) {
-    assert.equal(resolveManagedRuntimeProfile({ ...profile, [field]: profile[field] + '-other' }, {}, undefined, grants).typedInspectionApiOrigin, undefined)
+test('INSPECT uses the same operator native API origin as all other lanes, independent of API port/deployment', () => {
+  const grants = parseManagedChatScopes(doc([{ ...authorization, inspection }]))
+  for (const workspaceFileApiOrigin of ['http://127.0.0.1:19001', 'http://[::1]:28082', 'https://native.example.test:9443']) {
+    const enabled = resolveManagedRuntimeProfile({ ...profile, workspaceFileApiOrigin: 'https://untrusted-profile.example.test' },
+      { codexModel: 'existing-model', workspaceFileApiOrigin }, undefined, grants)
+    assert.equal(enabled.workspaceFileApiOrigin, workspaceFileApiOrigin)
+    assert.equal(Object.hasOwn(enabled, 'typedInspectionApiOrigin'), false)
+    assert.equal(enabled.typedInspectionProviderBaseUrl, inspection.providerBaseUrl)
+    assert.equal(enabled.typedInspectionCarrierEvidenceDigest, inspection.carrierEvidenceDigest)
+    for (const field of ['managedTenantId', 'managedClientId', 'managedOwnerJiacn', 'agentId', 'managedGeneration', 'profileId']) {
+      assert.equal(resolveManagedRuntimeProfile({ ...profile, [field]: profile[field] + '-other' },
+        { workspaceFileApiOrigin }, undefined, grants).typedInspectionEnabled, undefined)
+    }
   }
-  assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection,
-    apiOrigin: 'http://127.0.0.1:10018', providerBaseUrl: 'http://127.0.0.1:10018' } }])))
 })
 
-test('same-host INSPECT rejects plaintext remote origins and loopback aliases, credentials, ports or URI components', () => {
-  for (const apiOrigin of ['http://api.example.test', 'http://localhost:10018', 'http://127.0.0.2:10018',
-    'http://127.1:10018', 'http://2130706433:10018', 'http://[::1]:10018', 'http://127.0.0.1:10019',
-    'http://127.0.0.1', 'http://127.0.0.1:10018/', 'http://127.0.0.1:10018/internal',
-    'http://127.0.0.1:10018?x=1', 'http://127.0.0.1:10018#x', 'http://user:secret@127.0.0.1:10018',
-    ' http://127.0.0.1:10018', 'http://127.0.0.1:10018 ', 'http://127.0.0.1:10018@remote.example.test']) {
+test('scope cannot override the native API destination; missing/unsafe shared origin stays closed', () => {
+  for (const apiOrigin of ['https://api.example.test', 'http://127.0.0.1:10018'])
     assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection, apiOrigin } }])))
+  const grants = parseManagedChatScopes(doc([{ ...authorization, inspection }]))
+  for (const workspaceFileApiOrigin of ['', undefined, 'http://remote.example.test:19001',
+    'https://user:secret@native.example.test', 'https://native.example.test/internal',
+    'https://native.example.test?x=1', 'https://native.example.test#x', 'file:///tmp/api']) {
+    assert.throws(() => resolveManagedRuntimeProfile(profile, { workspaceFileApiOrigin }, undefined, grants))
   }
+  assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection,
+    providerBaseUrl: 'http://127.0.0.1:19001' } }])))
+})
+
+test('independent INSPECT API profile setting is rejected, not silently retained as a compatibility path', () => {
+  assert.throws(() => normalizeProfile({ typedInspectionApiOrigin: 'https://other.example.test' }), /Separate typedInspectionApiOrigin/)
+  assert.throws(() => normalizeProfile({}, { typedInspectionApiOrigin: 'http://127.0.0.1:19001' }), /Separate typedInspectionApiOrigin/)
 })
