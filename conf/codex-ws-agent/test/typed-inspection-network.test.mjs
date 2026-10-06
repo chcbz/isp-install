@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { buildProviderTlsProbe, RestrictedProviderEgress, restrictedProviderNetworkPolicy, verifyRestrictedNftReadback } from '../typed-inspection-network.mjs'
+import { buildProviderTlsProbe, isolatedSlirpCommand, RestrictedProviderEgress, restrictedProviderNetworkPolicy, verifyRestrictedNftReadback } from '../typed-inspection-network.mjs'
 
 const hostNs = Object.freeze({ dev: '1', ino: '10', link: 'net:[10]' })
 const privateNs = Object.freeze({ dev: '1', ino: '20', link: 'net:[20]' })
@@ -52,7 +52,7 @@ test('generated provider TLS probe preserves escaped CRLF and parses as Python b
 test('restricted provider policy binds one exact HTTPS authority and explicit transport timeout', () => {
   assert.deepEqual(restrictedProviderNetworkPolicy('https://provider.example:8443/v1', { connectTimeoutMs: 250 }), {
     schemaVersion: 1, providerOrigin: 'https://provider.example:8443', providerAuthority: 'provider.example:8443',
-    transport: 'fixed-connect-proxy-v1', connectTimeoutMs: '250', namespace: 'private-slirp4netns-v1', directEgress: 'nft-default-drop-readback-v1',
+    transport: 'fixed-connect-proxy-v1', connectTimeoutMs: '250', namespace: 'private-slirp4netns-v1', slirpMountIsolation: 'unshare-mount-recursive-private-v1', directEgress: 'nft-default-drop-readback-v1',
     hostLoopback: 'proxy-port-only', dns: 'proxy-side-only'
   })
   for (const invalid of ['http://provider.example', 'https://u:p@provider.example', 'not-a-url']) {
@@ -97,4 +97,50 @@ test('root and holder startticks plus both executable identities are revalidated
     try { await assert.rejects(() => egress.attach(), error => error.code === 'TYPED_INSPECTION_EGRESS_OWNER_DRIFT') }
     finally { await egress.dispose() }
   }
+})
+
+
+test('slirp sandbox runs only after recursive private mount isolation and preserves restrictions/ready fd', () => {
+  assert.deepEqual(isolatedSlirpCommand('/usr/bin/slirp4netns', 201), {
+    executable: '/usr/bin/unshare',
+    args: ['--mount', '--propagation', 'private', '--', '/usr/bin/slirp4netns',
+      '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
+      '--enable-seccomp', '--ready-fd=3', '201', 'tap0']
+  })
+})
+
+test('mount isolation failure fails closed without a direct-slirp retry', async () => {
+  const { EventEmitter } = await import('node:events')
+  const calls = []; const egress = egressFor(inspector())
+  await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  await egress.start()
+  const readback = `table inet cyf_typed_inspection {
+ chain input {
+  policy drop;
+  ct state established,related accept
+  iifname "lo" accept
+ }
+ chain output {
+  policy drop;
+  ct state established,related accept
+  oifname "lo" accept
+  ip daddr 10.0.2.2 tcp dport ${egress.port} accept
+ }
+}`
+  egress._nsenter = async () => ({ status: 0, stdout: readback })
+  egress.spawnFn = (bin, args, options) => {
+    calls.push({ bin, args, options })
+    const process = new EventEmitter(); process.exitCode = null
+    process.stderr = new EventEmitter(); process.stdio = [null, null, process.stderr, new EventEmitter()]
+    process.kill = () => { process.exitCode = 1 }
+    queueMicrotask(() => { process.stderr.emit('data', Buffer.from('unshare: mount namespace denied')); process.exitCode = 1; process.emit('exit', 1) })
+    return process
+  }
+  try {
+    await assert.rejects(() => egress.attach(), error => error.code === 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED' && error.message.includes('mount namespace denied'))
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].bin, '/usr/bin/unshare')
+    assert.deepEqual(calls[0].options, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env: { PATH: '' } })
+    assert.equal(egress.attestation, null)
+  } finally { await egress.dispose() }
 })
