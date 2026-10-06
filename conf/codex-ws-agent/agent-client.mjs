@@ -5750,6 +5750,32 @@ const isProfileBusy = profile => getProfileState(profile)?.processor?.isBusy() |
 export const canPublishProfileOnline = (profile, state) => !profile.managedGeneration ||
   Boolean(state?.managedRegistered && state?.managedEngine?.ready)
 
+// Diagnostic only: one read-only queue GET, no dispatch, retries, or receipt body logging.
+// Run only for an explicitly enabled managed CHAT profile and its exact native receipt.
+export const observeTypedRuntimeAuthentication = async ({ profile, receipt, authHeader, apiOrigin,
+  runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID, fetchFn = globalThis.fetch } = {}) => {
+  if (!profile?.typedDeliberationEnabled || !profile.managedGeneration ||
+      receipt?.typedDeliberation?.state !== 'READY') return { state: 'NOT_APPLICABLE' }
+  const binding = receipt.runtimeAuth
+  if (!binding || binding.scheme !== 'native-runtime-v1' || binding.agentId !== profile.agentId ||
+      binding.runtimeInstanceId !== runtimeInstanceId || binding.tenantId !== profile.managedTenantId ||
+      binding.clientId !== profile.managedClientId || binding.ownerJiacn !== profile.managedOwnerJiacn ||
+      !/^AgentRuntime [0-9a-f]{32}$/.test(authHeader || '')) return { state: 'RECEIPT_BINDING_MISMATCH' }
+  try {
+    const origin = new URL(apiOrigin)
+    if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password) {
+      return { state: 'INVALID_API_ORIGIN' }
+    }
+    const response = await fetchFn(new URL('/internal/agent/tasks/workspace-executions/commands', origin), {
+      method: 'GET', redirect: 'error', headers: { Authorization: authHeader, Accept: 'application/json',
+        'X-Agent-Id': profile.agentId, 'X-Agent-Runtime-Id': runtimeInstanceId }
+    })
+    // A queue read never claims or executes a command. Do not retain any returned work data.
+    await response.body?.cancel()
+    return { state: response.status === 401 ? 'CURRENT_BINDING_DENIED' : 'HTTP_OBSERVED', httpStatus: response.status }
+  } catch { return { state: 'TRANSPORT_ERROR' } }
+}
+
 const handleMessage = async (profile, raw) => {
   let parsed
   try { parsed = JSON.parse(raw.toString()) } catch (error) {
@@ -5769,6 +5795,13 @@ const handleMessage = async (profile, raw) => {
     }
     // The API rotates this registration token. Keep it only in memory for this live socket binding.
     state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
+    if (profile.typedDeliberationEnabled && profile.managedGeneration) {
+      const origin = new URL(config.wsUrl)
+      origin.protocol = origin.protocol === 'wss:' ? 'https:' : 'http:'
+      void observeTypedRuntimeAuthentication({ profile, receipt: parsed.payload || parsed,
+        authHeader: state.workspaceFileRuntimeAuthHeader, apiOrigin: origin.origin
+      }).then(observation => console.log(`typed runtime authentication | agent=${profile.agentId} | state=${observation.state} | http=${observation.httpStatus ?? 'none'}`))
+    }
     startWorkspaceFilePoller(profile, state)
     startNativeConversationPoller(profile, state)
     startControlledImageV3ConversationPoller(profile, state)

@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseManagedChatScopes, loadManagedChatScopes } from '../managed-chat-scope-config.mjs'
-import { resolveManagedRuntimeProfile, prepareChatWorkdir, publishMeasuredRuntimeCapabilities } from '../agent-client.mjs'
+import { resolveManagedRuntimeProfile, prepareChatWorkdir, publishMeasuredRuntimeCapabilities, observeTypedRuntimeAuthentication } from '../agent-client.mjs'
 import { buildTypedDeliberationDeclaration } from '../juyiting-typed-outcome.mjs'
 const authorization = { tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner',
   agentId: 'agt_00000000000000000000000000000001', generation: 'hri_00000000-0000-0000-0000-000000000001', profileId: 'managed:fixture:agent:generation', appServerSchemaContractId: 'codex-cli-0.160.0' }
@@ -76,4 +76,32 @@ test('readiness updates acknowledged registration, not a presence-only declarati
       { ...state, registration: { snapshot: () => ({ stage: 'idle' }) } }])
     assert.equal(publishMeasuredRuntimeCapabilities(profile, altered, { registerFn }), false)
   assert.equal(registrations, 1)
+})
+
+const nativeReceipt = { typedDeliberation: { state: 'READY' }, runtimeAuth: {
+  scheme: 'native-runtime-v1', tenantId: profile.managedTenantId, clientId: profile.managedClientId,
+  ownerJiacn: profile.managedOwnerJiacn, agentId: profile.agentId, runtimeInstanceId: 'fixture-runtime'
+} }
+test('typed native diagnostics reads once without claiming, exposing tokens, or reading work bodies', async () => {
+  let calls = 0, cancelled = false
+  const result = await observeTypedRuntimeAuthentication({ profile: { ...profile, typedDeliberationEnabled: true },
+    receipt: nativeReceipt, authHeader: 'AgentRuntime ' + '1'.repeat(32), apiOrigin: 'http://localhost:10018',
+    runtimeInstanceId: 'fixture-runtime', fetchFn: async (url, options) => {
+      calls++; assert.equal(url.pathname, '/internal/agent/tasks/workspace-executions/commands')
+      assert.equal(options.method, 'GET'); assert.equal(options.redirect, 'error')
+      return { status: 401, body: { cancel: async () => { cancelled = true } },
+        json: () => assert.fail('Must not read returned work/secret data') }
+    } })
+  assert.equal(calls, 1); assert.equal(cancelled, true)
+  assert.deepEqual(result, { state: 'CURRENT_BINDING_DENIED', httpStatus: 401 })
+})
+test('typed native diagnostics never queries another scope, disabled profile, or unavailable receipt', async () => {
+  for (const args of [ { profile }, { receipt: { ...nativeReceipt, typedDeliberation: { state: 'UNAVAILABLE' } } },
+      { receipt: { ...nativeReceipt, runtimeAuth: { ...nativeReceipt.runtimeAuth, ownerJiacn: 'other-owner' } } },
+      { authHeader: '' }, { runtimeInstanceId: 'other-runtime' }, { apiOrigin: 'http://user:password@localhost' } ]) {
+    const result = await observeTypedRuntimeAuthentication({ profile: { ...profile, typedDeliberationEnabled: true },
+      receipt: nativeReceipt, authHeader: 'AgentRuntime ' + '1'.repeat(32), apiOrigin: 'http://localhost:10018',
+      runtimeInstanceId: 'fixture-runtime', ...args, fetchFn: () => assert.fail('Unexpected diagnostic read') })
+    assert.notEqual(result.state, 'HTTP_OBSERVED')
+  }
 })
