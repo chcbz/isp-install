@@ -507,7 +507,7 @@ export const recoverTypedInspection = async (profile, message, record, {
   const expectedTurnId = record?.engine?.turnId || null
   if (!nonblank(engineThreadId)) fail('TYPED_INSPECTION_RECOVERY_BINDING_MISSING')
   const requestKey = message.dedupeKey || message.messageId
-  const selectedAdapter = adapter || await profileRuntime.openAdapter(preparation.inputDirectory, requestKey, inspectionEngineStateBinding(message, typed, requestKey))
+  const selectedAdapter = adapter || await profileRuntime.openAdapter(preparation.inputDirectory, requestKey, inspectionEngineStateBinding(message, typed, requestKey), { requireExistingState: true })
   let preserveAdapter = false
   try {
     const reconciliation = await selectedAdapter.reconcileTurn({ threadId: engineThreadId, turnId: expectedTurnId, clientUserMessageId: message.messageId })
