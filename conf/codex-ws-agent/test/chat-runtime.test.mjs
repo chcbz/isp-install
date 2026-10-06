@@ -340,6 +340,26 @@ test('durable wire rejects numeric Long tokens, context drift, and non-canonical
   assert.throws(() => validateChatDispatch({ ...wire, contextSnapshot: { ...wire.contextSnapshot, contextHash: 'sha256:' + '0'.repeat(64) } }), /CONTEXT_HASH_MISMATCH/)
 })
 
+test('durable wire preserves negotiated capability declaration types without weakening Long scope', () => {
+  const wire = apiWire()
+  const capability = { decision: 'ALLOW', profile: 'CHAT', capabilityContractVersion: 1,
+    runtimeVersion: 'juyiting-fast-context-runtime-v2',
+    policy: { supported: true, enabled: true, strictNoToolsVerified: true, toolPolicy: 'strict-no-tools' } }
+  wire.targetCapability = capability; wire.payload.targetCapability = structuredClone(capability)
+  for (const source of [wire, JSON.stringify(wire)]) {
+    const normalized = normalizeInboundMessage(source)
+    assert.equal(normalized.targetCapability.runtimeVersion, capability.runtimeVersion)
+    assert.equal(normalized.targetCapability.capabilityContractVersion, 1)
+  }
+  for (const [path, value] of [['conversationGeneration', 3], ['stateVersion', 1], ['taskRevision', 2]]) {
+    const changed = structuredClone(wire)
+    if (path === 'taskRevision') changed.targetCapability.policy.taskRevision = value
+    else changed[path] = value
+    assert.throws(() => normalizeInboundMessage(changed), error => error.code === 'INVALID_LONG_WIRE_TYPE')
+    assert.throws(() => normalizeInboundMessage(JSON.stringify(changed)), error => error.code === 'INVALID_LONG_WIRE_TYPE')
+  }
+})
+
 test('durable inbox applies hard file and byte backpressure before acceptance', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'chat-capacity-'))
   try {

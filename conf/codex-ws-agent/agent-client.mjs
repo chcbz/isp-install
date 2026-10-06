@@ -303,6 +303,10 @@ const semanticLongPath = (path, parent = null) => {
   const normalized = path[0] === 'payload' ? path.slice(1) : path
   if (normalized.includes('metadata')) return false // API metadata is non-authoritative DATA and may retain legacy JSON numbers.
   const field = normalized.at(-1)
+  // Negotiated runtime declaration fields are not durable SQL Longs: runtimeVersion
+  // is an opaque identifier and capabilityContractVersion is a JSON schema integer.
+  if (normalized.length === 2 && normalized[0] === 'targetCapability' &&
+      ['runtimeVersion', 'capabilityContractVersion'].includes(field)) return false
   if (isRawLongPath(path)) return true
   if (['occurredAt', 'createdAt', 'updatedAt', 'stateVersion', 'lastDeltaSeq', 'fencingToken', 'attemptCount'].includes(field)) return true
   if (field && field !== 'schemaVersion' && /(?:Generation|Revision|Version|Sequence|Seq)$/.test(field)) return true
