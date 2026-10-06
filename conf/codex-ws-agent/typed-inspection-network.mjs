@@ -80,14 +80,14 @@ const closeServer = server => new Promise(resolve => {
 })
 const collectChild = (child, signal, input = null) => new Promise((resolve, reject) => {
   let stdout = ''; let stderr = ''; let settled = false
-  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('exit', exit) }
+  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('close', close) }
   const finish = (callback, value) => { if (settled) return; settled = true; cleanup(); callback(value) }
   const abort = () => { try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}; const errorValue = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); errorValue.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; finish(reject, errorValue) }
   const error = value => finish(reject, value)
-  const exit = (status, exitSignal) => finish(resolve, { status, signal: exitSignal, stdout, stderr })
+  const close = (status, exitSignal) => finish(resolve, { status, signal: exitSignal, stdout, stderr })
   child.stdout?.on('data', chunk => { if (stdout.length < 65536) stdout += chunk.toString('utf8') })
   child.stderr?.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString('utf8') })
-  child.once('error', error); child.once('exit', exit); signal?.addEventListener('abort', abort, { once: true })
+  child.once('error', error); child.once('close', close); signal?.addEventListener('abort', abort, { once: true })
   if (input === null) child.stdin?.end(); else child.stdin?.end(input)
 })
 const waitForSlirpReady = (child, signal) => new Promise((resolve, reject) => {

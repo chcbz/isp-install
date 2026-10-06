@@ -144,3 +144,25 @@ test('mount isolation failure fails closed without a direct-slirp retry', async 
     assert.equal(egress.attestation, null)
   } finally { await egress.dispose() }
 })
+
+test('namespace command drains stdout and stderr through close after process exit', async () => {
+  const { EventEmitter } = await import('node:events')
+  const egress = egressFor(inspector())
+  await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  egress.spawnFn = () => {
+    const process = new EventEmitter(); process.exitCode = null
+    process.stdout = new EventEmitter(); process.stderr = new EventEmitter(); process.stdin = { end() {} }
+    queueMicrotask(() => {
+      process.exitCode = 0; process.emit('exit', 0, null)
+      process.stdout.emit('data', Buffer.from('complete nft readback'))
+      process.stderr.emit('data', Buffer.from('complete local diagnostic'))
+      process.emit('close', 0, null)
+    })
+    return process
+  }
+  try {
+    assert.deepEqual(await egress._nsenter(201, ['/usr/sbin/nft', 'list', 'table', 'inet', 'cyf_typed_inspection']), {
+      status: 0, signal: null, stdout: 'complete nft readback', stderr: 'complete local diagnostic'
+    })
+  } finally { await egress.dispose() }
+})
