@@ -595,3 +595,5 @@ still determine readiness. This does not enable INSPECT or image generation.
 已有 preparation/engine、未知 acceptance 或进程中断状态禁止重新启动；已有 final 只恢复原最终消息发布/服务端持久确认。不得手工移动 inbox 文件、重置数据库 outbox 或新建业务请求替代恢复。
 
 INSPECT 测量完成会触发携带最新声明的重新注册。读取资料和恢复引擎前必须等待当前精确 registration ACK；旧 ACK、presence 和仅本地测量成功均不能释放原生读取。慢 ACK 继续等待，不增加强制业务 deadline；拒绝/断线/发送失败则关闭此路径。资料 GET 非200只记录 HTTP 数字状态，不读取或输出错误正文、凭据。
+
+INSPECT 的 v3 原生输出 schema 进一步固定 `deliverable=false`、`deliveryRelation=null`，不把资料读取回复关联成可验收成果。模型终态返回后，即使成果关联/其他严格校验拒绝回复，也必须保留原私有引擎状态供只读核对，不得在 finally 删除唯一终态，再用新模型 turn 补偿。历史已被删除的引擎状态不可能由本修复补回；缺少原终态时不能伪造成功。

@@ -300,8 +300,12 @@ const carrierSource = (source, profileRuntime = null, inputDirectory = '') => {
 }
 // Outer manifest/receipt authorization stays unchanged. Output version is explicit
 // in the server-frozen discussion facts, never inferred from model prose.
+export const INSPECTION_ACTION_OUTCOME_SCHEMA = freeze({
+  ...ACTION_OUTCOME_SCHEMA,
+  properties: { ...ACTION_OUTCOME_SCHEMA.properties, deliverable: { type: 'boolean', enum: [false] }, deliveryRelation: { type: 'null' } }
+})
 const inspectionOutcomeContract = typed => typed.discussionFacts.schemaVersion === 3 ? {
-  instructions: ACTION_OUTCOME_INSTRUCTIONS + ' In INSPECT, deliverable must be false: this material-reading reply is not the task delivery.', outputSchema: ACTION_OUTCOME_SCHEMA,
+  instructions: ACTION_OUTCOME_INSTRUCTIONS + ' In INSPECT, deliverable must be false and deliveryRelation must be null: this material-reading reply is not the task delivery or a delivery-parent link.', outputSchema: INSPECTION_ACTION_OUTCOME_SCHEMA,
   validate: raw => {
     const outcome = validateActionOutcome(raw, typed.discussionFacts)
     if (outcome.deliverable === true) fail('ACTION_FINAL_DELIVERABLE_ROUTE_INVALID')
@@ -415,7 +419,15 @@ const publishPreparedInspectionFinal = async ({ profile, message, typed, finalPr
   }
 }
 const publishInspectionFinal = async ({ profile, message, typed, rawOutcome, receiptDraft, engineThreadId, engineTurnId, threadKey, controls, sendFinal }) => {
-  const finalPrepared = buildPreparedInspectionFinal({ message, typed, rawOutcome, receiptDraft, engineThreadId, engineTurnId, threadKey })
+  let finalPrepared
+  try { finalPrepared = buildPreparedInspectionFinal({ message, typed, rawOutcome, receiptDraft, engineThreadId, engineTurnId, threadKey }) }
+  catch (error) {
+    // The model already completed. Preserve its private thread state even when
+    // validation rejects the reply; never delete the only terminal readback or
+    // compensate by starting another model turn.
+    error.preserveEngineState = true
+    throw error
+  }
   if (typeof controls?.markFinalPrepared !== 'function') {
     const error = Object.assign(new Error('TYPED_INSPECTION_FINAL_DURABILITY_REQUIRED'), { code: 'TYPED_INSPECTION_FINAL_DURABILITY_REQUIRED', preserveEngineState: true })
     throw error

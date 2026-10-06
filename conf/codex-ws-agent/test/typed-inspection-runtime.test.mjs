@@ -10,7 +10,7 @@ import { normalizeInboundMessage } from '../agent-client.mjs'
 import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
 import {
   BUILTIN_TYPED_INSPECTION_DECODERS, TypedInspectionMaterializer, decodePngInspectionInput, decodeWavInspectionInput,
-  recoverTypedInspection, resolveTypedInspectionRequest, runTypedInspection
+  INSPECTION_ACTION_OUTCOME_SCHEMA, recoverTypedInspection, resolveTypedInspectionRequest, runTypedInspection
 } from '../typed-inspection-runtime.mjs'
 import { TYPED_INSPECTION_OUTPUT_SCHEMA, validateTypedInspectionOutcome, validateTypedInteractionOutcome } from '../juyiting-typed-outcome.mjs'
 
@@ -396,7 +396,6 @@ const actionMessage = () => {
 }
 
 test('v3 native INSPECT returns non-image action with bound receipt; durable replay publishes only, never starts provider', async () => {
-  const { ACTION_OUTCOME_SCHEMA } = await import('../juyiting-action-outcome.mjs')
   const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message); const frames = []
   const outcome = { schemaVersion: 3, kind: 'ACTION_REQUEST', text: '已查阅资料，现在生成报告。', clarification: null, action: { actionId: 'document', instruction: '整理资料为报告', sourceRefIds: ['source-1'] } }
   let starts = 0; let finalPrepared = null
@@ -404,7 +403,7 @@ test('v3 native INSPECT returns non-image action with bound receipt; durable rep
     closed: false, readback: adapterReadback(),
     startOrResumeThread: async (_prior, policy) => { assert.match(policy.developerInstructions, /version-3/); return { threadId: 'v3-inspect-thread' } },
     runTurn: async options => {
-      starts++; assert.deepEqual(options.policy.outputSchema, ACTION_OUTCOME_SCHEMA)
+      starts++; assert.deepEqual(options.policy.outputSchema, INSPECTION_ACTION_OUTCOME_SCHEMA)
       assert.equal(options.input[1].type, 'text')
       options.onAccepted({ threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn' })
       return { threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn', content: JSON.stringify(outcome) }
@@ -591,4 +590,32 @@ test('content rejection records only HTTP status while retaining strict no-model
         error.code === 'TYPED_INSPECTION_CONTENT_FETCH_FAILED' && error.httpStatus === status && error.message === `TYPED_INSPECTION_CONTENT_FETCH_FAILED: HTTP ${status}`)
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('INSPECT v3 forbids delivery linkage in output schema and preserves completed native state on validation rejection', async () => {
+  assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.deliverable, { type: 'boolean', enum: [false] })
+  assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.deliveryRelation, { type: 'null' })
+  const base = messageFor(); const facts = JSON.parse(JSON.stringify(base.contextSnapshot.facts))
+  facts.typedInspection.discussionFacts = { schemaVersion: 3, availableActions: [], availableSources: discussionFacts.availableSources, inspectedSourceRefIds: [] }
+  const contextHash = canonicalSha256({ sourceVector: base.sourceVector, facts })
+  const message = validateChatDispatch({ ...base, factsManifest: facts, contextHash, contextSnapshot: { ...base.contextSnapshot, contextHash, facts } })
+  const typed = resolveTypedInspectionRequest(profile, message); let starts = 0; let releases = 0; let preparation
+  const raw = JSON.stringify({ schemaVersion: 3, kind: 'ANSWER', text: 'Terminal but invalid delivery relation.', clarification: null, action: null,
+    deliverable: false, deliveryRelation: { mode: 'APPEND', parentOutcomeId: 'not-a-delivery-parent', parentFinalDigest: prefixed('invalid') } })
+  const adapter = { closed: false, readback: adapterReadback(),
+    startOrResumeThread: async () => ({ threadId: 'terminal-thread', state: 'HOT' }),
+    runTurn: async options => { starts++; assert.equal(options.policy.outputSchema, INSPECTION_ACTION_OUTCOME_SCHEMA)
+      options.onAccepted({ threadId: 'terminal-thread', turnId: 'terminal-turn' }); return { threadId: 'terminal-thread', turnId: 'terminal-turn', content: raw } },
+    reconcileTurn: async () => ({ status: 'TERMINAL', terminalStatus: 'completed', turnId: 'terminal-turn',
+      turn: { items: [{ type: 'agentMessage', text: raw }] } }) }
+  const controls = { markPrepared: value => { preparation = value }, markRunning: () => {}, isCancelled: () => false,
+    markFinalPrepared: () => assert.fail('invalid reply must not be persisted as a valid final') }
+  const profileRuntime = { releaseAdapter: async () => { releases++ } }
+  await assert.rejects(() => runTypedInspection(profile, message, { adapter, profileRuntime, isolationReadback: readback(typed),
+    materializer: { materialize: async () => ({ directory: '/private/terminal', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) },
+    controls, sendFinal: () => assert.fail('invalid final must not publish') }), error => error.code === 'ACTION_DELIVERY_PARENT_INVALID' && error.preserveEngineState === true)
+  await assert.rejects(() => recoverTypedInspection(profile, message, { preparation, engine: { threadId: 'terminal-thread', turnId: 'terminal-turn' } },
+    { adapter, profileRuntime, isolationReadback: readback(typed), controls, sendFinal: () => assert.fail('must not publish invalid readback') }),
+    error => error.code === 'ACTION_DELIVERY_PARENT_INVALID' && error.preserveEngineState === true)
+  assert.equal(starts, 1); assert.equal(releases, 0)
 })
