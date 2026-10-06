@@ -3687,3 +3687,54 @@ test('default-disabled modern durable CHAT is rejected without spawning the lega
   const normalized = normalizeInboundMessage(message); const item = chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
   assert.equal(item.record.state, 'RECOVERY_REQUIRED')
 })
+
+test('pre-engine INSPECT failure resumes original durable identity once after restart without a server redispatch', async () => {
+  const root = temporaryDirectory(); const message = normalizeInboundMessage(durableChat(901, { route: 'INSPECT' }))
+  const seed = new PersistentChatInbox({ rootDir: root, profile }); seed.initialize()
+  const accepted = await seed.accept(message); const claimed = seed.claim(accepted.key)
+  seed.recoveryRequired(claimed, 'CHAT_FAILURE: fetch failed')
+  const fingerprint = claimed.record.fingerprint; const seen = []
+  const runtime = createChatRuntime(root, { runChat: async (original, controls) => {
+    seen.push(original); controls.markPrepared({ threadKey: 'original' })
+    controls.markRunning(() => {}, { threadId: 'thread-original', turnId: 'turn-original' })
+    return { status: 'completed' }
+  } })
+  runtime.processor.start(); runtime.processor.resume(); await runtime.processor.waitForIdle()
+  const item = runtime.chatInbox.findByKey(accepted.key)
+  assert.deepEqual(seen, [JSON.parse(JSON.stringify(message))]); assert.equal(item.record.fingerprint, fingerprint)
+  assert.equal(item.record.state, 'COMPLETED'); assert.ok(item.record.preEngineResumedAt)
+  const duplicate = await runtime.chatInbox.accept(message); assert.equal(duplicate.duplicate, true)
+  runtime.processor.resume(); await runtime.processor.waitForIdle(); assert.equal(seen.length, 1); runtime.processor.stop()
+})
+
+test('pre-engine failure does not spin on repeated resume and cannot replay unknown/engine/final/crash state', async () => {
+  const root = temporaryDirectory(); const seed = new PersistentChatInbox({ rootDir: root, profile }); seed.initialize()
+  const states = [
+    {}, { state: 'ACCEPTANCE_UNKNOWN' }, { recoveryReason: 'PROCESSING_OUTCOME_UNKNOWN' },
+    { preparation: {} }, { preparedAt: 1 }, { engine: {} }, { runningAt: 1 },
+    { finalPrepared: {} }, { finalPublication: {} }, { finalConfirmation: {} }
+  ]
+  for (let index = 0; index < states.length; index++) {
+    const accepted = await seed.accept(normalizeInboundMessage(durableChat(910 + index, { route: 'INSPECT' })))
+    const claimed = seed.claim(accepted.key)
+    seed.recoveryRequired(claimed, 'CHAT_FAILURE: fetch failed')
+    // Fixture-only corruption/phase variants; live inbox is never manually rewritten.
+    writeFileSync(claimed.path, JSON.stringify({ ...claimed.record, ...states[index] }))
+  }
+  const seen = []; const runtime = createChatRuntime(root, { runChat: async original => {
+    seen.push(original.dispatchId); throw new Error('fetch failed')
+  } })
+  runtime.processor.start(); await runtime.processor.waitForIdle()
+  runtime.processor.resume(); await runtime.processor.waitForIdle()
+  assert.deepEqual(seen, ['chat-dispatch-910']); assert.equal(runtime.chatInbox.listRecovery().length, states.length)
+  runtime.processor.stop()
+})
+
+test('pre-engine recovery claim checks fingerprint and durable key under the inbox lock', async () => {
+  const seed = new PersistentChatInbox({ rootDir: temporaryDirectory(), profile }); seed.initialize()
+  const accepted = await seed.accept(normalizeInboundMessage(durableChat(950, { route: 'INSPECT' })))
+  const claimed = seed.claim(accepted.key); seed.recoveryRequired(claimed, 'CHAT_FAILURE: fetch failed')
+  writeFileSync(claimed.path, JSON.stringify({ ...claimed.record, fingerprint: 'corrupted' }))
+  assert.throws(() => seed.claimPreEngineInspection(accepted.key), /CHAT_FINGERPRINT_CONFLICT/)
+  assert.equal(seed.findByKey(accepted.key).state, 'recovery')
+})

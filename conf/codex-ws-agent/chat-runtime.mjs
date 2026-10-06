@@ -206,6 +206,16 @@ const fingerprintSource = message => {
 export const chatFingerprint = message => canonicalSha256(fingerprintSource(message))
 export const durableChatKey = message => createHash('sha256').update(message.dedupeKey).digest('hex')
 
+// INSPECT persists preparation synchronously before thread/start or turn/start.
+// Only an explicit pre-preparation failure is safe to materialize again. Missing
+// state after a crash, unknown acceptance and any engine/final evidence fail closed.
+export const canResumePreEngineInspection = record => object(record) &&
+  (record.message?.route || record.message?.routing?.interactionMode) === 'INSPECT' &&
+  record.state === 'RECOVERY_REQUIRED' && typeof record.recoveryReason === 'string' &&
+  record.recoveryReason.startsWith('CHAT_FAILURE: ') &&
+  ['preparation', 'preparedAt', 'engine', 'runningAt', 'finalPrepared', 'finalPublication', 'finalConfirmation']
+    .every(key => !Object.hasOwn(record, key))
+
 export class PersistentChatInbox {
   constructor({
     rootDir, profile,
@@ -576,6 +586,19 @@ export class PersistentChatInbox {
       const record = JSON.parse(readFileSync(path, 'utf8')); const target = this.path('processing', key); durableRename(path, target)
       const claimed = { ...record, state: 'STARTING', claimedAt: Date.now() }; atomicJson(target, claimed)
       return { key, state: 'processing', path: target, record: claimed }
+    })
+  }
+  claimPreEngineInspection(key) {
+    return this._withLock(() => {
+      const item = this.findByKey(key)
+      if (!item || item.state !== 'recovery' || !canResumePreEngineInspection(item.record)) return null
+      // Verify identity before moving the original record; never synthesize a dispatch.
+      if (durableChatKey(item.record.message) !== key || chatFingerprint(item.record.message) !== item.record.fingerprint)
+        throw new Error('CHAT_FINGERPRINT_CONFLICT')
+      const target = this.path('processing', key)
+      const record = { ...item.record, state: 'STARTING', claimedAt: Date.now(), preEngineResumedAt: Date.now() }
+      atomicJson(item.path, record); durableRename(item.path, target)
+      return { key, state: 'processing', path: target, record }
     })
   }
   markPrepared(item, preparation) { return this._withLock(() => {

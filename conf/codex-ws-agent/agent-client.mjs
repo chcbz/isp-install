@@ -63,7 +63,7 @@ import {
   managedImageScopeMatches
 } from './managed-image-scope-config.mjs'
 import { emptyManagedChatScopes, loadManagedChatScopes, applyManagedChatScope } from './managed-chat-scope-config.mjs'
-import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
+import { canResumePreEngineInspection, buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import {
   AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
   measureCodexAppServerBinary, resolveCodexAppServerSchemaContract
@@ -2429,6 +2429,7 @@ export class AgentMessageProcessor {
     this.activeChats = new Map()
     this.chatAckRetries = new Map()
     this.chatRecoveryRetries = new Map()
+    this.preEngineRecoveryAttempts = new Set()
     this.chatRecoveryRetryBaseMs = chatRecoveryRetryBaseMs
     this.chatRecoveryRetryMaxMs = chatRecoveryRetryMaxMs
     this.drainPromise = null
@@ -2793,8 +2794,12 @@ export class AgentMessageProcessor {
   }
   _schedulePendingChats() { if (!this.chatInbox || this.paused || this.stopped) return; for (const item of this.chatInbox.listPending()) this._scheduleChat(item) }
   _scheduleRecoveryChats() {
-    if (!this.chatInbox || !this.recoverChat || this.paused || this.stopped) return
-    for (const item of this.chatInbox.listRecovery()) if ((item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' && item.record.preparation) this._scheduleChatRecovery(item)
+    if (!this.chatInbox || this.paused || this.stopped) return
+    for (const item of this.chatInbox.listRecovery()) {
+      if (canResumePreEngineInspection(item.record)) {
+        if (!this.preEngineRecoveryAttempts.has(item.key)) this._scheduleChat(item, true)
+      } else if (this.recoverChat && (item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' && (item.record.preparation || item.record.finalPrepared)) this._scheduleChatRecovery(item)
+    }
   }
   _retryChatRecovery(item) {
     if (!item || this.stopped || this.paused) return
@@ -2863,13 +2868,14 @@ export class AgentMessageProcessor {
     try { void this.lanes.enqueue('inspect', this._chatFairness(message), task, `recovery:${this._chatTurnKey(message)}`).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_ERROR', error.message), message.rawPayload) }) }
     catch (error) { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_FULL', error.message), message.rawPayload) }
   }
-  _scheduleChat(item) {
+  _scheduleChat(item, preEngineRecovery = false) {
     if (!item || this.activeChats.has(item.key)) return
     const message = item.record.message; const active = { key: item.key, state: 'QUEUED', message, cancelRequested: false, cancel: null }
     this.activeChats.set(item.key, active)
     const task = async () => {
       if (active.cancelRequested) { this.activeChats.delete(item.key); return }
-      const claimed = this.chatInbox.claim(item.key); if (!claimed) { this.activeChats.delete(item.key); return }
+      if (preEngineRecovery) this.preEngineRecoveryAttempts.add(item.key)
+      const claimed = preEngineRecovery ? this.chatInbox.claimPreEngineInspection(item.key) : this.chatInbox.claim(item.key); if (!claimed) { this.activeChats.delete(item.key); return }
       active.state = 'STARTING'; active.item = claimed; this.chatActive = true
       const controls = {
         markPrepared: preparation => { active.state = 'PREPARED'; this.chatInbox.markPrepared(claimed, preparation) },

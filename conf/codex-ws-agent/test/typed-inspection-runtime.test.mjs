@@ -551,3 +551,30 @@ test('materializer reuses native origin validation, permitting configured loopba
       assert.throws(() => construct(apiOrigin), { code: 'TYPED_INSPECTION_ORIGIN_INVALID' })
   } finally { rmSync(rootDir, { recursive: true, force: true }) }
 })
+
+test('real materializer fetch failure leaves no engine/preparation evidence and preserves safe original reclaim', async () => {
+  const { canResumePreEngineInspection } = await import('../chat-runtime.mjs')
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-pre-engine-')); chmodSync(root, 0o700)
+  try {
+    const message = messageFor(); const typed = resolveTypedInspectionRequest(profile, message)
+    const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+    const accepted = await inbox.accept(message); const claimed = inbox.claim(accepted.key)
+    let threadStarts = 0; let turnStarts = 0; let finalCalls = 0
+    const adapter = { closed: false, readback: adapterReadback(),
+      startOrResumeThread: async () => { threadStarts++; throw new Error('must not start') },
+      runTurn: async () => { turnStarts++; throw new Error('must not run') } }
+    const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example', rootDir: resolve(root, 'inputs'),
+      agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`,
+      fetchFn: async () => { throw new TypeError('fetch failed') } })
+    await assert.rejects(() => runTypedInspection(profile, message, { adapter, isolationReadback: readback(typed), materializer,
+      controls: { markPrepared: value => inbox.markPrepared(claimed, value), markRunning: (_cancel, value) => inbox.markRunning(claimed, value) },
+      sendFinal: () => { finalCalls++ } }), /fetch failed/)
+    inbox.recoveryRequired(claimed, 'CHAT_FAILURE: fetch failed')
+    assert.equal(canResumePreEngineInspection(claimed.record), true)
+    assert.deepEqual([threadStarts, turnStarts, finalCalls], [0, 0, 0])
+    const resumed = inbox.claimPreEngineInspection(accepted.key)
+    assert.equal(resumed.record.fingerprint, claimed.record.fingerprint)
+    assert.deepEqual(resumed.record.message, message)
+    assert.equal(inbox.claimPreEngineInspection(accepted.key), null)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
