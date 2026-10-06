@@ -680,7 +680,7 @@ test('completed typed inspection measurement republishes exact readiness only on
   const statuses = []
   const state = { disposed: false, ws: { readyState: 1 }, registration: { snapshot: () => ({ stage: 'pending_ack' }) },
     typedInspectionProfileRuntime: { declaration: () => declaration } }
-  assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: (_profile, status) => { statuses.push(status); return true }, busyFn: () => false }), true)
+  assert.equal(publishTypedInspectionReadiness(profile, state, { registerFn: () => true, sendStatusFn: (_profile, status) => { statuses.push(status); return true }, busyFn: () => false }), true)
   assert.deepEqual(statuses, ['online'])
   state.registration = { snapshot: () => ({ stage: 'idle' }) }
   assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: () => assert.fail('must not publish before registration'), busyFn: () => false }), false)

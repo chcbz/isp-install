@@ -3941,10 +3941,18 @@ const sendStatus = (profile, status, extra = {}) => {
   }), profile)
 }
 
-export const publishTypedInspectionReadiness = (profile, state, { sendStatusFn = sendStatus, busyFn = isProfileBusy } = {}) => {
+// The server activates capability declarations only from an acknowledged registration.
+// Presence is status-only, so a measured readiness transition must refresh registration.
+export const publishMeasuredRuntimeCapabilities = (profile, state, { registerFn = registerAgent } = {}) => {
   const stage = state?.registration?.snapshot?.().stage
-  if (!state || state.disposed || !state.typedInspectionProfileRuntime?.declaration?.() ||
-      !['pending_ack', 'ack_timeout', 'registered'].includes(stage) || state.ws?.readyState !== 1) return false
+  if (!state || state.disposed || state.ws?.readyState !== 1 ||
+      !['pending_ack', 'ack_timeout', 'registered'].includes(stage)) return false
+  return registerFn(profile) === true
+}
+
+export const publishTypedInspectionReadiness = (profile, state, { registerFn = registerAgent, sendStatusFn = sendStatus, busyFn = isProfileBusy } = {}) => {
+  if (!state?.typedInspectionProfileRuntime?.declaration?.()) return false
+  if (!publishMeasuredRuntimeCapabilities(profile, state, { registerFn })) return false
   return sendStatusFn(profile, busyFn(profile) ? 'busy' : 'online') === true
 }
 
@@ -5638,17 +5646,20 @@ const createProfileState = profile => {
           if (state.appServerAdapter === adapter) state.appServerAdapter = null
           state.appServerPromise = null
           if (!isCurrent()) return
+          if (profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
           if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
           state.appServerRestartAttempt++; scheduleRestart()
         }
         state.appServerExitListener = exitListener
         adapter.once('exit', exitListener)
         state.appServerAdapter = adapter; state.appServerRestartAttempt = 0; state.appServerNotBefore = 0
+        if (profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
         if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
         return adapter
       }).catch(error => {
         state.appServerAdapter = null; state.appServerRestartAttempt++; state.appServerNotBefore = 0
         if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') state.appServerPermanentFailure = error
+        if (isCurrent() && profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
         console.warn(`app-server unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
         if (isCurrent() && !state.appServerPermanentFailure) scheduleRestart()
         return null

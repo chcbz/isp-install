@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseManagedChatScopes, loadManagedChatScopes } from '../managed-chat-scope-config.mjs'
-import { resolveManagedRuntimeProfile, prepareChatWorkdir } from '../agent-client.mjs'
+import { resolveManagedRuntimeProfile, prepareChatWorkdir, publishMeasuredRuntimeCapabilities } from '../agent-client.mjs'
 import { buildTypedDeliberationDeclaration } from '../juyiting-typed-outcome.mjs'
 const authorization = { tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner',
   agentId: 'agt_00000000000000000000000000000001', generation: 'hri_00000000-0000-0000-0000-000000000001', profileId: 'managed:fixture:agent:generation', appServerSchemaContractId: 'codex-cli-0.160.0' }
@@ -64,4 +64,16 @@ test('unknown or missing exact native schema remains rejected', () => {
   assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, appServerSchemaContractId: 'codex-cli-unknown' }])))
   const { appServerSchemaContractId, ...missing } = authorization
   assert.throws(() => parseManagedChatScopes(doc([missing])))
+})
+
+test('readiness updates acknowledged registration, not a presence-only declaration', () => {
+  let registrations = 0
+  const state = { disposed: false, ws: { readyState: 1 }, registration: { snapshot: () => ({ stage: 'registered' }) } }
+  const registerFn = selected => { assert.equal(selected, profile); registrations++; return true }
+  assert.equal(publishMeasuredRuntimeCapabilities(profile, state, { registerFn }), true)
+  assert.equal(registrations, 1)
+  for (const altered of [{ ...state, disposed: true }, { ...state, ws: { readyState: 3 } },
+      { ...state, registration: { snapshot: () => ({ stage: 'idle' }) } }])
+    assert.equal(publishMeasuredRuntimeCapabilities(profile, altered, { registerFn }), false)
+  assert.equal(registrations, 1)
 })
