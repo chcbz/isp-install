@@ -5763,6 +5763,10 @@ const handleMessage = async (profile, raw) => {
   const state = getProfileState(profile)
   const registrationOutcome = state?.registration.observe(parsed)
   if (registrationOutcome === 'registered') {
+    if (profile.typedDeliberationEnabled) {
+      const receipt = parsed.payload || parsed
+      console.log(`typed runtime registration | agent=${profile.agentId} | requested=${buildTypedDeliberationDeclaration(profile, state.appServerAdapter)?.state || 'UNDECLARED'} | receipt=${receipt.typedDeliberation?.state || 'UNDECLARED'} | schema=${state.appServerAdapter?.readback?.schema?.schemaContractId || 'unmeasured'}`)
+    }
     // The API rotates this registration token. Keep it only in memory for this live socket binding.
     state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
     startWorkspaceFilePoller(profile, state)
