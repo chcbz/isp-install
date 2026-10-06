@@ -64,6 +64,7 @@ export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs } = 
     connectTimeoutMs: String(connectTimeoutMs),
     namespace: 'private-slirp4netns-v1',
     slirpMountIsolation: 'unshare-mount-recursive-private-v1',
+    slirpTarget: 'exact-owner-netns-path-v1',
     directEgress: 'nft-default-drop-readback-v1',
     hostLoopback: 'proxy-port-only',
     dns: 'proxy-side-only'
@@ -130,12 +131,14 @@ export const verifyRestrictedNftReadback = (readback, proxyPort, canaryPort) => 
 
 // slirp's sandbox may unmount inherited paths. Detach the complete mount tree
 // BEFORE executing slirp; a private root alone leaves shared submounts unsafe.
+// Use the exact guarded netns path, not PID-mode implicit userns entry.
+// SUID bwrap can expose a descendant userns that does not own its netns.
 // No direct-slirp fallback: unshare errors must fail the readiness handshake.
 export const isolatedSlirpCommand = (slirpBin, pid) => ({
   executable: '/usr/bin/unshare',
   args: ['--mount', '--propagation', 'private', '--', slirpBin,
     '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
-    '--enable-seccomp', '--ready-fd=3', String(pid), 'tap0']
+    '--enable-seccomp', '--ready-fd=3', '--netns-type=path', `/proc/${pid}/ns/net`, 'tap0']
 })
 
 export class RestrictedProviderEgress {

@@ -52,7 +52,7 @@ test('generated provider TLS probe preserves escaped CRLF and parses as Python b
 test('restricted provider policy binds one exact HTTPS authority and explicit transport timeout', () => {
   assert.deepEqual(restrictedProviderNetworkPolicy('https://provider.example:8443/v1', { connectTimeoutMs: 250 }), {
     schemaVersion: 1, providerOrigin: 'https://provider.example:8443', providerAuthority: 'provider.example:8443',
-    transport: 'fixed-connect-proxy-v1', connectTimeoutMs: '250', namespace: 'private-slirp4netns-v1', slirpMountIsolation: 'unshare-mount-recursive-private-v1', directEgress: 'nft-default-drop-readback-v1',
+    transport: 'fixed-connect-proxy-v1', connectTimeoutMs: '250', namespace: 'private-slirp4netns-v1', slirpMountIsolation: 'unshare-mount-recursive-private-v1', slirpTarget: 'exact-owner-netns-path-v1', directEgress: 'nft-default-drop-readback-v1',
     hostLoopback: 'proxy-port-only', dns: 'proxy-side-only'
   })
   for (const invalid of ['http://provider.example', 'https://u:p@provider.example', 'not-a-url']) {
@@ -105,7 +105,7 @@ test('slirp sandbox runs only after recursive private mount isolation and preser
     executable: '/usr/bin/unshare',
     args: ['--mount', '--propagation', 'private', '--', '/usr/bin/slirp4netns',
       '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
-      '--enable-seccomp', '--ready-fd=3', '201', 'tap0']
+      '--enable-seccomp', '--ready-fd=3', '--netns-type=path', '/proc/201/ns/net', 'tap0']
   })
 })
 
