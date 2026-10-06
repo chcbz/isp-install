@@ -244,7 +244,11 @@ export class TypedInspectionMaterializer {
             'X-Agent-Runtime-Id': this.runtimeInstanceId, 'X-Inspection-Manifest-Digest': typed.manifestDigest
           }
         })
-        if (!response || response.status !== 200) fail(response?.status >= 300 && response?.status < 400 ? 'TYPED_INSPECTION_REDIRECT_FORBIDDEN' : 'TYPED_INSPECTION_CONTENT_FETCH_FAILED')
+        if (!response || response.status !== 200) {
+          const code = response?.status >= 300 && response?.status < 400 ? 'TYPED_INSPECTION_REDIRECT_FORBIDDEN' : 'TYPED_INSPECTION_CONTENT_FETCH_FAILED'
+          // Status only: never log credentials, response bytes or peer error text.
+          throw Object.assign(new Error(`${code}: HTTP ${Number.isInteger(response?.status) ? response.status : 'UNAVAILABLE'}`), { code, httpStatus: response?.status || null })
+        }
         if (response.redirected === true || response.url !== expectedUrl) fail('TYPED_INSPECTION_RESPONSE_URL_MISMATCH')
         if ((header(response.headers, 'content-type') || '').trim().toLowerCase() !== source.mimeType.toLowerCase()) fail('TYPED_INSPECTION_CONTENT_TYPE_MISMATCH')
         if ((header(response.headers, 'content-length') || '').trim() !== source.byteLength) fail('TYPED_INSPECTION_CONTENT_LENGTH_MISMATCH')

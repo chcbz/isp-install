@@ -578,3 +578,17 @@ test('real materializer fetch failure leaves no engine/preparation evidence and 
     assert.equal(inbox.claimPreEngineInspection(accepted.key), null)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('content rejection records only HTTP status while retaining strict no-model failure', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-http-status-')); chmodSync(root, 0o700)
+  try {
+    const message = messageFor(); const typed = resolveTypedInspectionRequest(profile, message)
+    for (const status of [401, 403, 404, 409, 503]) {
+      const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example', rootDir: root,
+        agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`,
+        fetchFn: async () => ({ status, json: () => { throw new Error('peer body must not be read/logged') } }) })
+      await assert.rejects(() => materializer.materialize({ message, typed }), error =>
+        error.code === 'TYPED_INSPECTION_CONTENT_FETCH_FAILED' && error.httpStatus === status && error.message === `TYPED_INSPECTION_CONTENT_FETCH_FAILED: HTTP ${status}`)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

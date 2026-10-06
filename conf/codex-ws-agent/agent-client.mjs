@@ -5704,6 +5704,7 @@ const createProfileState = profile => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
       if (isTypedInspectionDispatch(message)) {
         const inspectionProfile = await state.ensureTypedInspectionProfile()
+        await state.registration.waitForRegistration()
         return runReadOnlyInspection(profile, message, {
           profileRuntime: inspectionProfile, bindingStore: threadBindingStore, controls, materializer: state.typedInspectionMaterializer,
           nativeInputAdapters: state.typedInspectionNativeInputAdapters,
@@ -5719,6 +5720,7 @@ const createProfileState = profile => {
       const route = message.route || message.routing?.interactionMode
       if (route !== 'INSPECT') return { status: 'recovery_required', reconciliationStatus: 'UNSUPPORTED_ROUTE' }
       const inspectionProfile = await state.ensureTypedInspectionProfile()
+      await state.registration.waitForRegistration()
       try {
         return await recoverTypedInspection(profile, message, record, {
           profileRuntime: inspectionProfile, controls,

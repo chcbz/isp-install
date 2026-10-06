@@ -22,12 +22,30 @@ export class RegistrationAckObserver {
     this.messageId = null
     this.runtimeToken = null
     this.timer = null
+    this.waiters = new Set()
   }
 
   get registered() { return this.stage === 'registered' }
 
   // Token remains process-memory only; snapshots and logs must never expose it.
   get runtimeAuthHeader() { return /^[0-9a-f]{32}$/.test(this.runtimeToken || '') ? `AgentRuntime ${this.runtimeToken}` : '' }
+
+  // Registration timeout is observational: a slow exact ACK can still release
+  // native readers. No token is returned, persisted or included in failures.
+  waitForRegistration() {
+    if (this.registered) return Promise.resolve(this.snapshot())
+    if (!['pending_ack', 'ack_timeout'].includes(this.stage))
+      return Promise.reject(Object.assign(new Error('NATIVE_RUNTIME_REGISTRATION_REQUIRED'), { code: 'NATIVE_RUNTIME_REGISTRATION_REQUIRED' }))
+    return new Promise((resolve, reject) => this.waiters.add({ resolve, reject }))
+  }
+
+  settleWaiters(registered) {
+    for (const waiter of this.waiters) {
+      if (registered) waiter.resolve(this.snapshot())
+      else waiter.reject(Object.assign(new Error('NATIVE_RUNTIME_REGISTRATION_UNAVAILABLE'), { code: 'NATIVE_RUNTIME_REGISTRATION_UNAVAILABLE' }))
+    }
+    this.waiters.clear()
+  }
 
   snapshot() { return { stage: this.stage, registered: this.registered } }
 
@@ -62,6 +80,7 @@ export class RegistrationAckObserver {
     this.clearTimer()
     this.stage = 'send_failed'
     this.messageId = null
+    this.settleWaiters(false)
     this.log('warn', this.stage)
   }
 
@@ -75,6 +94,7 @@ export class RegistrationAckObserver {
       this.runtimeToken = payload.token
       this.stage = 'registered'
       this.messageId = null
+      this.settleWaiters(true)
       this.log('log', this.stage)
       return 'registered'
     }
@@ -82,6 +102,7 @@ export class RegistrationAckObserver {
     this.clearTimer()
     this.stage = 'rejected'
     this.messageId = null
+    this.settleWaiters(false)
     this.log('warn', this.stage)
     return 'rejected'
   }
@@ -90,6 +111,7 @@ export class RegistrationAckObserver {
     this.clearTimer()
     this.stage = 'disconnected'
     this.messageId = null
+    this.settleWaiters(false)
     this.runtimeToken = null
   }
 }
