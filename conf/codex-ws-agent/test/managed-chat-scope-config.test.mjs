@@ -7,7 +7,7 @@ import { parseManagedChatScopes, loadManagedChatScopes } from '../managed-chat-s
 import { resolveManagedRuntimeProfile, prepareChatWorkdir } from '../agent-client.mjs'
 import { buildTypedDeliberationDeclaration } from '../juyiting-typed-outcome.mjs'
 const authorization = { tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner',
-  agentId: 'agt_00000000000000000000000000000001', generation: 'hri_00000000-0000-0000-0000-000000000001', profileId: 'managed:fixture:agent:generation' }
+  agentId: 'agt_00000000000000000000000000000001', generation: 'hri_00000000-0000-0000-0000-000000000001', profileId: 'managed:fixture:agent:generation', appServerSchemaContractId: 'codex-cli-0.160.0' }
 const profile = { profileId: authorization.profileId, agentId: authorization.agentId,
   managedTenantId: authorization.tenantId, managedClientId: authorization.clientId,
   managedOwnerJiacn: authorization.ownerJiacn, managedGeneration: authorization.generation }
@@ -19,6 +19,7 @@ test('exact scoped composition enables native typed CHAT, not a fabricated READY
   assert.equal(enabled.typedDeliberationEnabled, true); assert.equal(enabled.chatEngine, 'app-server')
   assert.equal(enabled.chatSandbox, 'read-only'); assert.equal(enabled.chatToolPolicy, 'read-only-constrained')
   assert.equal(enabled.chatWorkdir, undefined)
+  assert.equal(enabled.appServerSchemaContractId, 'codex-cli-0.160.0')
   assert.equal(buildTypedDeliberationDeclaration(enabled, null).state, 'UNAVAILABLE')
 })
 test('every identity dimension is exact; global defaults cannot enable unrelated managed CHAT', () => {
@@ -57,4 +58,10 @@ test('managed CHAT workdirs are private and identity-isolated', () => {
     assert.notEqual(first, other)
     assert.equal(prepareChatWorkdir({ rootDir: root, profile, forbidden: [] }), first)
   } finally { rmSync(root, { recursive: true }) }
+})
+
+test('unknown or missing exact native schema remains rejected', () => {
+  assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, appServerSchemaContractId: 'codex-cli-unknown' }])))
+  const { appServerSchemaContractId, ...missing } = authorization
+  assert.throws(() => parseManagedChatScopes(doc([missing])))
 })

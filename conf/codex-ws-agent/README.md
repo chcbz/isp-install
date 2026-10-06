@@ -573,7 +573,8 @@ Images deleted by older clients cannot be recreated from the claim or receipt.
 
 `AGENT_MANAGED_CHAT_SCOPES_FILE` points to a canonical private operator-owned JSON
 file: `{ "schemaVersion": 1, "authorizations": [...] }`. Each authorization has
-exact `tenantId`, `clientId`, `ownerJiacn`, `agentId`, `generation`, `profileId`.
+exact `tenantId`, `clientId`, `ownerJiacn`, `agentId`, `generation`, `profileId`,
+and a supported `appServerSchemaContractId` bound to the measured native version.
 Only this exact managed identity receives native CHAT/typed controls; other
 managed identities do not inherit global CHAT activation. CHAT cwd is allocated
 from the managed profile identity, not copied from a template. A scope enables

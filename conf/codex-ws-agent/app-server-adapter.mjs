@@ -15,6 +15,11 @@ export const CODEX_APP_SERVER_SCHEMA_CONTRACTS = Object.freeze({
     contractId: DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
     ...CODEX_APP_SERVER_SCHEMA
   }),
+  'codex-cli-0.160.0': Object.freeze({
+    contractId: 'codex-cli-0.160.0',
+    cliVersion: '0.160.0',
+    bundleSha256: '7243ba241962af92ca60581f1a81808ebda4212a800f8b205f54703bcfd508c5'
+  }),
   'codex-cli-0.159.2': Object.freeze({
     contractId: 'codex-cli-0.159.2',
     cliVersion: '0.159.2',

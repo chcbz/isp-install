@@ -1,5 +1,6 @@
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
+import { resolveCodexAppServerSchemaContract } from './app-server-adapter.mjs'
 
 const fields = ['tenantId', 'clientId', 'ownerJiacn', 'agentId', 'generation', 'profileId']
 const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) &&
@@ -16,9 +17,11 @@ export const parseManagedChatScopes = raw => {
     throw new Error('Invalid managed CHAT scope document')
   const byScope = new Map()
   for (const entry of doc.authorizations) {
-    if (!exactKeys(entry, fields) || !fields.every(field => text(entry[field])) ||
+    if (!exactKeys(entry, [...fields, 'appServerSchemaContractId']) || !fields.every(field => text(entry[field])) ||
         !/^agt_[0-9a-f]{32}$/.test(entry.agentId) || !/^hri_[0-9a-f-]{36}$/.test(entry.generation))
       throw new Error('Invalid managed CHAT authorization')
+    resolveCodexAppServerSchemaContract({ appServerSchemaContractId: entry.appServerSchemaContractId })
+    if (!text(entry.appServerSchemaContractId)) throw new Error('Exact CHAT schema contract required')
     if (byScope.has(key(entry))) throw new Error('Duplicate managed CHAT authorization')
     byScope.set(key(entry), Object.freeze({ ...entry }))
   }
@@ -38,7 +41,8 @@ export const loadManagedChatScopes = path => {
 // Scope is the authorization boundary. No operator-template cwd is inherited: createProfileState
 // allocates a private CHAT directory from the full managed profile identity.
 export const applyManagedChatScope = (profile, source, scopes = emptyManagedChatScopes()) => {
-  if (!scopes.resolve(profile)) return profile
+  const authorized = scopes.resolve(profile)
+  if (!authorized) return profile
   return { ...profile,
     fastChatEnabled: profile.fastChatEnabled ?? true,
     appServerEnabled: profile.appServerEnabled ?? true,
@@ -47,7 +51,7 @@ export const applyManagedChatScope = (profile, source, scopes = emptyManagedChat
     chatEngine: profile.chatEngine ?? 'app-server',
     chatSandbox: profile.chatSandbox ?? 'read-only',
     chatToolPolicy: profile.chatToolPolicy ?? 'read-only-constrained',
-    appServerSchemaContractId: profile.appServerSchemaContractId ?? source.appServerSchemaContractId,
+    appServerSchemaContractId: authorized.appServerSchemaContractId,
     chatModel: profile.chatModel ?? source.chatModel ?? '',
     chatReasoningEffort: profile.chatReasoningEffort ?? source.chatReasoningEffort ?? ''
   }
