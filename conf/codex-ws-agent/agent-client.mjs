@@ -2369,6 +2369,18 @@ export class SerialExecutionGate {
   }
 }
 
+// Durable CHAT acknowledgements are replayable across process restarts. Their
+// dispatch/message identity remains durable; the authenticated socket identity
+// must be bound at send time, never omitted or replayed from an old process.
+export const bindChatDispatchAckToSession = (envelope, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
+  if (envelope?.messageType !== 'chat.dispatch.ack') return envelope
+  if (envelope.agentId !== profile?.agentId || typeof runtimeInstanceId !== 'string' ||
+      !runtimeInstanceId || runtimeInstanceId === profile.agentId) {
+    throw new AgentProtocolError('CHAT_ACK_SESSION_BINDING_INVALID', 'CHAT acknowledgement does not match the current Agent session')
+  }
+  return { ...envelope, sourceAgentId: profile.agentId, runtimeInstanceId }
+}
+
 export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
   const envelope = {
     schemaVersion: PROTOCOL_VERSION,
@@ -5518,7 +5530,7 @@ const createProfileState = profile => {
   const hostedWireContract = profile.fastChatEnabled && profile.appServerEnabled ? verifyHostedWireContract() : null
   const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 256 })
   const legacyExecutionGate = new SerialExecutionGate()
-  const sendAckFn = envelope => sendRaw(envelope, profile)
+  const sendAckFn = envelope => sendRaw(bindChatDispatchAckToSession(envelope, profile), profile)
   const executionReportOutbox = new ExecutionReportOutbox({
     profile,
     rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile), 'execution-report-outbox'),
