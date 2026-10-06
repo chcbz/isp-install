@@ -5623,6 +5623,8 @@ const createProfileState = profile => {
     }).catch(error => {
       state.typedInspectionProfileFailure = error
       console.warn(`typed inspection profile unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
+      // Only locally generated nft rules are logged; never dump provider errors or credentials.
+      if (error.code === 'TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH') console.warn(`typed inspection nft diagnosis | ${error.message}`)
       return null
     })
     await state.typedInspectionProfilePromise

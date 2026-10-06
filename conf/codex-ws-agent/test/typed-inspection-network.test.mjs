@@ -64,7 +64,7 @@ test('restricted provider policy binds one exact HTTPS authority and explicit tr
 test('nft readback requires default-drop chains and only loopback, established traffic, and the exact proxy port', () => {
   const readback = `table inet cyf_typed_inspection {\n chain input {\n  type filter hook input priority filter; policy drop;\n  ct state established,related accept\n  iifname "lo" accept\n }\n chain output {\n  type filter hook output priority filter; policy drop;\n  ct state established,related accept\n  oifname "lo" accept\n  ip daddr 10.0.2.2 tcp dport 46211 accept\n }\n}\n`
   assert.match(verifyRestrictedNftReadback(readback, 46211, 46212).digest, /^sha256:[a-f0-9]{64}$/)
-  assert.throws(() => verifyRestrictedNftReadback(readback.replace('oifname "lo" accept', 'oifname "lo" accept\n  tcp dport 46212 accept'), 46211, 46212), error => error.code === 'TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH')
+  assert.throws(() => verifyRestrictedNftReadback(readback.replace('oifname "lo" accept', 'oifname "lo" accept\n  tcp dport 46212 accept'), 46211, 46212), error => error.code === 'TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH' && error.message.includes('46212') && error.message.includes('nft exact readback'))
 })
 
 test('network owner binds a direct bwrap child in the host namespace to one immutable private descendant holder', async () => {

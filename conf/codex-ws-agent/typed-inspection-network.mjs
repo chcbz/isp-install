@@ -124,7 +124,7 @@ export const verifyRestrictedNftReadback = (readback, proxyPort, canaryPort) => 
   if (!/policy drop;/.test(input) || !/policy drop;/.test(output) || inputAccepts.length !== 2 || outputAccepts.length !== 3 ||
       !inputAccepts.includes('ct state established,related accept') || !inputAccepts.includes('iifname "lo" accept') ||
       !outputAccepts.includes('ct state established,related accept') || !outputAccepts.includes('oifname "lo" accept') ||
-      !outputAccepts.some(line => proxyRule.test(line)) || readback.includes(`dport ${canaryPort}`)) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH')
+      !outputAccepts.some(line => proxyRule.test(line)) || readback.includes(`dport ${canaryPort}`)) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH', `nft exact readback ${JSON.stringify({ proxyPort, canaryPort, readback })}`)
   return Object.freeze({ validated: true, digest: `sha256:${createHash('sha256').update(readback).digest('hex')}` })
 }
 
