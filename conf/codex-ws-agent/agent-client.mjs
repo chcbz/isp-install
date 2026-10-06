@@ -62,6 +62,7 @@ import {
   loadManagedImageScopeAuthorizations,
   managedImageScopeMatches
 } from './managed-image-scope-config.mjs'
+import { emptyManagedChatScopes, loadManagedChatScopes, applyManagedChatScope } from './managed-chat-scope-config.mjs'
 import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import {
   AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
@@ -5216,8 +5217,8 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}, managedI
   }
 }
 
-export const resolveManagedRuntimeProfile = (profile, source = {}, managedImageScopes = emptyManagedImageScopeAuthorizations()) =>
-  inheritManagedRuntimeCapabilities(profile, source, managedImageScopes?.resolve?.(profile) || null)
+export const resolveManagedRuntimeProfile = (profile, source = {}, managedImageScopes = emptyManagedImageScopeAuthorizations(), managedChatScopes = emptyManagedChatScopes()) =>
+  applyManagedChatScope(inheritManagedRuntimeCapabilities(profile, source, managedImageScopes?.resolve?.(profile) || null), source, managedChatScopes)
 
 /** Fully composed source-aware v3 runtime for production registration and polling. */
 export const createControlledImageV3SourceRuntime = ({
@@ -6118,6 +6119,7 @@ export const main = async () => {
   )
 
   if (hasFlag('--validate')) {
+    if (process.env.AGENT_MANAGED_CHAT_SCOPES_FILE) loadManagedChatScopes(process.env.AGENT_MANAGED_CHAT_SCOPES_FILE)
     for (const profile of buildConfigurationReport(runtimeConfig).profiles) {
       for (const warning of profile.warnings) console.warn(`configuration warning | profile=${profile.profileId} | ${warning}`)
     }
@@ -6159,6 +6161,8 @@ export const main = async () => {
           console.warn(`managed image scopes unavailable; controlled image remains disabled (${error.message})`)
         }
       }
+      const managedChatScopes = process.env.AGENT_MANAGED_CHAT_SCOPES_FILE
+        ? loadManagedChatScopes(process.env.AGENT_MANAGED_CHAT_SCOPES_FILE) : emptyManagedChatScopes()
       const host = new ManagedHost({ root, workspacePolicyId, templateHome: required('AGENT_MANAGED_HOST_TEMPLATE_HOME'),
         codexBin: required('AGENT_MANAGED_HOST_CODEX_BIN'), runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
         tenantId: required('AGENT_MANAGED_HOST_TENANT_ID'), clientId: required('AGENT_MANAGED_HOST_CLIENT_ID'),
@@ -6172,7 +6176,7 @@ export const main = async () => {
             runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
         },
         attachProfile: async (profile, engine) => {
-          profile = resolveManagedRuntimeProfile(profile, defaultProfile, managedImageScopes)
+          profile = resolveManagedRuntimeProfile(profile, defaultProfile, managedImageScopes, managedChatScopes)
           let state = profileStates.get(profile.agentId)
           if (state && (state.profile.managedOwnerJiacn !== profile.managedOwnerJiacn ||
               state.profile.managedGeneration !== profile.managedGeneration)) throw new Error('Managed profile collision')

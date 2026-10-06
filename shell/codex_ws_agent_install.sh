@@ -229,6 +229,7 @@ RELEASE_PAYLOAD=(
     "juyiting-typed-outcome-stream.mjs"
     "juyiting-typed-outcome.mjs"
     "managed-host.mjs"
+    "managed-chat-scope-config.mjs"
     "managed-image-scope-config.mjs"
     "managed-image-scopes.example.json"
     "native-bounty-capability.mjs"

@@ -791,7 +791,12 @@ export function prepareChatWorkdir({ rootDir, profile, forbidden = [] }) {
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== process.getuid() || (rootStat.mode & 0o077)) throw new Error('FAST_CHAT_WORKDIR_ROOT_UNSAFE')
   const root = realpathSync(rootDir)
   if (root !== resolve(rootDir)) throw new Error('FAST_CHAT_WORKDIR_ROOT_UNSAFE')
-  const path = resolve(root, Buffer.from(profile.agentId).toString('hex'))
+  const identity = profile.managedGeneration
+    ? canonicalSha256({ tenantId: profile.managedTenantId, clientId: profile.managedClientId,
+        ownerJiacn: profile.managedOwnerJiacn, agentId: profile.agentId,
+        generation: profile.managedGeneration, profileId: profile.profileId })
+    : Buffer.from(profile.agentId).toString('hex')
+  const path = resolve(root, identity)
   if (!existsSync(path)) { mkdirSync(path, { mode: 0o700 }); directoryFsync(root) }
   const stat = lstatSync(path); if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('FAST_CHAT_WORKDIR_UNSAFE')
   const canonicalPath = realpathSync(path); if (canonicalPath !== path) throw new Error('FAST_CHAT_WORKDIR_UNSAFE')

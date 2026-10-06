@@ -568,3 +568,14 @@ is deleted, and the receipt grants no API authority. The current start lease/inb
 cannot reclaim a provider-started execution. A separately authorized result-only
 recovery contract is required for retransmission after restart or lease expiry.
 Images deleted by older clients cannot be recreated from the claim or receipt.
+
+## Managed native CHAT activation
+
+`AGENT_MANAGED_CHAT_SCOPES_FILE` points to a canonical private operator-owned JSON
+file: `{ "schemaVersion": 1, "authorizations": [...] }`. Each authorization has
+exact `tenantId`, `clientId`, `ownerJiacn`, `agentId`, `generation`, `profileId`.
+Only this exact managed identity receives native CHAT/typed controls; other
+managed identities do not inherit global CHAT activation. CHAT cwd is allocated
+from the managed profile identity, not copied from a template. A scope enables
+measurement, not READY: the installed binary/schema and initialized adapter
+still determine readiness. This does not enable INSPECT or image generation.
