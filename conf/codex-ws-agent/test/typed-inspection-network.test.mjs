@@ -133,7 +133,7 @@ test('mount isolation failure fails closed without a direct-slirp retry', async 
     const process = new EventEmitter(); process.exitCode = null
     process.stderr = new EventEmitter(); process.stdio = [null, null, process.stderr, new EventEmitter()]
     process.kill = () => { process.exitCode = 1 }
-    queueMicrotask(() => { process.stderr.emit('data', Buffer.from('unshare: mount namespace denied')); process.exitCode = 1; process.emit('exit', 1) })
+    queueMicrotask(() => { process.stderr.emit('data', Buffer.from('unshare: mount namespace denied')); process.exitCode = 1; process.emit('exit', 1); process.emit('close', 1) })
     return process
   }
   try {

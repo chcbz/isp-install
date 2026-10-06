@@ -92,14 +92,14 @@ const collectChild = (child, signal, input = null) => new Promise((resolve, reje
 })
 const waitForSlirpReady = (child, signal) => new Promise((resolve, reject) => {
   let settled = false; const ready = child.stdio?.[3]
-  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('exit', exit); ready?.off('data', data) }
+  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('close', close); ready?.off('data', data) }
   const finish = (callback, value) => { if (settled) return; settled = true; cleanup(); callback(value) }
   const abort = () => { try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}; const value = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); value.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; finish(reject, value) }
   const error = value => finish(reject, value)
-  const exit = () => { const value = new Error('TYPED_INSPECTION_EGRESS_SLIRP_FAILED'); value.code = 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED'; finish(reject, value) }
+  const close = () => { const value = new Error('TYPED_INSPECTION_EGRESS_SLIRP_FAILED'); value.code = 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED'; finish(reject, value) }
   const data = chunk => { if (chunk.length > 0) finish(resolve) }
   if (!ready) { const value = new Error('TYPED_INSPECTION_EGRESS_SLIRP_READY_FD_MISSING'); value.code = 'TYPED_INSPECTION_EGRESS_SLIRP_READY_FD_MISSING'; reject(value); return }
-  child.once('error', error); child.once('exit', exit); ready.once('data', data); signal?.addEventListener('abort', abort, { once: true })
+  child.once('error', error); child.once('close', close); ready.once('data', data); signal?.addEventListener('abort', abort, { once: true })
 })
 const hostCanaryControl = (port, timeoutMs) => new Promise((resolve, reject) => {
   const socket = connect(port, '127.0.0.1'); let received = ''
