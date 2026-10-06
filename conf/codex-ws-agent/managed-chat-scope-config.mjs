@@ -20,8 +20,11 @@ const trustedUrl = (value, originOnly = false) => {
   try { const url = new URL(value); return text(value) && url.protocol === 'https:' && !url.username && !url.password &&
     !url.search && !url.hash && (!originOnly || url.origin === value) } catch { return false }
 }
+// Same-host native API uses a literal loopback origin; public /internal routes stay closed.
+// Do not accept DNS aliases, alternate ports, URL normalization or plaintext remote origins.
+const trustedInspectionApiOrigin = value => value === 'http://127.0.0.1:10018' || trustedUrl(value, true)
 const parseInspection = value => {
-  if (!exactKeys(value, inspectionFields) || !trustedUrl(value.apiOrigin, true) || !trustedUrl(value.providerBaseUrl) ||
+  if (!exactKeys(value, inspectionFields) || !trustedInspectionApiOrigin(value.apiOrigin) || !trustedUrl(value.providerBaseUrl) ||
     !['responses', 'chat'].includes(value.providerWireApi) || !['inputRoot', 'stateRoot', 'carrierEvidencePath'].every(key => canonicalPath(value[key])) ||
     overlaps(value.inputRoot, value.stateRoot) || !['profileId', 'providerId', 'model'].every(key => text(value[key])) ||
     !Number.isSafeInteger(value.networkConnectTimeoutMs) || value.networkConnectTimeoutMs <= 0 ||

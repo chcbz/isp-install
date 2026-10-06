@@ -140,3 +140,27 @@ test('scoped INSPECT fails closed on malformed controls, overlapping roots, unme
     {supportedInputs:[inspection.supportedInputs[0],inspection.supportedInputs[0]]}, {unsafe:true}])
     assert.throws(()=>parseManagedChatScopes(doc([{...authorization,inspection:{...inspection,...patch}}])))
 })
+
+
+test('same-host INSPECT accepts only the literal native loopback origin without relaxing provider TLS or identity', () => {
+  const grants = parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection, apiOrigin: 'http://127.0.0.1:10018' } }]))
+  const enabled = resolveManagedRuntimeProfile(profile, { codexModel: 'existing-model' }, undefined, grants)
+  assert.equal(enabled.typedInspectionApiOrigin, 'http://127.0.0.1:10018')
+  assert.equal(enabled.typedInspectionProviderBaseUrl, inspection.providerBaseUrl)
+  assert.equal(enabled.typedInspectionCarrierEvidenceDigest, inspection.carrierEvidenceDigest)
+  for (const field of ['managedTenantId', 'managedClientId', 'managedOwnerJiacn', 'agentId', 'managedGeneration', 'profileId']) {
+    assert.equal(resolveManagedRuntimeProfile({ ...profile, [field]: profile[field] + '-other' }, {}, undefined, grants).typedInspectionApiOrigin, undefined)
+  }
+  assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection,
+    apiOrigin: 'http://127.0.0.1:10018', providerBaseUrl: 'http://127.0.0.1:10018' } }])))
+})
+
+test('same-host INSPECT rejects plaintext remote origins and loopback aliases, credentials, ports or URI components', () => {
+  for (const apiOrigin of ['http://api.example.test', 'http://localhost:10018', 'http://127.0.0.2:10018',
+    'http://127.1:10018', 'http://2130706433:10018', 'http://[::1]:10018', 'http://127.0.0.1:10019',
+    'http://127.0.0.1', 'http://127.0.0.1:10018/', 'http://127.0.0.1:10018/internal',
+    'http://127.0.0.1:10018?x=1', 'http://127.0.0.1:10018#x', 'http://user:secret@127.0.0.1:10018',
+    ' http://127.0.0.1:10018', 'http://127.0.0.1:10018 ', 'http://127.0.0.1:10018@remote.example.test']) {
+    assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection, apiOrigin } }])))
+  }
+})
