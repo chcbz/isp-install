@@ -105,3 +105,38 @@ test('typed native diagnostics never queries another scope, disabled profile, or
     assert.notEqual(result.state, 'HTTP_OBSERVED')
   }
 })
+
+
+const inspection = { apiOrigin:'https://api.example.test', inputRoot:'/private/inspect-inputs', stateRoot:'/private/inspect-state',
+  profileId:'measured-inspection', providerId:'configured-provider', providerBaseUrl:'https://provider.example.test/v1',
+  providerWireApi:'responses', model:'existing-model', networkConnectTimeoutMs:15000, carrierEvidencePath:'/private/carrier.json',
+  carrierEvidenceDigest:`sha256:${'1'.repeat(64)}`, supportedInputs:[{mediaKind:'image',mimeType:'image/png',carrier:'LOCAL_IMAGE',carrierContractDigest:`sha256:${'2'.repeat(64)}`}] }
+test('scoped INSPECT controls apply only to the exact authorized managed identity and preserve measurement gate', () => {
+  const grants = parseManagedChatScopes(doc([{ ...authorization, inspection }]))
+  const result = resolveManagedRuntimeProfile(profile, {codexModel:'existing-model'}, undefined, grants)
+  assert.equal(result.typedInspectionEnabled,true)
+  assert.equal(result.typedInspectionProfileId,inspection.profileId)
+  assert.equal(result.typedInspectionProviderNetwork,'restricted-proxy')
+  assert.equal(result.typedInspectionCarrierEvidenceDigest,inspection.carrierEvidenceDigest)
+  assert.equal(result.chatModel,'existing-model')
+  assert.equal(Object.isFrozen(result.typedInspectionSupportedInputs),true)
+  for(const field of ['managedTenantId','managedClientId','managedOwnerJiacn','agentId','managedGeneration','profileId']) {
+    const denied=resolveManagedRuntimeProfile({...profile,[field]:profile[field]+'other'}, {typedInspectionEnabled:true}, undefined, grants)
+    assert.equal(denied.typedInspectionEnabled,undefined)
+    assert.equal(denied.typedInspectionCarrierEvidencePath,undefined)
+  }
+  assert.equal(resolveManagedRuntimeProfile(profile,{typedInspectionEnabled:true},undefined,scopes).typedInspectionEnabled,undefined)
+})
+test('scoped INSPECT does not override an explicit disabled profile or switch the existing model', () => {
+  const grants=parseManagedChatScopes(doc([{...authorization,inspection}]))
+  assert.equal(resolveManagedRuntimeProfile({...profile,typedInspectionEnabled:false},{codexModel:'existing-model'},undefined,grants).typedInspectionEnabled,false)
+  assert.throws(()=>resolveManagedRuntimeProfile(profile,{codexModel:'other-model'},undefined,grants),/differs from existing/)
+})
+test('scoped INSPECT fails closed on malformed controls, overlapping roots, unmeasured carrier or unsupported format', () => {
+  for(const patch of [{apiOrigin:'https://user:secret@api.example.test'}, {providerBaseUrl:'http://provider.example.test'},
+    {inputRoot:'../inputs'}, {stateRoot:inspection.inputRoot+'/child'}, {carrierEvidenceDigest:''},
+    {networkConnectTimeoutMs:0}, {carrierEvidencePath:'/private/../carrier.json'}, {supportedInputs:[]},
+    {supportedInputs:[{...inspection.supportedInputs[0],mimeType:'application/pdf'}]},
+    {supportedInputs:[inspection.supportedInputs[0],inspection.supportedInputs[0]]}, {unsafe:true}])
+    assert.throws(()=>parseManagedChatScopes(doc([{...authorization,inspection:{...inspection,...patch}}])))
+})
