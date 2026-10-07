@@ -395,18 +395,19 @@ const actionMessage = () => {
   return validateChatDispatch(message)
 }
 
-test('v3 native INSPECT returns non-image action with bound receipt; durable replay publishes only, never starts provider', async () => {
+test('v3 native INSPECT answers from material with bound receipt; durable replay publishes only, never starts provider', async () => {
   const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message); const frames = []
-  const outcome = { schemaVersion: 3, kind: 'ACTION_REQUEST', text: '已查阅资料，现在生成报告。', clarification: null, action: { actionId: 'document', instruction: '整理资料为报告', sourceRefIds: ['source-1'] } }
+  const rawOutcome = { schemaVersion: 3, kind: 'ANSWER', text: '已查阅资料：bird', clarification: null, action: null, deliverable: false, deliveryRelation: null }
+  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: '已查阅资料：bird', clarification: null, action: null, deliverable: false }
   let starts = 0; let finalPrepared = null
   const adapter = {
     closed: false, readback: adapterReadback(),
-    startOrResumeThread: async (_prior, policy) => { assert.match(policy.developerInstructions, /version-3/); return { threadId: 'v3-inspect-thread' } },
+    startOrResumeThread: async (_prior, policy) => { assert.match(policy.developerInstructions, /INSPECT material-reading turn/); return { threadId: 'v3-inspect-thread' } },
     runTurn: async options => {
       starts++; assert.deepEqual(options.policy.outputSchema, INSPECTION_ACTION_OUTCOME_SCHEMA)
       assert.equal(options.input[1].type, 'text')
       options.onAccepted({ threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn' })
-      return { threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn', content: JSON.stringify(outcome) }
+      return { threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn', content: JSON.stringify(rawOutcome) }
     }
   }
   const result = await runTypedInspection(profile, message, {
@@ -424,6 +425,23 @@ test('v3 native INSPECT returns non-image action with bound receipt; durable rep
     controls: { markFinalPublication: () => {} }, sendFinal: (_profile, _message, content, extra) => { frames.push({ content, extra }); return true }
   })
   assert.deepEqual(frames[1], frames[0]); assert.equal(starts, 1)
+})
+
+test('v3 native INSPECT rejects ACTION_REQUEST and preserves the terminal readback', async () => {
+  const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message)
+  let starts = 0; let releases = 0; let preparation
+  const raw = JSON.stringify({ schemaVersion: 3, kind: 'ACTION_REQUEST', text: '请检查并读取已提供的图片与文本资料。', clarification: null,
+    action: { actionId: 'inspect', instruction: '检查并读取已提供的图片与文本资料。', sourceRefIds: ['source-1'] }, deliverable: false, deliveryRelation: null })
+  const adapter = { closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'inspect-action-reject-thread' }),
+    runTurn: async options => { starts++; options.onAccepted({ threadId: 'inspect-action-reject-thread', turnId: 'inspect-action-reject-turn' })
+      return { threadId: 'inspect-action-reject-thread', turnId: 'inspect-action-reject-turn', content: raw } } }
+  const controls = { markPrepared: value => { preparation = value }, markRunning: () => {}, isCancelled: () => false,
+    markFinalPrepared: () => assert.fail('ACTION_REQUEST must not be persisted as a valid inspection final') }
+  const profileRuntime = { releaseAdapter: async () => { releases++ } }
+  await assert.rejects(() => runTypedInspection(profile, message, { adapter, profileRuntime, isolationReadback: readback(typed),
+    materializer: { materialize: async () => ({ directory: '/private/inspect-action-reject', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) },
+    controls, sendFinal: () => assert.fail('ACTION_REQUEST must not publish') }), error => error.code === 'ACTION_INSPECT_ACTION_REQUEST_FORBIDDEN' && error.preserveEngineState === true)
+  assert.equal(starts, 1); assert.equal(releases, 0)
 })
 
 test('v3 rejects catalogue mismatch before fetching, without a speculative no-reread gate', () => {
@@ -593,6 +611,8 @@ test('content rejection records only HTTP status while retaining strict no-model
 })
 
 test('INSPECT v3 forbids delivery linkage in output schema and preserves completed native state on validation rejection', async () => {
+  assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.kind, { type: 'string', enum: ['ANSWER', 'CLARIFY'] })
+  assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.action, { type: 'null' })
   assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.deliverable, { type: 'boolean', enum: [false] })
   assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.deliveryRelation, { type: 'null' })
   const base = messageFor(); const facts = JSON.parse(JSON.stringify(base.contextSnapshot.facts))
