@@ -4520,7 +4520,11 @@ const createProfileState = profile => {
     wsUrl: config.wsUrl,
     enabled: config.platformSkillInstallEnabled,
     archiveEnabled: config.archiveMaintenanceEnabled,
-    authorizationProvider: () => state?.registration.nativeRuntimeAuthHeader || ''
+    authorizationProvider: () => state?.registration.nativeRuntimeAuthHeader || '',
+    managerOptions: {
+      maxRetainedInstallationCopies: config.platformSkillMaxRetainedCopies,
+      maxInstallationBytes: config.platformSkillMaxInstallationBytes
+    }
   })
   state = {
     profile,
@@ -4988,7 +4992,10 @@ export const main = async () => {
     platformSkillInstallEnabled: parseEnabledFlag(process.env.AGENT_PLATFORM_SKILL_INSTALL_ENABLED),
     archiveMaintenanceEnabled: parseEnabledFlag(process.env.AGENT_ARCHIVE_MAINTENANCE_ENABLED),
     skillInstallMaxBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_BYTES, 16 * 1024 * 1024),
-    skillInstallMaxExtractedBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_EXTRACTED_BYTES, 64 * 1024 * 1024)
+    skillInstallMaxExtractedBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_EXTRACTED_BYTES, 64 * 1024 * 1024),
+    platformSkillMaxRetainedCopies: parsePositiveInteger(process.env.AGENT_PLATFORM_SKILL_MAX_RETAINED_COPIES, 2),
+    platformSkillMaxInstallationBytes: process.env.AGENT_PLATFORM_SKILL_MAX_INSTALLATION_BYTES
+      ? parsePositiveInteger(process.env.AGENT_PLATFORM_SKILL_MAX_INSTALLATION_BYTES, 1) : 0
   }
   if (!config.apiKey && !config.profiles.every(profile => profile.apiKey)) {
     configError('OPENCLAW_API_KEY is required unless every profile defines apiKey')

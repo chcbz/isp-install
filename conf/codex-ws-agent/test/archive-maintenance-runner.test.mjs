@@ -44,7 +44,7 @@ const installManager = async (root, scope = runtimeScope, stateName = 'platform-
     sendResultFn: async ({ command, outcome, errorCode }) => ({ installationId: command.installationId,
       agentId: command.targetAgentId, bindingVersion: command.bindingVersion, skillKey: command.skillKey,
       skillVersion: command.skillVersion, packageSha256: command.packageSha256, origin: 'PLATFORM_PROVISIONED',
-      state: outcome, errorCode, revision: '2' }) })
+      state: outcome, errorCode, revision: '2', reclaimableInstallationIds: [] }) })
   manager.initialize()
   const installationId = 'installation-a'
   const command = { schemaVersion: 1, messageType: 'command.dispatch', messageId: 'install-message', commandId: platformCommandId(installationId),

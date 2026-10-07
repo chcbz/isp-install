@@ -23,7 +23,7 @@ const exactResponse = (url, bytes, contentType = 'application/zip') => {
   Object.defineProperty(r, 'url', { value: String(url) }); return r
 }
 const view = c => ({ installationId: c.installationId, agentId: scope.agentId, bindingVersion: c.bindingVersion, skillKey: c.skillKey,
-  skillVersion: c.skillVersion, packageSha256: c.packageSha256, origin: 'PLATFORM_PROVISIONED', state: 'SUCCEEDED', errorCode: null, revision: '2' })
+  skillVersion: c.skillVersion, packageSha256: c.packageSha256, origin: 'PLATFORM_PROVISIONED', state: 'SUCCEEDED', errorCode: null, revision: '2', reclaimableInstallationIds: [] })
 const native = () => ({ wsUrl: 'wss://api.example.invalid/ws', command: command(), runtimeScope: scope, authorization: token })
 test('exact wire validates as an independent platform command', () => {
   assert.equal(command().installationId, 'psi_a'); assert.equal(command().attempt, 1)

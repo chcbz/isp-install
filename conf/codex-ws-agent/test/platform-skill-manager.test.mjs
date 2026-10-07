@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -74,9 +75,9 @@ const wire = (bytes, overrides = {}) => {
       packageRef: `/internal/agent/platform-skills/installations/${installationId}/package` } }
   return { ...base, ...wireOverrides, payload: { ...base.payload, ...payloadOverrides } }
 }
-const receipt = (command, outcome = 'SUCCEEDED', errorCode = null) => ({ installationId: command.installationId, agentId: command.targetAgentId,
+const receipt = (command, outcome = 'SUCCEEDED', errorCode = null, reclaimableInstallationIds = []) => ({ installationId: command.installationId, agentId: command.targetAgentId,
   bindingVersion: command.bindingVersion, skillKey: command.skillKey, skillVersion: command.skillVersion,
-  packageSha256: command.packageSha256, origin: 'PLATFORM_PROVISIONED', state: outcome, errorCode, revision: '2' })
+  packageSha256: command.packageSha256, origin: 'PLATFORM_PROVISIONED', state: outcome, errorCode, revision: '2', reclaimableInstallationIds })
 
 const identity = path => {
   const status = lstatSync(path, { bigint: true })
@@ -99,13 +100,15 @@ const fakeAtomic = {
 const runtime = (settings = {}) => {
   const { root = temporaryDirectory(), bytes = validPackage(), runtimeScope = scope(), stateRoot,
     downloadFn, sendResultFn, atomicFs = fakeAtomic, maxPackageBytes, maxReplayBatch = 32,
-    maxNativeCallMs, receiptReplayGraceMs, sessionSignal = null, now = () => 1000 } = settings
+    maxNativeCallMs, receiptReplayGraceMs, maxRetainedInstallationCopies, maxInstallationBytes,
+    sessionSignal = null, now = () => 1000 } = settings
   const codexHome = resolve(root, 'codex-home'); mkdirSync(codexHome, { recursive: true })
   const selectedStateRoot = stateRoot || resolve(root, 'state')
   let downloads = 0; let sends = 0; let ids = 0
   const options = { profile: { profileId: 'profile-a', agentId: 'agt_a', codexHome }, runtimeScope,
     stateRoot: selectedStateRoot, wsUrl: 'wss://api.example.invalid/ws', atomicFs, now,
-    createId: () => `id-${++ids}`, maxPackageBytes, maxReplayBatch, maxNativeCallMs, receiptReplayGraceMs, sessionSignal,
+    createId: () => `id-${++ids}`, maxPackageBytes, maxReplayBatch, maxNativeCallMs, receiptReplayGraceMs,
+    maxRetainedInstallationCopies, maxInstallationBytes, sessionSignal,
     authorizationProvider: async () => `AgentRuntime ${'1'.repeat(32)}`,
     downloadFn: async arguments_ => { downloads++; return downloadFn ? downloadFn(arguments_) : bytes },
     sendResultFn: async arguments_ => { sends++; return sendResultFn ? sendResultFn(arguments_) : receipt(arguments_.command, arguments_.outcome, arguments_.errorCode) } }
@@ -606,4 +609,274 @@ test('same CODEX_HOME isolates new runtime scope and installation in immutable p
   assert.deepEqual(new Set(markers.map(marker => marker.runtimeInstanceId)), new Set(['runtime-a', 'runtime-b']))
   assert.notEqual(markers[0].scopeDigest, markers[1].scopeDigest)
   assert(targets.every(target => target.includes(`${sep}skills${sep}platform-provisioned${sep}`)))
+})
+
+
+test('server-authorized reclaim enforces the retained-copy quota using verified real package bytes', async () => {
+  const r = runtime({ maxRetainedInstallationCopies: 2, sendResultFn: async arguments_ =>
+    receipt(arguments_.command, arguments_.outcome, arguments_.errorCode,
+      arguments_.command.installationId === 'psi_c' ? ['psi_a'] : []) })
+  for (const installationId of ['psi_a', 'psi_b', 'psi_c']) {
+    const result = await r.manager.execute(wire(r.bytes, { installationId, messageId: `message-${installationId}` }))
+    assert.equal(result.status, 'completed', result.errorMessage)
+  }
+  assert.deepEqual(activatedTargets(r.codexHome).map(path => basename(path)), ['psi_b', 'psi_c'])
+  assert.equal(existsSync(installationDirectory(r.stateRoot, 'psi_a')), false)
+})
+
+test('quota refuses a fourth copy when the server protects every retained installation', async () => {
+  const r = runtime({ maxRetainedInstallationCopies: 2 })
+  for (const installationId of ['psi_a', 'psi_b', 'psi_c']) {
+    const result = await r.manager.execute(wire(r.bytes, { installationId, messageId: `message-${installationId}` }))
+    assert.equal(result.status, 'completed', result.errorMessage)
+  }
+  const refused = await r.manager.execute(wire(r.bytes, { installationId: 'psi_d', messageId: 'message-psi_d' }))
+  assert.equal(refused.status, 'failed')
+  assert.equal(refused.failureCode, PLATFORM_SKILL_FAILURE.IO_FAILED)
+  assert.deepEqual(activatedTargets(r.codexHome).map(path => basename(path)), ['psi_a', 'psi_b', 'psi_c'])
+})
+
+
+test('persisted server reclaim receipt completes registry cleanup after crash removed only the target', async () => {
+  const root = temporaryDirectory(); const stateRoot = resolve(root, 'state')
+  const first = runtime({ root, stateRoot, maxRetainedInstallationCopies: 3, sendResultFn: async arguments_ =>
+    receipt(arguments_.command, arguments_.outcome, arguments_.errorCode,
+      arguments_.command.installationId === 'psi_c' ? ['psi_a'] : []) })
+  const commands = new Map()
+  for (const installationId of ['psi_a', 'psi_b', 'psi_c']) {
+    const command = wire(first.bytes, { installationId, messageId: `message-${installationId}` })
+    commands.set(installationId, command)
+    const result = await first.manager.execute(command)
+    assert.equal(result.status, 'completed', result.errorMessage)
+  }
+  const targetA = activatedTargets(first.codexHome).find(path => basename(path) === 'psi_a')
+  assert.ok(targetA); rmSync(targetA, { recursive: true, force: false })
+  assert.equal(existsSync(installationDirectory(stateRoot, 'psi_a')), true)
+
+  const restarted = runtime({ root, stateRoot, maxRetainedInstallationCopies: 2 })
+  const recovered = await restarted.manager.execute(commands.get('psi_c'))
+  assert.equal(recovered.status, 'completed', recovered.errorMessage)
+  assert.equal(existsSync(installationDirectory(stateRoot, 'psi_a')), false)
+  assert.deepEqual(activatedTargets(restarted.codexHome).map(path => basename(path)), ['psi_b', 'psi_c'])
+})
+
+
+test('reclaim restart uses authorizing C durable receipt when A own successful receipt was lost', async () => {
+  const root = temporaryDirectory(); const stateRoot = resolve(root, 'state')
+  const first = runtime({ root, stateRoot, maxRetainedInstallationCopies: 3, sendResultFn: async args => {
+    if (args.command.installationId === 'psi_a') throw new Error('A success response lost')
+    return receipt(args.command, args.outcome, args.errorCode, args.command.installationId === 'psi_c' ? ['psi_a'] : [])
+  } })
+  const commands = new Map()
+  for (const id of ['psi_a', 'psi_b', 'psi_c']) {
+    const command = wire(first.bytes, { installationId: id, messageId: `message-${id}` })
+    commands.set(id, command)
+    const result = await first.manager.execute(command)
+    assert.equal(result.status, id === 'psi_a' ? 'recovery_required' : 'completed', result.errorMessage)
+    assert.equal(result.result.outcome, 'SUCCEEDED')
+  }
+  const directoryA = installationDirectory(stateRoot, 'psi_a')
+  assert.equal(existsSync(resolve(directoryA, 'receipt.json')), false)
+  const preparedA = json(resolve(directoryA, 'prepared.json'))
+  // Exact crash window: authorized physical target removed, registry not yet removed.
+  rmSync(preparedA.targetPath, { recursive: true, force: false })
+  const restarted = runtime({ root, stateRoot, maxRetainedInstallationCopies: 2,
+    sendResultFn: async () => { throw new Error('durable C receipt must suffice without network') } })
+  const result = await restarted.manager.execute(commands.get('psi_c'))
+  assert.equal(result.status, 'completed', result.errorMessage)
+  assert.equal(existsSync(directoryA), false)
+  assert.deepEqual(activatedTargets(first.codexHome).map(path => basename(path)), ['psi_b', 'psi_c'])
+  assert.deepEqual(restarted.counts(), { downloads: 0, sends: 0 })
+})
+
+test('missing reclaim target never relaxes authorizing receipt scope or candidate parent proof', async t => {
+  for (const mutation of ['C scope', 'A parent proof', 'A command scope']) await t.test(mutation, async () => {
+    const root = temporaryDirectory(); const stateRoot = resolve(root, 'state')
+    const first = runtime({ root, stateRoot, maxRetainedInstallationCopies: 3, sendResultFn: async args => {
+      if (args.command.installationId === 'psi_a') throw new Error('lost A receipt')
+      return receipt(args.command, args.outcome, args.errorCode, args.command.installationId === 'psi_c' ? ['psi_a'] : [])
+    } })
+    let commandC
+    for (const id of ['psi_a', 'psi_b', 'psi_c']) {
+      const command = wire(first.bytes, { installationId: id, messageId: `message-${id}` })
+      const result = await first.manager.execute(command)
+      assert.equal(result.status, id === 'psi_a' ? 'recovery_required' : 'completed', result.errorMessage)
+      if (id === 'psi_c') commandC = command
+    }
+    const directoryA = installationDirectory(stateRoot, 'psi_a')
+    const preparedPath = resolve(directoryA, 'prepared.json'); const prepared = json(preparedPath)
+    rmSync(prepared.targetPath, { recursive: true, force: false })
+    if (mutation === 'C scope') {
+      const path = resolve(installationDirectory(stateRoot, 'psi_c'), 'receipt.json'); const record = json(path)
+      record.scopeDigest = '0'.repeat(64); writeFileSync(path, JSON.stringify(record))
+    } else if (mutation === 'A parent proof') {
+      prepared.targetParentIdentity.ino = '0'; writeFileSync(preparedPath, JSON.stringify(prepared))
+    } else {
+      const path = resolve(directoryA, 'command.json'); const record = json(path)
+      record.command.ownerJiacn = 'foreign-owner'; writeFileSync(path, JSON.stringify(record))
+    }
+    const restarted = runtime({ root, stateRoot, maxRetainedInstallationCopies: 2 })
+    const result = await restarted.manager.execute(commandC)
+    assert.equal(result.status, mutation === 'C scope' ? 'failed' : 'recovery_required', result.errorMessage)
+    assert.equal(result.failureCode, PLATFORM_SKILL_FAILURE.CONFLICT)
+    assert.equal(existsSync(directoryA), true)
+    assert.deepEqual(activatedTargets(first.codexHome).map(path => basename(path)), ['psi_b', 'psi_c'])
+  })
+})
+
+test('more than 32 real package installations consume progressing bounded server reclaim batches', async () => {
+  // This server contract model retains every fenced tombstone and journals each receipt.
+  const tombstones = []; const receipts = new Map(); let cursor = 0; let lost35 = false
+  const protectedId = 'psi_001'
+  const root = temporaryDirectory(); const stateRoot = resolve(root, 'state')
+  const sendResultFn = async args => {
+    const id = args.command.installationId
+    if (receipts.has(id)) return receipts.get(id)
+    const candidates = tombstones.filter(candidate => candidate !== protectedId)
+    let selected = candidates.slice(cursor, cursor + 32)
+    if (!selected.length && candidates.length) { cursor = 0; selected = candidates.slice(0, 32) }
+    cursor += selected.length
+    const response = receipt(args.command, args.outcome, args.errorCode, selected)
+    receipts.set(id, response); tombstones.push(id)
+    if (id === 'psi_035' && !lost35) { lost35 = true; throw new Error('server committed 35 receipt; response lost') }
+    return response
+  }
+  let r = runtime({ root, stateRoot, maxRetainedInstallationCopies: 2, sendResultFn })
+  for (let index = 1; index <= 40; index++) {
+    const id = `psi_${String(index).padStart(3, '0')}`
+    const command = wire(r.bytes, { installationId: id, messageId: `message-${id}` })
+    let result = await r.manager.execute(command)
+    if (index === 35) {
+      assert.equal(result.status, 'recovery_required', result.errorMessage)
+      assert.equal(result.activationCommitted, true)
+      assert.equal(activatedTargets(r.codexHome).length, 3)
+      // Before installing 36, restart/replay the exact lost receipt of 35.
+      r = runtime({ root, stateRoot, maxRetainedInstallationCopies: 2, sendResultFn })
+      result = await r.manager.execute(command)
+      assert.deepEqual(r.counts(), { downloads: 0, sends: 1 })
+    }
+    assert.equal(result.status, 'completed', `${index}: ${result.errorMessage}`)
+    assert(result.receipt.reclaimableInstallationIds.length <= 32)
+    assert(!result.receipt.reclaimableInstallationIds.includes(protectedId))
+    assert(activatedTargets(r.codexHome).length <= 2)
+    assert.equal(existsSync(installationDirectory(r.stateRoot, protectedId)), true)
+    if (index === 10 || index === 36) {
+      r = runtime({ root, stateRoot, maxRetainedInstallationCopies: 2,
+        sendResultFn: async () => { throw new Error('durable receipt replay must not request a new batch') } })
+      assert.equal((await r.manager.execute(command)).status, 'completed')
+      assert.deepEqual(r.counts(), { downloads: 0, sends: 0 })
+      r = runtime({ root, stateRoot, maxRetainedInstallationCopies: 2, sendResultFn })
+    }
+  }
+  assert.equal(tombstones.length, 40)
+  assert.deepEqual(activatedTargets(r.codexHome).map(path => basename(path)), [protectedId, 'psi_040'])
+})
+
+
+// Kill only this test's child after the real manager fsyncs the registry (empty)
+// or its actual createJsonOnce fsyncs the command temporary file (temporary).
+// Normal exception unwinding would unlink that temporary file and miss the crash.
+const crashBeforeCommandPublication = (r, kind) => {
+  const settings = { stateRoot: r.stateRoot, profile: { profileId: 'profile-a', agentId: 'agt_a', codexHome: r.codexHome },
+    runtimeScope: scope(), wsUrl: 'wss://api.example.invalid/ws', enabled: true }
+  const script = `
+    import { PlatformSkillManager } from ${JSON.stringify(new URL('../platform-skill-manager.mjs', import.meta.url).href)};
+    import { basename } from 'node:path';
+    import { existsSync, renameSync } from 'node:fs';
+    const kind = ${JSON.stringify(kind)};
+    const crash = () => { process.kill(process.pid, 'SIGKILL'); throw new Error('SIGKILL did not stop child'); };
+    const atomicFs = { renameNoReplace(source, target) {
+      if (kind === 'temporary' && basename(target) === 'command.json') crash();
+      if (existsSync(target)) return { ok: false, code: 'TARGET_EXISTS', message: 'exists' };
+      renameSync(source, target); return { ok: true, code: 'OK', message: '' };
+    } };
+    let ids = 0;
+    const manager = new PlatformSkillManager({ ...${JSON.stringify(settings)}, atomicFs, now: () => 1000,
+      createId: () => 'crash-' + (++ids),
+      authorizationProvider: async () => { throw new Error('crash must precede authorization'); },
+      downloadFn: async () => { throw new Error('crash must precede download'); },
+      sendResultFn: async () => { throw new Error('crash must precede result'); } });
+    manager.initialize();
+    if (kind === 'empty') {
+      const writeOnce = manager._writeOnce.bind(manager);
+      manager._writeOnce = (path, ...args) => {
+        if (basename(path) === 'command.json') crash();
+        return writeOnce(path, ...args);
+      };
+    }
+    await manager.execute(${JSON.stringify(wire(r.bytes))});
+    process.exitCode = 99;
+  `
+  const child = spawnSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8', timeout: 15000 })
+  assert.equal(child.error, undefined, child.error?.message)
+  assert.equal(child.status, null, child.stderr)
+  assert.equal(child.signal, 'SIGKILL', child.stderr)
+  const directory = installationDirectory(r.stateRoot, 'psi_a')
+  assert.equal(lstatSync(directory).isDirectory(), true)
+  assert.equal(lstatSync(directory).mode & 0o777, 0o700)
+  assert.equal(existsSync(resolve(directory, 'command.json')), false)
+  const entries = readdirSync(directory)
+  assert.equal(entries.length, kind === 'empty' ? 0 : 1)
+  if (kind === 'temporary') {
+    assert.match(entries[0], /^\.command\.json\.tmp-[1-9][0-9]*-crash-[1-9][0-9]*$/u)
+    assert.equal(json(resolve(directory, entries[0])).command.installationId, 'psi_a')
+    assert.equal(lstatSync(resolve(directory, entries[0])).mode & 0o777, 0o600)
+  }
+  return { directory, entries }
+}
+
+test('command publication crash preserves empty or actual fsynced temporary registry unknown while new B installs', async t => {
+  for (const kind of ['empty', 'temporary']) await t.test(kind, async () => {
+    const first = runtime()
+    const { directory, entries } = crashBeforeCommandPublication(first, kind)
+    const evidence = entries.map(name => readFileSync(resolve(directory, name)))
+    const restarted = runtime({ root: first.root, stateRoot: first.stateRoot })
+    const replay = await restarted.manager.replayPending()
+    assert.equal(replay.length, 1)
+    assert.equal(replay[0].installationId, 'psi_a')
+    assert.equal(replay[0].status, 'unknown')
+    assert.deepEqual(restarted.counts(), { downloads: 0, sends: 0 })
+    const result = await restarted.manager.execute(wire(restarted.bytes, { installationId: 'psi_b', messageId: 'message-b' }))
+    assert.equal(result.status, 'completed', result.errorMessage)
+    assert.equal(result.result.outcome, 'SUCCEEDED')
+    assert.deepEqual(restarted.counts(), { downloads: 1, sends: 1 })
+    assert.equal(restarted.manager.getInstallation('psi_a').status, 'unknown')
+    assert.equal(existsSync(directory), true)
+    assert.deepEqual(readdirSync(directory), entries)
+    entries.forEach((name, index) => assert.deepEqual(readFileSync(resolve(directory, name)), evidence[index]))
+    assert.deepEqual(activatedTargets(restarted.codexHome).map(path => basename(path)), ['psi_b'])
+  })
+})
+
+test('commandless registry with unexpected residuals or unsafe temporary proof blocks new B without deleting evidence', async t => {
+  for (const mutation of ['result residual', 'temporary symlink', 'temporary hardlink', 'temporary directory',
+    'temporary permissions', 'registry permissions', 'foreign temporary scope', 'malformed temporary name', 'corrupt temporary']) await t.test(mutation, async () => {
+    const first = runtime()
+    const { directory, entries } = crashBeforeCommandPublication(first, 'temporary')
+    const temporaryPath = resolve(directory, entries[0])
+    const outside = resolve(first.root, 'outside-command.json')
+    if (mutation === 'result residual') writeFileSync(resolve(directory, 'result.json'), '{}', { mode: 0o600 })
+    else if (mutation === 'temporary symlink') {
+      renameSync(temporaryPath, outside); symlinkSync(outside, temporaryPath)
+    } else if (mutation === 'temporary hardlink') linkSync(temporaryPath, outside)
+    else if (mutation === 'temporary directory') { unlinkSync(temporaryPath); mkdirSync(temporaryPath, { mode: 0o700 }) }
+    else if (mutation === 'temporary permissions') chmodSync(temporaryPath, 0o644)
+    else if (mutation === 'registry permissions') chmodSync(directory, 0o755)
+    else if (mutation === 'foreign temporary scope') {
+      const record = json(temporaryPath); record.command.ownerJiacn = 'foreign-owner'; writeFileSync(temporaryPath, JSON.stringify(record))
+    } else if (mutation === 'malformed temporary name') renameSync(temporaryPath, resolve(directory, '.command.json.tmp-unproven'))
+    else writeFileSync(temporaryPath, '{incomplete')
+    const retainedEntries = readdirSync(directory)
+    const restarted = runtime({ root: first.root, stateRoot: first.stateRoot })
+    const replay = await restarted.manager.replayPending()
+    assert.equal(replay[0].status, 'unknown')
+    const result = await restarted.manager.execute(wire(restarted.bytes, { installationId: 'psi_b', messageId: 'message-b' }))
+    assert.equal(result.status, 'failed', result.errorMessage)
+    assert.equal(result.failureCode, PLATFORM_SKILL_FAILURE.CONFLICT)
+    assert.deepEqual(restarted.counts(), { downloads: 0, sends: 0 })
+    assert.equal(existsSync(directory), true)
+    assert.deepEqual(readdirSync(directory), retainedEntries)
+    assert.deepEqual(activatedTargets(restarted.codexHome), [])
+    if (existsSync(outside)) assert.equal(json(outside).command.installationId, 'psi_a')
+  })
 })

@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -48,6 +50,7 @@ const DEFAULT_MAX_ENTRIES = 256
 const DEFAULT_MAX_REPLAY_BATCH = 32
 const DEFAULT_MAX_NATIVE_CALL_MS = 30 * 1000
 const DEFAULT_RECEIPT_REPLAY_GRACE_MS = 5 * 60 * 1000
+const DEFAULT_MAX_RETAINED_INSTALLATION_COPIES = 2
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const SHA256 = /^[0-9a-f]{64}$/
 const FAILURE_CODES = new Set(Object.values(PLATFORM_SKILL_FAILURE))
@@ -341,6 +344,8 @@ export class PlatformSkillManager {
     maxReplayBatch = DEFAULT_MAX_REPLAY_BATCH,
     maxNativeCallMs = DEFAULT_MAX_NATIVE_CALL_MS,
     receiptReplayGraceMs = DEFAULT_RECEIPT_REPLAY_GRACE_MS,
+    maxRetainedInstallationCopies = DEFAULT_MAX_RETAINED_INSTALLATION_COPIES,
+    maxInstallationBytes = 0,
     sessionSignal = null
   }) {
     if (!profile?.profileId || !profile?.agentId || !profile?.codexHome) throw new Error('profileId, agentId and codexHome are required')
@@ -348,6 +353,8 @@ export class PlatformSkillManager {
     if (!Number.isSafeInteger(maxReplayBatch) || maxReplayBatch < 1 || maxReplayBatch > 256) throw new Error('maxReplayBatch must be between 1 and 256')
     if (!Number.isSafeInteger(maxNativeCallMs) || maxNativeCallMs < 1 || maxNativeCallMs > 3600000) throw new Error('maxNativeCallMs must be between 1 and 3600000')
     if (!Number.isSafeInteger(receiptReplayGraceMs) || receiptReplayGraceMs < 0 || receiptReplayGraceMs > 3600000) throw new Error('receiptReplayGraceMs must be between 0 and 3600000')
+    if (!Number.isSafeInteger(maxRetainedInstallationCopies) || maxRetainedInstallationCopies < 1 || maxRetainedInstallationCopies > 32) throw new Error('maxRetainedInstallationCopies must be between 1 and 32')
+    if (!Number.isSafeInteger(maxInstallationBytes) || maxInstallationBytes < 0) throw new Error('maxInstallationBytes must be a non-negative safe integer')
     this.profile = { profileId: String(profile.profileId), agentId: String(profile.agentId), codexHome: resolve(profile.codexHome) }
     this.runtimeScope = Object.freeze({ ...runtimeScope })
     this.stateRoot = resolve(stateRoot)
@@ -365,6 +372,8 @@ export class PlatformSkillManager {
     this.maxReplayBatch = maxReplayBatch
     this.maxNativeCallMs = maxNativeCallMs
     this.receiptReplayGraceMs = receiptReplayGraceMs
+    this.maxRetainedInstallationCopies = maxRetainedInstallationCopies
+    this.maxInstallationBytes = maxInstallationBytes
     this.sessionSignal = sessionSignal
     this.apiOrigin = platformSkillApiOrigin(wsUrl)
     this.scope = Object.freeze({
@@ -503,7 +512,10 @@ export class PlatformSkillManager {
   }
 
   _loadCommandRecord(directory) {
-    const record = readJson(resolve(directory, 'command.json'), 'platform installation command')
+    return this._validateCommandRecord(readJson(resolve(directory, 'command.json'), 'platform installation command'))
+  }
+
+  _validateCommandRecord(record) {
     if (!exactKeys(record, ['businessFingerprint', 'command', 'formatVersion', 'origin', 'receivedAt', 'scopeDigest'])
         || record.formatVersion !== 2 || record.origin !== PLATFORM_SKILL_ORIGIN || record.scopeDigest !== this.scopeRecord.digest
         || !Number.isSafeInteger(record.receivedAt) || record.receivedAt < 0) {
@@ -514,6 +526,55 @@ export class PlatformSkillManager {
       throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform installation command fingerprint is invalid')
     }
     return record
+  }
+
+  // Observation only: no command has been published, so this cannot prove a copy,
+  // execution authority, or reclaim eligibility. Preserve the original crash evidence.
+  _isRecoverableCommandlessDirectory(directory) {
+    if (typeof process.getuid !== 'function' || !Number.isInteger(constants.O_NOFOLLOW)) return false
+    const uid = BigInt(process.getuid())
+    const privateNode = (status, kind, mode) => !status.isSymbolicLink()
+      && (kind === 'directory' ? status.isDirectory() : status.isFile())
+      && status.uid === uid && (status.mode & 0o7777n) === BigInt(mode)
+    assertRealDirectory(this.installationsDir, 'platform installation registry parent')
+    assertRealDirectory(directory, 'platform installation registry')
+    if (dirname(directory) !== this.installationsDir
+        || !privateNode(lstatSync(this.installationsDir, { bigint: true }), 'directory', 0o700)
+        || !privateNode(lstatSync(directory, { bigint: true }), 'directory', 0o700)) return false
+    const parentIdentity = pathIdentity(this.installationsDir)
+    const directoryIdentity = pathIdentity(directory)
+    const entries = readdirSync(directory).sort()
+    for (const name of entries) {
+      if (!/^\.command\.json\.tmp-[1-9][0-9]*-[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/u.test(name)) return false
+      const path = resolve(directory, name)
+      const before = lstatSync(path, { bigint: true })
+      if (!privateNode(before, 'file', 0o600) || before.nlink !== 1n || before.size > 1024n * 1024n) return false
+      const fileIdentity = pathIdentity(path)
+      const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      let bytes
+      try {
+        const opened = fstatSync(descriptor, { bigint: true })
+        if (!privateNode(opened, 'file', 0o600) || opened.nlink !== 1n
+            || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) return false
+        bytes = readFileSync(descriptor)
+        const after = fstatSync(descriptor, { bigint: true })
+        if (!privateNode(after, 'file', 0o600) || after.nlink !== 1n
+            || after.size !== before.size || after.ctimeNs !== before.ctimeNs
+            || BigInt(bytes.length) !== before.size) return false
+      } finally { closeSync(descriptor) }
+      let record
+      try { record = JSON.parse(bytes.toString('utf8')) } catch { return false }
+      this._validateCommandRecord(record)
+      const current = lstatSync(path, { bigint: true })
+      if (record.command.installationId !== basename(directory)
+          || !privateNode(current, 'file', 0o600) || current.nlink !== 1n || current.ctimeNs !== before.ctimeNs
+          || !samePathIdentity(pathIdentity(path), fileIdentity)) return false
+    }
+    return samePathIdentity(pathIdentity(directory), directoryIdentity)
+      && samePathIdentity(pathIdentity(this.installationsDir), parentIdentity)
+      && privateNode(lstatSync(directory, { bigint: true }), 'directory', 0o700)
+      && privateNode(lstatSync(this.installationsDir, { bigint: true }), 'directory', 0o700)
+      && readdirSync(directory).sort().join('\0') === entries.join('\0')
   }
 
   _recoverCommandlessDirectory(directory) {
@@ -835,7 +896,12 @@ export class PlatformSkillManager {
       }
     }
     const existingReceipt = this._loadReceipt(directory, command, resultRecord)
-    if (existingReceipt) return this._terminal(resultRecord.result, existingReceipt, true)
+    if (existingReceipt) {
+      try { this._reclaimFromReceipt(existingReceipt, command) } catch (error) {
+        return this._recovery(error, resultRecord.result, true)
+      }
+      return this._terminal(resultRecord.result, existingReceipt, true)
+    }
     const receiptDeadline = resultRecord.result.outcome === 'SUCCEEDED'
       ? this._receiptReplayDeadline(command) : command.expiresAt
     try {
@@ -870,6 +936,7 @@ export class PlatformSkillManager {
         if (!sameJson(existing, validated)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform installation receipt creation raced with different content')
         return this._terminal(resultRecord.result, existing, true)
       }
+      this._reclaimFromReceipt(validated, command)
       return this._terminal(resultRecord.result, validated, false)
     } catch (error) {
       return {
@@ -926,6 +993,128 @@ export class PlatformSkillManager {
     if (!result?.ok) throw atomicFailure(result)
     if (!this._validActivation(record.targetPath, command, record)) {
       throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, 'activated platform skill failed immediate proof validation')
+    }
+  }
+
+  _installationByteLength(targetPath, command) {
+    const proof = this._packageProof(targetPath)
+    let total = 0
+    for (const entry of proof.entries) total += lstatSync(resolve(targetPath, ...entry.path.split('/'))).size
+    const markerPath = resolve(targetPath, MARKER_NAME)
+    const marker = readJson(markerPath, 'platform activation marker')
+    if (!sameJson(marker, this._marker(command))) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform installation marker changed during quota accounting')
+    const markerStatus = lstatSync(markerPath)
+    if (!markerStatus.isFile() || markerStatus.isSymbolicLink() || realpathSync(markerPath) !== markerPath) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform installation marker is not a canonical file')
+    return total + markerStatus.size
+  }
+
+  _quotaInventory(reclaimAuthorization = null) {
+    const copies = []
+    for (const installationId of readdirSync(this.installationsDir).sort()) {
+      if (!SAFE_ID.test(installationId)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, 'unexpected platform installation registry entry')
+      const directory = this._installationDirectory(installationId)
+      if (!existsSync(resolve(directory, 'command.json'))) {
+        if (!this._isRecoverableCommandlessDirectory(directory)) {
+          throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'commandless platform installation has unsafe or unexpected evidence')
+        }
+        continue // Retained unknown, not a successful copy and never deleted by inventory.
+      }
+      const record = this._loadCommandRecord(directory)
+      const command = record.command
+      const result = this._loadResult(directory, command)
+      if (!result || result.result.outcome !== 'SUCCEEDED') continue
+      const prepared = this._loadPrepared(directory, command)
+      if (!prepared) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'retained platform installation proof is incomplete')
+      // A own receipt may have been lost. Its command/result/proof remain mandatory;
+      // only a different installation's durable server receipt can authorize removal.
+      this._loadReceipt(directory, command, result)
+      if (!existsSync(prepared.targetPath)) {
+        const candidate = this._loadAuthorizedReclaimCandidate(directory, installationId, reclaimAuthorization)
+        copies.push({ installationId, byteLength: 0, targetMissing: true, candidate })
+        continue
+      }
+      if (!this._validActivation(prepared.targetPath, command, prepared)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'retained platform installation proof is invalid')
+      copies.push({ installationId, byteLength: this._installationByteLength(prepared.targetPath, command),
+        targetMissing: false, candidate: { command, prepared } })
+    }
+    return copies
+  }
+
+  _requireDurableReclaimAuthorization(authorization, installationId) {
+    if (!authorization?.command || !authorization?.receipt
+        || authorization.command.installationId === installationId) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'missing durable server reclaim authorization')
+    }
+    const directory = this._installationDirectory(authorization.command.installationId)
+    const commandRecord = this._loadCommandRecord(directory)
+    if (!sameJson(commandRecord.command, authorization.command)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'reclaim authorizing command changed')
+    const result = this._loadResult(directory, commandRecord.command)
+    const receipt = result && this._loadReceipt(directory, commandRecord.command, result)
+    if (!result || result.result.outcome !== 'SUCCEEDED' || !receipt || receipt.state !== 'SUCCEEDED'
+        || !sameJson(receipt, authorization.receipt) || !receipt.reclaimableInstallationIds.includes(installationId)) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'candidate is not authorized by the durable server reclaim receipt')
+    }
+  }
+
+  _loadAuthorizedReclaimCandidate(directory, installationId, authorization) {
+    this._requireDurableReclaimAuthorization(authorization, installationId)
+    assertRealDirectory(directory, 'platform installation registry')
+    const commandRecord = this._loadCommandRecord(directory)
+    if (commandRecord.command.installationId !== installationId) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'server-authorized reclaim registry changed')
+    const resultRecord = this._loadResult(directory, commandRecord.command)
+    const prepared = this._loadPrepared(directory, commandRecord.command)
+    if (!resultRecord || resultRecord.result?.outcome !== 'SUCCEEDED' || !prepared) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'server-authorized reclaim candidate lacks durable success and prepared proof')
+    }
+    // Validate A own receipt if present, but A receipt is not the authority to reclaim A.
+    this._loadReceipt(directory, commandRecord.command, resultRecord)
+    const targetParent = dirname(prepared.targetPath)
+    if (!samePathIdentity(pathIdentity(targetParent), prepared.targetParentIdentity) || existsSync(prepared.stagingPath)) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'server-authorized reclaim parent or staging proof changed')
+    }
+    return { command: commandRecord.command, prepared }
+  }
+
+  _assertQuotaForIncoming(command) {
+    const inventory = this._quotaInventory()
+    const markerBytes = Buffer.byteLength(`${JSON.stringify(this._marker(command), null, 2)}\n`)
+    const incomingBytes = APPROVED_PACKAGE_FILES.reduce((sum, entry) => sum + entry.size, 0) + markerBytes
+    const hardCopies = this.maxRetainedInstallationCopies + 1
+    const hardBytes = this.maxInstallationBytes || hardCopies * incomingBytes
+    const retainedBytes = inventory.reduce((sum, copy) => sum + copy.byteLength, 0)
+    if (inventory.length + 1 > hardCopies || retainedBytes + incomingBytes > hardBytes) {
+      throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, 'platform installation copy quota is exhausted without a server-authorized reclaim candidate')
+    }
+  }
+
+  _reclaimFromReceipt(receipt, currentCommand) {
+    if (receipt.state !== 'SUCCEEDED') return
+    const authorization = { receipt, command: currentCommand }
+    let inventory = this._quotaInventory(authorization)
+    for (const installationId of receipt.reclaimableInstallationIds) {
+      if (installationId === currentCommand.installationId || this.inFlight.has(installationId)) continue
+      const directory = this._installationDirectory(installationId)
+      const copy = inventory.find(entry => entry.installationId === installationId)
+      if (!copy || (!copy.targetMissing && inventory.length <= this.maxRetainedInstallationCopies)) continue
+      const candidate = this._loadAuthorizedReclaimCandidate(directory, installationId, authorization)
+      const { prepared } = candidate
+      const targetParent = dirname(prepared.targetPath)
+      if (existsSync(prepared.targetPath)) {
+        if (!this._validActivation(prepared.targetPath, candidate.command, prepared)
+            || !sameNodeIdentity(pathIdentity(prepared.targetPath), prepared.stagingIdentity)) {
+          throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'server-authorized reclaim target identity changed')
+        }
+        rmSync(prepared.targetPath, { recursive: true, force: false })
+        fsyncDirectory(targetParent)
+        if (existsSync(prepared.targetPath)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, 'platform installation target remained after reclaim')
+      }
+      if (!samePathIdentity(pathIdentity(targetParent), prepared.targetParentIdentity)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'server-authorized reclaim parent identity changed')
+      const registryIdentity = pathIdentity(directory)
+      if (!validIdentity(registryIdentity, 'directory', directory)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.CONFLICT, 'platform installation registry identity changed before reclaim')
+      rmSync(directory, { recursive: true, force: false })
+      fsyncDirectory(this.installationsDir)
+      if (existsSync(directory)) throw new PlatformSkillManagerError(PLATFORM_SKILL_FAILURE.IO_FAILED, 'platform installation registry remained after reclaim')
+      inventory = inventory.filter(entry => entry.installationId !== installationId)
     }
   }
 
@@ -990,6 +1179,7 @@ export class PlatformSkillManager {
       return this._postPersisted(directory, command, result)
     }
 
+    this._assertQuotaForIncoming(command)
     let stagingPath = ''
     let stagingIdentity = null
     try {

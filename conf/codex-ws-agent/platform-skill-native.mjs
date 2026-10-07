@@ -4,7 +4,8 @@ const TYPE = 'PLATFORM_SKILL_INSTALL'
 const ORIGIN = 'PLATFORM_PROVISIONED'
 const PAYLOAD_FIELDS = ['bindingVersion', 'challengeId', 'installationId', 'packageRef', 'packageSha256', 'schemaVersion', 'skillKey', 'skillVersion']
 const WIRE_FIELDS = ['attempt', 'causationId', 'clientId', 'commandId', 'commandType', 'correlationId', 'deliveryEpoch', 'executionEpoch', 'expiresAt', 'fencingToken', 'issuedAt', 'messageId', 'messageType', 'ownerJiacn', 'payload', 'schemaVersion', 'targetAgentId', 'taskId', 'tenantId', 'workItemId']
-const RECEIPT_FIELDS = ['agentId', 'bindingVersion', 'errorCode', 'installationId', 'origin', 'packageSha256', 'revision', 'skillKey', 'skillVersion', 'state']
+const LEGACY_RECEIPT_FIELDS = ['agentId', 'bindingVersion', 'errorCode', 'installationId', 'origin', 'packageSha256', 'revision', 'skillKey', 'skillVersion', 'state']
+const RECEIPT_FIELDS = ['agentId', 'bindingVersion', 'errorCode', 'installationId', 'origin', 'packageSha256', 'reclaimableInstallationIds', 'revision', 'skillKey', 'skillVersion', 'state']
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const id = value => typeof value === 'string' && ID.test(value)
 const SHA = /^[0-9a-f]{64}$/
@@ -147,11 +148,17 @@ export const downloadPlatformSkillPackage = async ({ wsUrl, command, runtimeScop
 }
 
 export const validatePlatformSkillReceipt = (receipt, command, runtimeScope, outcome, errorCode = null) => {
-  require(exactKeys(receipt, RECEIPT_FIELDS) && receipt.installationId === command?.installationId && receipt.agentId === runtimeScope?.agentId
-    && receipt.bindingVersion === command?.bindingVersion && receipt.skillKey === command?.skillKey && receipt.skillVersion === command?.skillVersion
-    && receipt.packageSha256 === command?.packageSha256 && receipt.origin === ORIGIN && receipt.state === outcome
-    && receipt.errorCode === errorCode && positive(receipt.revision), 'PLATFORM_SKILL_RECEIPT_UNKNOWN')
-  return Object.freeze({ ...receipt })
+  const canonical = exactKeys(receipt, LEGACY_RECEIPT_FIELDS)
+    ? { ...receipt, reclaimableInstallationIds: [] } : receipt
+  require(exactKeys(canonical, RECEIPT_FIELDS) && canonical.installationId === command?.installationId && canonical.agentId === runtimeScope?.agentId
+    && canonical.bindingVersion === command?.bindingVersion && canonical.skillKey === command?.skillKey && canonical.skillVersion === command?.skillVersion
+    && canonical.packageSha256 === command?.packageSha256 && canonical.origin === ORIGIN && canonical.state === outcome
+    && canonical.errorCode === errorCode && positive(canonical.revision)
+    && Array.isArray(canonical.reclaimableInstallationIds) && canonical.reclaimableInstallationIds.length <= 32
+    && canonical.reclaimableInstallationIds.every(value => id(value) && value !== canonical.installationId)
+    && new Set(canonical.reclaimableInstallationIds).size === canonical.reclaimableInstallationIds.length,
+    'PLATFORM_SKILL_RECEIPT_UNKNOWN')
+  return Object.freeze({ ...canonical, reclaimableInstallationIds: Object.freeze([...canonical.reclaimableInstallationIds]) })
 }
 
 /** Sends one exact persisted result. Retry policy belongs to the durable manager, never this helper. */
