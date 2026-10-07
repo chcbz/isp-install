@@ -273,7 +273,7 @@ test('offline migration creates a compressed verified backup and preserves pendi
   assert.equal((await migrateAckHighWater(restarted, { backupPath: f.backupPath })).alreadyMigrated, true)
 })
 
-for (const phase of ['backup-verified', 'checkpoint', 'counter', 'initialized', 'legacy-marker-removed']) {
+for (const phase of ['backup-verified', 'checkpoint', 'counter', 'initialized', 'legacy-marker-removed', 'legacy-cleanup-synced']) {
   test(`offline migration resumes after interruption at ${phase}`, async () => {
     const f = legacyFixture(6, true)
     let fired = false

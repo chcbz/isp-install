@@ -199,15 +199,18 @@ export async function migrateAckHighWater(outbox, { backupPath, onPhase = () => 
     for (const fileName of names) {
       const path = resolve(outbox.highWaterDir, fileName)
       fs.unlinkSync(path)
-      // Keep progress recoverable across a power loss; deletion is idempotent.
-      syncDirectory(fs, outbox.highWaterDir)
+      // The durable backup and intent cover every marker. A crash may retain
+      // any subset of these idempotent deletions; it must not require N fsyncs.
       onPhase('legacy-marker-removed')
     }
     for (const name of evidenceNames.filter(name => /^\d{20}\.json\.tmp-\d+-[0-9a-f-]+$/.test(name))) {
       const path = resolve(outbox.highWaterDir, name)
       if (!fs.lstatSync(path).isFile()) throw new Error('Invalid legacy temporary evidence')
-      fs.unlinkSync(path); syncDirectory(fs, outbox.highWaterDir)
+      fs.unlinkSync(path)
     }
+    // Publish all legacy deletions before removing their recovery intent.
+    syncDirectory(fs, outbox.highWaterDir)
+    onPhase('legacy-cleanup-synced')
     outbox._cleanupEvidenceTempsLocked()
     outbox._validateHighWaterLayoutLocked()
     fs.unlinkSync(outbox.highWaterIntentPath); syncDirectory(fs, outbox.highWaterDir)

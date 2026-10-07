@@ -623,7 +623,8 @@ Do not run the installer/restart an active deployment before planning this conve
    syncs and verifies it, then publishes a migration intent. It never overwrites an
    existing backup. The existing pending ACK bytes remain unchanged.
 4. The tool writes the new checkpoint/counter/identity, then removes only validated
-   legacy high-water markers covered by the backup, and finally removes the intent.
+   legacy high-water markers covered by the backup, synchronizes the directory once
+   for the completed deletion batch, and finally removes the intent.
    It does not change production configuration, activate a release, send ACKs, or restart
    a service. Its JSON result records the high-water, marker count and backup digest.
 5. If interrupted, keep the stopped state and rerun the **same** command/backup path.
