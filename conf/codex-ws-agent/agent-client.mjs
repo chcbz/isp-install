@@ -169,7 +169,7 @@ const RESERVED_FIELDS = [
 ]
 const INBOUND_CONTROL_TYPES = new Set([
   'connected', 'ping', 'pong', 'agent_registered', 'agent_status_updated', 'agent_status',
-  'agent_capability_index', 'protocol_error', 'error', 'task_reported', 'agent_message_saved'
+  'agent_capability_index', 'protocol_error', 'error', 'task_reported', 'agent_message_saved', 'chat_dispatch_acknowledged'
 ])
 const DISABLED_PROFILE_STATUSES = new Set(['disabled', 'inactive', 'unavailable'])
 

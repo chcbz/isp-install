@@ -23,6 +23,9 @@ const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
 const exactKeys = (value, keys) => object(value) && Object.getPrototypeOf(value) === Object.prototype &&
   Object.keys(value).length === keys.length && keys.every(key => own(value, key))
 const nonblank = value => typeof value === 'string' && value.length > 0 && value.trim() === value && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
+// INSPECT answers may legitimately contain line breaks. Keep newline/CR as visible text
+// while still rejecting NUL, tab, vertical tab, form feed, ESC and C1 controls.
+const inspectionFinalContent = value => typeof value === 'string' && value.length > 0 && value.trim() === value && !/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)
 const fail = (code, message = code) => { const error = new Error(message); error.code = code; throw error }
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const safeDecimalLength = value => DECIMAL.test(value) && BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER)
@@ -389,7 +392,7 @@ const validatePreparedInspectionFinal = ({ finalPrepared, message, typed }) => {
   if (!exactKeys(finalPrepared, keys) || finalPrepared.schemaVersion !== 1 || finalPrepared.contract !== 'juyiting-typed-inspection-final-v1' ||
       finalPrepared.authorizationId !== typed.authorizationId || finalPrepared.manifestDigest !== typed.manifestDigest ||
       finalPrepared.requestId !== message.requestId || finalPrepared.turnId !== message.turnId || finalPrepared.dispatchId !== message.dispatchId ||
-      !/^inspection_final_[a-f0-9]{64}$/.test(finalPrepared.outboundMessageId) || !nonblank(finalPrepared.content) ||
+      !/^inspection_final_[a-f0-9]{64}$/.test(finalPrepared.outboundMessageId) || !inspectionFinalContent(finalPrepared.content) ||
       !object(finalPrepared.extra) || !object(finalPrepared.result) || !DIGEST.test(finalPrepared.finalDigest) ||
       canonicalSha256(inspectionFinalPreimage(finalPrepared)) !== finalPrepared.finalDigest) fail('TYPED_INSPECTION_FINAL_PREPARED_INVALID')
   const outcome = inspectionOutcomeContract(typed).validate(finalPrepared.extra.interactionOutcome)

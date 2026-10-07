@@ -909,6 +909,7 @@ test('legacy agent status is ignored only as a non-executable control notificati
   }), true)
   assert.equal(isLegacyInboundControlFrame({ type: 'agent_capability_index', agents: [] }), true)
   assert.equal(isLegacyInboundControlFrame(finalSavedAck(durableChat(98))), true)
+  assert.equal(isLegacyInboundControlFrame({ type: 'chat_dispatch_acknowledged', dispatchId: 'dispatch_1', messageId: 'msg_1' }), true)
   assert.equal(isLegacyInboundControlFrame({ type: 'task_assigned', content: 'do it' }), false)
   assert.equal(isLegacyInboundControlFrame({ type: 'task.assign', content: 'do it' }), false)
   assert.equal(isLegacyInboundControlFrame({ type: 'codex.exec', content: 'do it' }), false)
