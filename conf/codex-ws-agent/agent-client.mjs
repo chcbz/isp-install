@@ -1871,6 +1871,8 @@ export class AckOutbox {
     this.sequencePath = resolve(this.rootDir, 'ack-sequence.json')
     this.highWaterDir = resolve(this.rootDir, 'ack-sequence-high-water')
     this.highWaterInitializedPath = resolve(this.highWaterDir, 'initialized.json')
+    this.highWaterCheckpointPath = resolve(this.highWaterDir, 'checkpoint.json')
+    this.highWaterIntentPath = resolve(this.highWaterDir, 'intent.json')
     this.lockPath = resolve(this.rootDir, 'ack-sequence.lock')
     this.lockOwnerPath = resolve(this.lockPath, 'owner.json')
     this.highWaterState = null
@@ -1902,29 +1904,29 @@ export class AckOutbox {
   }
 
   _initializeLocked() {
+    if (this.hasCorruption()) return
     const records = this._scanPendingRecords({ failOnInvalid: false })
-    const state = this._readSequenceState()
-    const highWater = this._readHighWater({ refresh: true })
-
-    if (!highWater.initialized) {
-      if (highWater.maximum > 0) {
-        this._sequenceCorruption('ACK high-water markers exist without the durable initialization marker')
+    if (this.hasCorruption()) return
+    this._assertHealthy()
+    if (this.fs.existsSync(this.highWaterIntentPath)) this._recoverIntentLocked(records)
+    if (!this.fs.existsSync(this.highWaterInitializedPath)) {
+      if (this.fs.existsSync(this.sequencePath) || records.length
+          || this.fs.existsSync(this.highWaterCheckpointPath)
+          || this.fs.readdirSync(this.highWaterDir).some(name => !['checkpoint.json', 'intent.json', 'initialized.json']
+            .some(target => name.startsWith(`${target}.tmp-`)))) {
+        this._sequenceCorruption('ACK evidence exists without the durable initialization marker')
       }
-      if (!state) {
-        if (records.length) {
-          this._sequenceCorruption('ACK sequence state is missing while pending ACK records exist')
-        }
-        this._writeSequenceState(0)
-        this._writeHighWaterInitialized()
-        return
-      }
-      this._validatePendingSequences(records, state.lastSequence)
-      if (state.lastSequence > 0) this._writeHighWaterMarker(state.lastSequence)
-      this._writeHighWaterInitialized()
-      return
+      const checkpoint = this._newCheckpoint(randomUUID(), 0, randomUUID())
+      this._writeIntent({ kind: 'bootstrap', previous: null, next: checkpoint, fileName: null, record: null })
+      this._recoverIntentLocked(records)
     }
-
-    this._validateSequenceEvidence(state, highWater, records)
+    const initialized = this._readInitialized()
+    // The new binary never runs against the per-sequence format. Conversion is
+    // an explicit, stopped-writer migration, not a second runtime code path.
+    if (initialized.formatVersion !== 2) this._migrationRequired()
+    this._validateHighWaterLayoutLocked()
+    this._validatedSequenceState(records)
+    this._cleanupEvidenceTempsLocked()
   }
 
   _withSequenceLock(operation, callback) {
@@ -2004,126 +2006,246 @@ export class AckOutbox {
     }
   }
 
-  _readSequenceState() {
-    if (!this.fs.existsSync(this.sequencePath)) return null
-    forceSecureFileMode(this.fs, this.sequencePath)
+  _migrationRequired() {
+    throw new AgentProtocolError('ACK_OUTBOX_MIGRATION_REQUIRED',
+      'ACK high-water requires explicit offline migration; stop all writers and run migrate-ack-high-water.mjs with a compressed backup path')
+  }
+
+  _sealEvidence(value) {
+    const payload = JSON.parse(JSON.stringify(value))
+    return { ...payload, digest: canonicalSha256(payload) }
+  }
+
+  _readEvidence(path) {
+    if (!this.fs.existsSync(path)) return null
+    forceSecureFileMode(this.fs, path)
     try {
-      const sequence = JSON.parse(this.fs.readFileSync(this.sequencePath, 'utf8'))
-      if (!isObject(sequence) || sequence.formatVersion !== 1
-          || !Number.isSafeInteger(sequence.lastSequence) || sequence.lastSequence < 0) {
-        throw new Error('invalid ACK outbox sequence state')
+      const value = JSON.parse(this.fs.readFileSync(path, 'utf8'))
+      if (!isObject(value)) throw new Error('expected an evidence object')
+      const { digest, ...payload } = value
+      if (typeof digest !== 'string' || digest !== canonicalSha256(payload)) {
+        throw new Error('evidence checksum mismatch')
       }
-      return sequence
+      return value
     } catch (error) {
-      this._sequenceCorruption(`Invalid ACK sequence state: ${error.message}`, this.sequencePath)
+      this._sequenceCorruption(`Invalid ACK evidence: ${error.message}`, path)
     }
   }
 
-  _writeSequenceState(lastSequence) {
-    atomicWriteJson(this.fs, this.sequencePath, { formatVersion: 1, lastSequence })
+  _newCheckpoint(storageId, lastSequence, transactionId) {
+    return this._sealEvidence({ formatVersion: 2, agentId: this.profile.agentId,
+      storageId, lastSequence, transactionId })
   }
 
-  _validateHighWaterInitializedMarker() {
-    if (!this.fs.existsSync(this.highWaterInitializedPath)) return false
+  _validateCheckpoint(checkpoint, path = '') {
+    if (!isObject(checkpoint) || checkpoint.formatVersion !== 2
+        || checkpoint.agentId !== this.profile.agentId
+        || typeof checkpoint.storageId !== 'string' || !checkpoint.storageId
+        || typeof checkpoint.transactionId !== 'string' || !checkpoint.transactionId
+        || !Number.isSafeInteger(checkpoint.lastSequence) || checkpoint.lastSequence < 0
+        || Object.keys(checkpoint).sort().join(',') !== 'agentId,digest,formatVersion,lastSequence,storageId,transactionId'
+        || checkpoint.digest !== this._sealEvidence({ ...checkpoint, digest: undefined }).digest) {
+      this._sequenceCorruption('Invalid ACK high-water checkpoint identity/shape/checksum', path)
+    }
+    return checkpoint
+  }
+
+  _readCheckpoint() {
+    const checkpoint = this._readEvidence(this.highWaterCheckpointPath)
+    if (!checkpoint) this._sequenceCorruption('ACK high-water checkpoint is missing after initialization')
+    return this._validateCheckpoint(checkpoint, this.highWaterCheckpointPath)
+  }
+
+  _readInitialized() {
+    if (!this.fs.existsSync(this.highWaterInitializedPath)) return null
     forceSecureFileMode(this.fs, this.highWaterInitializedPath)
     try {
-      const marker = JSON.parse(this.fs.readFileSync(this.highWaterInitializedPath, 'utf8'))
-      if (!isObject(marker) || marker.formatVersion !== 1 || marker.agentId !== this.profile.agentId) {
-        throw new Error('invalid ACK high-water initialization marker')
+      const value = JSON.parse(this.fs.readFileSync(this.highWaterInitializedPath, 'utf8'))
+      if (!isObject(value) || value.agentId !== this.profile.agentId) throw new Error('initialization identity mismatch')
+      if (value.formatVersion === 1) return value
+      if (value.formatVersion !== 2 || typeof value.storageId !== 'string' || !value.storageId
+          || value.digest !== this._sealEvidence({ ...value, digest: undefined }).digest
+          || Object.keys(value).sort().join(',') !== 'agentId,digest,formatVersion,storageId') {
+        throw new Error('initialization shape/checksum mismatch')
       }
-      return true
+      return value
     } catch (error) {
       this._sequenceCorruption(`Invalid ACK high-water initialization marker: ${error.message}`, this.highWaterInitializedPath)
     }
   }
 
-  _validateHighWaterMarker(fileName) {
-    const path = resolve(this.highWaterDir, fileName)
-    forceSecureFileMode(this.fs, path)
+  _writeInitialized(checkpoint) {
+    atomicWriteJson(this.fs, this.highWaterInitializedPath, this._sealEvidence({
+      formatVersion: 2, agentId: this.profile.agentId, storageId: checkpoint.storageId
+    }))
+  }
+
+  _readSequenceState() {
+    if (!this.fs.existsSync(this.sequencePath)) return null
+    forceSecureFileMode(this.fs, this.sequencePath)
     try {
-      const match = /^(\d{20})\.json$/.exec(fileName)
-      if (!match) throw new Error('invalid ACK high-water marker filename')
-      const queueSequence = Number(match[1])
-      const marker = JSON.parse(this.fs.readFileSync(path, 'utf8'))
-      if (!Number.isSafeInteger(queueSequence) || queueSequence <= 0
-          || !isObject(marker) || marker.formatVersion !== 1
-          || marker.queueSequence !== queueSequence || marker.agentId !== this.profile.agentId) {
-        throw new Error('invalid ACK high-water marker')
-      }
-      return queueSequence
+      const value = JSON.parse(this.fs.readFileSync(this.sequencePath, 'utf8'))
+      // Read v1 only to report a rollback or to validate explicit migration.
+      // It is never accepted as a live checkpoint counter.
+      if (value?.formatVersion === 1 && Number.isSafeInteger(value.lastSequence) && value.lastSequence >= 0) return value
+      return this._validateCheckpoint(value, this.sequencePath)
     } catch (error) {
-      this._sequenceCorruption(`Invalid ACK high-water evidence ${fileName}: ${error.message}`, path)
+      if (error instanceof AgentProtocolError) throw error
+      this._sequenceCorruption(`Invalid ACK sequence state: ${error.message}`, this.sequencePath)
     }
   }
 
-  _readHighWater({ refresh = false } = {}) {
-    if (!refresh && this.highWaterState) {
-      const initialized = this._validateHighWaterInitializedMarker()
-      if (initialized !== this.highWaterState.initialized) {
-        this._sequenceCorruption('ACK high-water initialization marker changed during runtime')
-      }
-      if (this.highWaterState.maximum > 0) {
-        const fileName = `${String(this.highWaterState.maximum).padStart(20, '0')}.json`
-        if (!this.fs.existsSync(resolve(this.highWaterDir, fileName))) {
-          this._sequenceCorruption(`ACK high-water sequence ${this.highWaterState.maximum} disappeared during runtime`)
-        }
-        this._validateHighWaterMarker(fileName)
-      }
-      return { ...this.highWaterState }
+  _validateSequenceEvidence(state, checkpoint, records) {
+    if (!state) this._sequenceCorruption('ACK sequence state is missing after high-water initialization')
+    if (state.digest !== checkpoint.digest || state.formatVersion !== 2) {
+      this._sequenceCorruption(
+        `ACK sequence rollback/conflict: state=${state.lastSequence}, durableHighWater=${checkpoint.lastSequence}`,
+        this.sequencePath)
     }
-
-    const initialized = this._validateHighWaterInitializedMarker()
-    let maximum = 0
-    for (const fileName of this.fs.readdirSync(this.highWaterDir)) {
-      if (fileName === 'initialized.json' || !fileName.endsWith('.json')) continue
-      maximum = Math.max(maximum, this._validateHighWaterMarker(fileName))
-    }
-    this.highWaterState = { initialized, maximum }
-    return { ...this.highWaterState }
+    this._validatePendingSequences(records, checkpoint.lastSequence)
+    return checkpoint
   }
 
   _validatedSequenceState(records) {
+    // Recovery, health checks and all evidence comparisons share the existing
+    // cross-process lock. Never trust an instance's pre-lock cache.
+    this._assertHealthy()
+    if (this.fs.existsSync(this.highWaterIntentPath)) this._recoverIntentLocked(records)
+    const initialized = this._readInitialized()
+    if (!initialized) this._sequenceCorruption('ACK high-water initialization marker disappeared')
+    if (initialized.formatVersion !== 2) this._migrationRequired()
+    const checkpoint = this._readCheckpoint()
+    if (initialized.storageId !== checkpoint.storageId
+        || (this.highWaterState && (this.highWaterState.storageId !== checkpoint.storageId
+          || checkpoint.lastSequence < this.highWaterState.lastSequence
+          || (checkpoint.lastSequence === this.highWaterState.lastSequence && checkpoint.digest !== this.highWaterState.digest)))) {
+      this._sequenceCorruption('ACK high-water checkpoint rollback/conflict or storage identity changed')
+    }
+    const result = this._validateSequenceEvidence(this._readSequenceState(), checkpoint, records)
+    this.highWaterState = checkpoint
+    return result
+  }
+
+  _writeIntent(payload) {
+    if (this.fs.existsSync(this.highWaterIntentPath)) this._sequenceCorruption('ACK transaction intent already exists')
+    atomicWriteJson(this.fs, this.highWaterIntentPath,
+      this._sealEvidence({ formatVersion: 2, agentId: this.profile.agentId, ...payload }))
+  }
+
+  _readIntent() {
+    const intent = this._readEvidence(this.highWaterIntentPath)
+    if (!intent || intent.formatVersion !== 2 || intent.agentId !== this.profile.agentId
+        || !['enqueue', 'bootstrap', 'migrate'].includes(intent.kind)) {
+      this._sequenceCorruption('Invalid ACK recovery intent identity/operation', this.highWaterIntentPath)
+    }
+    const expectedKeys = ['agentId', 'digest', 'fileName', 'formatVersion', 'kind', 'next', 'previous', 'record']
+    if (intent.kind === 'migrate') expectedKeys.push('backupDigest', 'backupPath')
+    if (Object.keys(intent).sort().join(',') !== expectedKeys.sort().join(',')
+        || (intent.kind === 'migrate' && (typeof intent.backupPath !== 'string' || !intent.backupPath
+          || typeof intent.backupDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(intent.backupDigest)))) {
+      this._sequenceCorruption('Invalid ACK recovery intent shape', this.highWaterIntentPath)
+    }
+    this._validateCheckpoint(intent.next, this.highWaterIntentPath)
+    if (intent.kind === 'enqueue') {
+      this._validateCheckpoint(intent.previous, this.highWaterIntentPath)
+      if (intent.next.storageId !== intent.previous.storageId
+          || intent.next.transactionId === intent.previous.transactionId
+          || intent.next.lastSequence !== intent.previous.lastSequence + 1
+          || typeof intent.fileName !== 'string'
+          || !/^\d{20}-[A-Za-z0-9_-]+\.json$/.test(intent.fileName)
+          || Number(intent.fileName.slice(0, 20)) !== intent.next.lastSequence) {
+        this._sequenceCorruption('Invalid ACK enqueue intent sequence/path', this.highWaterIntentPath)
+      }
+      try { this._validateRecord(intent.record) } catch (error) {
+        this._sequenceCorruption(`Invalid ACK recovery payload: ${error.message}`, this.highWaterIntentPath)
+      }
+      if (intent.record.queueSequence !== intent.next.lastSequence) {
+        this._sequenceCorruption('ACK recovery payload/sequence conflict', this.highWaterIntentPath)
+      }
+    } else if (intent.previous !== null || intent.fileName !== null || intent.record !== null
+        || (intent.kind === 'bootstrap' && intent.next.lastSequence !== 0)) {
+      this._sequenceCorruption('Invalid ACK initialization intent', this.highWaterIntentPath)
+    }
+    return intent
+  }
+
+  _recoverIntentLocked(records) {
+    this._assertHealthy()
+    const intent = this._readIntent()
+    if (intent.kind === 'migrate') this._migrationRequired()
+    const initialized = this._readInitialized()
+    const checkpoint = this._readEvidence(this.highWaterCheckpointPath)
     const state = this._readSequenceState()
-    const refresh = !this.highWaterState || state?.lastSequence !== this.highWaterState.maximum
-    return this._validateSequenceEvidence(state, this._readHighWater({ refresh }), records)
+    if (checkpoint) this._validateCheckpoint(checkpoint, this.highWaterCheckpointPath)
+    const matches = (value, expected) => expected === null ? value === null : value?.digest === expected.digest
+    if (intent.kind === 'enqueue') {
+      if (initialized?.formatVersion !== 2 || initialized.storageId !== intent.next.storageId
+          || (this.highWaterState && (this.highWaterState.storageId !== intent.next.storageId
+            || intent.next.lastSequence < this.highWaterState.lastSequence
+            || (intent.next.lastSequence === this.highWaterState.lastSequence && intent.next.digest !== this.highWaterState.digest)))) {
+        this._sequenceCorruption('ACK recovery intent conflicts with storage identity/high-water')
+      }
+      const committed = matches(state, intent.next)
+      const checkpointAdvanced = matches(checkpoint, intent.next)
+      if ((!matches(checkpoint, intent.previous) && !checkpointAdvanced)
+          || (!matches(state, intent.previous) && !committed)
+          || (committed && !checkpointAdvanced)) {
+        this._sequenceCorruption('ACK recovery intent conflicts with checkpoint/counter')
+      }
+      this._validatePendingSequences(records, checkpoint.lastSequence)
+      const existing = records.find(item => item.fileName === intent.fileName)
+      const sameSequence = records.find(item => item.record.queueSequence === intent.next.lastSequence)
+      if ((sameSequence && sameSequence.fileName !== intent.fileName)
+          || (existing && canonicalSha256(existing.record) !== canonicalSha256(intent.record))
+          || (!checkpointAdvanced && existing)) {
+        this._sequenceCorruption('ACK recovery intent conflicts with pending payload/order')
+      }
+      if (!committed) {
+        if (!checkpointAdvanced) atomicWriteJson(this.fs, this.highWaterCheckpointPath, intent.next)
+        if (!existing) {
+          atomicWriteJson(this.fs, resolve(this.acksDir, intent.fileName), intent.record)
+          records.push({ fileName: intent.fileName, path: resolve(this.acksDir, intent.fileName), record: intent.record })
+        }
+        // This independent counter is the COMMIT fence: the checkpoint and ACK
+        // must both be durable before it advances. A leftover/restored intent
+        // with this fence must NEVER recreate an ACK that was already dequeued.
+        atomicWriteJson(this.fs, this.sequencePath, intent.next)
+      }
+    } else {
+      // Bootstrap recovery accepts only the exact prefix of our write order.
+      if (records.length || (initialized && (initialized.formatVersion !== 2 || initialized.storageId !== intent.next.storageId))
+          || (checkpoint && !matches(checkpoint, intent.next)) || (state && !matches(state, intent.next))
+          || (state && !checkpoint) || (initialized && (!state || !checkpoint))) {
+        this._sequenceCorruption('ACK bootstrap intent conflicts with existing evidence')
+      }
+      if (!checkpoint) atomicWriteJson(this.fs, this.highWaterCheckpointPath, intent.next)
+      if (!state) atomicWriteJson(this.fs, this.sequencePath, intent.next)
+      if (!initialized) this._writeInitialized(intent.next)
+    }
+    durableUnlink(this.fs, this.highWaterIntentPath)
+    this.highWaterState = intent.next
   }
 
-  _writeHighWaterInitialized() {
-    if (this.fs.existsSync(this.highWaterInitializedPath)) {
-      this._sequenceCorruption('ACK high-water initialization marker already exists during bootstrap')
+  _validateHighWaterLayoutLocked() {
+    const targets = ['checkpoint.json', 'intent.json', 'initialized.json']
+    for (const fileName of this.fs.readdirSync(this.highWaterDir)) {
+      if (!targets.some(target => fileName === target || fileName.startsWith(`${target}.tmp-`))) {
+        this._sequenceCorruption(`Unexpected ACK high-water evidence: ${fileName}`, resolve(this.highWaterDir, fileName))
+      }
     }
-    atomicWriteJson(this.fs, this.highWaterInitializedPath, {
-      formatVersion: 1,
-      agentId: this.profile.agentId,
-      initializedAt: this.now()
-    })
-    this.highWaterState = { initialized: true, maximum: this.highWaterState?.maximum || 0 }
   }
 
-  _writeHighWaterMarker(queueSequence) {
-    const path = resolve(this.highWaterDir, `${String(queueSequence).padStart(20, '0')}.json`)
-    if (this.fs.existsSync(path)) {
-      this._sequenceCorruption(`ACK high-water sequence ${queueSequence} already exists`, path)
+  _cleanupEvidenceTempsLocked() {
+    for (const [directory, names] of [[this.highWaterDir, ['checkpoint.json', 'intent.json', 'initialized.json']],
+      [this.rootDir, ['ack-sequence.json']]]) {
+      for (const fileName of this.fs.readdirSync(directory)) {
+        if (names.some(name => fileName.startsWith(`${name}.tmp-`))) {
+          const path = resolve(directory, fileName)
+          forceSecureFileMode(this.fs, path)
+          durableUnlink(this.fs, path)
+        }
+      }
     }
-    atomicWriteJson(this.fs, path, {
-      formatVersion: 1,
-      agentId: this.profile.agentId,
-      queueSequence,
-      allocatedAt: this.now()
-    })
-    this.highWaterState = { initialized: this.highWaterState?.initialized || false, maximum: queueSequence }
-  }
-
-  _validateSequenceEvidence(state, highWater, records) {
-    if (!state) this._sequenceCorruption('ACK sequence state is missing after high-water initialization')
-    if (state.lastSequence !== highWater.maximum) {
-      this._sequenceCorruption(
-        `ACK sequence rollback/conflict: state=${state.lastSequence}, durableHighWater=${highWater.maximum}`,
-        this.sequencePath
-      )
-    }
-    this._validatePendingSequences(records, highWater.maximum)
-    return state
   }
 
   _validatePendingSequences(records, highWater) {
@@ -2232,6 +2354,10 @@ export class AckOutbox {
     } catch (error) {
       throw new Error(`invalid ACK outbox JSON: ${error.message}`)
     }
+    return this._validateRecord(record)
+  }
+
+  _validateRecord(record) {
     if (!isObject(record) || record.formatVersion !== 1 || !isObject(record.envelope)) {
       throw new Error('invalid ACK outbox record shape')
     }
@@ -2275,9 +2401,11 @@ export class AckOutbox {
       createdAt: now,
       attempts: 0
     }
-    this._writeHighWaterMarker(queueSequence)
-    this._writeSequenceState(queueSequence)
-    atomicWriteJson(this.fs, resolve(this.acksDir, fileName), record)
+    this._validateRecord(record)
+    if (!/^\d{20}-[A-Za-z0-9_-]+\.json$/.test(fileName)) throw new Error('invalid ACK record filename')
+    const checkpoint = this._newCheckpoint(state.storageId, queueSequence, randomUUID())
+    this._writeIntent({ kind: 'enqueue', previous: state, next: checkpoint, fileName, record })
+    this._recoverIntentLocked(records)
     return { fileName, record }
   }
 

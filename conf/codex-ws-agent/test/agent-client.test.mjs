@@ -2212,7 +2212,7 @@ test('enqueue rechecks durable quarantine after waiting for the sequence lock', 
   const rootDir = temporaryDirectory()
   const { waiting, barrierRuns } = prepareAckQuarantineLockRace(rootDir)
   const sequenceBefore = JSON.parse(readFileSync(waiting.sequencePath, 'utf8')).lastSequence
-  const highWaterBefore = readdirSync(waiting.highWaterDir).filter(name => /^\d{20}\.json$/.test(name)).length
+  const highWaterBefore = readFileSync(waiting.highWaterCheckpointPath, 'utf8')
 
   assert.throws(
     () => waiting.enqueue(buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'quarantine-race' }), { kind: 'none' }),
@@ -2221,7 +2221,7 @@ test('enqueue rechecks durable quarantine after waiting for the sequence lock', 
 
   assert.equal(barrierRuns(), 1)
   assert.equal(JSON.parse(readFileSync(waiting.sequencePath, 'utf8')).lastSequence, sequenceBefore)
-  assert.equal(readdirSync(waiting.highWaterDir).filter(name => /^\d{20}\.json$/.test(name)).length, highWaterBefore)
+  assert.equal(readFileSync(waiting.highWaterCheckpointPath, 'utf8'), highWaterBefore)
 })
 
 test('replay rechecks durable quarantine after lock wait and sends nothing', () => {
@@ -3523,7 +3523,7 @@ test('non-opt-in command types do not create execution reports', async () => {
   assert.equal(outbox.pendingReports().length, 0)
 })
 
-test('ACK high-water history is fully verified once and only the durable tip is reread during runtime', () => {
+test('ACK checkpoint verification is bounded at startup and during runtime', () => {
   const rootDir = temporaryDirectory()
   const storageRoot = profileStorageRoot(rootDir)
   const writer = new AckOutbox({ rootDir: storageRoot, profile })
@@ -3548,7 +3548,8 @@ test('ACK high-water history is fully verified once and only the durable tip is 
     }
   })
   observer.initialize()
-  assert.ok(highWaterReads >= 33, 'startup must verify the complete immutable history')
+  assert.equal(highWaterReads, 3, 'startup reads initialization and checkpoint, not per-sequence history')
+  assert.deepEqual(readdirSync(observer.highWaterDir).sort(), ['checkpoint.json', 'initialized.json'])
 
   highWaterReads = 0
   const queued = observer.enqueue(
@@ -3558,10 +3559,10 @@ test('ACK high-water history is fully verified once and only the durable tip is 
   observer.pendingEnvelopes()
   observer.dequeue(queued.fileName)
 
-  assert.ok(highWaterReads <= 4, `runtime ACK operations must read only the durable tip, got ${highWaterReads} high-water reads`)
+  assert.ok(highWaterReads <= 8, `runtime ACK operations must read bounded evidence, got ${highWaterReads} high-water reads`)
 })
 
-test('ACK high-water replay verifies immutable secure markers without fsyncing each file', () => {
+test('ACK checkpoint verification repairs secure modes without scanning allocation history', () => {
   const rootDir = temporaryDirectory()
   const storageRoot = profileStorageRoot(rootDir)
   const writer = new AckOutbox({ rootDir: storageRoot, profile })
@@ -3587,7 +3588,7 @@ test('ACK high-water replay verifies immutable secure markers without fsyncing e
 
   assert.ok(fsyncCalls < 25, `secure immutable high-water verification must remain O(1), got ${fsyncCalls} fsync calls`)
 
-  const marker = resolve(observer.highWaterDir, '00000000000000000048.json')
+  const marker = observer.highWaterCheckpointPath
   chmodSync(marker, 0o644)
   const repairingObserver = new AckOutbox({ rootDir: storageRoot, profile })
   repairingObserver.initialize()

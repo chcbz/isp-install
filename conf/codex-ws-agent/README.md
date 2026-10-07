@@ -568,3 +568,83 @@ is deleted, and the receipt grants no API authority. The current start lease/inb
 cannot reclaim a provider-started execution. A separately authorized result-only
 recovery contract is required for retransmission after restart or lease expiry.
 Images deleted by older clients cannot be recreated from the claim or receipt.
+
+## ACK high-water checkpoints (format 2)
+
+The ACK queue remains file-backed, strictly FIFO and protected by the existing
+cross-process sequence lock. Sending stops at the first unsuccessful ACK; durable
+quarantine prevents every instance from allocating or sending further ACKs.
+
+High-water evidence no longer creates a file for every allocated sequence:
+
+- `ack-sequence-high-water/initialized.json`: private, checksummed Agent/storage identity.
+- `ack-sequence-high-water/checkpoint.json`: independent, checksummed high-water witness.
+- `ack-sequence.json`: counter/commit fence, which must match the witness exactly.
+- `ack-sequence-high-water/intent.json`: at most one active transaction, removed durably after commit.
+
+An enqueue holds the existing lock throughout: validate health/evidence → persist
+an intent containing the exact ACK and old/new checkpoints → persist the new
+witness → persist the ACK → advance the independent counter/commit fence → remove
+the intent. Every file publication fsyncs its contents and containing directory.
+Only exact reachable transaction prefixes are recovered. Missing or inconsistent
+evidence is quarantined; there is no “take the maximum” or old-checkpoint fallback.
+A leftover/restored committed intent does **not** recreate a dequeued ACK.
+Checksums detect integrity faults, not adversarial rewriting or authenticated history.
+
+Healthy high-water storage retains two small files, plus the counter outside that
+directory; space no longer grows with the number of already-sent ACKs. Actual pending
+ACKs, quarantine and superseded records have separate lifecycles and are not purged.
+Secure temporary evidence left by interrupted writes is cleaned under the lock after
+successful initialization. Startup/runtime checks read fixed-size high-water evidence;
+existing pending-queue scans remain proportional to the actual pending ACK count.
+
+### Explicit offline migration
+
+Format 1 is not a supported runtime mode. A new binary reports
+`ACK_OUTBOX_MIGRATION_REQUIRED` until its profile has been explicitly converted.
+Do not run the installer/restart an active deployment before planning this conversion.
+
+1. Identify the exact profile storage root and Agent identity. Drain/stop **all** its
+   writers under the release's maintenance authorization; do not hot-reload a busy
+   profile or stop a foreign service. A stale lock is never stolen: reconcile its
+   exact owner separately before migration.
+2. Run the migration from the pinned new release with a unique backup path **outside**
+   the profile storage root. Replace every placeholder with an authorized target:
+
+   ```bash
+   node /absolute/path/to/new-release/migrate-ack-high-water.mjs \
+     --root-dir /absolute/path/to/stopped-profile-storage \
+     --agent-id '<exact-agent-id>' \
+     --backup-path /home/isp/baks/ack-high-water/<profile>-<release>.jsonl.gz
+   ```
+
+3. The tool validates all legacy markers, identity, counter, pending filenames and
+   duplicate/future sequences. It streams a compressed complete high-water backup,
+   syncs and verifies it, then publishes a migration intent. It never overwrites an
+   existing backup. The existing pending ACK bytes remain unchanged.
+4. The tool writes the new checkpoint/counter/identity, then removes only validated
+   legacy high-water markers covered by the backup, and finally removes the intent.
+   It does not change production configuration, activate a release, send ACKs, or restart
+   a service. Its JSON result records the high-water, marker count and backup digest.
+5. If interrupted, keep the stopped state and rerun the **same** command/backup path.
+   Runtime refuses an unfinished migration; the offline tool verifies the archive and
+   exact commit/cleanup prefix before resuming. Never manually delete the intent or
+   repair a disagreement by choosing the highest value.
+6. After a successful migration, verify the exact new release/profile, empty intent,
+   matching counter/witness and pending FIFO before authorized activation. Do not
+   restart an older binary against format 2. Restoring a backup requires a separate
+   stopped-writer recovery plan covering both code and complete related runtime state;
+   never restore the counter alone. Backup retention/offloading/deletion is a separate
+   authorized operation.
+
+Like the old per-sequence format, local evidence cannot detect a coordinated rollback
+of the entire storage to a coherent earlier snapshot after process restart. That
+stronger guarantee requires an independent trusted witness (for example on the server).
+An initialized instance does reject a rollback relative to its observed high-water.
+
+Targeted regression command (disposable fixtures only):
+
+```bash
+node --test /absolute/path/to/source/conf/codex-ws-agent/test/ack-checkpoint.test.mjs \
+  /absolute/path/to/source/conf/codex-ws-agent/test/agent-client.test.mjs
+```

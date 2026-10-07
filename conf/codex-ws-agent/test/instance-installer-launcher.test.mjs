@@ -204,7 +204,7 @@ const appHome = (fixture, instance) => resolve(fixture.instanceRoot, instance)
 const manifestMap = releaseRoot => new Map(readFileSync(resolve(releaseRoot, 'release-manifest.sha256'), 'utf8')
   .trim().split('\n').map(line => [line.slice(66), line.slice(0, 64)]))
 
-test('two explicit instances install isolated roots and preserve the fixed 56-file release proof', () => {
+test('two explicit instances install isolated roots and preserve the exact release payload proof', () => {
   const fixture = prepareFixture()
   try {
     const alpha = runInstaller(fixture, 'local-a', { extraEnv: { START_CODEX_WS_AGENT: 'y' } })
@@ -245,7 +245,10 @@ test('two explicit instances install isolated roots and preserve the fixed 56-fi
       }
       const releaseRoot = resolve(home, readlinkSync(resolve(home, 'current')))
       const manifest = manifestMap(releaseRoot)
-      assert.equal(manifest.size, 56)
+      const payloadSource = readFileSync(installer, 'utf8').match(/RELEASE_PAYLOAD=\(\n([\s\S]*?)\n\)/)[1]
+      const expectedPayload = payloadSource.split('\n').map(line => line.match(/^\s+"([^"]+)"$/)[1])
+      assert.deepEqual([...manifest.keys()].sort(), expectedPayload.sort())
+      assert.equal(manifest.get('migrate-ack-high-water.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/migrate-ack-high-water.mjs')))
       assert.equal(manifest.get('controlled-image-delivery-retention-v3.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/controlled-image-delivery-retention-v3.mjs')))
       for (const [relative, digest] of manifest) assert.equal(sha256(resolve(releaseRoot, relative)), digest, relative)
       // Collation uses a stub validator; independently close every release-local import.
@@ -263,7 +266,7 @@ test('two explicit instances install isolated roots and preserve the fixed 56-fi
         }
       }
       const provenance = JSON.parse(readFileSync(resolve(releaseRoot, 'release-provenance.json'), 'utf8'))
-      assert.equal(provenance.payloadCount, 56)
+      assert.equal(provenance.payloadCount, expectedPayload.length)
       assert.equal(provenance.sourceCommit, 'a'.repeat(40))
       assert.equal(provenance.sourceTree, 'b'.repeat(40))
       assert.equal(provenance.payloadManifestSha256, sha256(resolve(releaseRoot, 'release-manifest.sha256')))
