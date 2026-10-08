@@ -2867,6 +2867,12 @@ export class AgentMessageProcessor {
             || entry.status === LEDGER_STATUS.RECOVERY_REQUIRED && item.record.e05ResultMaterial && e05ReassignmentBinding(this.profile, item.normalized)) this._reconcileCompletedRecord(item)
         else if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry.status)) {
           throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Completed inbox record conflicts with ledger status ${entry.status} for ${commandId}`)
+        } else if (this.profile.runtimeIdentity && item.record.e05ResultMaterial && e05ReassignmentBinding(this.profile, item.normalized)
+            && this.ledger.runtimeAckCommit(commandId, item.normalized.messageId)?.status !== entry.status
+            && !this.ackOutbox?.pendingEnvelopes().some(head => head.envelope.commandId === commandId && head.envelope.ackStatus === entry.status)) {
+          // Crash after confirmed business result + local terminal ledger, but
+          // before ACK enqueue: reconstruct from the SAME completed checkpoint.
+          this._emitAck(entry.status, { ...this._commandMeta(item.normalized), commandId, outcome: entry.outcome })
         }
         continue
       }

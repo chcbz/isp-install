@@ -4355,3 +4355,26 @@ test('E05 immutable material cannot be replaced after original checkpoint persis
     assert.equal(JSON.stringify(item.record).includes(leaseToken), false)
   } finally { runtime.processor.stop() }
 })
+
+test('E05 crash after terminal ledger before HTTP ACK enqueue reconstructs from sole completed checkpoint', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const selected = e05Profile(); const raw = e05Fixture(); const native = e05OfflineNative({ lostResult: true, readStatus: 409 })
+  const runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint,
+    nativeFetch: native.fetch, apiOrigin: 'https://api.example.test', runCodexFn: async () => ({ status: 'completed', output: 'original' }) }) })
+  await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); runtime.processor.stop()
+  const item = runtime.inbox.commandStateIndex().get(raw.commandId)[0]
+  const outcome = validateE05Result(e05Binding(), item.record.e05ResultMaterial, native.result())
+  runtime.inbox.markCompleted(item, outcome)
+  runtime.ledger.markReconciledOutcome(raw.commandId, outcome, 'E05_HTTP_ORIGINAL_RESULT')
+  assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+  assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'STARTED')
+  const statuses = []
+  const restarted = unifiedCheckpoint({ root: runtime.root, selectedProfile: selected, run: () => assert.fail('no model rerun'),
+    ack: async (_c, status, version) => { statuses.push(status); assert.equal(version, 2); return { kind: 'ADVANCED', status, deliveryVersion: 3 } } })
+  try {
+    await restarted.processor.runtimeAckTail
+    assert.deepEqual(statuses, ['SUCCEEDED']); assert.equal(restarted.processor.failClosedError, null)
+    assert.equal(restarted.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'SUCCEEDED')
+    assert.equal(restarted.outbox.pendingEnvelopes().length, 0)
+  } finally { restarted.processor.stop() }
+})
