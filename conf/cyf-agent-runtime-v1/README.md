@@ -13,6 +13,20 @@ and release-local Python delivery tools. It neither enables services nor adopts,
 rewrites, enrolls or deletes existing Agent state. Python still needs a compatible
 target ABI/stdlib; mocked installer tests do not prove clean-target installation.
 
+The current clean-target acceptance candidate targets **Python 3.11.13**.
+`Pillow==10.4.0` and `reportlab==3.6.13` have published cp311/Linux x86_64
+wheels matching the inspected tool tags; the previous Pillow 8.4.0 source build
+actually failed because JPEG headers/libraries were absent. Wheel metadata is
+not installation, ABI/API or six-format acceptance evidence: the new candidate
+still requires the full isolated install/import, relocation and PNG/JPEG/PDF/
+DOCX/XLSX/PPTX create/validate/reopen checks. Other four direct pins remain
+unchanged; these six pins are not a full transitive dependency lock.
+`python-docx==0.8.11` remains a permitted pure-Python source distribution; do
+not add blanket binary-only installation, borrow host packages or install host
+JPEG/compiler dependencies to bypass the private artifact checks. The existing
+private `pip<22` bootstrap, Node pin and installer are unchanged. No compatibility
+PASS, interpreter upgrade or production activation is implied by this source fix.
+
 Configuration lives **outside** the artifact. A host config has exactly:
 
 ```json
