@@ -281,7 +281,7 @@ export async function validateExecutionPayload(root, { dependencies = true, tool
       if (!path.startsWith('node_modules/') || expected.link || !expected.integrity) throw payloadError('RUNTIME_DEPENDENCY_LOCK_INVALID');
       const packagePath = resolve(root, path, 'package.json');
       if (await realpath(packagePath) !== packagePath || !(await lstat(packagePath)).isFile()) throw payloadError('RUNTIME_DEPENDENCY_PATH_UNSAFE');
-      const installed = JSON.parse(await readFile(packagePath, 'utf8')); 
+      const installed = JSON.parse(await readFile(packagePath, 'utf8'));
       if (installed.version !== expected.version) throw payloadError('RUNTIME_DEPENDENCY_VERSION_MISMATCH');
     }
   }
