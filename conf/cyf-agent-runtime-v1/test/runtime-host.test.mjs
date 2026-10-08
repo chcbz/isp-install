@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -740,4 +741,235 @@ print('PPTX stdlib predicate regression: 8 assertions PASS; real reopen NOT_RUN'
 `;
   const output = execFileSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', check, resolve(engineSource, 'toolchain/delivery_tool.py'), REOPEN], { encoding: 'utf8' });
   assert.match(output, /8 assertions PASS; real reopen NOT_RUN/);
+});
+
+// Consumer units use the exact FIXED SOURCE as static git blobs, and a
+// hand-written SYNTHETIC target. No installer, Node/Python dependency install,
+// Runtime execution, Java/HTTP/DB/UR04 or C1-C4 acceptance is run locally.
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+async function consumerFixture(t) {
+  const module = await import('./clean-target-install.acceptance.mjs');
+  const owner = await mkdtemp(resolve(tmpdir(), 'ur01-consumer-unit-'));
+  t.after(() => rm(owner, { recursive: true, force: true }));
+  const root = resolve(owner, 'exclusive-root'); await mkdir(root, { mode: 0o700 });
+  const archive = resolve(root, 'static-fixed-source.tar'); const archiveFd = await open(archive, 'wx', 0o600);
+  try { execFileSync('git', ['archive', '--format=tar', module.SOURCE.commit], { cwd: repo, stdio: ['ignore', archiveFd.fd, 'pipe'] }); }
+  finally { await archiveFd.close(); }
+  const sourceRoot = resolve(root, 'source');
+  // Original stdlib-only extractor is a static source test, not an installation.
+  execFileSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', module.EXTRACT, archive, sourceRoot, module.SOURCE.commit], { stdio: 'pipe' });
+  const { tree, files } = await module.sourceInventory(sourceRoot);
+  assert.equal(tree, module.SOURCE.tree); assert.equal(files.length, 285);
+  const target = resolve(root, 'parent/target'); await mkdir(target, { recursive: true, mode: 0o700 });
+  // Derive the exact frozen runtime list rather than another installer catalog.
+  const harnessSource = await readFile(resolve(repo, 'conf/cyf-agent-runtime-v1/test/clean-target-install.acceptance.mjs'), 'utf8');
+  const runtimeList = [...harnessSource.match(/const RUNTIME_FILES = \[([\s\S]*?)\];/)[1].matchAll(/'([^']+)'/g)].map(match => match[1]);
+  const installInputs = [...runtimeList.map(path => `conf/cyf-agent-runtime-v1/${path}`), ...EXECUTION_PAYLOAD_FILES.map(path => `conf/codex-ws-agent/${path}`)];
+  for (const input of installInputs) {
+    const relative = input.startsWith('conf/cyf-agent-runtime-v1/') ? input.replace('conf/cyf-agent-runtime-v1/', 'runtime/') : input.slice('conf/'.length);
+    const path = resolve(target, relative); await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, await readFile(resolve(sourceRoot, input)), { mode: 0o644 });
+  }
+  await mkdir(resolve(target, 'node/bin'), { recursive: true });
+  // Deliberately NOT a working Node binary; never execute it or call this a
+  // proven installation. The narrow hook unit tests real identity/hash checks.
+  const nodeBin = resolve(target, 'node/bin/node'); await writeFile(nodeBin, 'SYNTHETIC consumer unit: not Node\n', { mode: 0o700 });
+  await mkdir(resolve(target, 'codex-ws-agent/node_modules/synthetic-only'), { recursive: true });
+  const dependency = resolve(target, 'codex-ws-agent/node_modules/synthetic-only/payload'); await writeFile(dependency, 'SYNTHETIC dependency; not installed\n');
+  await symlink('node_modules', resolve(target, 'codex-ws-agent/synthetic-internal-link'));
+  const hash = async path => sha256(await readFile(path));
+  const archiveSha = await hash(archive), nodeSha = await hash(nodeBin);
+  assert.equal(archiveSha, 'f4dcd014e409b5a0e32f7419cd9500bf1f3e0022492f533736b366cd325f0106');
+  const stat = await lstat(root), targetStat = await lstat(target);
+  const receipt = { source: { ...module.SOURCE, readbackTree: tree, finalReadbackTree: tree, members: files, installInputs,
+      archive: { sha256: archiveSha, expectedSha256: archiveSha, finalSha256: archiveSha } },
+    harness: { sha256: sha256(harnessSource) }, cloudRun: 'SYNTHETIC-HOOK-UNIT-NOT-CLOUD',
+    // These are synthetic prerequisite states, NOT executions of the four lanes.
+    acceptance: Object.fromEntries(['C1', 'C2', 'C3', 'C4'].map(key => [key, { status: 'PASS' }])),
+    publication: { target, stageAbsent: true, installerSourceUnchanged: true }, targetPublished: true,
+    node: { sha256: nodeSha }, toolchain: { node: { sha256: nodeSha } },
+    privateSecret: 'unit-secret-never-in-snapshot', result: 'PASS' };
+  const context = { receipt, input: { SOURCE_ARCHIVE: archive, SOURCE_SHA256: archiveSha }, sourceRoot, root,
+    identity: { dev: stat.dev, ino: stat.ino }, target, targetIdentity: { dev: targetStat.dev, ino: targetStat.ino } };
+  return { module, owner, context, root, target, archive, nodeBin, dependency, sourceRoot, hash, receipt, harnessSource };
+}
+
+// Execute the exact existing final-source/consumer/catch/finally source slice,
+// supplying only real filesystem/hash/sourceInventory functions. The earlier
+// installation/dependency/C phases are intentionally NOT executed or mocked.
+async function consumerTail(f, consumeArtifact) {
+  const start = f.harnessSource.indexOf("    current = 'final-source-readback';");
+  const end = f.harnessSource.indexOf('\nexport function describe()', start);
+  assert.ok(start >= 0 && end > start);
+  const slice = f.harnessSource.slice(start, end).trimEnd();
+  assert.ok(slice.endsWith('}'));
+  const receiptPath = resolve(f.owner, 'synthetic-receipt.json');
+  const receiptFd = await open(receiptPath, 'wx', 0o600);
+  const context = { ...f.context, input: { ...f.context.input, RECEIPT: receiptPath },
+    consumer: f.module.createArtifactConsumer(consumeArtifact), consumeArtifact, receiptFd };
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const runTail = new AsyncFunction('context', 'sourceInventory', 'hashFile', 'lstat', 'realpath', 'rm', 'fail', 'console', `
+    const { receipt, input, sourceRoot, root, identity, target, targetIdentity, consumer, consumeArtifact, receiptFd } = context;
+    let current = 'synthetic-unit-tail'; const evidenceOwned = false; const evidence = undefined;
+    try {
+    ${slice.slice(0, -1)}
+  `);
+  const exit = await runTail(context, f.module.sourceInventory, f.hash, lstat, realpath, rm,
+    code => Object.assign(new Error(code), { code }), { log() {} });
+  await assert.rejects(lstat(f.root), cause => cause.code === 'ENOENT');
+  return { exit, receipt: JSON.parse(await readFile(receiptPath, 'utf8')) };
+}
+
+test('artifact consumer callback type rejection precedes every acceptance side effect', async t => {
+  const { acceptance } = await import('./clean-target-install.acceptance.mjs');
+  const root = await mkdtemp(resolve(tmpdir(), 'ur01-consumer-type-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const env = { CYF_CLEAN_INSTALL: '1', CYF_CLEAN_INSTALL_RECEIPT: resolve(root, 'never-created') };
+  for (const consumeArtifact of [null, false, 1, 'module/path', {}, []]) {
+    await assert.rejects(acceptance(env, { consumeArtifact }), code('CONSUMER_CALLBACK_INVALID'));
+    assert.deepEqual(await readdir(root), []);
+  }
+  await assert.rejects(acceptance({ CYF_CLEAN_INSTALL_CONSUMER: 'must-not-load-or-exec' }), code('CLOUD_OPT_IN_REQUIRED'));
+  assert.deepEqual(await readdir(root), []);
+});
+
+test('artifact consumer all-checks gate makes zero callback calls and original tail still cleans', async t => {
+  const f = await consumerFixture(t); let calls = 0;
+  const consumer = f.module.createArtifactConsumer(() => { calls++; return { status: 'PASS' }; });
+  for (const key of ['C1', 'C2', 'C3', 'C4']) for (const status of ['FAIL', 'NOT_RUN']) {
+    f.receipt.acceptance[key].status = status;
+    const attempt = f.module.createArtifactConsumer(() => { calls++; return { status: 'PASS' }; });
+    assert.equal(await attempt(f.context), false); assert.equal(f.receipt.consumer.calls, 0);
+    assert.equal(f.receipt.consumer.status, 'NOT_RUN'); assert.equal(f.receipt.consumer.code, 'CONSUMER_INSTALL_NOT_ACCEPTED');
+    f.receipt.acceptance[key].status = 'PASS';
+  }
+  f.receipt.acceptance.C4.status = 'NOT_RUN';
+  assert.equal(calls, 0); assert.equal(await consumer(f.context), false);
+  await assert.rejects(consumer(f.context), code('CONSUMER_ALREADY_INVOKED'));
+  const tail = await consumerTail(f, () => { calls++; return { status: 'PASS' }; });
+  assert.equal(tail.exit, 1); assert.equal(calls, 0); assert.equal(tail.receipt.acceptance.C4.status, 'NOT_RUN');
+  assert.equal(tail.receipt.cleanup.removed, true);
+});
+
+test('artifact consumer deep-freezes exact ordered projection and one-shot await preserves borrowed target', async t => {
+  const f = await consumerFixture(t); let entered; let finish;
+  const enteredPromise = new Promise(resolve => { entered = resolve; });
+  const wait = new Promise(resolve => { finish = resolve; }); let calls = 0;
+  const callback = async projection => {
+    calls++; assert.equal(await realpath(projection.target), f.target);
+    assert.deepEqual(Object.keys(projection), ['format', 'cloudRun', 'target', 'nodeBin', 'nodeSha256', 'source', 'harnessSha256', 'checks', 'acceptedSnapshotSha256']);
+    assert.deepEqual(Object.keys(projection.source), ['commit', 'tree', 'files', 'archiveSha256', 'finalReadbackTree']);
+    assert.deepEqual(Object.keys(projection.checks), ['C1', 'C2', 'C3', 'C4']);
+    for (const value of [projection, projection.source, projection.checks]) assert.equal(Object.isFrozen(value), true);
+    const { acceptedSnapshotSha256, ...ordered } = projection;
+    assert.equal(acceptedSnapshotSha256, sha256(JSON.stringify(ordered)));
+    assert.equal(JSON.stringify(projection).includes('unit-secret-never-in-snapshot'), false);
+    assert.throws(() => { projection.source.commit = 'tamper'; }, TypeError);
+    assert.throws(() => { projection.checks.C1 = 'FAIL'; }, TypeError);
+    entered(); await wait;
+    assert.equal(await realpath(projection.target), f.target);
+    await writeFile(resolve(projection.target, 'ur04-clean-artifact.json'), '{"syntheticUnitOnly":true}\n', { mode: 0o600 });
+    return { status: 'PASS' };
+  };
+  const tailPromise = consumerTail(f, callback);
+  await Promise.race([enteredPromise, tailPromise.then(() => { throw new Error('consumer tail finished without entering awaited callback'); })]);
+  assert.equal(await realpath(f.root), f.root); assert.equal(calls, 1);
+  finish(); const tail = await tailPromise;
+  assert.equal(tail.exit, 0); assert.equal(tail.receipt.consumer.status, 'PASS');
+  assert.equal(tail.receipt.consumer.calls, 1); assert.equal(tail.receipt.consumer.integrityReadback, 'PASS');
+  assert.equal(tail.receipt.cleanup.removed, true); assert.equal(tail.receipt.result, 'PASS');
+  // Separate factory instance explicitly exercises repeat rejection on a live
+  // synthetic target, not a background task after the finally cleanup above.
+  const g = await consumerFixture(t); const once = g.module.createArtifactConsumer(() => ({ status: 'PASS' }));
+  assert.equal(await once(g.context), true); await assert.rejects(once(g.context), code('CONSUMER_ALREADY_INVOKED'));
+});
+
+test('artifact consumer invalid/throwing/explicit failure results preserve C gates and cleanup without leaking errors', async t => {
+  const cases = [
+    [() => { throw Object.assign(new Error('secret exception payload'), { code: 'secret arbitrary code' }); }, 'CONSUMER_CALLBACK_THREW'],
+    [() => undefined, 'CONSUMER_RESULT_INVALID'],
+    [() => ({ status: 'PASS', token: 'unit-secret-never-in-snapshot' }), 'CONSUMER_RESULT_INVALID'],
+    [() => ({ status: 'FAIL', code: 'secret arbitrary code' }), 'CONSUMER_RESULT_INVALID'],
+    [() => ({ status: 'FAIL', code: 'CONSUMER_TEST_FAILED' }), 'CONSUMER_TEST_FAILED'],
+    [() => Object.defineProperty({}, 'status', { get() { throw new Error('secret getter'); } }), 'CONSUMER_RESULT_INVALID']
+  ];
+  for (const [callback, expected] of cases) {
+    const f = await consumerFixture(t); const tail = await consumerTail(f, callback);
+    assert.equal(tail.exit, 1); assert.equal(tail.receipt.consumer.status, 'FAIL');
+    assert.equal(tail.receipt.consumer.code, expected); assert.equal(tail.receipt.consumer.calls, 1);
+    assert.equal(tail.receipt.cleanup.removed, true); assert.equal(tail.receipt.result, 'FAIL');
+    assert.deepEqual(tail.receipt.acceptance, Object.fromEntries(['C1', 'C2', 'C3', 'C4'].map(key => [key, { status: 'PASS' }])));
+    assert.equal(JSON.stringify(tail.receipt.consumer).includes('secret'), false);
+  }
+});
+
+test('artifact consumer pre-gates reject changed fixed source, archive, target identity, Node and original payload', async t => {
+  const cases = [
+    ['source', 'CONSUMER_SOURCE_CHANGED'], ['archive', 'CONSUMER_SOURCE_CHANGED'],
+    ['target', 'CONSUMER_TARGET_IDENTITY_CHANGED'], ['node', 'CONSUMER_NODE_CHANGED'], ['payload', 'CONSUMER_PAYLOAD_CHANGED'],
+    ['proof', 'CONSUMER_SOURCE_NOT_FIXED'], ['harness', 'CONSUMER_HARNESS_CHANGED'], ['catalog', 'CONSUMER_PAYLOAD_CHANGED']
+  ];
+  for (const [kind, expected] of cases) {
+    const f = await consumerFixture(t); let calls = 0;
+    if (kind === 'source') await writeFile(resolve(f.sourceRoot, 'AGENTS.md'), 'changed original source');
+    if (kind === 'archive') await writeFile(f.archive, 'changed archive');
+    if (kind === 'target') { await rename(f.target, `${f.target}.original`); await mkdir(f.target); }
+    if (kind === 'node') await writeFile(f.nodeBin, 'changed synthetic Node');
+    if (kind === 'payload') await writeFile(resolve(f.target, 'runtime/agent-runtime.mjs'), 'changed original payload');
+    if (kind === 'proof') f.receipt.source.finalReadbackTree = '0'.repeat(40);
+    if (kind === 'harness') f.receipt.harness.sha256 = '0'.repeat(64);
+    if (kind === 'catalog') f.receipt.source.installInputs.pop();
+    const consume = f.module.createArtifactConsumer(() => { calls++; return { status: 'PASS' }; });
+    assert.equal(await consume(f.context), false); assert.equal(calls, 0);
+    assert.equal(f.receipt.consumer.code, expected); assert.equal(f.receipt.consumer.status, 'FAIL');
+    assert.equal(f.receipt.consumer.calls, 0); assert.equal(f.receipt.acceptance.C1.status, 'PASS');
+  }
+});
+
+test('artifact consumer post-readback catches original members, dependencies, modes, links, source and Node tampering', async t => {
+  const cases = [
+    ['payload', 'CONSUMER_PAYLOAD_CHANGED'], ['dependency', 'CONSUMER_ARTIFACT_CHANGED'],
+    ['mode', 'CONSUMER_ARTIFACT_CHANGED'], ['link', 'CONSUMER_ARTIFACT_CHANGED'],
+    ['source', 'CONSUMER_SOURCE_CHANGED'], ['archive', 'CONSUMER_SOURCE_CHANGED'],
+    ['node', 'CONSUMER_NODE_CHANGED'], ['metadata-link', 'CONSUMER_ARTIFACT_CHANGED'],
+    ['target', 'CONSUMER_TARGET_IDENTITY_CHANGED']
+  ];
+  for (const [kind, expected] of cases) {
+    const f = await consumerFixture(t);
+    const tail = await consumerTail(f, async () => {
+      if (kind === 'payload') await writeFile(resolve(f.target, 'runtime/agent-runtime.mjs'), 'tampered');
+      if (kind === 'dependency') await writeFile(f.dependency, 'tampered');
+      if (kind === 'mode') await chmod(f.dependency, 0o700);
+      if (kind === 'link') await symlink(f.owner, resolve(f.target, 'outside-link'));
+      if (kind === 'source') await writeFile(resolve(f.sourceRoot, 'AGENTS.md'), 'tampered');
+      if (kind === 'archive') await writeFile(f.archive, 'tampered');
+      if (kind === 'node') await writeFile(f.nodeBin, 'tampered');
+      if (kind === 'metadata-link') await symlink(f.dependency, resolve(f.target, 'ur04-clean-artifact.json'));
+      if (kind === 'target') { await rename(f.target, `${f.target}.moved`); await mkdir(f.target); }
+      return { status: 'PASS' };
+    });
+    assert.equal(tail.exit, 1); assert.equal(tail.receipt.consumer.status, 'FAIL');
+    assert.equal(tail.receipt.consumer.code, expected); assert.equal(tail.receipt.consumer.calls, 1);
+    assert.equal(tail.receipt.cleanup.removed, true); assert.equal(tail.receipt.acceptance.C4.status, 'PASS');
+  }
+});
+
+test('artifact consumer absent callback retains original standalone tail/cleanup and no consumer receipt', async t => {
+  const f = await consumerFixture(t); const tail = await consumerTail(f, undefined);
+  assert.equal(tail.exit, 0); assert.equal(tail.receipt.result, 'PASS');
+  assert.equal(Object.hasOwn(tail.receipt, 'consumer'), false); assert.equal(tail.receipt.cleanup.removed, true);
+  // Default helper does not even inspect a synthetic context or claim a gate.
+  assert.equal(await f.module.createArtifactConsumer(undefined)(null), true);
+});
+
+
+test('artifact consumer return schema is exact plain data with only the declared failure code whitelist', async () => {
+  const { consumerResult, CONSUMER_FAILURE_CODES } = await import('./clean-target-install.acceptance.mjs');
+  assert.deepEqual(consumerResult({ status: 'PASS' }), { status: 'PASS' });
+  for (const code of CONSUMER_FAILURE_CODES) assert.deepEqual(consumerResult({ status: 'FAIL', code }), { status: 'FAIL', code });
+  const getter = Object.defineProperty({}, 'status', { get() { throw new Error('must never read diagnostic getter'); } });
+  for (const invalid of [null, [], 'PASS', {}, { status: 'PASS', code: 'CONSUMER_TEST_FAILED' },
+    { status: 'FAIL' }, { status: 'NOT_RUN' }, { status: 'FAIL', code: 'arbitrary-secret' },
+    { status: 'PASS', [Symbol('secret')]: true }, getter, Object.create({ status: 'PASS' })]) {
+    assert.throws(() => consumerResult(invalid), code('CONSUMER_RESULT_INVALID'));
+  }
 });

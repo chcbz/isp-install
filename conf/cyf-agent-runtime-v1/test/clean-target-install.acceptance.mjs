@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, symlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, symlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { arch, release, type } from 'node:os';
@@ -92,7 +92,7 @@ export function treeDigest(entries) {
     Buffer.from(`${entry.mode} ${entry.name}\0`), Buffer.from(entry.blob, 'hex')
   ]))));
 }
-async function sourceInventory(root) {
+export async function sourceInventory(root) {
   const files = [];
   async function walk(directory, prefix = '') {
     const entries = [];
@@ -379,7 +379,168 @@ export function relocation(stage, target, stageRoot, targetRoot) {
     scope: 'venv --copies still depends on the supplied base interpreter/stdlib/system ABI; not a portability assertion' };
 }
 
-export async function acceptance(env = process.env) {
+export const CONSUMER_FAILURE_CODES = Object.freeze([
+  'CONSUMER_INPUT_REJECTED', 'CONSUMER_TEST_FAILED', 'CONSUMER_EXECUTION_FAILED'
+]);
+const CONSUMER_GUARD_CODES = new Set([
+  'CONSUMER_SOURCE_NOT_FIXED', 'CONSUMER_SOURCE_CHANGED', 'CONSUMER_TARGET_IDENTITY_CHANGED',
+  'CONSUMER_NODE_CHANGED', 'CONSUMER_PAYLOAD_CHANGED', 'CONSUMER_ARTIFACT_CHANGED',
+  'CONSUMER_PROJECTION_INVALID', 'CONSUMER_HARNESS_CHANGED'
+]);
+function deepFreeze(value) {
+  for (const child of Object.values(value)) if (child && typeof child === 'object') deepFreeze(child);
+  return Object.freeze(value);
+}
+// Exact plain data only: no arbitrary fields, getters, symbols or diagnostic
+// strings. Do not spread a callback object or reflect a thrown exception.
+export function consumerResult(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw fail('CONSUMER_RESULT_INVALID');
+    const keys = Reflect.ownKeys(value).sort();
+    const properties = Object.getOwnPropertyDescriptors(value);
+    if (keys.some(key => typeof key !== 'string' || !Object.hasOwn(properties[key], 'value'))) throw fail('CONSUMER_RESULT_INVALID');
+    if (keys.join(',') === 'status' && properties.status.value === 'PASS') return { status: 'PASS' };
+    if (keys.join(',') === 'code,status' && properties.status.value === 'FAIL'
+        && CONSUMER_FAILURE_CODES.includes(properties.code.value)) return { status: 'FAIL', code: properties.code.value };
+  } catch { /* Invalid callback data never gets serialized. */ }
+  throw fail('CONSUMER_RESULT_INVALID');
+}
+async function artifactIdentity(path, expected) {
+  const stat = await lstat(path);
+  if (!expected || !stat.isDirectory() || stat.isSymbolicLink() || await realpath(path) !== path
+      || stat.dev !== expected.dev || stat.ino !== expected.ino) throw fail('CONSUMER_TARGET_IDENTITY_CHANGED');
+}
+// Full installed file/mode/link digest for the callback's borrowed artifact.
+// Only the one UR04 provenance manifest may be newly written by the explicit
+// control wrapper. It is NOT installed payload, is never a link, and cannot
+// hide changes to any pre-existing member. No metadata is created by this hook.
+async function artifactInventory(root, { allowConsumerManifest = false } = {}) {
+  const rootStat = await lstat(root);
+  const entries = [{ path: '', type: 'directory', mode: rootStat.mode & 0o777, uid: rootStat.uid, gid: rootStat.gid, dev: rootStat.dev, ino: rootStat.ino }];
+  async function walk(directory, prefix = '') {
+    for (const name of (await readdir(directory)).sort()) {
+      const relative = memberPath(prefix + name); const path = join(directory, name); const stat = await lstat(path);
+      if (!prefix && name === 'ur04-clean-artifact.json') {
+        if (!allowConsumerManifest || !stat.isFile() || stat.isSymbolicLink() || await realpath(path) !== path) throw fail('CONSUMER_ARTIFACT_CHANGED');
+        continue;
+      }
+      const fact = { path: relative, mode: stat.mode & 0o777, uid: stat.uid, gid: stat.gid, dev: stat.dev, ino: stat.ino };
+      if (stat.isSymbolicLink()) {
+        const resolved = await realpath(path);
+        if (!inside(root, resolved)) throw fail('CONSUMER_ARTIFACT_CHANGED');
+        entries.push({ ...fact, type: 'symlink', link: await readlink(path), resolved });
+      } else if (stat.isDirectory()) {
+        if (await realpath(path) !== path) throw fail('CONSUMER_ARTIFACT_CHANGED');
+        entries.push({ ...fact, type: 'directory' }); await walk(path, `${relative}/`);
+      } else if (stat.isFile() && await realpath(path) === path) {
+        entries.push({ ...fact, type: 'file', bytes: stat.size, sha256: await hashFile(path) });
+      } else throw fail('CONSUMER_ARTIFACT_CHANGED');
+    }
+  }
+  await walk(root);
+  return digest(JSON.stringify(entries));
+}
+async function consumerSource(context) {
+  const { receipt, input, sourceRoot } = context;
+  if (receipt.source.commit !== SOURCE.commit || receipt.source.tree !== SOURCE.tree || receipt.source.files !== SOURCE.files
+      || receipt.source.readbackTree !== SOURCE.tree || receipt.source.finalReadbackTree !== SOURCE.tree
+      || receipt.source.archive.sha256 !== input.SOURCE_SHA256 || receipt.source.archive.finalSha256 !== input.SOURCE_SHA256
+      || receipt.source.archive.expectedSha256 !== input.SOURCE_SHA256) throw fail('CONSUMER_SOURCE_NOT_FIXED');
+  try {
+    if ((await sourceInventory(sourceRoot)).tree !== SOURCE.tree || await hashFile(input.SOURCE_ARCHIVE) !== input.SOURCE_SHA256) throw fail('CONSUMER_SOURCE_CHANGED');
+  } catch { throw fail('CONSUMER_SOURCE_CHANGED'); }
+}
+async function consumerTarget(context) {
+  const { receipt, root, identity, target, targetIdentity } = context;
+  if (target !== join(root, 'parent/target') || !receipt.targetPublished || receipt.publication?.target !== target
+      || !receipt.publication.stageAbsent || !receipt.publication.installerSourceUnchanged) throw fail('CONSUMER_TARGET_IDENTITY_CHANGED');
+  await artifactIdentity(root, identity); await artifactIdentity(target, targetIdentity);
+  const nodeBin = join(target, 'node/bin/node'); const nodeStat = await lstat(nodeBin);
+  if (!nodeStat.isFile() || nodeStat.isSymbolicLink() || !(nodeStat.mode & 0o111) || await realpath(nodeBin) !== nodeBin
+      || receipt.node?.sha256 !== receipt.toolchain.node.sha256 || await hashFile(nodeBin) !== receipt.node.sha256) throw fail('CONSUMER_NODE_CHANGED');
+  return nodeBin;
+}
+async function consumerPayload(context) {
+  const { receipt, sourceRoot, target } = context;
+  const adapter = await readFile(join(sourceRoot, 'conf/cyf-agent-runtime-v1/lib/execution-adapter.mjs'), 'utf8');
+  const catalog = JSON.parse(adapter.match(/export const EXECUTION_PAYLOAD_FILES = Object\.freeze\((\[[\s\S]*?\])\);/)?.[1] || 'null');
+  if (!Array.isArray(catalog) || catalog.length !== 46) throw fail('CONSUMER_PAYLOAD_CHANGED');
+  const expected = [...RUNTIME_FILES.map(path => `conf/cyf-agent-runtime-v1/${path}`), ...catalog.map(path => `conf/codex-ws-agent/${memberPath(path)}`)];
+  if (JSON.stringify(receipt.source.installInputs) !== JSON.stringify(expected)) throw fail('CONSUMER_PAYLOAD_CHANGED');
+  // Bind all original executable/config/doc members to the fixed source.
+  // Dependencies/toolchain are covered by the complete pre/post digest.
+  for (const sourcePath of expected) {
+    const relative = sourcePath.startsWith('conf/cyf-agent-runtime-v1/')
+      ? sourcePath.replace('conf/cyf-agent-runtime-v1/', 'runtime/') : sourcePath.slice('conf/'.length);
+    const path = join(target, relative); const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || await realpath(path) !== path
+        || await hashFile(path) !== await hashFile(join(sourceRoot, sourcePath))) throw fail('CONSUMER_PAYLOAD_CHANGED');
+  }
+}
+
+// Factory validates the explicit callback BEFORE input parsing or filesystem
+// effects. Its one-shot closure cannot silently retry a consumer or install.
+// Tests call this narrow lifecycle with synthetic files, NOT acceptance().
+export function createArtifactConsumer(consumeArtifact) {
+  if (consumeArtifact !== undefined && typeof consumeArtifact !== 'function') throw fail('CONSUMER_CALLBACK_INVALID');
+  let handled = false;
+  return async context => {
+    if (consumeArtifact === undefined) return true; // Preserve standalone behavior.
+    if (handled) throw fail('CONSUMER_ALREADY_INVOKED');
+    handled = true;
+    const { receipt } = context;
+    const record = receipt.consumer = { status: 'NOT_RUN', calls: 0 };
+    if (Object.keys(receipt.acceptance).sort().join(',') !== 'C1,C2,C3,C4'
+        || !['C1', 'C2', 'C3', 'C4'].every(key => receipt.acceptance[key]?.status === 'PASS')) {
+      record.code = 'CONSUMER_INSTALL_NOT_ACCEPTED'; return false;
+    }
+    try {
+      await consumerSource(context);
+      const nodeBin = await consumerTarget(context);
+      await consumerPayload(context);
+      if (await hashFile(SELF) !== receipt.harness.sha256) throw fail('CONSUMER_HARNESS_CHANGED');
+      if (!/^[A-Za-z0-9._:-]+$/.test(receipt.cloudRun) || !/^[a-f0-9]{64}$/.test(receipt.node.sha256)
+          || !/^[a-f0-9]{64}$/.test(receipt.harness.sha256)) throw fail('CONSUMER_PROJECTION_INVALID');
+      const artifactDigest = await artifactInventory(context.target);
+      // Explicit insertion order is the snapshot contract. No receipt/env/error
+      // object is copied; the final receipt hash does not exist until finally.
+      const accepted = {
+        format: 'ur01-accepted-clean-target-v1', cloudRun: receipt.cloudRun,
+        target: context.target, nodeBin, nodeSha256: receipt.node.sha256,
+        source: { commit: SOURCE.commit, tree: SOURCE.tree, files: SOURCE.files,
+          archiveSha256: context.input.SOURCE_SHA256, finalReadbackTree: receipt.source.finalReadbackTree },
+        harnessSha256: receipt.harness.sha256,
+        checks: { C1: 'PASS', C2: 'PASS', C3: 'PASS', C4: 'PASS' }
+      };
+      accepted.acceptedSnapshotSha256 = digest(JSON.stringify(accepted));
+      deepFreeze(accepted);
+      record.acceptedSnapshot = accepted;
+      record.calls = 1;
+      let result;
+      try { result = await consumeArtifact(accepted); }
+      catch { record.status = 'FAIL'; record.code = 'CONSUMER_CALLBACK_THREW'; }
+      if (record.status !== 'FAIL') {
+        try { Object.assign(record, consumerResult(result)); }
+        catch { record.status = 'FAIL'; record.code = 'CONSUMER_RESULT_INVALID'; }
+      }
+      // Even a failed/throwing callback may not silently modify source or
+      // installed members. Guard failures are independent of original C1-C4.
+      await consumerSource(context); await consumerTarget(context); await consumerPayload(context);
+      if (await artifactInventory(context.target, { allowConsumerManifest: true }) !== artifactDigest) throw fail('CONSUMER_ARTIFACT_CHANGED');
+      if (await hashFile(SELF) !== receipt.harness.sha256) throw fail('CONSUMER_HARNESS_CHANGED');
+      record.integrityReadback = 'PASS';
+      return record.status === 'PASS';
+    } catch (error) {
+      record.status = 'FAIL';
+      record.code = CONSUMER_GUARD_CODES.has(error?.code) ? error.code : 'CONSUMER_INTEGRITY_CHECK_FAILED';
+      return false;
+    }
+  };
+}
+
+export async function acceptance(env = process.env, { consumeArtifact } = {}) {
+  const consumer = createArtifactConsumer(consumeArtifact);
   const input = parseInputs(env);
   const receipt = { format: 'ur01-clean-target-install-v1', startedAt: new Date().toISOString(),
     source: { ...SOURCE, archive: { path: input.SOURCE_ARCHIVE, expectedSha256: input.SOURCE_SHA256 } },
@@ -499,8 +660,9 @@ export async function acceptance(env = process.env) {
     });
     // A published-but-invalid target remains a failure, never called rollback.
     // Probe other dimensions if publication actually happened; otherwise NOT_RUN.
-    let published = false;
-    try { const stat = await lstat(target); published = stat.isDirectory() && !stat.isSymbolicLink() && await realpath(target) === target; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    let published = false; let targetIdentity;
+    try { const stat = await lstat(target); published = stat.isDirectory() && !stat.isSymbolicLink() && await realpath(target) === target;
+      if (published) targetIdentity = { dev: stat.dev, ino: stat.ino }; } catch (error) { if (error.code !== 'ENOENT') throw error; }
     receipt.targetPublished = published;
     if (published) {
       if (!receipt.python.stage) {
@@ -560,6 +722,10 @@ export async function acceptance(env = process.env) {
     receipt.source.archive.finalSha256 = await hashFile(input.SOURCE_ARCHIVE);
     if (receipt.source.archive.finalSha256 !== input.SOURCE_SHA256) throw fail('SOURCE_ARCHIVE_CHANGED');
     receipt.result = Object.values(receipt.acceptance).every(check => check.status === 'PASS') ? 'PASS' : 'FAIL';
+    if (consumeArtifact !== undefined) {
+      current = 'artifact-consumer';
+      if (!await consumer({ receipt, input, sourceRoot, root, identity, target, targetIdentity })) receipt.result = 'FAIL';
+    }
   } catch (error) {
     receipt.failure = { stage: current, code: error.code || 'ASSERTION_OR_IO_FAILURE' };
     receipt.result = 'FAIL';
@@ -595,7 +761,11 @@ export function describe() {
     receipt: ['source.archive/member modes/blob/SHA256/tree readback', 'harness SHA256', 'cloudRun', 'os/ABI',
       'toolchain actual paths/origins/SHA256/npm distribution', 'isolation and childEnvironmentKeys (not values)',
       'steps exit/signal/sanitized log SHA256', 'publication', 'python base/stage/target/health/distributions/modules/pyvenv/shebang/relocation',
-      'node engine/ws/yauzl/lock distributions/ABI', 'delivery synthetic create/validate/reopen/hash', 'acceptance C1-C4', 'failure', 'cleanup', 'result'],
+      'node engine/ws/yauzl/lock distributions/ABI', 'delivery synthetic create/validate/reopen/hash', 'acceptance C1-C4', 'optional independent consumer/snapshot/integrityReadback', 'failure', 'cleanup', 'result'],
+    consumer: { invocation: 'acceptance(env, { consumeArtifact }) explicit function only; never env/code loading',
+      success: { status: 'PASS' }, failure: { status: 'FAIL', code: CONSUMER_FAILURE_CODES },
+      snapshot: 'ordered JSON excluding acceptedSnapshotSha256; not final receipt SHA; borrowed target until await settles',
+      cleanup: 'unchanged default and failure finally; only ur04-clean-artifact.json may be added to target' },
     boundaries: 'standalone opt-in Flow only; no services/enroll/Provider/old state/Java; no local real install; NOT_RUN is not PASS; stale stage shebang is FAIL, no automatic repair' };
 }
 export function invocationMode(args, env) {
@@ -635,6 +805,10 @@ export function selfcheck() {
   yes(() => { const target = proof('/target'); target.binEntries.push({ shebang: '#!/bin/sh', observedRoot: '/stage', observedRootReferences: 1 }); assert.equal(relocation(proof('/stage'), target, '/stage', '/target').staleLaunchers.length, 1); });
   yes(() => assert.throws(() => parseInputs({ ...env, CYF_CLEAN_INSTALL_PATH: '/tmp/node_modules/.bin' }), { code: 'INPUT_PATH_HOST_DEPENDENCY_DIRECTORY' }));
   yes(() => assert.equal(FORMATS.length, 6));
+  yes(() => assert.throws(() => createArtifactConsumer(null), { code: 'CONSUMER_CALLBACK_INVALID' }));
+  yes(() => assert.deepEqual(consumerResult({ status: 'PASS' }), { status: 'PASS' }));
+  yes(() => assert.throws(() => consumerResult({ status: 'PASS', token: 'not-allowed' }), { code: 'CONSUMER_RESULT_INVALID' }));
+  yes(() => assert.throws(() => consumerResult({ status: 'FAIL', code: 'raw-secret' }), { code: 'CONSUMER_RESULT_INVALID' }));
   yes(() => assert.equal(invocationMode([], { NODE_TEST_CONTEXT: 'child', CYF_CLEAN_INSTALL: '1' }), 'node-test-not-acceptance'));
   yes(() => assert.equal(invocationMode(['--selfcheck'], {}), 'selfcheck'));
   yes(() => assert.equal(invocationMode(['--describe'], {}), 'describe'));
