@@ -11,8 +11,8 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { arch, release, type } from 'node:os';
 
-export const SOURCE = Object.freeze({ commit: '7594fd72251d38b6e1d23a1a3cca184ae0d085e7',
-  tree: '0827ce904179862ab55648fe99b780cea94faf98', files: 285 });
+export const SOURCE = Object.freeze({ commit: 'd91ebbf436911eac20ffb70cb92192a65c742e11',
+  tree: 'b2e3f17ff57e21e2482c0fc54e71dbf4b92dbd82', files: 285 });
 const SELF = fileURLToPath(import.meta.url);
 const REQUIRED = ['BUILD_ID', 'SOURCE_ARCHIVE', 'SOURCE_SHA256', 'NODE', 'NPM_CLI', 'PYTHON',
   'BASH', 'PATH', 'TOOLCHAIN_PROVENANCE', 'PARENT', 'RECEIPT'];
@@ -120,7 +120,7 @@ export async function sourceInventory(root) {
   return { tree, files };
 }
 
-// Python 3.6-compatible stdlib-only extraction. No tar subprocess, unsafe
+// Python 3 stdlib-only extraction. No tar subprocess, unsafe
 // extractall, links, owner preservation, prefix guessing or host source copy.
 export const EXTRACT = String.raw`
 import json, os, shutil, sys, tarfile

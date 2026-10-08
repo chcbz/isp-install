@@ -779,7 +779,8 @@ async function consumerFixture(t) {
   await symlink('node_modules', resolve(target, 'codex-ws-agent/synthetic-internal-link'));
   const hash = async path => sha256(await readFile(path));
   const archiveSha = await hash(archive), nodeSha = await hash(nodeBin);
-  assert.equal(archiveSha, 'f4dcd014e409b5a0e32f7419cd9500bf1f3e0022492f533736b366cd325f0106');
+  assert.equal(archiveSha, '3c826b9e78db3bc4ca5a9eef1e9026ebeb0e34626e214a6b1b2d8bd532169b36');
+  assert.equal((await lstat(archive)).size, 3624960);
   const stat = await lstat(root), targetStat = await lstat(target);
   const receipt = { ...module.localFixtureReceipt({ BUILD_ID: 'SYNTHETIC-HOOK-LOCAL-UNIT-NOT-INSTALL', SOURCE_ARCHIVE: archive, SOURCE_SHA256: archiveSha }, sha256(harnessSource)),
     source: { ...module.SOURCE, readbackTree: tree, finalReadbackTree: tree, members: files, installInputs,
@@ -820,6 +821,19 @@ async function consumerTail(f, consumeArtifact) {
   await assert.rejects(lstat(f.root), cause => cause.code === 'ENOENT');
   return { exit, receipt: JSON.parse(await readFile(receiptPath, 'utf8')) };
 }
+
+test('current delivery dependency candidate keeps six exact pins and one fixed payload source', async () => {
+  const { SOURCE } = await import('./clean-target-install.acceptance.mjs');
+  assert.deepEqual(SOURCE, { commit: 'd91ebbf436911eac20ffb70cb92192a65c742e11',
+    tree: 'b2e3f17ff57e21e2482c0fc54e71dbf4b92dbd82', files: 285 });
+  const requirements = await readFile(resolve(engineSource, 'toolchain/requirements.txt'), 'utf8');
+  assert.deepEqual(requirements.split(/\r?\n/).filter(line => line && !line.startsWith('#')), [
+    'python-docx==0.8.11', 'python-pptx==0.6.23', 'openpyxl==3.1.3',
+    'Pillow==10.4.0', 'PyPDF2==1.28.6', 'reportlab==3.6.13'
+  ]);
+  assert.match(requirements, /Python 3\.11\.13.*not yet accepted/);
+  // Source/pin assertions only; no install, wheel import, format or ABI PASS.
+});
 
 test('local fixture identity and origin schema reject retired inputs before any acceptance IO', async t => {
   const { acceptance, parseInputs, origin, describe, invocationMode, localFixtureReceipt, SOURCE } = await import('./clean-target-install.acceptance.mjs');
@@ -951,7 +965,7 @@ test('artifact consumer pre-gates reject changed fixed source, archive, target i
   const cases = [
     ['source', 'CONSUMER_SOURCE_CHANGED'], ['archive', 'CONSUMER_SOURCE_CHANGED'],
     ['target', 'CONSUMER_TARGET_IDENTITY_CHANGED'], ['node', 'CONSUMER_NODE_CHANGED'], ['payload', 'CONSUMER_PAYLOAD_CHANGED'],
-    ['proof', 'CONSUMER_SOURCE_NOT_FIXED'], ['harness', 'CONSUMER_HARNESS_CHANGED'], ['catalog', 'CONSUMER_PAYLOAD_CHANGED'],
+    ['proof', 'CONSUMER_SOURCE_NOT_FIXED'], ['retired-payload', 'CONSUMER_SOURCE_NOT_FIXED'], ['harness', 'CONSUMER_HARNESS_CHANGED'], ['catalog', 'CONSUMER_PAYLOAD_CHANGED'],
     ['schema', 'CONSUMER_PROJECTION_INVALID'], ['buildId', 'CONSUMER_PROJECTION_INVALID'], ['legacy', 'CONSUMER_PROJECTION_INVALID']
   ];
   for (const [kind, expected] of cases) {
@@ -962,6 +976,10 @@ test('artifact consumer pre-gates reject changed fixed source, archive, target i
     if (kind === 'node') await writeFile(f.nodeBin, 'changed synthetic Node');
     if (kind === 'payload') await writeFile(resolve(f.target, 'runtime/agent-runtime.mjs'), 'changed original payload');
     if (kind === 'proof') f.receipt.source.finalReadbackTree = '0'.repeat(40);
+    if (kind === 'retired-payload') {
+      f.receipt.source.commit = '7594fd72251d38b6e1d23a1a3cca184ae0d085e7';
+      f.receipt.source.tree = '0827ce904179862ab55648fe99b780cea94faf98';
+    }
     if (kind === 'harness') f.receipt.harness.sha256 = '0'.repeat(64);
     if (kind === 'catalog') f.receipt.source.installInputs.pop();
     if (kind === 'schema') f.receipt.localBackendFixtureOnly = false;
