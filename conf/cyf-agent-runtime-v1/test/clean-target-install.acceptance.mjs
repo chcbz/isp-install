@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Standalone opt-in CLOUD acceptance. NOT a *.test.mjs and NOT an installer.
 // Local use: --selfcheck / --describe / node --check only. Never run the lane
-// locally. Main supplies its own full d8 archive and explicit toolchain in Flow.
+// locally. Main supplies the full fixed payload archive and explicit toolchain in Flow.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -11,8 +11,8 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { arch, release, type } from 'node:os';
 
-export const SOURCE = Object.freeze({ commit: 'd8fae95b3206c4af4266df1209de29651f895ccb',
-  tree: 'ee0a2b44b4d463a78e97fa6f694a784a770ed208', files: 284 });
+export const SOURCE = Object.freeze({ commit: '3746043947888a6b727be88527695d1edf3587c3',
+  tree: 'ddc3c0b3355eb77cd0be080f8fc4b734c901cab7', files: 285 });
 const SELF = fileURLToPath(import.meta.url);
 const REQUIRED = ['CLOUD_RUN', 'SOURCE_ARCHIVE', 'SOURCE_SHA256', 'NODE', 'NPM_CLI', 'PYTHON',
   'BASH', 'PATH', 'TOOLCHAIN_PROVENANCE', 'PARENT', 'RECEIPT'];
@@ -113,7 +113,7 @@ async function sourceInventory(root) {
   }
   const tree = await walk(root);
   files.sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
-  if (tree !== SOURCE.tree || files.length !== SOURCE.files) throw fail('SOURCE_NOT_FULL_FIXED_D8_TREE');
+  if (tree !== SOURCE.tree || files.length !== SOURCE.files) throw fail('SOURCE_NOT_FULL_FIXED_PAYLOAD_TREE');
   return { tree, files };
 }
 
@@ -123,7 +123,7 @@ export const EXTRACT = String.raw`
 import json, os, shutil, sys, tarfile
 archive, root, commit = sys.argv[1:]
 with tarfile.open(archive, 'r:') as tar:
-    assert tar.pax_headers.get('comment') == commit, 'ARCHIVE_COMMIT_NOT_D8'
+    assert tar.pax_headers.get('comment') == commit, 'ARCHIVE_COMMIT_NOT_FIXED_PAYLOAD'
     members = tar.getmembers()
     seen = set()
     for entry in members:
@@ -575,7 +575,7 @@ export function describe() {
     optionalEnvironment: ['CYF_CLEAN_INSTALL_NPM_REGISTRY', 'CYF_CLEAN_INSTALL_PIP_INDEX_URL'],
     toolchainProvenance: { format: 'ur01-clean-install-toolchain-v1', tools: Object.fromEntries(['node', 'npm', 'python', 'bash'].map(name => [name,
       { path: '/absolute/explicit/tool', sha256: '<64 lowercase hex>', origin: 'flow-input:tool-artifact-or-system-image' }])) },
-    archive: { format: 'uncompressed git archive --format=tar; no prefix; full fixed d8 tree',
+    archive: { format: 'uncompressed git archive --format=tar; no prefix; full fixed payload tree',
       trackedFiles: SOURCE.files, reconstructedTree: SOURCE.tree, runtimeFiles: RUNTIME_FILES.map(path => `conf/cyf-agent-runtime-v1/${path}`),
       executionCatalog: 'all 46 original EXECUTION_PAYLOAD_FILES from frozen execution-adapter.mjs' },
     receipt: ['source.archive/member modes/blob/SHA256/tree readback', 'harness SHA256', 'cloudRun', 'os/ABI',
