@@ -59,6 +59,89 @@ done
 "$STAGE/codex-ws-agent/.toolchain/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir --upgrade 'pip<22'
 "$STAGE/codex-ws-agent/.toolchain/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir \
     -r "$STAGE/codex-ws-agent/toolchain/requirements.txt"
+# Prepare generated venv launchers BEFORE observing/validating the stage. Python
+# --copies relocates the interpreter, not pip's absolute shebangs or activation.
+# Relative shell/Python trampolines work both before and after mv, including long
+# paths; no base-interpreter/stdlib portability or production compiler claim.
+"$STAGE/codex-ws-agent/.toolchain/bin/python" -I -S -B - "$STAGE" "$TARGET" <<'PY_RUNTIME_RELOCATE'
+import base64, csv, hashlib, io, os, re, shlex, sys
+stage, target = sys.argv[1:]
+venv = os.path.join(stage, 'codex-ws-agent', '.toolchain')
+bin_dir = os.path.join(venv, 'bin')
+final_venv = os.path.join(target, 'codex-ws-agent', '.toolchain')
+changed = {}
+def save(path, data):
+    # Preserve original executable/ownership modes; all paths are in our stage.
+    with open(path, 'wb') as stream: stream.write(data)
+    changed[path] = data
+
+def interpreter_name(value):
+    assert value.startswith(bin_dir + '/'), 'VENV_LAUNCHER_INTERPRETER_OUTSIDE_STAGE'
+    name = value[len(bin_dir) + 1:]
+    assert re.fullmatch(r'(?:platform-)?python[0-9.]*', name), 'VENV_LAUNCHER_INTERPRETER_INVALID'
+    assert os.path.isfile(os.path.join(bin_dir, name)), 'VENV_LAUNCHER_INTERPRETER_MISSING'
+    return name
+
+for name in sorted(os.listdir(bin_dir)):
+    path = os.path.join(bin_dir, name)
+    if os.path.islink(path):
+        assert stage not in os.readlink(path), 'VENV_STAGE_SYMLINK_NOT_RELOCATABLE'
+        continue
+    if not os.path.isfile(path): continue
+    with open(path, 'rb') as stream: data = stream.read()
+    if stage.encode() not in data: continue
+    text = data.decode('utf-8')  # Unknown binary stage references fail closed.
+    lines = text.splitlines(True)
+    if lines[0].startswith('#!' + bin_dir + '/'):
+        interpreter = interpreter_name(lines[0][2:].strip())
+        body = ''.join(lines[1:])
+    elif lines[0].strip() == '#!/bin/sh' and len(lines) >= 3:
+        match = re.fullmatch(r"'''exec' (.+) \"\$0\" \"\$@\"\n", lines[1])
+        assert match and lines[2].strip() == "' '''", 'VENV_TRAMPOLINE_NOT_RECOGNIZED'
+        arguments = shlex.split(match.group(1))
+        assert len(arguments) == 1, 'VENV_TRAMPOLINE_INTERPRETER_INVALID'
+        interpreter = interpreter_name(arguments[0])
+        body = ''.join(lines[3:])
+    elif name in ('activate', 'activate.csh', 'activate.fish'):
+        if name == 'activate':
+            pattern, assignment = r'^VIRTUAL_ENV=.*$', 'VIRTUAL_ENV=' + shlex.quote(final_venv)
+        else:
+            escaped = final_venv.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$')
+            if name == 'activate.csh':
+                escaped = escaped.replace('`', '\\`').replace('!', '\\!')
+                pattern, assignment = r'^setenv VIRTUAL_ENV .*$', 'setenv VIRTUAL_ENV "' + escaped + '"'
+            else:
+                pattern, assignment = r'^set -gx VIRTUAL_ENV .*$', 'set -gx VIRTUAL_ENV "' + escaped + '"'
+        text, count = re.subn(pattern, lambda _: assignment, text, flags=re.MULTILINE)
+        assert count == 1 and stage not in text, 'VENV_ACTIVATION_NOT_RELOCATABLE'
+        save(path, text.encode('utf-8'))
+        continue
+    else:
+        raise AssertionError('VENV_STAGE_REFERENCE_NOT_RECOGNIZED')
+    assert stage not in body, 'VENV_LAUNCHER_BODY_CONTAINS_STAGE_REFERENCE'
+    header = ("#!/bin/sh\n'''exec' \"$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)/"
+              + interpreter + "\" \"$0\" \"$@\"\n' '''\n")
+    save(path, (header + body).encode('utf-8'))
+
+# Retain installed distribution integrity for the rewritten generated scripts.
+# Metadata is finalized in the stage, so stage->target RECORD hashes stay equal.
+for directory, _, files in os.walk(os.path.join(venv, 'lib')):
+    if not directory.endswith('.dist-info') or 'RECORD' not in files: continue
+    record = os.path.join(directory, 'RECORD')
+    with open(record, newline='') as stream: rows = list(csv.reader(stream))
+    updated = False
+    for row in rows:
+        path = os.path.normpath(os.path.join(os.path.dirname(directory), row[0]))
+        if path in changed:
+            data = changed[path]
+            row[1:] = ['sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('='), str(len(data))]
+            updated = True
+    if updated:
+        output = io.StringIO(newline='')
+        csv.writer(output).writerows(rows)
+        with open(record, 'w', newline='') as stream: stream.write(output.getvalue())
+print('Runtime venv launchers prepared for publication: %d' % len(changed))
+PY_RUNTIME_RELOCATE
 "$STAGE/runtime/validate.sh" --root "$STAGE"
 # Do not let a competing operator install be overwritten between preflight and publication.
 [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ] || { echo 'Runtime target appeared during staging' >&2; exit 1; }

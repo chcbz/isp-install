@@ -254,6 +254,11 @@ image.close()
 `;
 export const REOPEN = String.raw`
 import json, sys
+def pptx_text_matches(text, instruction):
+    # The original producer wraps at 40 columns into paragraphs. Reconstruct
+    # layout whitespace only: ALL words and their order must match, not merely
+    # a prefix/title. Do not treat create/validate alone as semantic reopen.
+    return ' '.join(text.split()) == ' '.join(instruction.split())
 kind, path, instruction = sys.argv[1:]
 if kind in ('png', 'jpeg'):
     from PIL import Image
@@ -282,8 +287,8 @@ elif kind == 'xlsx':
 elif kind == 'pptx':
     from pptx import Presentation
     presentation = Presentation(path)
-    assert any(instruction in shape.text for slide in presentation.slides for shape in slide.shapes if shape.has_text_frame)
-    proof = {'slides': len(presentation.slides), 'syntheticTextMatched': True}
+    assert any(pptx_text_matches(shape.text, instruction) for slide in presentation.slides for shape in slide.shapes if shape.has_text_frame)
+    proof = {'slides': len(presentation.slides), 'syntheticTextMatched': True, 'completeOrderedTextMatched': True}
 else:
     raise ValueError('UNSUPPORTED_SYNTHETIC_FORMAT')
 print(json.dumps(proof, sort_keys=True))
@@ -367,6 +372,7 @@ export function relocation(stage, target, stageRoot, targetRoot) {
   const modulesEqual = normalize(stage.modules) === normalize(target.modules);
   return { stageRoot, targetRoot, stagePrefix: stage.prefix, targetPrefix: target.prefix,
     basePrefixUnchanged: stage.basePrefix === target.basePrefix, distributionsEqual, modulesEqual,
+    binEntriesEqual: normalize(stage.binEntries) === normalize(target.binEntries),
     pyvenvContentUnchanged: stage.pyvenv.content === target.pyvenv.content,
     executableContentUnchanged: stage.executable?.sha256 === target.executable?.sha256,
     staleShebangs, staleLaunchers, staleLinks, staleActivationReferences, baseDependencies, selfContainedPython: false,
@@ -519,8 +525,16 @@ export async function acceptance(env = process.env) {
         receipt.python.relocation = relocation(receipt.python.stage, receipt.python.target, stageRoot, target);
         const result = receipt.python.relocation;
         if (!result.basePrefixUnchanged || !result.distributionsEqual || !result.modulesEqual || !result.pyvenvContentUnchanged
-            || !result.executableContentUnchanged || result.staleShebangs.length || result.staleLaunchers.length || result.staleLinks.length) throw fail('VENV_RELOCATION_DEFECT');
+            || !result.executableContentUnchanged || !result.binEntriesEqual || result.staleShebangs.length || result.staleLaunchers.length
+            || result.staleLinks.length || result.staleActivationReferences.length) throw fail('VENV_RELOCATION_DEFECT');
         if (receipt.python.target.basePrefix !== receipt.python.base.basePrefix) throw fail('TARGET_BASE_PYTHON_MISMATCH');
+        // Run the installed generated CLI itself, not python -m pip. This is
+        // additional launcher evidence, not a replacement for health/relocation
+        // or the six real format create/validate/reopen checks below.
+        const pip = await run('target-pip-direct-cli', join(target, 'codex-ws-agent/.toolchain/bin/pip'), ['--isolated', '--version']);
+        if (!pip.stdout.startsWith('pip ') || !pip.stdout.includes(join(target, 'codex-ws-agent/.toolchain/lib/'))
+            || pip.stdout.includes(stageRoot)) throw fail('TARGET_PIP_LAUNCHER_NOT_LOCAL');
+        receipt.python.directCli = { path: join(target, 'codex-ws-agent/.toolchain/bin/pip'), output: pip.stdout.trim(), status: 'PASS' };
       });
       await check('C4', async () => {
         receipt.delivery = []; const instruction = 'UR01 synthetic clean-install acceptance material';
@@ -614,6 +628,9 @@ export function selfcheck() {
     modules: { PIL: `${path}/site/PIL` }, pyvenv: { content: 'home = /base' }, binEntries: [] });
   yes(() => assert.equal(relocation(proof('/stage'), proof('/target'), '/stage', '/target').distributionsEqual, true));
   yes(() => { const target = proof('/target'); target.binEntries.push({ shebang: '#!/stage/codex-ws-agent/.toolchain/bin/python' }); assert.equal(relocation(proof('/stage'), target, '/stage', '/target').staleShebangs.length, 1); });
+  yes(() => { const target = proof('/target'); target.binEntries.push({ activationObservedRoot: '/stage', activationRootReferences: 1 }); assert.equal(relocation(proof('/stage'), target, '/stage', '/target').staleActivationReferences.length, 1); });
+  yes(() => assert.equal(relocation(proof('/stage'), proof('/target'), '/stage', '/target').binEntriesEqual, true));
+  yes(() => { const target = proof('/target'); target.binEntries.push({ sha256: 'changed' }); assert.equal(relocation(proof('/stage'), target, '/stage', '/target').binEntriesEqual, false); });
   yes(() => assert.equal(RUNTIME_FILES.length, 13));
   yes(() => { const target = proof('/target'); target.binEntries.push({ shebang: '#!/bin/sh', observedRoot: '/stage', observedRootReferences: 1 }); assert.equal(relocation(proof('/stage'), target, '/stage', '/target').staleLaunchers.length, 1); });
   yes(() => assert.throws(() => parseInputs({ ...env, CYF_CLEAN_INSTALL_PATH: '/tmp/node_modules/.bin' }), { code: 'INPUT_PATH_HOST_DEPENDENCY_DIRECTORY' }));

@@ -603,3 +603,141 @@ test('canonical skill product installation is data; wrong raw scope/Runtime-prod
   c.sockets[0].receive({ ...raw, commandType: 'WORK_ITEM_EXECUTE' }); // product field is not a Runtime proof
   await c.tick(); assert.deepEqual(c.states()[0].accepted, [raw]); assert.equal(c.states()[1].accepted.length, 0);
 });
+
+// Run only the install/validate stdlib snippets against hand-written launcher
+// files. No installer, venv, npm, pip, dependency download or format library is
+// run here. These regressions do NOT prove cloud C1-C4 or Python ABI closure.
+async function venvLauncherFixture(t) {
+  const root = await mkdtemp(resolve(tmpdir(), "ur01-launcher 'quote space-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stage = resolve(root, '.cyf-agent-runtime.stage.fixture');
+  const target = resolve(root, 'target "quote $value !');
+  const relativeBin = 'codex-ws-agent/.toolchain/bin';
+  const bin = resolve(stage, relativeBin); await mkdir(bin, { recursive: true });
+  const metadata = resolve(stage, 'codex-ws-agent/.toolchain/lib/python3.6/site-packages/fixture.dist-info');
+  await mkdir(metadata, { recursive: true });
+  await writeFile(resolve(stage, 'codex-ws-agent/.toolchain/pyvenv.cfg'), 'home = /explicit-test-base\n');
+  for (const name of ['python', 'platform-python3.6']) {
+    // Synthetic interpreter forwarder, explicitly not an installed --copies venv.
+    await writeFile(resolve(bin, name), '#!/bin/sh\nexec /usr/bin/python3 "$@"\n', { mode: 0o755 });
+  }
+  const body = 'import json, sys\nprint(json.dumps({"file": __file__, "args": sys.argv[1:]}))\n';
+  const scripts = ['pip', 'easy_install', 'vba_extract.py', 'distlib-pip'];
+  for (const name of scripts) {
+    const interpreter = resolve(bin, name === 'easy_install' ? 'platform-python3.6' : 'python');
+    const header = name === 'distlib-pip'
+      ? `#!/bin/sh\n'''exec' "${interpreter}" "$0" "$@"\n' '''\n`
+      : `#!${interpreter}\n`;
+    await writeFile(resolve(bin, name), header + body, { mode: 0o755 });
+  }
+  const venv = resolve(stage, 'codex-ws-agent/.toolchain');
+  await writeFile(resolve(bin, 'activate'), `VIRTUAL_ENV="${venv}"\nexport VIRTUAL_ENV\n`);
+  await writeFile(resolve(bin, 'activate.csh'), `setenv VIRTUAL_ENV "${venv}"\n`);
+  await writeFile(resolve(bin, 'activate.fish'), `set -gx VIRTUAL_ENV "${venv}"\n`);
+  await writeFile(resolve(metadata, 'RECORD'), scripts.map(name => `../../../bin/${name},sha256=old,1\n`).join('') + 'untouched.py,sha256=unchanged,7\n');
+  const script = async (path, marker) => {
+    const source = await readFile(resolve(repo, path), 'utf8');
+    const start = source.indexOf(`<<'${marker}'\n`); const end = source.indexOf(`\n${marker}\n`, start);
+    assert.ok(start >= 0 && end > start, 'exact production snippet remains available');
+    return source.slice(start + marker.length + 5, end);
+  };
+  const relocate = await script('conf/cyf-agent-runtime-v1/install.sh', 'PY_RUNTIME_RELOCATE');
+  const validate = await script('conf/cyf-agent-runtime-v1/validate.sh', 'PY_RUNTIME_LAUNCHER_VALIDATE');
+  const options = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' } };
+  const python = (source, args) => execFileSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', source, ...args], options);
+  return { root, stage, target, bin, body, scripts, relativeBin, metadata, options, relocate, validate,
+    prepare: () => python(relocate, [stage, target]), check: path => python(validate, [path]), python };
+}
+
+test('venv generated launchers preserve direct CLI, argv, modes and RECORD integrity across stage deletion', async t => {
+  const f = await venvLauncherFixture(t);
+  assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION/.test(cause.stderr));
+  f.prepare(); f.check(f.stage);
+  const args = ['space argument', "apostrophe'", '$not-expanded'];
+  const run = path => JSON.parse(execFileSync(path, args, f.options));
+  for (const name of f.scripts) {
+    const path = resolve(f.bin, name);
+    assert.deepEqual(run(path), { file: path, args });
+    assert.equal((await lstat(path)).mode & 0o777, 0o755);
+    const text = await readFile(path, 'utf8');
+    assert.equal(text.includes(f.stage), false); assert.ok(text.endsWith(f.body));
+  }
+  const recordBefore = await readFile(resolve(f.metadata, 'RECORD'), 'utf8');
+  assert.match(recordBefore, /untouched\.py,sha256=unchanged,7/);
+  const verifyRecord = `import base64, csv, hashlib, os, sys
+venv = os.path.join(sys.argv[1], 'codex-ws-agent', '.toolchain')
+site = os.path.join(venv, 'lib', 'python3.6', 'site-packages')
+with open(os.path.join(site, 'fixture.dist-info', 'RECORD'), newline='') as stream:
+    for row in csv.reader(stream):
+        if row[0] == 'untouched.py': continue
+        with open(os.path.normpath(os.path.join(site, row[0])), 'rb') as file: data = file.read()
+        assert row[1] == 'sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('=')
+        assert int(row[2]) == len(data)
+`;
+  f.python(verifyRecord, [f.stage]);
+  await rename(f.stage, f.target);
+  await assert.rejects(lstat(f.stage), cause => cause.code === 'ENOENT');
+  f.check(f.target); f.python(verifyRecord, [f.target]);
+  for (const name of f.scripts) {
+    const path = resolve(f.target, f.relativeBin, name);
+    assert.deepEqual(run(path), { file: path, args });
+  }
+  const activation = resolve(f.target, f.relativeBin, 'activate');
+  const activated = execFileSync('bash', ['--noprofile', '--norc', '-c', '. "$1"; printf "%s" "$VIRTUAL_ENV"', 'activation-test', activation], f.options);
+  assert.equal(activated, resolve(f.target, 'codex-ws-agent/.toolchain'));
+  for (const name of ['activate', 'activate.csh', 'activate.fish']) {
+    assert.equal((await readFile(resolve(f.target, f.relativeBin, name), 'utf8')).includes(f.stage), false);
+  }
+  assert.equal(await readFile(resolve(f.target, 'codex-ws-agent/.toolchain/lib/python3.6/site-packages/fixture.dist-info/RECORD'), 'utf8'), recordBefore);
+});
+
+test('venv publication fails closed for unknown stage references, launcher bodies and stale links', async t => {
+  for (const kind of ['unknown', 'body', 'link', 'activation']) {
+    const f = await venvLauncherFixture(t);
+    if (kind === 'unknown') await writeFile(resolve(f.bin, 'unknown-cli'), `#!/bin/sh\necho '${f.stage}'\n`, { mode: 0o755 });
+    if (kind === 'body') await writeFile(resolve(f.bin, 'pip'), `#!${f.bin}/python\nprint(${JSON.stringify(f.stage)})\n`, { mode: 0o755 });
+    if (kind === 'link') await symlink(resolve(f.bin, 'python'), resolve(f.bin, 'stale-link'));
+    if (kind === 'activation') await writeFile(resolve(f.bin, 'activate'), `# unknown format ${f.stage}\n`);
+    assert.throws(() => f.prepare(), cause => /VENV_(?:TRAMPOLINE_NOT_RECOGNIZED|STAGE_REFERENCE_NOT_RECOGNIZED|LAUNCHER_BODY_CONTAINS_STAGE_REFERENCE|STAGE_SYMLINK_NOT_RELOCATABLE|ACTIVATION_NOT_RELOCATABLE)/.test(cause.stderr));
+    await assert.rejects(lstat(f.target), cause => cause.code === 'ENOENT');
+  }
+});
+
+test('venv validator rejects stale shell trampolines and activation even when imports could pass', async t => {
+  for (const kind of ['trampoline', 'activation', 'link', 'config']) {
+    const f = await venvLauncherFixture(t); f.prepare();
+    if (kind === 'trampoline') await writeFile(resolve(f.bin, 'pip'), `#!/bin/sh\n'''exec' "${f.bin}/python" "$0" "$@"\n' '''\n${f.body}`);
+    if (kind === 'activation') await writeFile(resolve(f.bin, 'activate'), `VIRTUAL_ENV="${f.stage}/codex-ws-agent/.toolchain"\n`);
+    if (kind === 'link') await symlink(resolve(f.bin, 'python'), resolve(f.bin, 'bad-link'));
+    if (kind === 'config') await writeFile(resolve(f.stage, 'codex-ws-agent/.toolchain/pyvenv.cfg'), `home = ${f.stage}\n`);
+    assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_(?:LAUNCHER_OR_ACTIVATION|SYMLINK)/.test(cause.stderr));
+  }
+});
+
+test('PPTX semantic reopen reconstructs original producer wrapping and rejects lost/reordered/extra text', async () => {
+  const { REOPEN } = await import('./clean-target-install.acceptance.mjs');
+  // Only original stdlib wrapping and the exact assertion predicate are run;
+  // no fake presentation, dependency import or actual C4 pass is manufactured.
+  const check = `import ast, runpy, sys
+helper = runpy.run_path(sys.argv[1], run_name='ur01_stdlib_only')
+tree = ast.parse(sys.argv[2])
+function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'pptx_text_matches')
+namespace = {}
+exec(compile(ast.Module(body=[function]), '<actual-harness-pptx-predicate>', 'exec'), namespace)
+match = namespace['pptx_text_matches']
+instruction = 'UR01 synthetic clean-install acceptance material'
+lines = helper['wrapped'](instruction, 40)[:10]
+text = '\\n'.join(lines)
+assert len(instruction) == 48 and len(lines) == 2
+assert instruction not in text, 'must reproduce original false negative'
+assert match(text, instruction)
+assert not match(text[:-1], instruction), 'lost character must fail'
+assert not match(' '.join(instruction.split()[:-1]), instruction), 'lost word must fail'
+assert not match(' '.join(reversed(instruction.split())), instruction), 'reordered words must fail'
+assert not match(text + ' extra', instruction), 'extra content must fail'
+assert not match('Agent 交付演示', instruction), 'title alone must fail'
+print('PPTX stdlib predicate regression: 8 assertions PASS; real reopen NOT_RUN')
+`;
+  const output = execFileSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', check, resolve(engineSource, 'toolchain/delivery_tool.py'), REOPEN], { encoding: 'utf8' });
+  assert.match(output, /8 assertions PASS; real reopen NOT_RUN/);
+});

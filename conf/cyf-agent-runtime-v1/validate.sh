@@ -33,6 +33,23 @@ done
   const { validateExecutionPayload } = await import(pathToFileURL(process.argv[1]));
   await validateExecutionPayload(process.argv[2]);
 ' "$PACKAGE_ROOT/runtime/lib/execution-adapter.mjs" "$PACKAGE_ROOT/codex-ws-agent"
+# A healthy Python import does not validate relocated generated CLI launchers.
+# Reject stale staging paths in launchers/activation/config without importing
+# host modules, activating the venv or running a retired authentication entry.
+"$PACKAGE_ROOT/codex-ws-agent/.toolchain/bin/python" -I -S -B - "$PACKAGE_ROOT" <<'PY_RUNTIME_LAUNCHER_VALIDATE'
+import os, sys
+venv = os.path.join(sys.argv[1], 'codex-ws-agent', '.toolchain')
+paths = [os.path.join(venv, 'pyvenv.cfg')]
+paths.extend(os.path.join(venv, 'bin', name) for name in os.listdir(os.path.join(venv, 'bin')))
+for path in paths:
+    if os.path.islink(path):
+        assert '.cyf-agent-runtime.stage.' not in os.readlink(path), 'VENV_STALE_STAGE_SYMLINK'
+    elif os.path.isfile(path):
+        with open(path, 'rb') as stream: data = stream.read()
+        if path.endswith('/pyvenv.cfg') or data.startswith(b'#!') or os.path.basename(path) in ('activate', 'activate.csh', 'activate.fish'):
+            assert b'.cyf-agent-runtime.stage.' not in data, 'VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION'
+print('Runtime venv launchers contain no staging references')
+PY_RUNTIME_LAUNCHER_VALIDATE
 # The import must resolve from this artifact, never a globally installed engine.
 # An eval argument is argv[1], not a main module: pass the root so importing the
 # engine cannot be mistaken for its retired standalone CLI by the main guard.
