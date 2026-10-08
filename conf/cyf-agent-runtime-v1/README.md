@@ -1,7 +1,7 @@
 # Unified Agent Runtime (UR-01, 2026-10-08)
 
 One Runtime host reuses `codex-ws-agent`; it is not a heartbeat sidecar or a new
-model executor. The current source is an **offline M3b candidate**, not an accepted
+model executor. The current source is an **offline M3 canonical-r2 candidate**, not an accepted
 migration or authorized release. The old engine CLI/API-key execution entry is
 retired; do not run the old service with the new ACK format.
 
@@ -68,8 +68,11 @@ credentials. Enrollment alone consumes one protected environment secret or
 that secret in the running service environment. Each Agent persists only its own
 installation authorization in `stateRoot/runtime-authorization.json`.
 
-Wire r1 is frozen by API commit **87c894dc297145ee2da338107727087ac74e81b1**;
-fixture SHA256 **56d7c3d31a33191eb23b0209158dd0395c184f661aa694eb7cc29f0942322adb**.
+Current shared wire r2 is pinned by API commit
+**8911817e07cd938ecc77f14c4bb373a7f0246934**, fixture SHA256
+**7a1b0b41d3d57634557401b1a6e9fdf1ccd6f2ef09e14eea1ce42acef6616312**.
+Session/proof/version semantics remain as frozen in r1; the UR03 v1 fixture
+is retained only as its unchanged historical test input, not a second protocol.
 Session POST `/agent/runtime/v1/session` uses installation Bearer plus sealed
 identity/host/boot. Only exact `JsonResult.data` identity, host, boot and increasing
 server generation is accepted. WS `/ws/agent/channel`, native `/internal/agent/`
@@ -90,7 +93,7 @@ replacement token or session secrets in logs/checkpoints.
   persist exact D06 receipt + emitted marker, then durably dequeue. A crash between
   these steps retains idempotent replay evidence.
 - Immutable ACK context contains installation/full subject, original message,
-  correlation, command, task, nullable workItem, payloadReference and expiresAt.
+  correlation, command, task, nullable workItem, nullable payloadReference and ISO expiresAt.
   Session proof is appended only when sending. First deliveryVersion is null;
   later it is the last confirmed value, not a predicted CAS version. Only matching
   status + valid monotonic version + ADVANCED/PRIOR confirms commit. Injected
@@ -139,19 +142,33 @@ HTTP test explicitly NOT_RUN (skip), not a synthetic PASS.
 They use private synthetic roots/mock HTTP/socket and a local WS handshake;
 **they are not cross-end API, clean-target install, Flow or online evidence**.
 
-The exact API canonical dispatch fixture (commit
+Canonical dispatch projection **r2** uses the exact API codec fixture (commit
 `a2dbe65062ff4c1c511094c19233b1b25c076f3e`, SHA256
-`057a4626387846f4bf420cab046d7d0bb4d12cdae6569e90839af00161cbd5a3`)
-exposes a real pending wire conflict: it has tenant/client/targetAgentId, not
-canonicalAgentId/Runtime installationId/payloadReference; expiresAt is epoch
-milliseconds. Current frozen ACK projection requires canonicalAgentId and a
-nonempty payloadReference. No references are invented; production dispatch remains
-fail-closed until the two Owners receive the same revised projection. Skill's
-product installationId is not Runtime installation identity. Remaining M3 gates
-include that projection integration, verified WORK_ITEM_CANCEL if its existing
-adapter/codec can prove exact binding, and actual client/server HTTP/native/skill
-acceptance. Retaining uncertain recovery material is intentional, not permission
-to clear it manually.
+`057a4626387846f4bf420cab046d7d0bb4d12cdae6569e90839af00161cbd5a3`).
+Raw tenant/client/targetAgentId must first match the trusted manifest, without
+nested identity aliases. ACK canonicalAgentId and Runtime installation then come
+only from that manifest; session/host/boot/generation are added by the current
+transport at send. Skill's root installationId is PRODUCT data, not Runtime proof;
+using Runtime installation as product installation is rejected. An absent actual
+payloadReference projects to null, never a fabricated source/ACL proof. Nullable
+workItem follows the codec. A safe epoch integer within the JS date range projects
+to ISO, without changing admission expiry or the original message. The existing
+source/context/reference/reassignment/lease checks are not replaced by projection.
+
+The Runtime fingerprint binds the original canonical raw wire, including original
+epoch, product installation and actual business source/context, not ACK-normalized
+fields. Before any HTTP ACK send, ledger projection and original inbox wire
+fingerprint/projection must independently match; response commit still rechecks
+FIFO/status/version under the original short lock. No second durable queue exists.
+`test/canonical-dispatch-r2.test.mjs` covers the byte-pinned E05 fixture at a frozen
+fake Date (the shared fixture clock `1001000`) through a **local real HTTP server**
+and mature checkpoint, exact shared first-ACK projection, pre-checkpoint negatives,
+expiry, lost terminal response and restart/current-session replay. This is an
+Owner client boundary test, **not the actual Java API/D06/DB integration**. The
+UR03 cross-end NOT_RUN skip is not removed or reclassified. Remaining M3 gates are
+actual client/server HTTP/native/skill acceptance and exact WORK_ITEM_CANCEL
+adapter/codec verification if that existing adapter can prove binding. Uncertain
+recovery material is retained, never manually cleared or automatically reexecuted.
 Dynamic online identity/maintenance ownership, stopped-writer state migration,
 Flow version/commit/artifact proof and three-Agent real business acceptance remain
 release gates. Current task is incomplete: **do not publish or switch production**.

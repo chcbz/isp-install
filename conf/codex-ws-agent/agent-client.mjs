@@ -1405,7 +1405,12 @@ const buildFingerprintSource = normalized => {
 export class CommandFingerprint {
   static compute(normalized) {
     const business = buildFingerprintSource(normalized)
-    if (normalized?.canonicalAgentId) Object.assign(business, { tenantId: normalized.tenantId, clientId: normalized.clientId, canonicalAgentId: normalized.canonicalAgentId, messageId: normalized.messageId, correlationId: normalized.correlationId, payloadReference: normalized.payloadReference, expiresAt: normalized.expiresAt })
+    // Runtime r2 fingerprints the original canonical wire, not its ACK projection.
+    // In particular expiry, source/reference/binding and skill product installation
+    // cannot disappear through the generic transport-field filter. No derived
+    // installation, ISO date, nullable reference or current session is added here.
+    const raw = normalized?.rawPayload || normalized
+    if (isObject(raw) && (hasOwn(raw, 'tenantId') || hasOwn(raw, 'clientId'))) return canonicalSha256(raw).slice(7)
     return computeSha256(JSON.stringify(canonicalizeFingerprintValue(business)))
   }
 }
@@ -2582,23 +2587,34 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = p
 }
 
 
+const exactRuntimeCommandField = value => typeof value === 'string' && value.length > 0
+  && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value)
+
+// r2: verify ORIGINAL codec identity first; only then project trusted installation
+// and canonical Agent into the existing ACK DTO. Product installation is DATA.
 export const runtimeCommandContext = (profile, message) => {
-  if (message.runtimeCommand) {
-    const context = message.runtimeCommand
-    const fields = ['installationId','tenantId','clientId','canonicalAgentId','messageId','correlationId','commandId','taskId','workItemId','payloadReference','expiresAt']
-    if (message.rawPayload || !isObject(context) || Object.keys(context).sort().join(',') !== [...fields].sort().join(',')) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_FORBIDDEN', 'Wire cannot supply a replacement checkpoint or session proof')
-    if (['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].some(key => context[key] !== profile.runtimeIdentity[key])
-        || context.commandId !== message.commandId || context.messageId !== message.messageId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Persisted command context must match exact identity and original work')
-    return { ...context }
-  }
+  const raw = message.rawPayload || message
+  if (!isObject(raw) || hasOwn(message, 'runtimeCommand') || hasOwn(raw, 'runtimeCommand')) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_FORBIDDEN', 'Wire cannot supply a replacement checkpoint or session proof')
   const identity = profile.runtimeIdentity
-  for (const key of ['tenantId', 'clientId', 'canonicalAgentId']) if (message[key] !== identity[key]) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Dispatch must carry its exact complete subject')
-  const expiry = typeof message.expiresAt === 'number' ? new Date(message.expiresAt).toISOString() : message.expiresAt
-  for (const value of [message.messageId, message.correlationId, message.commandId, message.taskId, message.payloadReference, expiry]) if (typeof value !== 'string' || !value.trim()) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Dispatch must carry original D06 work and payload context')
-  return { installationId: identity.installationId, tenantId: identity.tenantId, clientId: identity.clientId,
-    canonicalAgentId: identity.canonicalAgentId, messageId: message.messageId, correlationId: message.correlationId,
-    commandId: message.commandId, taskId: message.taskId, workItemId: message.workItemId || null,
-    payloadReference: message.payloadReference, expiresAt: expiry }
+  if (!identity || profile.agentId !== identity.canonicalAgentId
+      || !['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].every(key => exactRuntimeCommandField(identity[key]))
+      || raw.tenantId !== identity.tenantId || raw.clientId !== identity.clientId || raw.targetAgentId !== identity.canonicalAgentId
+      || hasOwn(raw, 'canonicalAgentId') && raw.canonicalAgentId !== identity.canonicalAgentId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Original dispatch must match the trusted complete subject before projection')
+  if (hasOwn(raw, 'installationId')) {
+    if (raw.commandType === 'SKILL_INSTALL') {
+      if (raw.installationId === identity.installationId) throw new AgentProtocolError('RUNTIME_COMMAND_INSTALLATION_CONFUSION', 'Skill product installation must not be Runtime authorization')
+    } else if (raw.installationId !== identity.installationId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Business frame cannot replace Runtime installation')
+  }
+  for (const key of ['messageId', 'correlationId', 'commandId', 'commandType', 'taskId']) if (!exactRuntimeCommandField(raw[key])) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Dispatch must carry original D06 message and work context')
+  if (!Number.isSafeInteger(raw.expiresAt) || !Number.isFinite(new Date(raw.expiresAt).getTime())) throw new AgentProtocolError('RUNTIME_COMMAND_EXPIRY_INVALID', 'Original expiry must be a safe integer within the epoch millisecond date range')
+  const reference = hasOwn(raw, 'payloadReference') ? raw.payloadReference : null
+  const workItem = hasOwn(raw, 'workItemId') ? raw.workItemId : null
+  if (reference !== null && !exactRuntimeCommandField(reference)) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Payload reference is null or an actual nonblank wire value')
+  if (workItem !== null && !exactRuntimeCommandField(workItem)) throw new AgentProtocolError('RUNTIME_COMMAND_WORK_INVALID', 'Work item is null or an actual nonblank wire value')
+  return Object.freeze({ installationId: identity.installationId, tenantId: identity.tenantId, clientId: identity.clientId,
+    canonicalAgentId: identity.canonicalAgentId, messageId: raw.messageId, correlationId: raw.correlationId,
+    commandId: raw.commandId, taskId: raw.taskId, workItemId: workItem,
+    payloadReference: reference, expiresAt: new Date(raw.expiresAt).toISOString() })
 }
 
 export class AgentMessageProcessor {
@@ -3560,6 +3576,7 @@ export class AgentMessageProcessor {
         if (!head) { await this._cleanupRuntimeTerminals(); return confirmed }
         const command = head.envelope.runtimeCommand
         if (!command) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_REQUIRED', 'Legacy ACK requires stopped-writer migration, not an auth fallback')
+        this._assertRuntimeAckContext(head)
         const prior = this.ledger.runtimeAckCommit(head.envelope.commandId, command.messageId)
         let result
         try { result = await this.sendCommandAckFn(command, head.envelope.ackStatus, prior?.deliveryVersion ?? null) }
@@ -3575,6 +3592,16 @@ export class AgentMessageProcessor {
     }).catch(error => { this._failClosed(new AgentProtocolError(error.code || 'RUNTIME_ACK_CHECKPOINT_ERROR', error.message), {}); return false })
     this.runtimeAckTail = operation
     return operation
+  }
+
+  _assertRuntimeAckContext(head) {
+    const command = head.envelope.runtimeCommand
+    const entry = this.ledger.getEntry(head.envelope.commandId)
+    const digest = canonicalSha256(command)
+    if (!entry || !isObject(entry.runtimeCommand) || head.envelope.commandId !== command.commandId || digest !== canonicalSha256(entry.runtimeCommand)) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_CONFLICT', 'Queued ACK must match the original ledger projection before HTTP')
+    const records = this.inbox.commandStateIndex().get(entry.commandId) || []
+    if (records.length > 1 || records.length === 1 && (CommandFingerprint.compute(records[0].normalized) !== entry.fingerprint
+        || canonicalSha256(runtimeCommandContext(this.profile, records[0].normalized)) !== digest)) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_CONFLICT', 'Original wire fingerprint and ACK projection must both match before HTTP')
   }
 
   async _cleanupRuntimeTerminals() {

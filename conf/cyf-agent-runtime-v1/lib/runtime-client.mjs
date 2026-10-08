@@ -27,7 +27,7 @@ export function classifyRuntimeError(error) {
   return { kind: 'permanent' };
 }
 
-// Wire r1: API fixture87c894dc; immutable business ACKs have no session/token.
+// Session/ACK r1 + canonical projection r2; immutable ACKs have no session/token.
 export const RUNTIME_SESSION_TOKEN = /^rts1_[0-9a-f]{64}$/;
 export const RUNTIME_ACK_STATUSES = new Set(['RECEIVED', 'STARTED', 'SUCCEEDED', 'FAILED', 'REJECTED']);
 const fail = code => Object.assign(new Error(code), { code });
@@ -61,9 +61,10 @@ export function validateCommandForManifest(command, manifest, status, now = Date
   if (!RUNTIME_ACK_STATUSES.has(status) || !command || typeof command !== 'object' || Array.isArray(command)) throw fail('RUNTIME_ACK_INVALID');
   const allowed = [...identityFields, 'messageId', 'correlationId', 'commandId', 'taskId', 'workItemId', 'payloadReference', 'expiresAt'];
   if (Object.keys(command).some(key => !allowed.includes(key))) throw fail('RUNTIME_ACK_FIELD_FORBIDDEN');
-  for (const key of ['messageId', 'correlationId', 'commandId', 'taskId', 'payloadReference', 'expiresAt']) if (!exact(command[key])) throw fail('RUNTIME_COMMAND_FIELD_REQUIRED');
+  for (const key of ['messageId', 'correlationId', 'commandId', 'taskId', 'expiresAt']) if (!exact(command[key])) throw fail('RUNTIME_COMMAND_FIELD_REQUIRED');
   for (const key of identityFields) if (command[key] !== manifest[key]) throw fail('RUNTIME_COMMAND_IDENTITY_MISMATCH');
   if (command.workItemId !== null && !exact(command.workItemId)) throw fail('RUNTIME_COMMAND_WORK_INVALID');
+  if (command.payloadReference !== null && !exact(command.payloadReference)) throw fail('RUNTIME_COMMAND_REFERENCE_INVALID');
   const expiry = Date.parse(command.expiresAt);
   if (!Number.isFinite(expiry)) throw fail('RUNTIME_COMMAND_EXPIRY_INVALID');
   if (expiry <= now && ['RECEIVED', 'STARTED'].includes(status)) throw fail('RUNTIME_COMMAND_EXPIRED');

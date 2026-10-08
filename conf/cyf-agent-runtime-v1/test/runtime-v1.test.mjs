@@ -18,7 +18,7 @@ const manifest = () => {
 };
 const command = () => ({ installationId: manifest().installationId, tenantId: '0', clientId: 'client-fixture', canonicalAgentId: manifest().canonicalAgentId,
   messageId: 'msg-fixture', correlationId: 'correlation-fixture', commandId: 'command-fixture', taskId: 'task-fixture', workItemId: null,
-  payloadReference: 'payload-fixture', expiresAt: '2030-01-01T00:00:00Z' });
+  payloadReference: null, expiresAt: '2030-01-01T00:00:00Z' });
 const session = generation => ({ ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].map(k => [k, manifest()[k]])),
   hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: generation, scheme: 'AgentRuntime', sessionToken: token,
   websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' });
@@ -194,3 +194,12 @@ test('native explicit user cancellation composes with session signal without inv
   assert.equal(seenSignal.aborted, false); user.abort(); assert.equal(seenSignal.aborted, true)
   assert.equal(client.currentSession.sessionGeneration, 7)
 })
+
+test('r2 ACK nullable reference/work item is explicit; absent, blank, forged identity or extra proof is not an ACL fallback', () => {
+  assert.deepEqual(validateCommandForManifest(command(), manifest(), 'RECEIVED').payloadReference, null);
+  for (const patch of [{ payloadReference: undefined }, { payloadReference: '' }, { payloadReference: ' ' }, { payloadReference: {} },
+    { workItemId: '' }, { workItemId: 1 }, { installationId: 'synthetic-product-installation' }, { targetAgentId: manifest().canonicalAgentId }]) {
+    assert.throws(() => validateCommandForManifest({ ...command(), ...patch }, manifest(), 'RECEIVED'));
+  }
+  assert.equal(validateCommandForManifest({ ...command(), payloadReference: 'actual-wire-reference' }, manifest(), 'RECEIVED').payloadReference, 'actual-wire-reference');
+});

@@ -72,8 +72,17 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             try { frame = JSON.parse(bytes.toString()); } catch { logger('runtime-frame-rejected', { code: 'INVALID_JSON' }); return; }
             if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
             const payload = frame.data && typeof frame.data === 'object' && !Array.isArray(frame.data) ? frame.data : frame;
-            if (['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration'].some(key => Object.hasOwn(frame, key) && frame[key] !== session[key])) return;
-            if (['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration'].some(key => Object.hasOwn(payload, key) && payload[key] !== session[key])) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH' }); return; }
+            const proofMismatch = layer => {
+              // Canonical skill command installationId is the PRODUCT binding.
+              // It never substitutes for the authenticated Runtime installation.
+              const productInstall = layer.messageType === 'command.dispatch' && layer.commandType === 'SKILL_INSTALL';
+              if (layer.messageType === 'command.dispatch' && (layer.tenantId !== session.tenantId || layer.clientId !== session.clientId
+                  || layer.targetAgentId !== session.canonicalAgentId || productInstall && layer.installationId === session.installationId)) return true;
+              return ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
+                .some(key => !(productInstall && key === 'installationId') && Object.hasOwn(layer, key) && layer[key] !== session[key]);
+            };
+            if (proofMismatch(frame)) return;
+            if (proofMismatch(payload)) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH' }); return; }
             const observed = observer.observe(frame);
             if (observed === 'registered') {
               if (payload.readyCommandTypes.length !== requestTypes.length || payload.readyCommandTypes.some(type => !requestTypes.includes(type)) || !payload.durableStateHealthy && requestTypes.length) {

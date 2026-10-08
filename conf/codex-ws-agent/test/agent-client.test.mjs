@@ -3694,8 +3694,8 @@ test('pre-engine recovery claim checks fingerprint and durable key under the inb
 
 // UR-01 M3: mature checkpoint is authoritative. Session proofs never persisted.
 const unifiedProfile = () => ({ ...profile, runtimeIdentity: { installationId: 'installation-a', tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId } })
-const unifiedCommand = (number = 7001, patch = {}) => ({ ...command(number), tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId,
-  correlationId: `correlation-${number}`, payloadReference: `payload-${number}`, ...patch })
+const unifiedCommand = (number = 7001, patch = {}) => ({ ...command(number), tenantId: 'tenant-a', clientId: 'client-a',
+  correlationId: `correlation-${number}`, ...patch })
 function unifiedCheckpoint({ root = temporaryDirectory(), cleanup = null, run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }) } = {}) {
   const selected = unifiedProfile()
   const inbox = new PersistentCommandInbox({ rootDir: root, profile: selected }); inbox.initialize()
