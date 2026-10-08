@@ -11,8 +11,8 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { arch, release, type } from 'node:os';
 
-export const SOURCE = Object.freeze({ commit: 'd91ebbf436911eac20ffb70cb92192a65c742e11',
-  tree: 'b2e3f17ff57e21e2482c0fc54e71dbf4b92dbd82', files: 285 });
+export const SOURCE = Object.freeze({ commit: '5666fd2c990e4577cd4e16d5a32924ea0f3a8b7b',
+  tree: 'd3cdc69da62bddc48af0bc86b4f32dbfa9429b60', files: 285 });
 const SELF = fileURLToPath(import.meta.url);
 const REQUIRED = ['BUILD_ID', 'SOURCE_ARCHIVE', 'SOURCE_SHA256', 'NODE', 'NPM_CLI', 'PYTHON',
   'BASH', 'PATH', 'TOOLCHAIN_PROVENANCE', 'PARENT', 'RECEIPT'];

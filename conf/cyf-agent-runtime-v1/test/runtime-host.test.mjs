@@ -608,11 +608,12 @@ test('canonical skill product installation is data; wrong raw scope/Runtime-prod
 // Run only the install/validate stdlib snippets against hand-written launcher
 // files. No installer, venv, npm, pip, dependency download or format library is
 // run here. These regressions do NOT prove actual C1-C4 or Python ABI closure.
-async function venvLauncherFixture(t) {
+async function venvLauncherFixture(t, { longPath = false } = {}) {
   const root = await mkdtemp(resolve(tmpdir(), "ur01-launcher 'quote space-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const stage = resolve(root, '.cyf-agent-runtime.stage.fixture');
-  const target = resolve(root, 'target "quote $value !');
+  const parent = longPath ? resolve(root, 'nested-' + 'a'.repeat(110), 'nested-' + 'b'.repeat(110)) : root;
+  const stage = resolve(parent, '.cyf-agent-runtime.stage.fixture');
+  const target = resolve(parent, 'target "quote $value !');
   const relativeBin = 'codex-ws-agent/.toolchain/bin';
   const bin = resolve(stage, relativeBin); await mkdir(bin, { recursive: true });
   const metadata = resolve(stage, 'codex-ws-agent/.toolchain/lib/python3.6/site-packages/fixture.dist-info');
@@ -715,6 +716,88 @@ test('venv validator rejects stale shell trampolines and activation even when im
   }
 });
 
+// Python 3.11 command is an audit string, not a shell command. These are
+// hand-written cfg files plus ORIGINAL stdlib snippets: never a real venv,
+// package install, import/ABI, C1-C4 or old failed cfg-byte readback.
+const cfgPosixQuote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+const cfgBaseFields = 'home = /explicit-test-base\ninclude-system-site-packages = false\nversion = 3.11.13\nexecutable = /explicit-test-base/python3.11\nprompt = unchanged synthetic audit\n';
+
+test('Python 3.11 cfg command audit maps only its exact venv operand preserving every base field, quotes, modes and stage-to-target bytes', async t => {
+  for (const quoted of [false, true]) for (const withoutPip of [false, true]) {
+    const f = await venvLauncherFixture(t, { longPath: true });
+    const cfg = resolve(f.stage, 'codex-ws-agent/.toolchain/pyvenv.cfg');
+    const beforeVenv = resolve(f.stage, 'codex-ws-agent/.toolchain');
+    const finalVenv = resolve(f.target, 'codex-ws-agent/.toolchain');
+    assert.ok(beforeVenv.length > 256, 'exercise a genuine long synthetic path, not a fake version probe');
+    const prefix = '/explicit-test-base/python3.11 -m venv --copies' + (withoutPip ? ' --without-pip' : '') + ' ';
+    const quote = quoted ? cfgPosixQuote : value => value;
+    const base = withoutPip ? cfgBaseFields.replaceAll('\n', '\r\n') : cfgBaseFields;
+    const newline = withoutPip ? '' : '\n'; // also preserve an absent final newline
+    const before = base + 'command = ' + prefix + quote(beforeVenv) + newline;
+    const expected = base + 'command = ' + prefix + quote(finalVenv) + newline;
+    await writeFile(cfg, before); await chmod(cfg, 0o640);
+    assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION/.test(cause.stderr));
+    f.prepare(); f.check(f.stage);
+    assert.equal(await readFile(cfg, 'utf8'), expected);
+    assert.equal((await lstat(cfg)).mode & 0o777, 0o640);
+    assert.equal((await readFile(cfg, 'utf8')).includes('.cyf-agent-runtime.stage.'), false);
+    const record = await readFile(resolve(f.metadata, 'RECORD'), 'utf8');
+    await rename(f.stage, f.target);
+    await assert.rejects(lstat(f.stage), cause => cause.code === 'ENOENT');
+    f.check(f.target);
+    const finalCfg = resolve(f.target, 'codex-ws-agent/.toolchain/pyvenv.cfg');
+    assert.equal(await readFile(finalCfg, 'utf8'), expected);
+    assert.equal((await lstat(finalCfg)).mode & 0o777, 0o640);
+    assert.equal(await readFile(resolve(f.target, 'codex-ws-agent/.toolchain/lib/python3.6/site-packages/fixture.dist-info/RECORD'), 'utf8'), record);
+    const pip = resolve(f.target, f.relativeBin, 'pip');
+    assert.deepEqual(JSON.parse(execFileSync(pip, ['synthetic cfg path', '$not-expanded'], f.options)),
+      { file: pip, args: ['synthetic cfg path', '$not-expanded'] });
+  }
+});
+
+test('Python 3.11 cfg relocation rejects unknown command, stale home/base/body/foreign stage and duplicate fields without deleting audit metadata', async t => {
+  for (const kind of ['extra-option', 'wrong-module', 'wrong-operand', 'extra-tail', 'foreign-stage',
+    'duplicate-command', 'stale-home', 'stale-base', 'unknown-field', 'missing-command', 'cfg-symlink']) {
+    const f = await venvLauncherFixture(t);
+    const venv = resolve(f.stage, 'codex-ws-agent/.toolchain');
+    const cfg = resolve(venv, 'pyvenv.cfg');
+    const command = `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`;
+    let text = cfgBaseFields + command;
+    if (kind === 'extra-option') text = cfgBaseFields + command.replace('--copies ', '--copies --system-site-packages ');
+    if (kind === 'wrong-module') text = cfgBaseFields + command.replace('-m venv', '-m unrelated');
+    if (kind === 'wrong-operand') text = cfgBaseFields + command.replace(`${venv}\n`, `${venv}-not-the-venv\n`);
+    if (kind === 'extra-tail') text = cfgBaseFields + command.trimEnd() + ' extra-operand\n';
+    if (kind === 'foreign-stage') text = cfgBaseFields + command.replace(venv, '/tmp/.cyf-agent-runtime.stage.foreign/codex-ws-agent/.toolchain');
+    if (kind === 'duplicate-command') text += command;
+    if (kind === 'stale-home') text = text.replace('/explicit-test-base\n', `${f.stage}\n`);
+    if (kind === 'stale-base') text = cfgBaseFields + command.replace('/explicit-test-base/python3.11', resolve(f.stage, 'untrusted-base/python3.11'));
+    if (kind === 'unknown-field') text += `unknown-audit = ${f.stage}\n`;
+    if (kind === 'missing-command') text = cfgBaseFields + `unknown-audit = ${f.stage}\n`;
+    await writeFile(cfg, text);
+    let external;
+    if (kind === 'cfg-symlink') {
+      external = resolve(f.root, 'external-synthetic-cfg'); await writeFile(external, text);
+      await rm(cfg); await symlink(external, cfg);
+    }
+    assert.throws(() => f.prepare(), cause => /VENV_CONFIG_(?:UNSAFE|COMMAND_NOT_RECOGNIZED|BASE_CONTAINS_STAGE|STAGE_REFERENCE_NOT_RECOGNIZED)/.test(cause.stderr));
+    assert.equal(await readFile(cfg, 'utf8'), text, 'do not delete/reconstruct/partially rewrite unrecognized cfg');
+    if (external) assert.equal(await readFile(external, 'utf8'), text, 'never follow cfg symlink for writes');
+    assert.ok((await readFile(resolve(f.bin, 'pip'), 'utf8')).startsWith(`#!${f.bin}/python\n`), 'bad cfg fails before launcher mutation');
+    await assert.rejects(lstat(f.target), cause => cause.code === 'ENOENT');
+  }
+});
+
+test('Python 3.11 cfg command remains subject to the ORIGINAL strict stale validator after successful preparation', async t => {
+  const f = await venvLauncherFixture(t); const cfg = resolve(f.stage, 'codex-ws-agent/.toolchain/pyvenv.cfg');
+  const venv = resolve(f.stage, 'codex-ws-agent/.toolchain');
+  await writeFile(cfg, cfgBaseFields + `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`);
+  f.prepare(); f.check(f.stage);
+  await writeFile(cfg, cfgBaseFields + `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`);
+  assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION/.test(cause.stderr));
+  await writeFile(cfg, cfgBaseFields + `unknown-audit = /tmp/.cyf-agent-runtime.stage.foreign\n`);
+  assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION/.test(cause.stderr));
+});
+
 test('PPTX semantic reopen reconstructs original producer wrapping and rejects lost/reordered/extra text', async () => {
   const { REOPEN } = await import('./clean-target-install.acceptance.mjs');
   // Only original stdlib wrapping and the exact assertion predicate are run;
@@ -779,8 +862,8 @@ async function consumerFixture(t) {
   await symlink('node_modules', resolve(target, 'codex-ws-agent/synthetic-internal-link'));
   const hash = async path => sha256(await readFile(path));
   const archiveSha = await hash(archive), nodeSha = await hash(nodeBin);
-  assert.equal(archiveSha, '3c826b9e78db3bc4ca5a9eef1e9026ebeb0e34626e214a6b1b2d8bd532169b36');
-  assert.equal((await lstat(archive)).size, 3624960);
+  assert.equal(archiveSha, '9b5d74b27a91579359ad0a18d241f66f19d6df13d376e3cff5dbd45b729b7687');
+  assert.equal((await lstat(archive)).size, 3635200);
   const stat = await lstat(root), targetStat = await lstat(target);
   const receipt = { ...module.localFixtureReceipt({ BUILD_ID: 'SYNTHETIC-HOOK-LOCAL-UNIT-NOT-INSTALL', SOURCE_ARCHIVE: archive, SOURCE_SHA256: archiveSha }, sha256(harnessSource)),
     source: { ...module.SOURCE, readbackTree: tree, finalReadbackTree: tree, members: files, installInputs,
@@ -824,8 +907,8 @@ async function consumerTail(f, consumeArtifact) {
 
 test('current delivery dependency candidate keeps six exact pins and one fixed payload source', async () => {
   const { SOURCE } = await import('./clean-target-install.acceptance.mjs');
-  assert.deepEqual(SOURCE, { commit: 'd91ebbf436911eac20ffb70cb92192a65c742e11',
-    tree: 'b2e3f17ff57e21e2482c0fc54e71dbf4b92dbd82', files: 285 });
+  assert.deepEqual(SOURCE, { commit: '5666fd2c990e4577cd4e16d5a32924ea0f3a8b7b',
+    tree: 'd3cdc69da62bddc48af0bc86b4f32dbfa9429b60', files: 285 });
   const requirements = await readFile(resolve(engineSource, 'toolchain/requirements.txt'), 'utf8');
   assert.deepEqual(requirements.split(/\r?\n/).filter(line => line && !line.startsWith('#')), [
     'python-docx==0.8.11', 'python-pptx==0.6.23', 'openpyxl==3.1.3',
