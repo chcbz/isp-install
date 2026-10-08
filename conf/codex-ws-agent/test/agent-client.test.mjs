@@ -4378,3 +4378,436 @@ test('E05 crash after terminal ledger before HTTP ACK enqueue reconstructs from 
     assert.equal(restarted.outbox.pendingEnvelopes().length, 0)
   } finally { restarted.processor.stop() }
 })
+
+// UR01: ACK waiters certify their immutable queue record, not a flush owner or
+// absent FIFO head. All HTTP callbacks/material below are isolated test input.
+const ackRaceDeferred = () => {
+  let resolvePromise
+  const promise = new Promise(resolve => { resolvePromise = resolve })
+  return { promise, resolve: resolvePromise }
+}
+const ackRaceCompete = (runtime, mode) => {
+  if (mode === 'untargeted') return runtime.processor._scheduleRuntimeAckFlush()
+  const replay = runtime.processor.replayAcks()
+  if (mode === 'heartbeat') runtime.processor.resume() // original adapter's replay/resume sequence
+  return replay
+}
+const ackRaceInstall = (runtime, mode) => {
+  const emit = runtime.processor._emitRuntimeAck.bind(runtime.processor)
+  const deliveries = []; const competitors = []
+  runtime.processor._emitRuntimeAck = (status, meta, marker) => {
+    if (status === 'STARTED') competitors.push(ackRaceCompete(runtime, mode))
+    const delivery = emit(status, meta, marker)
+    deliveries.push({ status, delivery })
+    return delivery
+  }
+  return { deliveries, competitors }
+}
+
+for (const mode of ['untargeted', 'replay', 'heartbeat']) test(`runtime ACK completion race: older ${mode} flush commits exact STARTED before its targeted flush`, async () => {
+  const calls = []; let runs = 0; let runtime
+  runtime = unifiedCheckpoint({ ack: async (context, status, version) => {
+    assert.equal(existsSync(runtime.outbox.lockPath), false, 'no file lock over HTTP')
+    assert.equal(context.commandId, 'command-7001'); assert.equal(context.messageId, 'message-7001')
+    calls.push({ status, version })
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  }, run: async () => {
+    runs++
+    const entry = runtime.ledger.getEntry('command-7001')
+    assert.equal(entry.runtimeAckCommits[Buffer.from('message-7001').toString('hex')].status, 'STARTED')
+    assert.equal(entry.ackStartedEmitted, true)
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+    return { status: 'completed' }
+  } })
+  const race = ackRaceInstall(runtime, mode)
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    await Promise.all(race.competitors)
+    assert.equal(runs, 1); assert.equal(runtime.processor.failClosedError, null)
+    assert.deepEqual(calls, [{ status: 'RECEIVED', version: null }, { status: 'STARTED', version: 1 }, { status: 'SUCCEEDED', version: 2 }])
+    const started = race.deliveries.find(item => item.status === 'STARTED').delivery
+    assert.equal(await started.confirmation, true)
+    assert.deepEqual([started.persisted, started.sent, started.markerPersisted, started.dequeued], [true, true, true, true])
+    assert.equal(runtime.ledger.getEntry('command-7001').status, 'SUCCEEDED')
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0, 'only transient unsettled waiters')
+  } finally { runtime.processor.stop() }
+})
+
+test('runtime ACK completion race: suspended HTTP with repeated heartbeat/replay and duplicate callbacks executes exactly once', async () => {
+  const entered = ackRaceDeferred(); const release = ackRaceDeferred()
+  let runs = 0; let startedCommitted = false; let runtime
+  const seen = []
+  runtime = unifiedCheckpoint({ ack: async (context, status, version) => {
+    assert.equal(existsSync(runtime.outbox.lockPath), false)
+    seen.push({ status, version })
+    if (status === 'STARTED' && !startedCommitted) {
+      entered.resolve(); await release.promise
+      // Original persisted marker/FIFO must still be unconfirmed during callback.
+      assert.equal(runtime.ledger.getEntry(context.commandId).ackStartedEmitted, false)
+      startedCommitted = true
+      return { kind: 'ADVANCED', status, deliveryVersion: version + 1 }
+    }
+    return { kind: status === 'STARTED' ? 'PRIOR' : 'ADVANCED', status,
+      deliveryVersion: status === 'STARTED' ? version : (version ?? 0) + 1 }
+  }, run: async () => {
+    assert.equal(startedCommitted, true); runs++
+    const entry = runtime.ledger.getEntry('command-7001')
+    assert.equal(entry.ackStartedEmitted, true)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 2)
+    return { status: 'completed' }
+  } })
+  const race = ackRaceInstall(runtime, 'heartbeat')
+  try {
+    const raw = unifiedCommand()
+    await runtime.processor.handle(raw); runtime.processor.resume(); await entered.promise
+    assert.equal(runs, 0)
+    assert.equal(runtime.outbox.pendingEnvelopes().filter(item => item.envelope.ackStatus === 'STARTED').length, 1)
+    for (let i = 0; i < 3; i++) {
+      race.competitors.push(ackRaceCompete(runtime, 'heartbeat'))
+      assert.equal((await runtime.processor.handle(raw)).kind, 'command-duplicate')
+    }
+    assert.equal(runs, 0); assert.equal(runtime.ledger.getEntry(raw.commandId).ackStartedEmitted, false)
+    release.resolve()
+    await Promise.all(race.competitors); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    const started = race.deliveries.filter(item => item.status === 'STARTED').map(item => item.delivery)
+    assert.equal(started.length, 4)
+    assert.deepEqual(await Promise.all(started.map(delivery => delivery.confirmation)), [true, true, true, true])
+    assert.equal(runs, 1); assert.equal(runtime.processor.failClosedError, null)
+    assert.equal(runtime.inbox.commandStateIndex().get(raw.commandId)[0].record.state, 'completed'); assert.equal(runtime.inbox.count('recovery_required'), 0)
+    assert.equal(seen.filter(item => item.status === 'STARTED').length, 4)
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+    assert.equal(JSON.stringify(runtime.ledger.getEntry(raw.commandId)).includes('runtimeAckCompletions'), false)
+    assert.equal((await runtime.processor.handle(raw)).kind, 'command-duplicate')
+    await runtime.processor.runtimeAckTail; assert.equal(runs, 1)
+  } finally { release.resolve(); runtime.processor.stop() }
+})
+
+async function ackRacePrepared(options = {}) {
+  const runtime = unifiedCheckpoint(options)
+  const raw = unifiedCommand()
+  await runtime.processor.handle(raw); await runtime.processor.runtimeAckTail
+  runtime.ledger.markStarted(raw.commandId)
+  const meta = { ...runtime.processor._commandMeta(normalizeInboundMessage(raw)), commandId: raw.commandId }
+  return { runtime, raw, meta }
+}
+
+for (const [label, change] of [
+  ['tenant subject', record => { record.envelope.runtimeCommand.tenantId = 'foreign' }],
+  ['installation subject', record => { record.envelope.runtimeCommand.installationId = 'foreign' }],
+  ['canonical Agent', record => { record.envelope.runtimeCommand.canonicalAgentId = 'foreign' }],
+  ['command message', record => { record.envelope.runtimeCommand.messageId = 'foreign' }],
+  ['work context', record => { record.envelope.runtimeCommand.workItemId = 'foreign' }],
+  ['expiry context', record => { record.envelope.runtimeCommand.expiresAt = '2099-01-01T00:00:00.000Z' }],
+  ['ACK status', record => { record.envelope.ackStatus = 'RECEIVED' }],
+  ['ACK message identity', record => { record.envelope.messageId = 'foreign-ack-message' }],
+  ['queue record fence', record => { record.createdAt += 1 }],
+  ['marker identity', record => { record.marker.kind = 'none' }]
+]) test(`runtime ACK completion race: changed ${label} cannot certify or dequeue immutable target`, async () => {
+  const calls = []
+  const { runtime, meta } = await ackRacePrepared({ ack: async (_context, status, version) => {
+    calls.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  } })
+  ackRaceInstall(runtime, 'untargeted')
+  let dequeues = 0
+  const dequeue = runtime.outbox.dequeue.bind(runtime.outbox)
+  runtime.outbox.dequeue = file => { dequeues++; return dequeue(file) }
+  try {
+    const delivery = runtime.processor._emitAck('STARTED', meta)
+    const item = runtime.outbox.pendingEnvelopes()[0]
+    const waiter = runtime.processor.runtimeAckCompletions.get(item.fileName)
+    assert.equal(Object.isFrozen(waiter.target), true)
+    const path = resolve(runtime.outbox.acksDir, item.fileName)
+    const record = JSON.parse(readFileSync(path, 'utf8')); change(record)
+    writeFileSync(path, JSON.stringify(record), { mode: 0o600 }) // only private synthetic outbox
+    assert.equal(await delivery.confirmation, false)
+    await runtime.processor.runtimeAckTail
+    assert.deepEqual([delivery.sent, delivery.markerPersisted, delivery.dequeued], [false, false, false])
+    assert.deepEqual(calls, ['RECEIVED']); assert.equal(dequeues, 0)
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 1)
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'RECEIVED')
+    assert.ok(['RUNTIME_ACK_CONTEXT_CONFLICT', 'RUNTIME_ACK_FIFO_CHANGED'].includes(runtime.processor.failClosedError.code))
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+test('runtime ACK completion race: callback cannot change expected context while HTTP is suspended', async () => {
+  const entered = ackRaceDeferred(); const release = ackRaceDeferred(); let passedContext
+  const { runtime, meta } = await ackRacePrepared({ ack: async (context, status, version) => {
+    if (status === 'STARTED') { passedContext = context; entered.resolve(); await release.promise }
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  } })
+  try {
+    const delivery = runtime.processor._emitAck('STARTED', meta)
+    await entered.promise
+    passedContext.tenantId = 'callback-replacement'
+    release.resolve()
+    assert.equal(await delivery.confirmation, false)
+    assert.equal(runtime.processor.failClosedError.code, 'RUNTIME_ACK_FIFO_CHANGED')
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 1)
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+  } finally { release.resolve(); runtime.processor.stop() }
+})
+
+test('runtime ACK completion race: missing target and unrelated latest receipt never imply successful delivery', async () => {
+  const { runtime, meta } = await ackRacePrepared()
+  try {
+    await runtime.processor.handle(unifiedCommand(7002)); await runtime.processor.runtimeAckTail
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7002', 'message-7002').status, 'RECEIVED')
+    ackRaceInstall(runtime, 'untargeted')
+    const delivery = runtime.processor._emitAck('STARTED', meta)
+    runtime.outbox.dequeue(runtime.outbox.pendingEnvelopes()[0].fileName) // synthetic unexplained disappearance
+    assert.equal(await delivery.confirmation, false)
+    assert.deepEqual([delivery.sent, delivery.markerPersisted, delivery.dequeued], [false, false, false])
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'RECEIVED')
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+test('runtime ACK completion race: certified record remains exact after older flush overwrites per-message receipt', async () => {
+  const { runtime, meta } = await ackRacePrepared()
+  const race = ackRaceInstall(runtime, 'replay'); let proofChecked = false
+  runtime.processor.sendCommandAckFn = async (context, status, version) => {
+    if (status === 'REJECTED') {
+      const proof = [...runtime.processor.runtimeAckCompletions.values()].find(item => item.proof?.status === 'STARTED').proof
+      assert.equal(Object.isFrozen(proof), true)
+      assert.deepEqual(Object.keys(proof).sort(), ['recordDigest', 'contextDigest', 'kind', 'status', 'deliveryVersion'].sort())
+      assert.equal(proof.contextDigest, runtime.ledger.runtimeAckCommit(context.commandId, context.messageId).contextDigest)
+      assert.equal(proof.kind, 'ADVANCED'); assert.equal(proof.deliveryVersion, 2)
+      assert.throws(() => { proof.deliveryVersion = 900 }, TypeError); proofChecked = true
+    }
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  }
+  try {
+    const started = runtime.processor._emitAck('STARTED', meta)
+    const rejected = runtime.processor._emitAck('REJECTED', { ...meta, rejectReason: 'PRIVATE SYNTHETIC successor' })
+    assert.equal(await started.confirmation, true); assert.equal(await rejected.confirmation, true)
+    await Promise.all(race.competitors)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'REJECTED')
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 3)
+    assert.equal(proofChecked, true)
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+for (const [label, result] of [
+  ['wrong status', { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: 2 }],
+  ['nonadvancing version', { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: 1 }],
+  ['regressed version', { kind: 'PRIOR', status: 'STARTED', deliveryVersion: 0 }],
+  ['unsafe version', { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: Number.MAX_SAFE_INTEGER + 1 }],
+  ['unknown result', { kind: 'UNKNOWN', status: 'STARTED', deliveryVersion: 2 }],
+  ['absent result', null]
+]) test(`runtime ACK completion race: ${label} retains STARTED outbox without execution or confirmation`, async () => {
+  let runs = 0
+  const runtime = unifiedCheckpoint({ ack: async (_context, status, version) => status === 'STARTED'
+    ? result : { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 },
+    run: async () => { runs++; return { status: 'completed' } } })
+  const race = ackRaceInstall(runtime, 'heartbeat')
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    const started = race.deliveries.find(item => item.status === 'STARTED').delivery
+    assert.equal(await started.confirmation, false); assert.equal(runs, 0)
+    assert.equal(runtime.processor.failClosedError.code, 'RUNTIME_ACK_COMMIT_UNCONFIRMED')
+    assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'STARTED')
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'RECEIVED')
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+    assert.equal(runtime.inbox.count('recovery_required'), 1)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+for (const fault of ['ledger-before', 'ledger-after', 'marker-before', 'marker-after', 'dequeue-before', 'dequeue-after', 'commit-lock-release']) {
+  test(`runtime ACK completion race: ${fault} fails closed even if latest receipt/marker/FIFO suggests success`, async () => {
+    let runs = 0
+    const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } },
+      ack: async (_context, status, version) => ({ kind: status === 'STARTED' && version === 2 ? 'PRIOR' : 'ADVANCED',
+        status, deliveryVersion: status === 'STARTED' && version === 2 ? version : (version ?? 0) + 1 }) })
+    const race = ackRaceInstall(runtime, 'untargeted'); let faultCalls = 0
+    const fail = () => { faultCalls++; throw Object.assign(Error('private injected durable ACK failure'), { code: 'EIO' }) }
+    if (fault.startsWith('ledger-')) {
+      const mark = runtime.ledger.markRuntimeAckCommitted.bind(runtime.ledger)
+      runtime.ledger.markRuntimeAckCommitted = (id, context, result) => {
+        if (result.status !== 'STARTED') return mark(id, context, result)
+        if (fault === 'ledger-after') mark(id, context, result)
+        fail()
+      }
+    } else if (fault.startsWith('marker-')) {
+      const mark = runtime.ledger.markAckEmitted.bind(runtime.ledger)
+      runtime.ledger.markAckEmitted = (id, status, marker) => {
+        if (status !== 'STARTED') return mark(id, status, marker)
+        if (fault === 'marker-after') mark(id, status, marker)
+        fail()
+      }
+    } else if (fault.startsWith('dequeue-')) {
+      const dequeue = runtime.outbox.dequeue.bind(runtime.outbox)
+      runtime.outbox.dequeue = fileName => {
+        const item = JSON.parse(readFileSync(resolve(runtime.outbox.acksDir, fileName), 'utf8'))
+        if (item.envelope.ackStatus !== 'STARTED') return dequeue(fileName)
+        if (fault === 'dequeue-after') dequeue(fileName)
+        fail()
+      }
+    } else {
+      const commit = runtime.outbox.commitRuntimeDelivery.bind(runtime.outbox)
+      const release = runtime.outbox._releaseSequenceLock.bind(runtime.outbox)
+      let isStartedCommit = false
+      runtime.outbox.commitRuntimeDelivery = (head, result, ledger) => {
+        isStartedCommit = head.envelope.ackStatus === 'STARTED'
+        try { return commit(head, result, ledger) } finally { isStartedCommit = false }
+      }
+      runtime.outbox._releaseSequenceLock = () => { release(); if (isStartedCommit) fail() }
+    }
+    try {
+      await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+      await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+      const started = race.deliveries.find(item => item.status === 'STARTED').delivery
+      assert.equal(await started.confirmation, false); assert.equal(runs, 0); assert.ok(faultCalls > 0)
+      assert.deepEqual([started.sent, started.markerPersisted, started.dequeued], [false, false, false])
+      assert.ok(runtime.processor.failClosedError); assert.equal(runtime.inbox.count('recovery_required'), 1)
+      if (['dequeue-after', 'commit-lock-release'].includes(fault)) {
+        assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+        assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
+      } else assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'STARTED')
+      assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+    } finally { runtime.processor.stop() }
+  })
+}
+
+for (const failure of ['403', 'unknown-response']) test(`runtime ACK completion race: actual Node HTTP ${failure} never executes, unknown STARTED checkpoint restart never reruns (JavaDB NOT_RUN)`, async t => {
+  const { RuntimeV1Client } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
+  const selected = unifiedProfile(); const root = temporaryDirectory(); let runs = 0; const requests = []
+  const authorization = 'rta1_' + 'b'.repeat(64); const token = 'rts1_' + 'a'.repeat(64)
+  const server = createServer(async (request, response) => {
+    let bytes = ''; for await (const part of request) bytes += part
+    const body = JSON.parse(bytes); requests.push(body.status || 'session')
+    const send = data => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ data })) }
+    if (request.url === '/agent/runtime/v1/session') {
+      assert.equal(request.headers.authorization, `Bearer ${authorization}`)
+      return send({ ...selected.runtimeIdentity, hostId: 'race-host', runtimeInstanceId: 'race-boot', sessionGeneration: 1,
+        scheme: 'AgentRuntime', sessionToken: token, websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' })
+    }
+    assert.equal(request.headers.authorization, `AgentRuntime ${token}`)
+    assert.equal(request.headers['x-api-key'], undefined)
+    if (body.status === 'STARTED') {
+      assert.equal(body.deliveryVersion, 1)
+      if (failure === '403') { response.writeHead(403, { 'Content-Type': 'application/json' }); response.end('{"code":"TEST_FORBIDDEN"}'); return }
+      response.destroy(); return // no known HTTP commit, never inferred from transport loss
+    }
+    send({ kind: 'ADVANCED', status: body.status, deliveryVersion: (body.deliveryVersion ?? 0) + 1 })
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
+  const client = new RuntimeV1Client({ manifest: { ...selected.runtimeIdentity, manifestVersion: '1', manifestSha256: 'sha256:' + 'd'.repeat(64) },
+    apiBaseUrl: `http://127.0.0.1:${server.address().port}`, stateDir: root, hostId: 'race-host', runtimeInstanceId: 'race-boot' })
+  writeFileSync(client.authorizationPath(), JSON.stringify({ installationId: selected.runtimeIdentity.installationId, runtimeAuthorization: authorization }), { mode: 0o600 })
+  await client.session()
+  const runtime = unifiedCheckpoint({ root, selectedProfile: selected, ack: (...args) => client.acknowledge(...args),
+    run: async () => { runs++; return { status: 'completed' } } })
+  const race = ackRaceInstall(runtime, 'heartbeat')
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.ok(requests.includes('STARTED')); assert.equal(runs, 0)
+    assert.equal(await race.deliveries.find(item => item.status === 'STARTED').delivery.confirmation, false)
+    assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'STARTED')
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+    if (failure === '403') {
+      assert.equal(runtime.processor.runtimeAckFailure.code, 'RUNTIME_HTTP_REJECTED')
+      assert.equal(runtime.processor.runtimeAckFailure.status, 403)
+    }
+    assert.equal(runtime.inbox.count('recovery_required'), 1)
+  } finally { runtime.processor.stop(); client.invalidateSession() }
+  const restarted = unifiedCheckpoint({ root, selectedProfile: selected, run: async () => { runs++; return { status: 'completed' } } })
+  try {
+    restarted.processor.resume(); await restarted.processor.waitForIdle(); await restarted.processor.runtimeAckTail
+    assert.equal(runs, 0); assert.equal(restarted.ledger.getEntry('command-7001').status, 'RECOVERY_REQUIRED')
+    assert.equal(restarted.inbox.count('recovery_required'), 1)
+    await restarted.processor.replayAcks() // await reconstructed waiters, not just the HTTP flush tail
+    assert.equal(restarted.processor.runtimeAckCompletions.size, 0, 'no transient proof survives checkpoint reconstruction')
+  } finally { restarted.processor.stop() }
+})
+
+
+test('runtime ACK completion race: stop during old flush confirmation cannot be overridden by its certified target', async () => {
+  let runtime; let runs = 0
+  runtime = unifiedCheckpoint({ ack: async (_context, status, version) => {
+    if (status === 'STARTED') runtime.processor.stop() // only in-memory synthetic processor, no process signal
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  }, run: async () => { runs++; return { status: 'completed' } } })
+  const race = ackRaceInstall(runtime, 'untargeted')
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    const started = race.deliveries.find(item => item.status === 'STARTED').delivery
+    assert.equal(runtime.processor.stopped, true); assert.equal(runs, 0)
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
+    assert.equal(await started.confirmation, false)
+    assert.deepEqual([started.sent, started.markerPersisted, started.dequeued], [false, false, false])
+    assert.equal(runtime.inbox.count('recovery_required'), 1)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+
+test('runtime ACK completion race: later command HTTP rejection retains its own FIFO without erasing certified target', async () => {
+  const entered = ackRaceDeferred(); const release = ackRaceDeferred()
+  const { runtime, meta } = await ackRacePrepared({ ack: async (context, status, version) => {
+    if (context.commandId === 'command-7002') throw Object.assign(Error('private second-command rejection'), { code: 'RUNTIME_HTTP_REJECTED', status: 403 })
+    if (status === 'STARTED') { entered.resolve(); await release.promise }
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  } })
+  const emit = runtime.processor._emitRuntimeAck.bind(runtime.processor); const deliveries = []
+  runtime.processor._emitRuntimeAck = (status, meta, marker) => {
+    const delivery = emit(status, meta, marker); deliveries.push({ commandId: meta.commandId, delivery }); return delivery
+  }
+  try {
+    const started = runtime.processor._emitAck('STARTED', meta); await entered.promise
+    await runtime.processor.handle(unifiedCommand(7002)); release.resolve()
+    assert.equal(await started.confirmation, true)
+    await runtime.processor.runtimeAckTail
+    const other = deliveries.find(item => item.commandId === 'command-7002').delivery
+    assert.equal(await other.confirmation, false)
+    assert.deepEqual([started.sent, started.markerPersisted, started.dequeued], [true, true, true])
+    assert.deepEqual([other.sent, other.markerPersisted, other.dequeued], [false, false, false])
+    const pending = runtime.outbox.pendingEnvelopes()
+    assert.equal(pending.length, 1); assert.equal(pending[0].envelope.commandId, 'command-7002')
+    assert.equal(runtime.ledger.getEntry('command-7002').ackReceivedEmitted, false)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7002', 'message-7002'), null)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'STARTED')
+    assert.equal(runtime.processor.runtimeAckFailure.status, 403)
+  } finally { release.resolve(); runtime.processor.stop() }
+})
+
+
+test('runtime ACK completion race: stop during postcommit cleanup await cannot confirm STARTED or execute', async () => {
+  const entered = ackRaceDeferred(); const release = ackRaceDeferred(); let runs = 0
+  const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } } })
+  const cleanup = runtime.processor._cleanupRuntimeTerminals.bind(runtime.processor)
+  runtime.processor._cleanupRuntimeTerminals = async () => {
+    if (runtime.ledger.getEntry('command-7001')?.ackStartedEmitted) { entered.resolve(); await release.promise }
+    return cleanup()
+  }
+  const emit = runtime.processor._emitRuntimeAck.bind(runtime.processor); let started
+  runtime.processor._emitRuntimeAck = (status, meta, marker) => {
+    const delivery = emit(status, meta, marker)
+    if (status === 'STARTED') started = delivery
+    return delivery
+  }
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await entered.promise
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'STARTED')
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
+    assert.equal(runs, 0)
+    runtime.processor.stop() // only this synthetic processor, never a process signal
+    release.resolve(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.equal(await started.confirmation, false)
+    assert.deepEqual([started.sent, started.markerPersisted, started.dequeued], [false, false, false])
+    assert.equal(runs, 0); assert.equal(runtime.inbox.count('recovery_required'), 1)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { release.resolve(); runtime.processor.stop() }
+})

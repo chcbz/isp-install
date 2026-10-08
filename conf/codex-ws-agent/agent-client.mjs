@@ -2658,6 +2658,7 @@ export class AgentMessageProcessor {
     this.onCommandTerminalConfirmed = onCommandTerminalConfirmed
     this.sendCommandAckFn = sendCommandAckFn
     this.runtimeAckTail = Promise.resolve()
+    this.runtimeAckCompletions = new Map() // transient exact-record waiters; never a second checkpoint
     this.chatInbox = chatInbox
     this.chatAckOutbox = chatAckOutbox
     this.lanes = lanes || new FairLaneScheduler()
@@ -3616,36 +3617,56 @@ export class AgentMessageProcessor {
   _emitRuntimeAck(status, meta, marker) {
     const delivery = { persisted: false, sent: false, markerPersisted: false, dequeued: false }
     try {
-      const command = meta.runtimeCommand
       const queued = this.ackOutbox.enqueue(buildAckEnvelope(this.profile, status, meta), marker)
       delivery.persisted = true
-      delivery.confirmation = this._scheduleRuntimeAckFlush(queued.fileName).then(confirmed => {
+      // Register synchronously, before any queued flush can resume from HTTP.
+      // The digest binds subject/message/status/context/marker/queue sequence,
+      // not just a filename, marker, absent head, or latest per-message receipt.
+      const target = Object.freeze({ fileName: queued.fileName, recordDigest: canonicalSha256(queued.record) })
+      const completion = { target, proof: null }
+      this.runtimeAckCompletions.set(target.fileName, completion)
+      delivery.confirmation = this._scheduleRuntimeAckFlush(target).then(confirmed => {
         if (confirmed) Object.assign(delivery, { sent: true, markerPersisted: true, dequeued: true })
         return confirmed
-      })
+      }).finally(() => { this.runtimeAckCompletions.delete(target.fileName) })
     } catch (error) { this._failClosed(new AgentProtocolError('ACK_OUTBOX_PERSIST_ERROR', error.message), meta) }
     return delivery
   }
 
-  _scheduleRuntimeAckFlush(target = '') {
+  _scheduleRuntimeAckFlush(target = null) {
+    const targetConfirmed = () => {
+      const completion = target && this.runtimeAckCompletions.get(target.fileName)
+      return completion?.target === target && completion.proof?.recordDigest === target.recordDigest
+    }
     const operation = this.runtimeAckTail.catch(() => false).then(async () => {
-      let confirmed = !target
+      // An older replay/heartbeat may already have certified this exact record.
+      if (target && !this.stopped && targetConfirmed()) return true
       while (typeof this.sendCommandAckFn === 'function' && !this.stopped) {
         const head = this.ackOutbox.pendingEnvelopes()[0] // lock ends before HTTP wait
-        if (!head) { await this._cleanupRuntimeTerminals(); return confirmed }
+        if (!head) { await this._cleanupRuntimeTerminals(); return !this.stopped && (!target || targetConfirmed()) }
         const command = head.envelope.runtimeCommand
         if (!command) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_REQUIRED', 'Legacy ACK requires stopped-writer migration, not an auth fallback')
         this._assertRuntimeAckContext(head)
+        const completion = this.runtimeAckCompletions.get(head.fileName)
+        const recordDigest = canonicalSha256(head.record)
+        if (completion && completion.target.recordDigest !== recordDigest) throw new AgentProtocolError('RUNTIME_ACK_FIFO_CHANGED', 'Queued ACK differs from its immutable confirmation target')
         const prior = this.ledger.runtimeAckCommit(head.envelope.commandId, command.messageId)
         let result
         try { result = await this.sendCommandAckFn(command, head.envelope.ackStatus, prior?.deliveryVersion ?? null) }
         catch (error) {
           // Retain FIFO on real transport or protocol rejection; never infer commit.
           this.runtimeAckFailure = error
-          return false
+          // A later record's rejection cannot erase this target's certified commit.
+          return Boolean(target && !this.stopped && targetConfirmed())
         }
+        if (canonicalSha256(head.record) !== recordDigest) throw new AgentProtocolError('RUNTIME_ACK_FIFO_CHANGED', 'ACK confirmation context changed during HTTP')
         this.ackOutbox.commitRuntimeDelivery(head, result, this.ledger)
-        if (head.fileName === target) confirmed = true
+        // Only the original locked commit's COMPLETE return certifies the exact
+        // HTTP status/version, durable ledger, marker, dequeue and lock release.
+        // Throws even after a marker/unlink leave no proof; a later empty FIFO
+        // must not turn that failed commit into a successful confirmation.
+        if (completion) completion.proof = Object.freeze({ recordDigest, contextDigest: canonicalSha256(command),
+          kind: result.kind, status: result.status, deliveryVersion: result.deliveryVersion })
       }
       return false
     }).catch(error => { this._failClosed(new AgentProtocolError(error.code || 'RUNTIME_ACK_CHECKPOINT_ERROR', error.message), {}); return false })
