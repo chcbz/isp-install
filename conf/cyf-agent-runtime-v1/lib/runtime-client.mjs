@@ -11,6 +11,7 @@ const PERMANENT_TLS_CODES = new Set([
 ]);
 
 export function classifyRuntimeError(error) {
+  if (error?.code === 'RUNTIME_ENROLLMENT_RECOVERY_REQUIRED') return { kind: 'recovery-required' };
   if (error?.name === 'AbortError') return { kind: 'cancelled' };
   if (error?.code === 'REBINDS_REQUIRED') return { kind: 'rebind' };
   const status = Number(error?.status);
@@ -93,6 +94,24 @@ const isReassignmentLeaseEndpoint = (endpoint, options, manifest) => {
   return query.length === 1 && query[0][0] === 'actorAgentId' && query[0][1] === manifest.canonicalAgentId;
 };
 
+const ENROLLMENT_AUTHORIZATION = /^rta1_[0-9a-f]{64}$/;
+const safeEpoch = value => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime());
+export function validateEnrollmentResult(response, manifest) {
+  const fields = ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion', 'manifestSha256', 'enrollmentExpiresAt', 'status', 'lastHeartbeatAt'];
+  const installation = response?.installation;
+  if (!response || typeof response !== 'object' || Array.isArray(response)
+      || Object.keys(response).sort().join(',') !== 'installation,runtimeAuthorization'
+      || !installation || typeof installation !== 'object' || Array.isArray(installation)
+      || Object.keys(installation).sort().join(',') !== [...fields].sort().join(',')
+      || !exact(response.runtimeAuthorization) || !ENROLLMENT_AUTHORIZATION.test(response.runtimeAuthorization)) throw fail('RUNTIME_ENROLLMENT_RESPONSE_INVALID');
+  const expected = identityOf(manifest);
+  if (Object.keys(expected).some(key => installation[key] !== expected[key])
+      || installation.status !== 'ACTIVE' || !safeEpoch(installation.enrollmentExpiresAt)
+      || installation.lastHeartbeatAt !== null && !safeEpoch(installation.lastHeartbeatAt)) throw fail('RUNTIME_ENROLLMENT_RESPONSE_INVALID');
+  return Object.freeze({ installationId: expected.installationId, runtimeAuthorization: response.runtimeAuthorization });
+}
+const enrollmentRecovery = () => Object.assign(fail('RUNTIME_ENROLLMENT_RECOVERY_REQUIRED'), { recoveryRequired: true, retryable: false });
+
 export class RuntimeV1Client {
   constructor({ manifest, apiBaseUrl, stateDir, hostId, runtimeInstanceId, fetchFn = globalThis.fetch }) {
     if (typeof fetchFn !== 'function') throw fail('RUNTIME_FETCH_REQUIRED');
@@ -101,6 +120,7 @@ export class RuntimeV1Client {
     this.currentSession = null; this.lastGeneration = 0; this.sessionAbort = null;
   }
   authorizationPath() { return `${this.stateDir}/runtime-authorization.json`; }
+  enrollmentAttemptPath() { return `${this.stateDir}/runtime-enrollment-attempt.json`; }
   async request(path, body, headers = {}, { signal } = {}) {
     const response = await this.fetchFn(`${this.apiBaseUrl}${path}`, { method: 'POST', redirect: 'error',
       headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), ...(signal ? { signal } : {}) });
@@ -118,10 +138,21 @@ export class RuntimeV1Client {
   }
   async enroll(enrollmentSecret, options = {}) {
     if (!exact(enrollmentSecret)) throw fail('RUNTIME_ENROLLMENT_SECRET_INVALID');
-    const response = await this.request('/agent/runtime/v1/enroll', { ...identityOf(this.manifest), enrollmentSecret }, {}, options);
-    if (!exact(response.runtimeAuthorization) || response.installationId !== this.manifest.installationId) throw fail('RUNTIME_ENROLLMENT_RESPONSE_INVALID');
-    await writePrivateJson(this.authorizationPath(), { installationId: this.manifest.installationId, runtimeAuthorization: response.runtimeAuthorization });
-    return { installationId: this.manifest.installationId }; // do not expose installation token to logs/CLI
+    // Never replace an existing authorization or replay a possibly consumed secret,
+    // even after a new process starts. The marker contains only public manifest identity.
+    if (await readPrivateJson(this.authorizationPath(), null)) throw fail('RUNTIME_ENROLLMENT_AUTHORIZATION_EXISTS');
+    if (await readPrivateJson(this.enrollmentAttemptPath(), null)) throw enrollmentRecovery();
+    try {
+      await writePrivateJson(this.enrollmentAttemptPath(), { ...identityOf(this.manifest), status: 'REQUEST_MAY_CONSUME_SECRET' }, { exclusive: true });
+    } catch (error) { if (error.code === 'EEXIST') throw enrollmentRecovery(); throw error; }
+    try {
+      const response = await this.request('/agent/runtime/v1/enroll', { ...identityOf(this.manifest), enrollmentSecret }, {}, options);
+      const valid = validateEnrollmentResult(response, this.manifest);
+      await writePrivateJson(this.authorizationPath(), valid);
+      const persisted = await readPrivateJson(this.authorizationPath(), null);
+      if (persisted?.installationId !== valid.installationId || persisted?.runtimeAuthorization !== valid.runtimeAuthorization) throw enrollmentRecovery();
+      return { installationId: valid.installationId }; // no token in logs/CLI/public view
+    } catch { throw enrollmentRecovery(); } // no transport/parser/OS error can leak credentials or trigger an automatic retry
   }
   async session(options = {}) {
     if (!exact(this.hostId) || !exact(this.runtimeInstanceId) || this.hostId === this.runtimeInstanceId) throw fail('RUNTIME_HOST_PROOF_REQUIRED');

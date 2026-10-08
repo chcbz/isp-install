@@ -18,7 +18,7 @@ const fixtureBytes = readFileSync(new URL('./fixtures/command-dispatch-e05.canon
 const raw = JSON.parse(fixtureBytes);
 const wireBytes = readFileSync(new URL('./fixtures/unified-runtime-wire-v2.redacted.json', import.meta.url));
 const wire = JSON.parse(wireBytes);
-const wireSha = '0fcc887699bde04c016b8f986a77d656c0d6e2531ba00c5a46daf418be6372dc';
+const wireSha = '5f86daf1c4fa1b767fb3b3331577e6a0d3de022bebd92758e3571461358c98eb';
 const frozenClock = wire.canonicalDispatchProjectionR2.clockEpochMillis;
 const hostId = wire.session.request.hostId; const bootId = wire.session.request.runtimeInstanceId;
 const fixtureSha = '057a4626387846f4bf420cab046d7d0bb4d12cdae6569e90839af00161cbd5a3';

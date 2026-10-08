@@ -1,4 +1,4 @@
-import { constants, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import { constants, link, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -74,7 +74,7 @@ export async function readPrivateJson(path, fallback) {
   try { return JSON.parse(await readPrivateBytes(path)); }
   catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
-export async function writePrivateJson(path, value) {
+export async function writePrivateJson(path, value, { exclusive = false } = {}) {
   const parent = dirname(resolve(path));
   await ensurePrivateDirectory(parent);
   const identity = await lstat(parent, { bigint: true });
@@ -87,7 +87,10 @@ export async function writePrivateJson(path, value) {
     const current = await lstat(parent, { bigint: true });
     if (identity.dev !== current.dev || identity.ino !== current.ino) throw new Error('private directory ownership changed');
     try { await readPrivateBytes(path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    await rename(temporary, path);
+    // One-time credential attempts require an atomic no-replace claim across processes.
+    // A private fsynced temp is linked into place; EEXIST never overwrites another claim.
+    if (exclusive) { await link(temporary, path); await unlink(temporary); }
+    else await rename(temporary, path);
     const directory = await open(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try { await directory.sync(); } finally { await directory.close(); }
   } catch (error) { await unlink(temporary).catch(() => {}); throw error; }

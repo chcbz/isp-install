@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chmod, mkdtemp, readdir, rm, symlink, writeFile, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, rm, symlink, writeFile, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { digestManifest, validateManifest } from '../lib/manifest.mjs';
 import { createLogger, readEnrollmentSecret, readPrivateJson } from '../lib/security.mjs';
 import { PERMANENT_RUNTIME_EXIT_STATUS, runtimeExitStatus } from '../agent-runtime.mjs';
-import { classifyRuntimeError, RuntimeV1Client, validateCommandForManifest, validateRuntimeAckResult } from '../lib/runtime-client.mjs';
+import { classifyRuntimeError, RuntimeV1Client, validateCommandForManifest, validateRuntimeAckResult, validateEnrollmentResult } from '../lib/runtime-client.mjs';
 
 // Wire r1 catalogs pinned to API87c894dc, SHA256 56d7c3d...322adb.
 // Synthetic credentials only. HTTP mocked here: NOT cross-end/production evidence.
 const token = 'rts1_' + 'a'.repeat(64);
+const installationToken = 'rta1_' + 'b'.repeat(64);
+const enrollment = () => ({ installation: { ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion'].map(k => [k, manifest()[k]])),
+  manifestSha256: manifest().manifestSha256.slice(7), enrollmentExpiresAt: 3601000, status: 'ACTIVE', lastHeartbeatAt: null }, runtimeAuthorization: installationToken });
 const manifest = () => {
   const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: 'rti_0123456789abcdef0123456789abcdef',
     tenantId: '0', clientId: 'client-fixture', canonicalAgentId: 'agt_0123456789abcdef0123456789abcdef' };
@@ -23,12 +26,12 @@ const session = generation => ({ ...Object.fromEntries(['installationId', 'tenan
   hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: generation, scheme: 'AgentRuntime', sessionToken: token,
   websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' });
 const response = data => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ data }) });
-async function setup(t, fetchFn) {
+async function setup(t, fetchFn, { authorization = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ur01-wire-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const client = new RuntimeV1Client({ manifest: manifest(), apiBaseUrl: 'https://api.example.test', stateDir: directory,
     hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', fetchFn });
-  await writeFile(client.authorizationPath(), JSON.stringify({ installationId: manifest().installationId, runtimeAuthorization: 'synthetic-install-token' }), { mode: 0o600 });
+  if (authorization) await writeFile(client.authorizationPath(), JSON.stringify({ installationId: manifest().installationId, runtimeAuthorization: 'synthetic-install-token' }), { mode: 0o600 });
   return { directory, client };
 }
 
@@ -68,12 +71,12 @@ test('installation Bearer derives memory-only session; WS/ACK use exactly five p
   const { directory, client } = await setup(t, async (url, options) => {
     const body = JSON.parse(options.body); requests.push({ url, options, body });
     if (url.endsWith('/session')) return response(session(7));
-    if (url.endsWith('/enroll')) return response({ installationId: manifest().installationId, runtimeAuthorization: 'synthetic-install-token' });
+    if (url.endsWith('/enroll')) return response(enrollment());
     return response({ kind: 'ADVANCED', status: body.status, deliveryVersion: ++version });
-  });
+  }, { authorization: false });
   assert.deepEqual(await client.enroll('synthetic-enroll'), { installationId: manifest().installationId });
   await client.session();
-  assert.equal(requests[1].options.headers.Authorization, 'Bearer synthetic-install-token');
+  assert.equal(requests[1].options.headers.Authorization, `Bearer ${installationToken}`);
   assert.deepEqual(Object.keys(requests[1].body).sort(), ['installationId','tenantId','clientId','canonicalAgentId','manifestVersion','manifestSha256','hostId','runtimeInstanceId'].sort());
   assert.equal(requests[1].body.manifestSha256, manifest().manifestSha256.slice(7));
   const headers = { Authorization: `AgentRuntime ${token}`, 'X-Agent-Id': manifest().canonicalAgentId, 'X-Agent-Installation-Id': manifest().installationId,
@@ -88,7 +91,7 @@ test('installation Bearer derives memory-only session; WS/ACK use exactly five p
   assert.deepEqual(requests[2].body, { ...command(), hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: 7, deliveryVersion: null, status: 'RECEIVED' });
   assert.deepEqual(requests[2].options.headers, { 'content-type': 'application/json', ...headers });
   assert.equal(requests[2].options.redirect, 'error');
-  assert.deepEqual(await readdir(directory), ['runtime-authorization.json']); // no pending-acks state
+  assert.deepEqual((await readdir(directory)).sort(), ['runtime-authorization.json', 'runtime-enrollment-attempt.json']); // no pending-acks state
   assert.equal((await readFile(client.authorizationPath(), 'utf8')).includes(token), false);
   assert.equal(client.queueAck, undefined); assert.equal(client.flushAcks, undefined);
 });
@@ -261,4 +264,109 @@ test('E05 native lease route is still session-fenced: invalidate aborts transpor
   await client.session(); release(response({})); await pending;
   assert.equal(client.currentSession.sessionGeneration, 2);
   client.invalidateSession(); await assert.rejects(client.nativeFetch(e05LeaseUrl(), { method: 'POST' }), /RUNTIME_SESSION_REQUIRED/);
+});
+
+
+test('enrollment uses actual b47 nested record fixture only, with synthetic authorization rather than REDACTED markers', async () => {
+  const wire = JSON.parse(await readFile(new URL('./fixtures/unified-runtime-wire-v2.redacted.json', import.meta.url), 'utf8')).enrollment;
+  assert.equal(wire.responseEnvelope, 'JsonResult.data'); assert.equal(Object.hasOwn(wire.response, 'installationId'), false);
+  const nested = wire.response.installation;
+  const trusted = { runtimeProtocolVersion: 'v1', ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion'].map(key => [key, nested[key]])), manifestSha256: `sha256:${nested.manifestSha256}` };
+  assert.deepEqual(validateEnrollmentResult({ ...wire.response, runtimeAuthorization: installationToken }, trusted), { installationId: trusted.installationId, runtimeAuthorization: installationToken });
+  assert.throws(() => validateEnrollmentResult(wire.response, trusted), /RUNTIME_ENROLLMENT_RESPONSE_INVALID/);
+});
+
+test('enrollment nested installation requires exact full subject, manifest, ACTIVE state and nullable heartbeat; no top-level fallback', () => {
+  for (const field of ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion', 'manifestSha256']) {
+    const data = enrollment(); data.installation[field] = 'foreign';
+    assert.throws(() => validateEnrollmentResult(data, manifest()), /RUNTIME_ENROLLMENT_RESPONSE_INVALID/);
+  }
+  for (const patch of [{ status: 'PENDING' }, { status: 'REVOKED' }, { status: 'ONLINE' }, { status: undefined },
+    { lastHeartbeatAt: undefined }, { lastHeartbeatAt: '1000' }, { lastHeartbeatAt: Number.MAX_SAFE_INTEGER },
+    { enrollmentExpiresAt: undefined }, { enrollmentExpiresAt: '1000' }, { enrollmentExpiresAt: Number.MAX_SAFE_INTEGER },
+    { enrollmentExpiresAt: 1.1 }, { sessionToken: token }]) {
+    assert.throws(() => validateEnrollmentResult({ ...enrollment(), installation: { ...enrollment().installation, ...patch } }, manifest()), /RUNTIME_ENROLLMENT_RESPONSE_INVALID/);
+  }
+  for (const authorization of ['', 'REDACTED_INSTALLATION_AUTHORIZATION', token, installationToken + '\n', ['rta1_' + 'b'.repeat(64)], { token: installationToken }]) {
+    assert.throws(() => validateEnrollmentResult({ ...enrollment(), runtimeAuthorization: authorization }, manifest()), /RUNTIME_ENROLLMENT_RESPONSE_INVALID/);
+  }
+  for (const data of [{ installationId: manifest().installationId, runtimeAuthorization: installationToken },
+    { ...enrollment(), installationId: manifest().installationId }, { ...enrollment(), installation: [] },
+    { ...enrollment(), installation: null }]) assert.throws(() => validateEnrollmentResult(data, manifest()), /RUNTIME_ENROLLMENT_RESPONSE_INVALID/);
+  assert.doesNotThrow(() => validateEnrollmentResult({ ...enrollment(), installation: { ...enrollment().installation, lastHeartbeatAt: 2000 } }, manifest()));
+});
+
+test('enrollment successful authorization is private atomic persisted/read back; public return and attempt record have no credential', async t => {
+  let calls = 0;
+  const { client, directory } = await setup(t, async () => { calls++; return response(enrollment()); }, { authorization: false });
+  assert.deepEqual(await client.enroll('one-time-synthetic-secret'), { installationId: manifest().installationId });
+  assert.equal(calls, 1); assert.equal(await client.loadAuthorization(), installationToken);
+  assert.equal((await stat(client.authorizationPath())).mode & 0o777, 0o600); assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  const attempted = await readFile(client.enrollmentAttemptPath(), 'utf8');
+  for (const value of ['one-time-synthetic-secret', installationToken, 'runtimeAuthorization', 'sessionToken']) assert.equal(attempted.includes(value), false);
+  const saved = await readFile(client.authorizationPath(), 'utf8');
+  await assert.rejects(client.enroll('one-time-synthetic-secret'), /RUNTIME_ENROLLMENT_AUTHORIZATION_EXISTS/);
+  assert.equal(await readFile(client.authorizationPath(), 'utf8'), saved); assert.equal(calls, 1);
+  assert.equal((await readdir(directory)).some(name => name.endsWith('.tmp')), false);
+});
+
+test('lost enrollment response or invalid envelope is recovery-required, nonretryable across process restart and never secret-bearing', async t => {
+  for (const mode of ['lost-response', 'bad-envelope', 'legacy-shape', 'foreign-subject', '503']) {
+    let calls = 0;
+    const { client, directory } = await setup(t, async () => {
+      calls++;
+      if (mode === 'lost-response') throw new Error('do not disclose one-time-synthetic-secret');
+      if (mode === 'bad-envelope') return { ...response({}), json: async () => ({ installationId: manifest().installationId }) };
+      if (mode === 'legacy-shape') return response({ installationId: manifest().installationId, runtimeAuthorization: installationToken });
+      if (mode === 'foreign-subject') return response({ ...enrollment(), installation: { ...enrollment().installation, canonicalAgentId: 'foreign' } });
+      return { ...response({}), ok: false, status: 503 };
+    }, { authorization: false });
+    await assert.rejects(client.enroll('one-time-synthetic-secret'), error => {
+      assert.equal(error.code, 'RUNTIME_ENROLLMENT_RECOVERY_REQUIRED'); assert.equal(error.recoveryRequired, true);
+      assert.equal(error.retryable, false); assert.equal(classifyRuntimeError(error).kind, 'recovery-required');
+      assert.equal(String(error).includes('one-time-synthetic-secret'), false); assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(await readPrivateJson(client.authorizationPath(), null), null);
+    await assert.rejects(client.enroll('one-time-synthetic-secret'), /RUNTIME_ENROLLMENT_RECOVERY_REQUIRED/);
+    const restarted = new RuntimeV1Client({ manifest: manifest(), apiBaseUrl: client.apiBaseUrl, stateDir: directory,
+      fetchFn: () => assert.fail('restart may not repeat an enrollment attempt') });
+    await assert.rejects(restarted.enroll('one-time-synthetic-secret'), /RUNTIME_ENROLLMENT_RECOVERY_REQUIRED/);
+    assert.equal(calls, 1);
+  }
+});
+
+test('enrollment cannot report success after authorization persistence failure or silently overwrite preexisting credentials', async t => {
+  let calls = 0; let selectedDirectory;
+  const { client, directory } = await setup(t, async () => { calls++; await chmod(selectedDirectory, 0o755); return response(enrollment()); }, { authorization: false });
+  selectedDirectory = directory;
+  try { await assert.rejects(client.enroll('one-time-synthetic-secret'), /RUNTIME_ENROLLMENT_RECOVERY_REQUIRED/); }
+  finally { await chmod(directory, 0o700); }
+  assert.equal(await readPrivateJson(client.authorizationPath(), null), null);
+  await assert.rejects(client.enroll('one-time-synthetic-secret'), /RUNTIME_ENROLLMENT_RECOVERY_REQUIRED/); assert.equal(calls, 1);
+  const existing = await setup(t, () => assert.fail('preexisting auth must not send HTTP'));
+  const before = await readFile(existing.client.authorizationPath(), 'utf8');
+  await assert.rejects(existing.client.enroll('one-time-synthetic-secret'), /RUNTIME_ENROLLMENT_AUTHORIZATION_EXISTS/);
+  assert.equal(await readFile(existing.client.authorizationPath(), 'utf8'), before);
+});
+
+test('enrollment exclusive durable attempt fences simultaneous independent clients: exactly one HTTP request', async t => {
+  let calls = 0;
+  const { client, directory } = await setup(t, async () => { calls++; return response(enrollment()); }, { authorization: false });
+  const peer = new RuntimeV1Client({ manifest: manifest(), apiBaseUrl: client.apiBaseUrl, stateDir: directory,
+    fetchFn: async () => { calls++; return response(enrollment()); } });
+  const results = await Promise.allSettled([client.enroll('one-time-synthetic-secret'), peer.enroll('one-time-synthetic-secret')]);
+  assert.equal(results.filter(value => value.status === 'fulfilled').length, 1); assert.equal(calls, 1);
+  assert.equal(results.find(value => value.status === 'rejected').reason.code, 'RUNTIME_ENROLLMENT_RECOVERY_REQUIRED');
+  assert.equal(await client.loadAuthorization(), installationToken);
+  assert.equal((await readdir(directory)).some(name => name.endsWith('.tmp')), false);
+});
+
+test('enrollment invalid secret and unsafe attempt path reject before HTTP and preserve private files', async t => {
+  const { client, directory } = await setup(t, () => assert.fail('invalid preflight cannot send HTTP'), { authorization: false });
+  await assert.rejects(client.enroll(' invalid '), /RUNTIME_ENROLLMENT_SECRET_INVALID/);
+  const privateFile = join(directory, 'owned-secret'); await writeFile(privateFile, 'preserve', { mode: 0o600 });
+  await symlink(privateFile, client.enrollmentAttemptPath());
+  await assert.rejects(client.enroll('one-time-synthetic-secret'), /symlinks/);
+  assert.equal(await readFile(privateFile, 'utf8'), 'preserve');
 });
