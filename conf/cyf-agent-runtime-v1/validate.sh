@@ -1,62 +1,42 @@
 #!/bin/bash
-# Offline integrity validation for one CYF Agent Runtime v1 package directory.
+# Validate the single Runtime/engine/toolchain artifact without execution or network.
 set -euo pipefail
-
-usage() {
-    echo "usage: validate.sh [--root PACKAGE_ROOT] [--manifest MANIFEST] [--node NODE]" >&2
-    exit 2
-}
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PACKAGE_ROOT="$SCRIPT_DIR"
-MANIFEST=""
-NODE_BIN="${CYF_RUNTIME_V1_NODE_BIN:-node}"
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PACKAGE_ROOT="$(dirname "$SCRIPT_DIR")"
+CONFIG=''
 while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || { echo 'validate requires key/value arguments' >&2; exit 2; }
     case "$1" in
-        --root) PACKAGE_ROOT="${2:-}"; shift 2 ;;
-        --manifest) MANIFEST="${2:-}"; shift 2 ;;
-        --node) NODE_BIN="${2:-}"; shift 2 ;;
-        *) usage ;;
+        --root) PACKAGE_ROOT="$2" ;;
+        --config) CONFIG="$2" ;;
+        *) echo 'usage: validate.sh [--root ARTIFACT_ROOT] [--config HOST_CONFIG]' >&2; exit 2 ;;
     esac
+    shift 2
 done
-
-[ -n "$PACKAGE_ROOT" ] && [ -d "$PACKAGE_ROOT" ] || { echo "Runtime v1 package root is invalid" >&2; exit 1; }
-PACKAGE_ROOT="$(cd "$PACKAGE_ROOT" && pwd -P)"
-if [ -z "$MANIFEST" ]; then
-    if [ -f "$PACKAGE_ROOT/manifest.json" ]; then
-        MANIFEST="$PACKAGE_ROOT/manifest.json"
-    else
-        MANIFEST="$PACKAGE_ROOT/manifest.example.json"
-    fi
-fi
-[ -f "$MANIFEST" ] && [ ! -L "$MANIFEST" ] || { echo "Runtime v1 manifest must be a regular non-symlink file" >&2; exit 1; }
-
-for file in agent-runtime.mjs install.sh validate.sh package.json README.md runtime.env.example manifest.example.json \
-    lib/manifest.mjs lib/runtime-client.mjs lib/security.mjs \
+[ -d "$PACKAGE_ROOT" ] && [ "$(readlink -f "$PACKAGE_ROOT")" = "$PACKAGE_ROOT" ] || { echo 'Runtime artifact root must be canonical' >&2; exit 1; }
+NODE_BIN="$PACKAGE_ROOT/node/bin/node"
+[ -x "$NODE_BIN" ] && [ ! -L "$NODE_BIN" ] || { echo 'Artifact-local Node is missing or unsafe' >&2; exit 1; }
+[ "$("$NODE_BIN" -p 'process.versions.node')" = '20.20.2' ] || { echo 'Runtime requires pinned Node 20.20.2' >&2; exit 1; }
+for file in agent-runtime.mjs install.sh validate.sh package.json runtime.env.example manifest.example.json \
+    lib/manifest.mjs lib/runtime-client.mjs lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs \
     systemd/cyf-agent-runtime-v1@.service; do
-    [ -f "$PACKAGE_ROOT/$file" ] && [ ! -L "$PACKAGE_ROOT/$file" ] || {
-        echo "Runtime v1 package file is missing or unsafe: $file" >&2
-        exit 1
+    [ -f "$PACKAGE_ROOT/runtime/$file" ] && [ ! -L "$PACKAGE_ROOT/runtime/$file" ] \
+        && [ "$(readlink -f "$PACKAGE_ROOT/runtime/$file")" = "$PACKAGE_ROOT/runtime/$file" ] || {
+        echo "Runtime payload is missing or unsafe: $file" >&2; exit 1;
     }
 done
-[ ! -e "$PACKAGE_ROOT/.env" ] || { echo "Runtime v1 package must not contain .env" >&2; exit 1; }
-[ ! -e "$PACKAGE_ROOT/runtime.env" ] || { echo "Runtime v1 package must not contain runtime.env" >&2; exit 1; }
-
-mode="$(stat -c '%a' "$MANIFEST")"
-case "$mode" in
-    ???) ;;
-    *) echo "Runtime v1 manifest permissions are unreadable" >&2; exit 1 ;;
-esac
-# Group/world write access makes the scope-bound manifest mutable after delivery.
-if [ $((8#${mode:1:1} & 2)) -ne 0 ] || [ $((8#${mode:2:1} & 2)) -ne 0 ]; then
-    echo "Runtime v1 manifest must not be group/world writable" >&2
-    exit 1
+for private in .env runtime.env runtime/.env runtime/runtime.env; do
+    [ ! -e "$PACKAGE_ROOT/$private" ] && [ ! -L "$PACKAGE_ROOT/$private" ] || { echo 'Runtime artifact contains private environment' >&2; exit 1; }
+done
+"$NODE_BIN" --input-type=module -e '
+  const { pathToFileURL } = await import("node:url");
+  const { validateExecutionPayload } = await import(pathToFileURL(process.argv[1]));
+  await validateExecutionPayload(process.argv[2]);
+' "$PACKAGE_ROOT/runtime/lib/execution-adapter.mjs" "$PACKAGE_ROOT/codex-ws-agent"
+# The import must resolve from this artifact, never a globally installed engine.
+"$NODE_BIN" --input-type=module -e 'await import((await import("node:url")).pathToFileURL(process.argv[1]));' \
+    "$PACKAGE_ROOT/codex-ws-agent/agent-client.mjs"
+if [ -n "$CONFIG" ]; then
+    "$NODE_BIN" "$PACKAGE_ROOT/runtime/agent-runtime.mjs" validate --config "$CONFIG" >/dev/null
 fi
-
-[ -x "$NODE_BIN" ] || NODE_BIN="$(command -v "$NODE_BIN" 2>/dev/null || true)"
-[ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ] || { echo "Node 20 executable not found" >&2; exit 1; }
-major="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
-[ "$major" = "20" ] || { echo "Runtime v1 requires Node 20" >&2; exit 1; }
-"$NODE_BIN" "$PACKAGE_ROOT/agent-runtime.mjs" validate --manifest "$MANIFEST" >/dev/null
-printf '%s\n' "Runtime v1 package validation passed: $PACKAGE_ROOT"
+printf '%s\n' "Runtime artifact closure validation passed: $PACKAGE_ROOT"

@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readManifest } from './lib/manifest.mjs';
+import { readManifest, readRuntimeHostConfig } from './lib/manifest.mjs';
 import { createLogger, readEnrollmentSecret } from './lib/security.mjs';
 import { classifyRuntimeError, RuntimeV1Client } from './lib/runtime-client.mjs';
 
@@ -100,6 +100,14 @@ async function readCommand(path) {
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const { command, options } = parseArgs(argv);
   const logger = createLogger();
+  if (command === 'validate' && options.config) {
+    const config = await readRuntimeHostConfig(resolve(options.config));
+    process.stdout.write(`${JSON.stringify({ valid: true, hostId: config.hostId, agentCount: config.agents.length })}\n`);
+    return 0;
+  }
+  // Until UR02 delivers the exact wire fixture, the multi-Agent execution entry
+  // fails closed. It never falls back to the historical heartbeat sidecar.
+  if (options.config) throw Object.assign(new Error('Runtime wire adapter is required'), { code: 'RUNTIME_WIRE_ADAPTER_REQUIRED' });
   if (command === 'validate') {
     const manifest = await readManifest(resolve(options.manifest || 'manifest.json'));
     process.stdout.write(`${JSON.stringify({ valid: true, installationId: manifest.installationId, manifestSha256: manifest.manifestSha256 })}\n`);

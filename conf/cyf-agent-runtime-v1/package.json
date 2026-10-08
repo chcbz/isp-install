@@ -2,9 +2,9 @@
   "name": "@cyf/agent-runtime-v1",
   "version": "1.0.1",
   "private": true,
-  "description": "Standalone Node 20 CYF Agent Runtime v1 client",
+  "description": "Unified multi-Agent Runtime reusing codex-ws-agent",
   "type": "module",
-  "engines": { "node": ">=20 <21" },
+  "engines": { "node": "=20.20.2" },
   "scripts": {
     "test": "node --test",
     "validate": "node agent-runtime.mjs validate --manifest manifest.example.json"

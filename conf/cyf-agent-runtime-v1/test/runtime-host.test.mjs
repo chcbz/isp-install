@@ -274,3 +274,75 @@ test('owned child cleanup escalates after signal-sent and awaits close, without 
   assert.equal(child.killed, true); assert.equal(child.signalCode, 'SIGKILL'); assert.equal(closed, true);
   await stopRuntimeExecutionChild(f.profiles[0], child);
 });
+
+test('multi-Agent validate CLI reads config without engine effects; run fails closed until wire is bound', async t => {
+  const f = await fixture(t);
+  const entry = resolve(repo, 'conf/cyf-agent-runtime-v1/agent-runtime.mjs');
+  const stdout = execFileSync(process.execPath, [entry, 'validate', '--config', f.path], { encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(stdout), { valid: true, hostId: 'stable-host', agentCount: 3 });
+  assert.deepEqual(await readdir(f.raw.stateRoot), []);
+  const { main } = await import(entry);
+  await assert.rejects(main(['run', '--config', f.path], {}), code('RUNTIME_WIRE_ADAPTER_REQUIRED'));
+  assert.deepEqual(await Promise.all(f.entries.map(entry => readdir(entry.stateRoot))), [[], [], []]);
+});
+
+test('installer refuses existing targets, wrong Node and unprepared parents before dependencies', async t => {
+  const f = await fixture(t, { count: 1 });
+  const installer = resolve(repo, 'conf/cyf-agent-runtime-v1/install.sh');
+  const target = resolve(f.root, 'artifact'); await mkdir(target, { mode: 0o700 });
+  await writeFile(resolve(target, 'foreign-marker'), 'untouched');
+  assert.throws(() => execFileSync('bash', [installer, '--target', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /target exists/.test(cause.stderr));
+  assert.equal(await readFile(resolve(target, 'foreign-marker'), 'utf8'), 'untouched');
+  assert.throws(() => execFileSync('bash', [installer, '--target', resolve(f.root, 'unprepared/artifact')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /parent must exist/.test(cause.stderr));
+  const wrongNode = resolve(f.root, 'wrong-node'); await writeFile(wrongNode, '#!/bin/sh\necho 22.0.0\n', { mode: 0o700 });
+  assert.throws(() => execFileSync('bash', [installer, '--target', resolve(f.root, 'new-artifact'), '--node', wrongNode], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /pinned Node 20.20.2/.test(cause.stderr));
+  assert.equal((await readdir(f.root)).some(name => name.startsWith('.cyf-agent-runtime.stage')), false);
+});
+
+test('dependency preparation failure never publishes or leaves its stage; does not invoke Python', async t => {
+  const f = await fixture(t, { count: 1 });
+  const installer = resolve(repo, 'conf/cyf-agent-runtime-v1/install.sh');
+  const npm = resolve(f.root, 'fixture-npm.cjs'); await writeFile(npm, 'process.exit(31)\n', { mode: 0o700 });
+  const python = resolve(f.root, 'fixture-python'); const marker = resolve(f.root, 'python-was-called');
+  await writeFile(python, `#!/bin/sh\ntouch '${marker}'\nexit 32\n`, { mode: 0o700 });
+  const target = resolve(f.root, 'artifact');
+  assert.throws(() => execFileSync('bash', [installer, '--target', target, '--node', process.execPath, '--npm', npm, '--python', python], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+  }), cause => cause.status === 31);
+  await assert.rejects(lstat(target), cause => cause.code === 'ENOENT');
+  await assert.rejects(lstat(marker), cause => cause.code === 'ENOENT');
+  assert.equal((await readdir(f.root)).some(name => name.startsWith('.cyf-agent-runtime.stage')), false);
+});
+
+test('validator checks full artifact-local dependency/toolchain graph instead of accepting payload-only collation', async t => {
+  const f = await fixture(t, { count: 1 });
+  const artifact = resolve(f.root, 'artifact'); await mkdir(artifact);
+  await cp(resolve(repo, 'conf/cyf-agent-runtime-v1'), resolve(artifact, 'runtime'), { recursive: true });
+  await collateExecutionPayload(engineSource, resolve(artifact, 'codex-ws-agent'));
+  await mkdir(resolve(artifact, 'node/bin'), { recursive: true }); await cp(process.execPath, resolve(artifact, 'node/bin/node')); await chmod(resolve(artifact, 'node/bin/node'), 0o755);
+  const validator = resolve(artifact, 'runtime/validate.sh');
+  assert.throws(() => execFileSync('bash', [validator, '--root', artifact], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /node_modules/.test(cause.stderr));
+  await cp(resolve(engineSource, 'node_modules'), resolve(artifact, 'codex-ws-agent/node_modules'), { recursive: true });
+  assert.throws(() => execFileSync('bash', [validator, '--root', artifact], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /\.toolchain/.test(cause.stderr));
+  const ws = resolve(artifact, 'codex-ws-agent/node_modules/ws/package.json');
+  const packageJson = JSON.parse(await readFile(ws, 'utf8')); packageJson.version = '0.0.0'; await writeFile(ws, JSON.stringify(packageJson));
+  await assert.rejects(validateExecutionPayload(resolve(artifact, 'codex-ws-agent'), { toolchain: false }), code('RUNTIME_DEPENDENCY_VERSION_MISMATCH'));
+});
+
+test('single-artifact units pin local Node and shared host config; shell entry has no activation/reload', async () => {
+  const units = await Promise.all([resolve(repo, 'systemd/cyf-agent-runtime-v1@.service'), resolve(repo, 'conf/cyf-agent-runtime-v1/systemd/cyf-agent-runtime-v1@.service')].map(path => readFile(path, 'utf8')));
+  assert.equal(units[0], units[1]);
+  assert.match(units[0], /^ExecStart=.*\/node\/bin\/node .*\/runtime\/agent-runtime.mjs run --config .*%i.host.json$/m);
+  assert.match(units[0], /^ExecStartPre=.*\/runtime\/validate.sh --root .* --config .*%i.host.json$/m);
+  assert.equal(units[0].includes('--state-dir'), false); assert.equal(units[0].includes('/usr/bin/env node'), false);
+  const shell = await readFile(resolve(repo, 'shell/cyf_agent_runtime_v1_install.sh'), 'utf8');
+  assert.equal(/\bsystemctl\b/.test(shell), false); assert.equal(/\b(?:stop|restart|enable)\b/.test(shell), false);
+});
+
+test('toolchain validation refuses a host-global interpreter alias instead of falsely claiming release closure', async t => {
+  const f = await fixture(t, { count: 1 }); const artifact = resolve(f.root, 'engine');
+  await collateExecutionPayload(engineSource, artifact);
+  await mkdir(resolve(artifact, '.toolchain/bin'), { recursive: true });
+  await symlink('/usr/bin/python3', resolve(artifact, '.toolchain/bin/python'));
+  await assert.rejects(validateExecutionPayload(artifact, { dependencies: false }), code('RUNTIME_TOOLCHAIN_PATH_UNSAFE'));
+});

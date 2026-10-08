@@ -160,9 +160,18 @@ export async function validateExecutionPayload(root, { dependencies = true, tool
   if (toolchain) {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
-    await promisify(execFile)(resolve(root, '.toolchain/bin/python'), [resolve(root, 'toolchain/delivery_tool.py'), 'health'], {
-      env: { PATH: process.env.PATH || '', LANG: 'C.UTF-8' }
-    });
+    const environmentRoot = resolve(root, '.toolchain');
+    const python = resolve(environmentRoot, 'bin/python');
+    const resolvedPython = await realpath(python);
+    if (await realpath(environmentRoot) !== environmentRoot || !resolvedPython.startsWith(`${environmentRoot}/`)
+        || !(await lstat(resolvedPython)).isFile()) throw payloadError('RUNTIME_TOOLCHAIN_PATH_UNSAFE');
+    const environment = { PATH: process.env.PATH || '', LANG: 'C.UTF-8', PYTHONDONTWRITEBYTECODE: '1' };
+    // The existing helper checks real format imports; also prove the six pinned
+    // distribution versions, not merely that similarly named imports exist.
+    await promisify(execFile)(python, ['-c',
+      'import pkg_resources, sys\nfor line in open(sys.argv[1]):\n line = line.strip()\n if line and not line.startswith("#"):\n  name, version = line.split("==")\n  assert pkg_resources.get_distribution(name).version == version, "PINNED_TOOLCHAIN_VERSION_MISMATCH"',
+      resolve(root, 'toolchain/requirements.txt')], { env: environment });
+    await promisify(execFile)(python, [resolve(root, 'toolchain/delivery_tool.py'), 'health'], { env: environment });
   }
   return Object.freeze({ payloadCount: known.size, dependenciesValidated: dependencies, toolchainValidated: toolchain });
 }
