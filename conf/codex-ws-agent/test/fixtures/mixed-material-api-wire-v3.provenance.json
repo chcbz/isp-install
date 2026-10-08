@@ -1,0 +1,7 @@
+{
+  "apiCommit": "c40491c883a5d9362638bf5c487a8adc2534c458",
+  "apiTree": "b407ca4c2b051699dae08f436fd89044004a8253",
+  "fixtureSha256": "d99ffd90953bc0eec64077b0bff052d4817380d45831f965c561ba0835d6020a",
+  "producer": "ChatMixedMaterialWireTest via actual context/admission/action consumer/hostedWire/Jackson",
+  "limitations": "Mock persistence/metadata and model action; real generated PNG/WAV and text/JSON bytes; no Provider/database/online proof."
+}

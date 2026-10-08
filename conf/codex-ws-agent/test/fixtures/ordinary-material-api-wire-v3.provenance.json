@@ -1,0 +1,9 @@
+{
+  "apiCommit": "0cd4bfdbd4d7b6160fb34ddb0237b0bf8240a56e",
+  "apiTree": "fb21a3269518e1c818c688d57aa98ea92922b16f",
+  "selector": "PersonalWorkspaceControlledImageV3ExecutionTest.ordinarySourcesUseActualRuntimeRowValidationAndHttpProjectionForCrossClientWire",
+  "emission": "JUnit system-out MMD_UNIFIED_EXECUTION_WIRE; actual runtime source-row validation and Spring inputs response serialization; command DTO serialization",
+  "fixtureSha256": "c39fab302fff47255345f1581643c4486cff3e22183e29124059427c7bba4a13",
+  "xmlSha256": "a79a87baeb5396af38dae6ce028cad03e4181c99a95b94f1f8b0d70cb97d4f3a",
+  "limitations": "Fixture DAO, not real HTTP authentication/ACL or MySQL. Local source diagnostic only; no Provider, Flow, deployment, or browser acceptance."
+}

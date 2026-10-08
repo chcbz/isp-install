@@ -22,6 +22,21 @@ journalctl -u codex-ws-agent -f
 
 The helper script `/home/isp/bin/codex_ws_agent.sh` now delegates to `systemd` automatically when the service is installed, and falls back to the legacy direct-start mode otherwise.
 
+### Isolated production instances
+
+The existing no-argument installer and shared service remain compatible. A new isolated instance uses a strict lowercase slug and the fixed production layout below:
+
+```bash
+shell/codex_ws_agent_install.sh --instance local-a
+/home/isp/apps/codex-ws-agent-instances/local-a/bin/codex_ws_agent.sh status
+```
+
+Each instance owns its application root, releases/current link, private `.env` and profile file, Codex Homes, workspace roots, inbox/outbox, state, PID record, logs, and provider ledger. The installer creates an **unconfigured** candidate and does not copy a live identity, credential, session, or task state. It never enables, starts, restarts, or registers an instance; an operations Owner must first configure and validate the exact identity and prove custody/idle state, then start it explicitly.
+
+Instance controls are systemd-only through `codex-ws-agent@<slug>.service`; there is no tmux/nohup fallback. Before status, stop, or restart can act on an active process, the launcher verifies the exact unit template, `MainPID` working root, absolute agent entrypoint token, and cgroup unit. A mismatch is treated as a foreign process and no stop is sent. The shared/default launcher retains its legacy fallback behavior.
+
+Do not use profile hot reload as a migration or drain mechanism. A changed busy profile may shut down the whole process, and disposal may terminate its child; identity migration and service cutover require a separate controlled maintenance action.
+
 Required:
 
 - Node.js 20 or newer with npm. The client always uses the declared `ws` dependency so authenticated upgrade headers behave consistently; the built-in WebSocket implementation is not used.
@@ -61,6 +76,8 @@ Each profile can define:
 - `workspaceNoTaskPolicy`
 - `workspaceNonCodingCommandTypes`
 - `workspaceFallbackWorkdir`
+- `nativeConversationHttpPollEnabled` (explicit opt-in to the authenticated native conversation poll wire)
+- `nativeConversationImageGenerationEnabled` (explicit opt-in to the local `GENERATE_IMAGE` executor)
 - `isDefault`
 
 Recommended `.env`:
@@ -110,6 +127,8 @@ At registration and every presence heartbeat, the client rebuilds `agent_runtime
 Workspace discovery scans only the workdir root plus one level inside recognized project containers, with a shared 512-entry cap and descriptor-scoped no-follow access. CYF aggregate modules require a Gradle settings file plus the project signature modules `agent/chat/task/oauth/user/kefu/point`; module-local workspaces require an allowlisted `jia-*` module name. It reports a fixed Chinese allowlist including `聚义厅协作`, `智能体管理`, `智能体调度`, `会话消息`, `多智能体协作`, `任务协作`, `身份认证`, `用户体系`, `客服系统`, `积分体系`, `微信生态`, `短信服务`, `域名与主机管理`, `内容管理`, `工作流编排`, `短链接服务`, and `天气查询`. Unknown directory names, paths, dependency versions, file contents, and technology labels are never reported. Broad home/host directories without direct project evidence produce no inferred abilities.
 
 Set `enabled=false` on an `[agent.*]` section to take that profile out of service without deleting it. Hot reload closes the profile connection and skips registration; changing it back to `enabled=true` reconnects it. `active=false` and `status=disabled|inactive|unavailable` are also treated as disabled.
+
+Native bounty execution is a separate registration declaration from fast-v1 `runtimeCapabilities`. It is enabled only when both native conversation flags are true, the private API origin/root and release-local validation toolchain are usable, the concrete `GENERATE_IMAGE` executor exists, the HTTP-poll lane is constructed, and the registration socket is open. Missing/disabled/offline configurations declare `enabled=false` with no operations. Installed skill/profile names are never evidence of support, no Provider probe is performed during declaration, and fast-v1 `EXECUTE.supported/enabled` remains false. Regular server profiles and managed-local profiles use the same `PERSONAL_WORKSPACE_CONVERSATION_HTTP_V1` wire; this declaration does not promise installation, cost authorization, Provider availability, or successful execution.
 
 If a profile is bound to a different user than the global `OPENCLAW_API_KEY`, set `apiKey` on that profile. Profile-level keys override the global key for that WebSocket connection.
 
@@ -527,3 +546,156 @@ Rollback to the pre-A05 client does not understand the durable inbox, ledger, AC
 - On shutdown, the agent sends `offline` and terminates active Codex children. Any unsettled `processing/` record becomes fail-closed `recovery-required/` on the next process and is not automatically retried.
 - Pending commands wait until the profile WebSocket reconnects before executing; recovery-required commands remain paused until explicit reconciliation.
 - Runtime logs are available from `journalctl -u codex-ws-agent`.
+
+## Juyi Hall durable Fast CHAT (disabled by default)
+
+Fast CHAT is opt-in per profile with `fastChatEnabled=true`, `appServerEnabled=true`, and `chatEngine=app-server`; `trueDeltaEnabled` independently controls publication of genuine app-server deltas. Modern durable CHAT is rejected with an explicit recovery/error when Fast CHAT is disabled or its app-server trust/readback fails; only explicit legacy protocol messages may use the lower-assurance legacy compatibility runner. The runtime is pinned to Codex CLI/app-server `0.153.4` and schema bundle SHA-256 `b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978`. Before spawning app-server it resolves the audited JavaScript launcher to its native executable, records launcher/native realpath, inode, timestamps and content hashes, copies the measured native executable and bounded resources from already-opened verified file descriptors into runtime-owned private new-inode snapshots, executes only that pinned snapshot with `--version`, generates its full experimental schema bundle in a temporary directory, hashes the bundle, and removes the temporary output. Version, schema, path, inode, hash, launcher-target or protected-ancestor drift permanently disables Fast CHAT for that profile until configuration/process replacement; modern durable CHAT then enters recovery-required and can never fall through to workspace-write legacy execution. Resource readback marks this measurement explicitly. It sends `turn/start.input` as `UserInput[]`, uses `developerInstructions`/`baseInstructions` on thread start/resume, and treats a schema change as a compatibility event requiring review.
+
+The Fast CHAT child runs in a runtime-owned empty directory, with `read-only`, network disabled, and approval `never`. Approval `never` is **not** a deny-all tool policy, so every app-server command/file/permission/network/MCP/dynamic-tool server request is also rejected and the matching turn interrupted. User-input requests are clarification-only and cannot authorize execution. Child exits use bounded exponential restart backoff. Only explicit old-protocol traffic may use final-only fallback. Modern durable CHAT fails closed on feature-disabled, trust, version, schema, or process-identity failures and never enters the legacy runner.
+
+Durable hosted CHAT is admitted before ACK under `COMMAND_INBOX_DIR/chat-inbox/<agent>/`. The hot quota covers only `pending/`, `processing/`, and `recovery/` (defaults: `chatInboxMaxFiles=1024`, `chatInboxMaxBytes=67108864`) and is serialized by a cross-process profile lock. Lock publication has no public empty-record window: the runtime writes and fsyncs a private `0600` owner temp file, publishes it with an atomic no-clobber hard link, fsyncs the directory, and removes the temp name. Valid dead PID/start-time owners are grace-reclaimed; malformed legacy locks remain fail-closed unless an operator invokes the explicit `confirmed-stopped` migration mode after stopping old runtimes. Completed/cancelled records first persist a forward-settlement marker and compact dedupe evidence, then move to an independently bounded/retained archive (defaults: 256 files, 16 MiB, seven days). Archive GC does not control dedupe evidence: terminal fingerprints/bindings are written once into a sharded immutable ledger, while a constant-size durable usage manifest avoids full-ledger scans on ordinary admission; the ledger has independently configured 30-day default audit/dedupe retention and hard admission capacity. If a mutation leaves the usage manifest dirty, startup builds a fresh turn-index tree only from authoritative ledger markers and swaps it under the profile lock instead of additively retaining stale entries. Stop lookup revalidates every indexed key and fingerprint against its marker, repairs stale records, and removes orphan entries plus empty buckets. Expired evidence may be collected, but recent evidence is never evicted to admit new work. Capacity rejection occurs before `chat.dispatch.ack`; an ACK enqueue failure does not block an already-durable task and is retried in-process. Processing records found after restart become `ACCEPTANCE_UNKNOWN`/recovery-required unless their completed/cancelled marker proves forward settlement. Thread bindings are profile/agent/key self-bound and capacity-limited; they are a cache only, while the API business database remains authoritative.
+
+The hosted wire contract under `contracts/` is the byte-for-byte API-generated artifact from commit `caee54fc27a08146f9cc57219cf86c763e41c531`. Runtime startup and tests require provenance status `API_GENERATED_VERIFIED`, the pinned fixture SHA-256, API source path, and generator class before enabling Fast CHAT; the artifact is produced through the real `ChatDeliberationService.eventPayload -> ChatDeliberationOutboxRelay.hostedWire` path.
+
+### U0 runtime capability declaration
+
+`agent.register` and every `agent.presence` include `runtimeCapabilities.capabilityContractVersion=1`.
+The default profile keeps Fast CHAT disabled, so `profiles.CHAT.enabled=false`; it does not advertise
+INSPECT or EXECUTE. CHAT declares `toolPolicy=read-only-constrained` only when the opt-in app-server
+profile is configured with its actual read-only/network-disabled policy. This is not a claim that the
+Provider has proven a strict no-tools boundary (`strictNoToolsVerified=false`).
+
+`profiles.INSPECT` remains `supported=false` and `enabled=false` until a fixed exact manifest, readonly
+input materialization, and Provider isolation have been independently verified. Existing `PRIVATE`/
+`TASK` compatibility and native START availability are reported only under `legacyCompatibility`; they
+are not evidence of new EXECUTE orchestration admission.
+
+### Controlled-image v3: retain produced bytes when delivery is uncertain
+
+After a validated PNG returns, the v3 lane writes `delivery/output_1.png` and then
+`delivery/receipt.json` inside its private run directory, fsyncing the files and
+directories before upload. The receipt binds the exact command, Agent, API origin,
+byte length and SHA-256; it contains no runtime credential. Directories are 0700,
+files 0600, and existing/symlink destinations are rejected rather than overwritten.
+
+Upload errors, lost/mismatched commit acknowledgements, expired leases and local
+persistence errors retain the run for investigation. A transport error after an
+image was produced is not reported as an ordinary execution failure. Only a
+validated commit acknowledgement permits normal run-directory cleanup.
+
+Retention is **not** automatic recovery: no Provider call is retried, no paid claim
+is deleted, and the receipt grants no API authority. The current start lease/inbox
+cannot reclaim a provider-started execution. A separately authorized result-only
+recovery contract is required for retransmission after restart or lease expiry.
+Images deleted by older clients cannot be recreated from the claim or receipt.
+
+## ACK high-water checkpoints (format 2)
+
+The ACK queue remains file-backed, strictly FIFO and protected by the existing
+cross-process sequence lock. Sending stops at the first unsuccessful ACK; durable
+quarantine prevents every instance from allocating or sending further ACKs.
+
+High-water evidence no longer creates a file for every allocated sequence:
+
+- `ack-sequence-high-water/initialized.json`: private, checksummed Agent/storage identity.
+- `ack-sequence-high-water/checkpoint.json`: independent, checksummed high-water witness.
+- `ack-sequence.json`: counter/commit fence, which must match the witness exactly.
+- `ack-sequence-high-water/intent.json`: at most one active transaction, removed durably after commit.
+
+An enqueue holds the existing lock throughout: validate health/evidence → persist
+an intent containing the exact ACK and old/new checkpoints → persist the new
+witness → persist the ACK → advance the independent counter/commit fence → remove
+the intent. Every file publication fsyncs its contents and containing directory.
+Only exact reachable transaction prefixes are recovered. Missing or inconsistent
+evidence is quarantined; there is no “take the maximum” or old-checkpoint fallback.
+A leftover/restored committed intent does **not** recreate a dequeued ACK.
+Checksums detect integrity faults, not adversarial rewriting or authenticated history.
+
+Healthy high-water storage retains two small files, plus the counter outside that
+directory; space no longer grows with the number of already-sent ACKs. Actual pending
+ACKs, quarantine and superseded records have separate lifecycles and are not purged.
+Secure temporary evidence left by interrupted writes is cleaned under the lock after
+successful initialization. Startup/runtime checks read fixed-size high-water evidence;
+existing pending-queue scans remain proportional to the actual pending ACK count.
+
+### Explicit offline migration
+
+Format 1 is not a supported runtime mode. A new binary reports
+`ACK_OUTBOX_MIGRATION_REQUIRED` until its profile has been explicitly converted.
+Do not run the installer/restart an active deployment before planning this conversion.
+
+1. Identify the exact profile storage root and Agent identity. Drain/stop **all** its
+   writers under the release's maintenance authorization; do not hot-reload a busy
+   profile or stop a foreign service. A stale lock is never stolen: reconcile its
+   exact owner separately before migration.
+2. Run the migration from the pinned new release with a unique backup path **outside**
+   the profile storage root. Replace every placeholder with an authorized target:
+
+   ```bash
+   node /absolute/path/to/new-release/migrate-ack-high-water.mjs \
+     --root-dir /absolute/path/to/stopped-profile-storage \
+     --agent-id '<exact-agent-id>' \
+     --backup-path /home/isp/baks/ack-high-water/<profile>-<release>.jsonl.gz
+   ```
+
+3. The tool validates all legacy markers, identity, counter, pending filenames and
+   duplicate/future sequences. It streams a compressed complete high-water backup,
+   syncs and verifies it, then publishes a migration intent. It never overwrites an
+   existing backup. The existing pending ACK bytes remain unchanged.
+4. The tool writes the new checkpoint/counter/identity, then removes only validated
+   legacy high-water markers covered by the backup, synchronizes the directory once
+   for the completed deletion batch, and finally removes the intent.
+   It does not change production configuration, activate a release, send ACKs, or restart
+   a service. Its JSON result records the high-water, marker count and backup digest.
+5. If interrupted, keep the stopped state and rerun the **same** command/backup path.
+   Runtime refuses an unfinished migration; the offline tool verifies the archive and
+   exact commit/cleanup prefix before resuming. Never manually delete the intent or
+   repair a disagreement by choosing the highest value.
+6. After a successful migration, verify the exact new release/profile, empty intent,
+   matching counter/witness and pending FIFO before authorized activation. Do not
+   restart an older binary against format 2. Restoring a backup requires a separate
+   stopped-writer recovery plan covering both code and complete related runtime state;
+   never restore the counter alone. Backup retention/offloading/deletion is a separate
+   authorized operation.
+
+Like the old per-sequence format, local evidence cannot detect a coordinated rollback
+of the entire storage to a coherent earlier snapshot after process restart. That
+stronger guarantee requires an independent trusted witness (for example on the server).
+An initialized instance does reject a rollback relative to its observed high-water.
+
+Targeted regression command (disposable fixtures only):
+
+```bash
+node --test /absolute/path/to/source/conf/codex-ws-agent/test/ack-checkpoint.test.mjs \
+  /absolute/path/to/source/conf/codex-ws-agent/test/agent-client.test.mjs
+```
+## Managed native CHAT activation
+
+`AGENT_MANAGED_CHAT_SCOPES_FILE` points to a canonical private operator-owned JSON
+file: `{ "schemaVersion": 1, "authorizations": [...] }`. Each authorization has
+exact `tenantId`, `clientId`, `ownerJiacn`, `agentId`, `generation`, `profileId`,
+and a supported `appServerSchemaContractId` bound to the measured native version.
+Only this exact managed identity receives native CHAT/typed controls; other
+managed identities do not inherit global CHAT activation. CHAT cwd is allocated
+from the managed profile identity, not copied from a template. A scope enables
+measurement, not READY: the installed binary/schema and initialized adapter
+still determine readiness. This does not enable INSPECT or image generation.
+
+
+### 原生 API 单一地址（2026-10-06）
+
+接应程序的 `workspaceFileApiOrigin` 是所有原生 HTTP lane 的唯一 API 地址，包含任务文件、受控执行和 INSPECT 资料读取；由操作员的来源 profile 配置，managed profile 不得覆盖。复用相同 origin 校验：远端 HTTPS，或同机显式 loopback HTTP；不含凭据、路径、query 或 fragment，不硬编码端口，不通过公开业务 proxy 暴露 `/internal`。
+
+精确 managed CHAT scope 的 `inspection` 只包含身份授权下的输入/状态目录、测量 profile、provider 和 carrier policy，不再包含 `apiOrigin`。旧独立字段 `inspection.apiOrigin`、`typedInspectionApiOrigin` 必须移除，不能双轨兼容。既有 private roots、AgentRuntime 身份与manifest/字节完整性、provider HTTPS及隔离测量不变。
+
+### INSPECT 模型启动前失败恢复（2026-10-06）
+
+收到 durable ACK 的原 dispatch 不依赖服务端重新派发。客户端启动/恢复时，仅对明确 `CHAT_FAILURE`、`RECOVERY_REQUIRED` 且没有 preparation/engine/final 及其时间证据的 INSPECT 原记录，在 profile lock 内核对原 key/fingerprint 后转为 processing，沿原身份重新测量、读取及校验资料。`markPrepared` 在 thread/start 与 turn/start 前同步持久化，因此这条路径不重跑已经启动的模型。每个客户端进程对同 key 仅尝试一次，不因反复 resume 盲重试。
+
+已有 preparation/engine、未知 acceptance 或进程中断状态禁止重新启动；已有 final 只恢复原最终消息发布/服务端持久确认。不得手工移动 inbox 文件、重置数据库 outbox 或新建业务请求替代恢复。
+
+INSPECT 测量完成会触发携带最新声明的重新注册。读取资料和恢复引擎前必须等待当前精确 registration ACK；旧 ACK、presence 和仅本地测量成功均不能释放原生读取。慢 ACK 继续等待，不增加强制业务 deadline；拒绝/断线/发送失败则关闭此路径。资料 GET 非200只记录 HTTP 数字状态，不读取或输出错误正文、凭据。
+
+INSPECT 的 v3 原生输出 schema 进一步固定 `deliverable=false`、`deliveryRelation=null`，不把资料读取回复关联成可验收成果。模型终态返回后，即使成果关联/其他严格校验拒绝回复，也必须保留原私有引擎状态供只读核对，不得在 finally 删除唯一终态，再用新模型 turn 补偿。历史已被删除的引擎状态不可能由本修复补回；缺少原终态时不能伪造成功。
+
+恢复只允许打开已存在且有精确 binding marker 的原引擎目录。原目录/marker 缺失时返回 `TYPED_INSPECTION_RECOVERY_STATE_MISSING`，不重建目录、不复制新凭据、不启动新 adapter 或模型 turn；必须另行安排明确的全新验证请求，不能冒充原 turn 的终态恢复。

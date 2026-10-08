@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readManifest } from './lib/manifest.mjs';
 import { createLogger, readEnrollmentSecret } from './lib/security.mjs';
-import { RuntimeV1Client } from './lib/runtime-client.mjs';
+import { classifyRuntimeError, RuntimeV1Client } from './lib/runtime-client.mjs';
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -39,7 +39,55 @@ function intervalMs(env) {
   return Number(raw);
 }
 
-const sleep = milliseconds => new Promise(resolveSleep => setTimeout(resolveSleep, milliseconds));
+function sleep(milliseconds, signal) {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise(resolveSleep => {
+    const timer = setTimeout(done, milliseconds);
+    function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolveSleep(); }
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+function retryDelay(attempt) { return Math.min(1000 * (2 ** Math.min(attempt, 6)), 60000); }
+
+export const PERMANENT_RUNTIME_EXIT_STATUS = 78;
+
+export function runtimeExitStatus(error) {
+  return ['transient-network', 'transient-http'].includes(classifyRuntimeError(error).kind)
+    ? 1
+    : PERMANENT_RUNTIME_EXIT_STATUS;
+}
+
+function errorLogDetails(error) {
+  const failure = classifyRuntimeError(error);
+  return failure.status === undefined
+    ? { category: failure.kind }
+    : { category: failure.kind, status: failure.status };
+}
+
+export async function runRuntimeLoop(client, { signal, health = 'HEALTHY', heartbeatIntervalMs = 60000, logger = () => {}, wait = sleep } = {}) {
+  let retryAttempt = 0;
+  while (!signal.aborted) {
+    try {
+      const session = await client.session(health, { signal });
+      if (signal.aborted) break;
+      if (isRebindRequired(session)) throw Object.assign(new Error('rebind required'), { code: 'REBINDS_REQUIRED' });
+      const heartbeat = await client.heartbeat(health, { signal });
+      if (signal.aborted) break;
+      if (isRebindRequired(heartbeat)) throw Object.assign(new Error('rebind required'), { code: 'REBINDS_REQUIRED' });
+      if (signal.aborted) break;
+      await client.flushAcks({ signal });
+      retryAttempt = 0;
+      if (!signal.aborted) await wait(heartbeatIntervalMs, signal);
+    } catch (error) {
+      if (signal.aborted || error?.name === 'AbortError') break;
+      const failure = classifyRuntimeError(error);
+      if (!['transient-network', 'transient-http'].includes(failure.kind)) throw error;
+      logger('runtime-retry', errorLogDetails(error));
+      await wait(retryDelay(retryAttempt++), signal);
+    }
+  }
+}
 
 async function readCommand(path) {
   try {
@@ -88,37 +136,40 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     return 0;
   }
   if (command === 'run') {
-    let stopping = false;
-    const stop = () => { stopping = true; };
+    const controller = new AbortController();
+    const stop = () => controller.abort();
     process.once('SIGTERM', stop);
     process.once('SIGINT', stop);
     try {
-      await client.loadAuthorization();
-    } catch (error) {
-      if (error.message !== 'Runtime v1 enrollment is required') throw error;
-      const enrollment = await readEnrollmentSecret(env);
-      await client.enroll(enrollment.value);
-      logger('enrolled', { installationId: manifest.installationId, secretSource: enrollment.source });
+      try {
+        await client.loadAuthorization();
+      } catch (error) {
+        if (error.message !== 'Runtime v1 enrollment is required') throw error;
+        const enrollment = await readEnrollmentSecret(env);
+        await client.enroll(enrollment.value);
+        logger('enrolled', { installationId: manifest.installationId, secretSource: enrollment.source });
+      }
+      await runRuntimeLoop(client, {
+        signal: controller.signal,
+        health: options.health || 'HEALTHY',
+        heartbeatIntervalMs: intervalMs(env),
+        logger
+      });
+      logger('stopped', { installationId: manifest.installationId });
+      return 0;
+    } finally {
+      process.removeListener('SIGTERM', stop);
+      process.removeListener('SIGINT', stop);
     }
-    while (!stopping) {
-      const session = await client.session(options.health || 'HEALTHY');
-      if (isRebindRequired(session)) throw new Error('rebind required');
-      const heartbeat = await client.heartbeat(options.health || 'HEALTHY');
-      if (isRebindRequired(heartbeat)) throw new Error('rebind required');
-      await client.flushAcks();
-      if (!stopping) await sleep(intervalMs(env));
-    }
-    logger('stopped', { installationId: manifest.installationId });
-    return 0;
   }
   throw new Error('usage: agent-runtime.mjs <validate|enroll|session|heartbeat|ack|run> [options]');
 }
 
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
-  main().catch(() => {
-    // Do not print exception text: configuration, headers, and enrollment input must stay out of logs.
-    console.error(JSON.stringify({ event: 'runtime-v1-error' }));
-    process.exitCode = 1;
+  main().catch(error => {
+    // Emit only a fixed classification and numeric HTTP status; never exception text/cause.
+    console.error(JSON.stringify({ event: 'runtime-v1-error', ...errorLogDetails(error) }));
+    process.exitCode = runtimeExitStatus(error);
   });
 }

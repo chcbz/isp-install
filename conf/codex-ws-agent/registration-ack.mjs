@@ -36,6 +36,7 @@ export class RegistrationAckObserver {
     this.confirmedRuntimeScope = null
     this._generation = 0
     this.timer = null
+    this.waiters = new Set()
   }
 
   get registered() { return this.stage === 'registered' }
@@ -47,6 +48,23 @@ export class RegistrationAckObserver {
     return this.confirmedRuntimeScope && validNativeToken(this.runtimeToken) ? `AgentRuntime ${this.runtimeToken}` : ''
   }
   get runtimeScope() { return this.confirmedRuntimeScope ? Object.freeze({ ...this.confirmedRuntimeScope }) : null }
+
+  // Registration timeout is observational: a slow exact ACK can still release
+  // native readers. No token is returned, persisted or included in failures.
+  waitForRegistration() {
+    if (this.registered) return Promise.resolve(this.snapshot())
+    if (!['pending_ack', 'ack_timeout'].includes(this.stage))
+      return Promise.reject(Object.assign(new Error('NATIVE_RUNTIME_REGISTRATION_REQUIRED'), { code: 'NATIVE_RUNTIME_REGISTRATION_REQUIRED' }))
+    return new Promise((resolve, reject) => this.waiters.add({ resolve, reject }))
+  }
+
+  settleWaiters(registered) {
+    for (const waiter of this.waiters) {
+      if (registered) waiter.resolve(this.snapshot())
+      else waiter.reject(Object.assign(new Error('NATIVE_RUNTIME_REGISTRATION_UNAVAILABLE'), { code: 'NATIVE_RUNTIME_REGISTRATION_UNAVAILABLE' }))
+    }
+    this.waiters.clear()
+  }
 
   snapshot() { return { stage: this.stage, registered: this.registered } }
 
@@ -86,6 +104,7 @@ export class RegistrationAckObserver {
     this.clearAuthority()
     this.stage = 'send_failed'
     this.messageId = null
+    this.settleWaiters(false)
     this.log('warn', this.stage)
   }
 
@@ -94,6 +113,7 @@ export class RegistrationAckObserver {
     this.clearAuthority()
     this.stage = 'rejected'
     this.messageId = null
+    this.settleWaiters(false)
     this.log('warn', this.stage)
     return 'rejected'
   }
@@ -119,6 +139,7 @@ export class RegistrationAckObserver {
       this.confirmedRuntimeScope = runtimeScope
       this.stage = 'registered'
       this.messageId = null
+      this.settleWaiters(true)
       this.log('log', this.stage)
       return 'registered'
     }
@@ -132,6 +153,7 @@ export class RegistrationAckObserver {
     this.clearAuthority()
     this.stage = 'disconnected'
     this.messageId = null
+    this.settleWaiters(false)
   }
 }
 

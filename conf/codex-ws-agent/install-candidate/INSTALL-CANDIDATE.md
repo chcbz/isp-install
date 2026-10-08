@@ -1,0 +1,90 @@
+# `wuyong` dual-mode install candidate
+
+This directory is an inert, redacted candidate for one existing `wuyong` identity. It does not create or bind an identity, install a release, restart a service, or call a Provider. An existing persona binding is identity evidence only and is not controlled-image credential-binding evidence. Numeric values are not globally unique across namespaces, so the checker does not blacklist historical IDs. The controlled-image `bindingId` and positive decimal `bindingEpoch` are platform Operator-selected configuration fences: no upstream Provider binding-issuance API or external binding object is required. Evidence remains `UNVERIFIED` when only the Client/API declarations exist.
+
+## Freeze inputs
+
+Main and the API configuration Owner must separately freeze every placeholder before installation:
+
+- existing `wuyong` agent ID, private Codex home, workspace/API origin, and WebSocket URL;
+- controlled-image HTTPS origin and exact model ID supplied by the Provider/account custodian;
+- platform Operator-selected binding ID and positive decimal binding epoch, changed when the local credential/configuration fence is rotated;
+- exact API tenant/client/owner/target-agent policy, custody, issuer, revision, expiry, and the same model/binding tuple;
+- private `0600` values for `OPENCLAW_API_KEY` and `CYF_CONTROLLED_IMAGE_API_KEY`.
+
+Do not place either secret in the profile, freeze JSON, registration capture, or logs. `producerRequestRevision` is server-owned under API contract commit `9ab62d6665c695a574b8b3bde9cfff3ea3ca13d4`; the Client profile, declaration, command, and freeze must not add or override it.
+
+The template's typed-inspection values are fixed to the accepted evidence: provider `gpt`, `https://codex.chcbz.net/v1`, model `gpt-5.6-terra`, restricted proxy, `/etc/pki/tls/certs/ca-bundle.crt`, profile/engine IDs, carrier evidence digest, and the `LOCAL_IMAGE` contract digest. `normalizeProfile` and the production declaration builders are used by `install-candidate-check.mjs`; no mock loader or hard-coded PASS is used.
+
+## Static scope and Client/API correspondence
+
+`verify-template` and `freeze` return `STATIC_VALID` only. Their enabled declarations are a **synthetic expected registration projection** produced through the production declaration builders with static stand-ins; they do not measure a live executor, poller, credential, socket, isolation run, or runtime readiness. Only post-start authenticated registration and presence readback can establish that the live process emitted the expected shapes.
+
+`controlled-image-api-policy.redacted.json` is deliberately marked `CONTROLLED_IMAGE_PROVIDER_PARTIAL_POLICY` and `fullInstallationReadiness=false`. It freezes only the provider-lane flags and exact operator policy represented by this Client handoff. It is not the complete product/API installation policy: formal-artifact, conversation-archive, selected-output, schema, exact API artifact/config, and full acceptance evidence remain required from Main/API owners and must not be inferred from this partial artifact.
+
+## Client/API correspondence
+
+| Capability | Client profile/evidence | Registration/presence | API policy/authority |
+| --- | --- | --- | --- |
+| INSPECT | `typedInspection*`, accepted carrier evidence file/digest, CA file bytes, `appServerEnabled=true` | `typedInspection.enabled=true`, exact profile/engine/policy/input declarations | authenticated agent registration and workspace-file access remain server-authorized |
+| GENERATE_IMAGE | controlled endpoint/key env/model/binding/epoch/ledger; native HTTP poll on and generic native image executor off | V3 operation `GENERATE_IMAGE`, 0–16 `TASK_LINKED_WORKSPACE_VERSION` JPEG/PNG inputs | exact operator-policy tenant/client/owner/target/provider/model/binding tuple; consent/grant and source snapshot remain server authority |
+| EDIT_IMAGE | same controlled provider tuple | V3 operation `EDIT_IMAGE`, exactly one `CURRENT_CONVERSATION_ASSET` JPEG/PNG input | API resolves and revalidates the authorized archive revision immediately before execution; Client never sends `producerRequestRevision` |
+
+Fixed fences are provider lane `CONTROLLED_IMAGE_HTTP_V1`, max inputs `16`, max outbound attempts `1`, and precall fence `1`. API scheduling/consent/grant/policy is authoritative; registration and presence only advertise the live Client's measured readiness.
+
+`bindingEpoch` is an exact positive-long equality fence, not an externally issued Provider version. The Client and API do not generate it or prove monotonicity; the Operator freezes one value in both configurations and changes it on a relevant rotation so stale consent/start state no longer matches.
+
+### Controlled image HTTP compatibility contract
+
+The configured endpoint is an HTTPS origin only. The production adapter appends `/v1/images/generations` or `/v1/images/edits` and sends Bearer-authenticated `application/json`. Generation sends `model`, `prompt`, `n: 1`, and `output_format: "png"`. Editing additionally requires JSON `images: [{"image_url":"data:image/...;base64,..."}]`; a Provider that only supports multipart image edits is not compatible with this adapter. The direct, non-redirected 200 response must contain exactly one canonical PNG in `data[0].b64_json`.
+
+This is not the Responses understanding contract. Static validation, model-list output, or a successful understanding request does not establish generation/edit compatibility; that remains unclaimed until supported by Provider contract evidence or a separately authorized real request.
+
+### Independent Operator freeze evidence
+
+`VERIFIED` is allowed only when `sourceType` is `API_OPERATOR_POLICY_FREEZE_FILE` and `freeze` receives `--operator-binding-freeze FILE`. The checker reads that regular non-symlink file, hashes its actual bytes, requires the digest and internal `sourceReference` to match the policy candidate, and compares its exact tenant/client/owner/target/lane/binding/epoch/model/custody/issuer/revision/expiry/attempt tuple with the API properties. The file is a non-secret platform Operator configuration freeze, not an upstream receipt and not a new signing requirement. Arbitrary non-empty source labels or a claimed SHA without the file cannot become `VERIFIED`.
+
+The independent file has exact top-level keys `schemaVersion`, `artifactType`, `sourceContractCommit`, `sourceReference`, and `operatorPolicy`; `artifactType` is `CONTROLLED_IMAGE_OPERATOR_BINDING_FREEZE_V1`. If that independently owned file is unavailable, keep all three source fields null and status `UNVERIFIED`.
+
+## Stable payload freeze (no Provider request)
+
+Run from the exact source checkout against the exact collated release and installer used to create it. The output path must not already exist:
+
+```bash
+node conf/codex-ws-agent/install-candidate/install-candidate-check.mjs verify-template
+node conf/codex-ws-agent/install-candidate/install-candidate-check.mjs freeze \
+  --profile /private/codex-profiles.private.json \
+  --env-file /private/wuyong-dual-mode.env \
+  --api-policy /private/controlled-image-api-policy.frozen.json \
+  --release /private/collated-release \
+  --installer shell/codex_ws_agent_install.sh \
+  --source-commit "$SOURCE_COMMIT" \
+  --source-tree "$SOURCE_TREE" \
+  --output /private/wuyong-dual-mode.freeze.json
+chmod 0600 /private/wuyong-dual-mode.freeze.json
+```
+
+For a policy explicitly marked `VERIFIED`, add `--operator-binding-freeze /private/operator-controlled-image-binding-freeze.json`. Do not add that option to an `UNVERIFIED` candidate.
+
+The checker verifies every `release-manifest.sha256` entry byte-for-byte, release provenance/integrity, installer digest, source commit/tree, normalized non-secret profile and minimal environment, secret-reference names, CA bytes, carrier-evidence bytes, provider-local partial API properties, provider-binding evidence status, and the synthetic expected declarations. The freeze digest excludes secret bytes, release-root paths, runtime instance IDs, process IDs, random ports, timestamps, nftables counters, and request/turn IDs. Thus another process using the identical source, payload, profile, policy, CA, and evidence has the same contract digest; native isolation remains a per-execution check and is not replaced by this freeze.
+
+## Post-start readback checklist (zero Provider calls)
+
+1. Confirm exactly one owned runtime is live for the frozen agent ID; do not stop or alter a foreign runtime.
+2. Read back `current`, `release-provenance.json`, `release-manifest.sha256`, and `release-integrity.sha256`; run `sha256sum --quiet -c` for both manifests and compare source commit/tree and installer/payload digests with the freeze.
+3. Under the private environment, run `node current/agent-client.mjs --inspect-config` and `node current/agent-client.mjs --validate`. Capture redacted output only; neither command may register, poll, or call the Provider.
+4. Start only through the separately authorized service action. Capture the authenticated `agent.register` and subsequent `agent.presence` payloads without credentials, commands, grants, source payloads, or secret headers.
+5. Verify both captures against the freeze:
+
+   ```bash
+   node current/install-candidate/install-candidate-check.mjs readback \
+     --freeze /private/wuyong-dual-mode.freeze.json \
+     --registration /private/agent-register.redacted.json \
+     --presence /private/agent-presence.redacted.json
+   ```
+
+   `READBACK_MATCH` requires one matching runtime instance and exact enabled INSPECT, provider binding, GENERATE_IMAGE, and EDIT_IMAGE declarations. Any drift fails closed.
+6. With an authenticated read-only API credential, capture `GET /agent/capabilities` and `GET /agent/tasks/{taskId}/point-and-start-controlled-image-capability?targetAgentId={frozenAgentId}`. Verify the registered target and exact policy tuple. Before explicit execution consent/grant, the task capability must remain consent-required/not executable and `paidExecutionAuthorized=false` (or the exact equivalent in the frozen API contract).
+7. Verify bootstrap created no command, lease, turn, Provider HTTP call, result, or ledger execution entry. Do not use a generation/edit call as a readiness check.
+
+A readback match is not overall installation readiness. Do not call readiness complete until the placeholders are frozen, the installed hashes match, the authenticated API accepts the registration, both live declarations match this freeze, and the API policy readback names the same target/provider/model/binding tuple.

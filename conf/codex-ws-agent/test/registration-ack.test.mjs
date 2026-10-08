@@ -291,3 +291,64 @@ test('late nested ACK cannot rotate token again after exact registration complet
   for (const value of Object.values(secret)) assert.equal(f.logs.join('\n').includes(value), false)
   assert.equal(f.logs.join('\n').includes('c'.repeat(32)), false)
 })
+
+test('native readiness waits for the latest exact registration ACK across supersession and slow ACK', async () => {
+  const f = fixture(); f.observer.begin('before-measurement')
+  f.observer.observe({ type: 'agent_registered', agentId: profile.agentId, status: 'online', token: 'a'.repeat(32), messageId: 'before-measurement', runtimeInstanceId })
+  f.observer.begin('inspection-measured'); let released = false
+  const pending = f.observer.waitForRegistration().then(value => { released = true; return value })
+  f.observer.begin('latest-measured'); f.fireTimers()
+  f.observer.observe({ type: 'agent_registered', agentId: profile.agentId, status: 'online', token: 'b'.repeat(32), messageId: 'inspection-measured', runtimeInstanceId })
+  await Promise.resolve(); assert.equal(released, false)
+  f.observer.observe({ type: 'agent_registered', agentId: profile.agentId, status: 'online', token: 'c'.repeat(32), messageId: 'latest-measured', runtimeInstanceId })
+  assert.deepEqual(await pending, { stage: 'registered', registered: true })
+  assert.equal(f.observer.runtimeAuthHeader, `AgentRuntime ${'c'.repeat(32)}`)
+  assert.equal(JSON.stringify(f.logs).includes('c'.repeat(32)), false)
+})
+
+test('native readiness rejects disconnected, rejected and failed registrations without exposing credentials', async () => {
+  for (const terminal of ['disconnect', 'rejected', 'sendFailed']) {
+    const f = fixture(); f.observer.begin('inspection-measured')
+    const pending = assert.rejects(f.observer.waitForRegistration(), error => error.code === 'NATIVE_RUNTIME_REGISTRATION_UNAVAILABLE')
+    if (terminal === 'rejected') f.observer.observe({ messageType: 'protocol.error', messageId: 'inspection-measured', runtimeInstanceId })
+    else f.observer[terminal](...terminal === 'sendFailed' ? ['inspection-measured'] : [])
+    await pending; assert.equal(f.observer.waiters.size, 0)
+    await assert.rejects(f.observer.waitForRegistration(), error => error.code === 'NATIVE_RUNTIME_REGISTRATION_REQUIRED')
+  }
+})
+
+
+test('merged readiness waiters release only after exact native receipt authority is installed', async () => {
+  const f = fixture(); const first = send(f).envelope
+  const waiting = f.observer.waitForRegistration().then(snapshot => ({ snapshot, scope: f.observer.runtimeScope, header: f.observer.nativeRuntimeAuthHeader }))
+  const latest = send(f).envelope
+  assert.equal(f.observer.observe(ack(first)), null)
+  assert.equal(f.observer.nativeRuntimeAuthHeader, '')
+  assert.equal(f.observer.observe(ack(latest)), 'registered')
+  const ready = await waiting
+  assert.deepEqual(ready.snapshot, { stage: 'registered', registered: true })
+  assert.deepEqual(ready.scope, ack(latest).runtimeAuth)
+  assert.equal(ready.header, `AgentRuntime ${secret.token}`)
+  const generation = f.observer.generation
+  f.observer.disconnect()
+  assert.ok(f.observer.generation > generation)
+  assert.equal(f.observer.nativeRuntimeAuthHeader, '')
+  assert.equal(f.observer.runtimeScope, null)
+  assert.equal(f.observer.observe(ack(latest)), null)
+})
+
+test('merged readiness waiters cannot acquire controlled authority from malformed or legacy ACKs', async () => {
+  const invalid = fixture(); const envelope = send(invalid).envelope
+  const denied = assert.rejects(invalid.observer.waitForRegistration(), error => error.code === 'NATIVE_RUNTIME_REGISTRATION_UNAVAILABLE')
+  assert.equal(invalid.observer.observe({ ...ack(envelope), runtimeAuth: { ...ack(envelope).runtimeAuth, agentId: 'another-agent' } }), 'rejected')
+  await denied
+  assert.equal(invalid.observer.runtimeScope, null)
+  assert.equal(invalid.observer.nativeRuntimeAuthHeader, '')
+  const legacy = fixture(); const legacyEnvelope = send(legacy).envelope
+  const waiting = legacy.observer.waitForRegistration()
+  const { runtimeAuth, ...legacyReceipt } = ack(legacyEnvelope)
+  assert.equal(legacy.observer.observe(legacyReceipt), 'registered')
+  assert.deepEqual(await waiting, { stage: 'registered', registered: true })
+  assert.equal(legacy.observer.runtimeScope, null)
+  assert.equal(legacy.observer.nativeRuntimeAuthHeader, '')
+})

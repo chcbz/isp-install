@@ -18,6 +18,10 @@ import {
   LEDGER_STATUS,
   MESSAGE_TYPES,
   PersistentCommandInbox,
+  PersistentChatInbox,
+  ChatAckOutbox,
+  FairLaneScheduler,
+  SerialExecutionGate,
   PROCESS_RUNTIME_INSTANCE_ID,
   buildAckEnvelope,
   buildAgentPresencePayload,
@@ -31,11 +35,15 @@ import {
   discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
   inheritManagedRuntimeCapabilities,
+  isTypedInspectionDispatch,
   loadWebSocketClient,
   normalizeInboundMessage,
+  normalizeProfile,
   pollWorkspaceFileCommands,
+  publishTypedInspectionReadiness,
   resolveProfileAbilities,
   runCodex,
+  runProfileChat,
   materializeImageGenerationResult,
   runManagedCommand,
   sanitizeWebSocketEndpoint,
@@ -44,6 +52,7 @@ import {
 import { WorkspaceFileBridge } from '../workspace-file-bridge.mjs'
 import { RegistrationAckObserver } from '../registration-ack.mjs'
 import { ExecutionReportOutbox, EXECUTION_REPORT_RESULT_TYPE } from '../report-outbox.mjs'
+import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
 
 const temporaryDirectories = []
 afterEach(() => {
@@ -84,6 +93,11 @@ test('managed profiles inherit only trusted runtime delivery capabilities', () =
   assert.equal(managed.workspaceFileApiOrigin, 'http://127.0.0.1:10018')
   assert.equal(managed.workspaceFileRootDir, '/srv/private-runs')
   assert.deepEqual(managed.executionReportCommandTypes, ['WORKSPACE_FILE_EXECUTE'])
+  assert.equal(managed.controlledImageHttpEnabled, false)
+  assert.equal(managed.controlledImageHttpEndpoint, '')
+  assert.equal(managed.controlledImageHttpApiKeyEnv, '')
+  assert.equal(managed.controlledImageHttpBindingId, '')
+  assert.equal(managed.controlledImageHttpLedgerRoot, '')
 })
 
 const command = number => ({
@@ -115,6 +129,59 @@ const chat = () => ({
   conversationId: 'conversation-1',
   content: 'hello'
 })
+
+const durableChat = (number = 1, overrides = {}) => {
+  const sourceVector = { conversationGeneration: '1', messageHighWatermark: String(100 + number) }
+  const facts = { schemaVersion: '1', conversation: { id: String(number), generation: '1' }, userMessage: { id: String(100 + number) } }
+  const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}` : JSON.stringify(value)
+  const contextHash = `sha256:${createHash('sha256').update(canonical({ sourceVector, facts })).digest('hex')}`
+  return {
+    schemaVersion: 1, messageType: MESSAGE_TYPES.CHAT_MESSAGE, messageId: `chat-event-${number}`,
+    requestId: `chat-request-${number}`, requestRevision: '1', turnId: `chat-turn-${number}`,
+    dispatchId: `chat-dispatch-${number}`, targetAgentId: profile.agentId, conversationId: `chat-conversation-${number}`,
+    conversationGeneration: '1', route: 'CHAT', content: `chat ${number}`, tenantId: 'tenant-a', ownerJiacn: 'owner-a', clientId: 'client-a',
+    dispatchAckType: MESSAGE_TYPES.CHAT_DISPATCH_ACK, ackRequired: true, deliverySemantics: 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED',
+    dedupeKey: `tenant-a:owner-a:client-a:chat-dispatch-${number}`, contextSnapshotId: `snapshot-${number}`, contextHash, sourceVector, factsManifest: facts,
+    contextSnapshot: { schemaVersion: '1', contextSnapshotId: `snapshot-${number}`, contextHash, sourceVector, facts },
+    ...overrides
+  }
+}
+
+const preparedInspectionFinal = message => ({
+  schemaVersion: 1, contract: 'juyiting-typed-inspection-final-v1', requestId: message.requestId,
+  turnId: message.turnId, dispatchId: message.dispatchId,
+  outboundMessageId: `inspection_final_${createHash('sha256').update(message.dedupeKey).digest('hex')}`,
+  finalDigest: 'sha256:' + 'd'.repeat(64),
+  result: {
+    status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed',
+    threadId: 'engine-thread-final', turnId: 'engine-turn-final', threadKey: 'thk:final', inputDigest: 'sha256:' + 'e'.repeat(64)
+  }
+})
+
+const finalSavedAck = (message, overrides = {}) => ({
+  type: 'agent_message_saved', channel: 'agent', timestamp: Date.now(), turnId: message.turnId,
+  messageId: '501', eventId: 'event-final-501', duplicate: false, ...overrides
+})
+
+const createChatRuntime = (rootDir, options = {}) => {
+  const inbox = new PersistentCommandInbox({ rootDir, profile })
+  const chatInbox = new PersistentChatInbox({ rootDir, profile })
+  const chatAckOutbox = options.chatAckOutbox || new ChatAckOutbox({ rootDir, profile })
+  const sent = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    chatInbox,
+    chatAckOutbox,
+    lanes: options.lanes || new FairLaneScheduler({ chatConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 16 }),
+    runCommand: options.runCommand || (async () => ({ status: 'completed' })),
+    runChat: options.runChat || (async () => ({ status: 'completed' })),
+    recoverChat: options.recoverChat || null,
+    sendFn: envelope => { sent.push(envelope); return options.sendResult === undefined ? true : options.sendResult },
+    onReject: options.onReject || (() => {})
+  })
+  return { processor, inbox, chatInbox, chatAckOutbox, sent }
+}
 
 const taskEvent = () => ({
   type: MESSAGE_TYPES.TASK_EVENT,
@@ -231,7 +298,502 @@ test('processing command restart enters durable recovery-required state without 
   assert.equal(entry.ackRejectedEmitted, true)
 })
 
-test('chat run emits only chat.message.delta and chat.message', async () => {
+test('durable CHAT startup drains pending exact keys and processing restart stays recovery-required', async () => {
+  const rootDir = temporaryDirectory()
+  const seeded = new PersistentChatInbox({ rootDir, profile }); seeded.initialize()
+  await seeded.accept(normalizeInboundMessage(durableChat(1)))
+  const executed = []
+  const first = createChatRuntime(rootDir, { runChat: async message => { executed.push(message.dispatchId); return { status: 'completed' } } })
+  const recovery = first.processor.start()
+  await first.processor.waitForIdle()
+  assert.equal(recovery.chatPending, 1)
+  assert.deepEqual(executed, ['chat-dispatch-1'])
+  assert.equal(first.chatInbox.count('archive'), 1)
+
+  const secondRoot = temporaryDirectory()
+  const acceptedInbox = new PersistentChatInbox({ rootDir: secondRoot, profile }); acceptedInbox.initialize()
+  const accepted = await acceptedInbox.accept(normalizeInboundMessage(durableChat(2)))
+  acceptedInbox.claim(accepted.key)
+  const restartedCalls = []
+  const restarted = createChatRuntime(secondRoot, { runChat: async message => { restartedCalls.push(message.dispatchId) } })
+  const restartedRecovery = restarted.processor.start()
+  await restarted.processor.waitForIdle()
+  assert.equal(restartedRecovery.chatRecoveryRequired, 1)
+  assert.deepEqual(restartedCalls, [])
+  assert.equal(restarted.chatInbox.count('recovery'), 1)
+})
+
+test('durable CHAT duplicate only re-ACKs while fingerprint conflict neither ACKs nor invokes twice', async () => {
+  const calls = []
+  const runtime = createChatRuntime(temporaryDirectory(), { runChat: async message => { calls.push(message.dispatchId); return { status: 'completed' } } })
+  runtime.processor.start()
+  const first = await runtime.processor.handle(durableChat(3))
+  await runtime.processor.waitForIdle()
+  const duplicate = await runtime.processor.handle(durableChat(3))
+  const ackCount = runtime.sent.length
+  const conflict = await runtime.processor.handle(durableChat(3, { content: 'different content' }))
+  assert.equal(first.kind, 'chat-accepted')
+  assert.equal(duplicate.kind, 'chat-duplicate')
+  assert.deepEqual(calls, ['chat-dispatch-3'])
+  assert.equal(runtime.sent.at(-1).status, 'duplicate')
+  assert.equal(conflict.kind, 'rejected')
+  assert.equal(conflict.error.code, 'CHAT_FINGERPRINT_CONFLICT')
+  assert.equal(runtime.sent.length, ackCount)
+})
+
+test('CHAT admission still schedules and retries ACK when initial durable ACK enqueue fails', async () => {
+  let attempts = 0; const pending = []
+  const flakyOutbox = {
+    initialize() { return this },
+    enqueue(envelope) { attempts++; if (attempts === 1) throw new Error('injected ACK write failure'); pending.push(envelope) },
+    drain(send) { let count = 0; while (pending.length && send(pending[0])) { pending.shift(); count++ } return count },
+    count() { return pending.length }
+  }
+  const runs = []; const rejected = []; const runtime = createChatRuntime(temporaryDirectory(), {
+    chatAckOutbox: flakyOutbox,
+    runChat: async message => { runs.push(message.dispatchId); return { status: 'completed' } },
+    onReject: error => rejected.push(error.code)
+  })
+  runtime.processor.start()
+  const result = await runtime.processor.handle(durableChat(30))
+  await runtime.processor.waitForIdle(); await new Promise(resolvePromise => setTimeout(resolvePromise, 150))
+  assert.equal(result.kind, 'chat-accepted'); assert.deepEqual(runs, ['chat-dispatch-30'])
+  assert.ok(attempts >= 2); assert.equal(runtime.sent.some(envelope => envelope.status === 'received'), true)
+  assert.deepEqual(rejected, ['CHAT_ACK_OUTBOX_ERROR'])
+})
+
+test('modern CHAT trust failure enters durable recovery and emits explicit recovery ACK', async () => {
+  const rootDir = temporaryDirectory(); const rejected = []
+  const runtime = createChatRuntime(rootDir, {
+    runChat: async () => { throw Object.assign(new Error('schema mismatch'), { code: 'APP_SERVER_BINARY_UNTRUSTED' }) },
+    onReject: error => rejected.push(error.code)
+  })
+  runtime.processor.start(); const message = durableChat(31); await runtime.processor.handle(message); await runtime.processor.waitForIdle()
+  const normalized = normalizeInboundMessage(message); const item = runtime.chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(item.record.state, 'RECOVERY_REQUIRED')
+  assert.ok(runtime.sent.some(envelope => envelope.dispatchId === message.dispatchId && envelope.status === 'recovery_required' && envelope.errorCode === 'APP_SERVER_BINARY_UNTRUSTED'))
+  assert.deepEqual(rejected, ['APP_SERVER_BINARY_UNTRUSTED'])
+})
+
+test('CHAT and COMMAND lanes start independently in both arrival orders and after pending restart', async () => {
+  for (const order of ['chat-first', 'command-first']) {
+    const chatGate = deferred(); const commandGate = deferred(); const started = []
+    const runtime = createChatRuntime(temporaryDirectory(), {
+      runChat: async () => { started.push('chat'); await chatGate.promise; return { status: 'completed' } },
+      runCommand: async () => { started.push('command'); await commandGate.promise; return { status: 'completed' } }
+    })
+    runtime.processor.start()
+    if (order === 'chat-first') { await runtime.processor.handle(durableChat(4)); await runtime.processor.handle(command(4)) }
+    else { await runtime.processor.handle(command(4)); await runtime.processor.handle(durableChat(4)) }
+    await new Promise(resolvePromise => setImmediate(resolvePromise))
+    assert.deepEqual(new Set(started), new Set(['chat', 'command']), order)
+    chatGate.resolve(); commandGate.resolve(); await runtime.processor.waitForIdle()
+  }
+
+  const rootDir = temporaryDirectory()
+  const commandInbox = new PersistentCommandInbox({ rootDir, profile }); commandInbox.initialize(); commandInbox.enqueue(normalizeInboundMessage(command(5)))
+  const chatInbox = new PersistentChatInbox({ rootDir, profile }); chatInbox.initialize(); await chatInbox.accept(normalizeInboundMessage(durableChat(5)))
+  const restarted = []
+  const runtime = createChatRuntime(rootDir, {
+    runChat: async () => { restarted.push('chat'); return { status: 'completed' } },
+    runCommand: async () => { restarted.push('command'); return { status: 'completed' } }
+  })
+  runtime.processor.start(); await runtime.processor.waitForIdle()
+  assert.deepEqual(new Set(restarted), new Set(['chat', 'command']))
+})
+
+test('chat.stop without conversationId cancels only the exact queued or running durable turn', async () => {
+  const firstGate = deferred(); const runningGate = deferred(); const started = []; const cancelled = []
+  const runtime = createChatRuntime(temporaryDirectory(), {
+    runChat: async (message, controls) => {
+      started.push(message.dispatchId)
+      if (message.dispatchId === 'chat-dispatch-6') await firstGate.promise
+      if (message.dispatchId === 'chat-dispatch-8') {
+        controls.markRunning(async () => { cancelled.push(message.dispatchId); runningGate.resolve() })
+        await runningGate.promise
+      }
+      return { status: 'completed' }
+    }
+  })
+  runtime.processor.start()
+  await runtime.processor.handle(durableChat(6))
+  await runtime.processor.handle(durableChat(7))
+  const queuedStop = await runtime.processor.handle({
+    schemaVersion: 1, messageType: MESSAGE_TYPES.CHAT_STOP,
+    requestId: 'chat-request-7', turnId: 'chat-turn-7', dispatchId: 'chat-dispatch-7', targetAgentId: profile.agentId
+  })
+  assert.equal(queuedStop.status, 'cancelled')
+  firstGate.resolve(); await runtime.processor.waitForIdle()
+  assert.deepEqual(started, ['chat-dispatch-6'])
+
+  await runtime.processor.handle(durableChat(8))
+  await new Promise(resolvePromise => setImmediate(resolvePromise))
+  const runningStop = await runtime.processor.handle({
+    schemaVersion: 1, messageType: MESSAGE_TYPES.CHAT_STOP,
+    requestId: 'chat-request-8', turnId: 'chat-turn-8', dispatchId: 'chat-dispatch-8', targetAgentId: profile.agentId
+  })
+  assert.equal(runningStop.status, 'cancel-requested')
+  await runtime.processor.waitForIdle()
+  assert.deepEqual(cancelled, ['chat-dispatch-8'])
+  assert.ok(runtime.sent.some(ack => ack.dispatchId === 'chat-dispatch-7' && ack.status === 'cancelled'))
+  assert.ok(runtime.sent.some(ack => ack.dispatchId === 'chat-dispatch-8' && ack.status === 'cancel-requested'))
+})
+
+test('typed inspection dispatch detection is fail-closed for either the INSPECT route or trusted marker', () => {
+  assert.equal(isTypedInspectionDispatch({ route: 'CHAT', contextSnapshot: { facts: {} } }), false)
+  assert.equal(isTypedInspectionDispatch({ route: 'INSPECT', contextSnapshot: { facts: {} } }), true)
+  assert.equal(isTypedInspectionDispatch({ route: 'CHAT', contextSnapshot: { facts: { typedInspection: {} } } }), true)
+})
+
+test('processor sends INSPECT through its isolated lane and reconciles unknown acceptance without a second start', async () => {
+  const root = temporaryDirectory(); const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 16 })
+  const observedLanes = []; const originalEnqueue = lanes.enqueue.bind(lanes)
+  lanes.enqueue = (lane, ...args) => { observedLanes.push(lane); return originalEnqueue(lane, ...args) }
+  let starts = 0; let reads = 0; const rejected = []
+  const runtime = createChatRuntime(root, {
+    lanes,
+    runChat: async (_message, controls) => {
+      starts++
+      controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', inputDigest: 'sha256:' + 'a'.repeat(64) })
+      controls.markRunning(() => {}, { threadId: 'engine-thread', turnId: 'engine-turn' })
+      throw Object.assign(new Error('opaque response loss'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+    },
+    onReject: error => rejected.push(error),
+    recoverChat: async (_message, record) => {
+      reads++
+      assert.equal(record.preparation.inputDigest, 'sha256:' + 'a'.repeat(64))
+      assert.deepEqual(record.engine, { threadId: 'engine-thread', turnId: 'engine-turn' })
+      return { status: 'completed', threadId: 'engine-thread', turnId: 'engine-turn' }
+    }
+  })
+  runtime.processor.start()
+  const message = durableChat(88, { route: 'INSPECT' })
+  await runtime.processor.handle(message)
+  for (let attempt = 0; attempt < 20 && reads === 0; attempt++) await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
+  await runtime.processor.waitForIdle()
+  assert.equal(starts, 1); assert.equal(reads, 1); assert.deepEqual(rejected.map(error => [error.code, error.message]), [['TURN_ACCEPTANCE_UNKNOWN', 'opaque response loss']])
+  assert.deepEqual(observedLanes.filter(lane => lane === 'inspect'), ['inspect', 'inspect'])
+  const normalized = normalizeInboundMessage(message)
+  const item = runtime.chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(item.state, 'archive'); assert.equal(item.record.state, 'COMPLETED')
+})
+
+
+
+test('processor recovery controls durably prepare a final produced by native readback before replay', async () => {
+  const root = temporaryDirectory(); let starts = 0; let recoveries = 0
+  const outboundMessageId = 'inspection_final_' + 'c'.repeat(64)
+  const runtime = createChatRuntime(root, {
+    runChat: async (_message, controls) => {
+      starts++; controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', inputDigest: 'sha256:' + 'a'.repeat(64) })
+      controls.markRunning(() => {}, { threadId: 'engine-thread-readback', turnId: 'engine-turn-readback' })
+      throw Object.assign(new Error('opaque response loss'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+    },
+    recoverChat: async (_message, record, controls) => {
+      recoveries++; assert.equal(record.finalPrepared, undefined); assert.equal(typeof controls.markFinalPrepared, 'function')
+      controls.markFinalPrepared({ schemaVersion: 1, outboundMessageId, finalDigest: 'sha256:' + 'd'.repeat(64) })
+      controls.markFinalPublication({ schemaVersion: 1, outboundMessageId, state: 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED', errorCode: null })
+      return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED', computationStatus: 'completed', serverPersistence: 'unconfirmed' }
+    },
+    onReject: () => {}
+  })
+  runtime.processor.start(); const message = durableChat(90, { route: 'INSPECT' }); await runtime.processor.handle(message)
+  for (let attempt = 0; attempt < 50 && recoveries === 0; attempt++) await new Promise(resolveWait => setTimeout(resolveWait, 10))
+  await runtime.processor.waitForIdle(); runtime.processor.stop()
+  const normalized = normalizeInboundMessage(message); const item = runtime.chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(starts, 1); assert.equal(recoveries, 1); assert.equal(item.state, 'recovery'); assert.equal(item.record.state, 'ACCEPTANCE_UNKNOWN')
+  assert.equal(item.record.finalPrepared.outboundMessageId, outboundMessageId)
+  assert.equal(item.record.finalPublication.state, 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED')
+})
+
+test('processor retains a durably prepared INSPECT final in recovery instead of archiving local computation as completed', async () => {
+  const root = temporaryDirectory(); let runs = 0; let recoveries = 0
+  const runtime = createChatRuntime(root, {
+    runChat: async (_message, controls) => {
+      runs++; controls.markPrepared({ schemaVersion: 1 }); controls.markRunning(() => {}, { threadId: 'engine-thread', turnId: 'engine-turn' })
+      controls.markFinalPrepared({ schemaVersion: 1, outboundMessageId: 'inspection_final_' + 'a'.repeat(64), finalDigest: 'sha256:' + 'b'.repeat(64) })
+      controls.markFinalPublication({ schemaVersion: 1, outboundMessageId: 'inspection_final_' + 'a'.repeat(64), state: 'NOT_SENT', errorCode: null })
+      return { status: 'recovery_required', recoveryReason: 'FINAL_PUBLISH_NOT_SENT', computationStatus: 'completed', serverPersistence: 'unconfirmed' }
+    },
+    recoverChat: async () => { recoveries++; return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' } }
+  })
+  runtime.processor.start(); const message = durableChat(89, { route: 'INSPECT' }); await runtime.processor.handle(message); await runtime.processor.waitForIdle(); runtime.processor.stop()
+  const normalized = normalizeInboundMessage(message); const item = runtime.chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(runs, 1); assert.equal(recoveries, 0); assert.equal(item.state, 'recovery'); assert.equal(item.record.state, 'RECOVERY_REQUIRED')
+  assert.equal(item.record.finalPrepared.outboundMessageId, 'inspection_final_' + 'a'.repeat(64)); assert.equal(item.record.result, undefined)
+  assert.ok(runtime.sent.some(ack => ack.dispatchId === message.dispatchId && ack.status === 'recovery_required' && ack.errorCode === 'FINAL_PUBLISH_NOT_SENT'))
+})
+
+test('trusted final-saved ACK wins the send-return race, archives confirmed completion and accepts duplicate receipt idempotently', async () => {
+  const root = temporaryDirectory(); const rejected = []; const message = durableChat(91, { route: 'INSPECT' })
+  let runtime; let acknowledgements = 0
+  runtime = createChatRuntime(root, {
+    runChat: async (_message, controls) => {
+      const prepared = preparedInspectionFinal(message)
+      controls.markFinalPrepared(prepared)
+      const acknowledged = await runtime.processor.handle(finalSavedAck(message))
+      assert.equal(acknowledged.kind, 'chat-final-saved'); acknowledgements++
+      controls.markFinalPublication({ schemaVersion: 1, outboundMessageId: prepared.outboundMessageId, state: 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED', errorCode: null })
+      return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' }
+    },
+    onReject: error => rejected.push(error)
+  })
+  runtime.processor.start(); await runtime.processor.handle(message); await runtime.processor.waitForIdle()
+  const normalized = normalizeInboundMessage(message); const key = (await import('../chat-runtime.mjs')).durableChatKey(normalized)
+  const archived = runtime.chatInbox.findByKey(key)
+  assert.equal(acknowledgements, 1); assert.equal(archived.state, 'archive'); assert.equal(archived.record.state, 'COMPLETED')
+  assert.equal(archived.record.result.serverPersistence, 'confirmed'); assert.equal(archived.record.result.persistedMessageId, '501')
+  assert.equal(archived.record.finalConfirmation.outboundMessageId, preparedInspectionFinal(message).outboundMessageId)
+  assert.equal(runtime.processor.chatRecoveryRetries.size, 0); assert.deepEqual(rejected, [])
+  assert.equal(runtime.sent.some(envelope => envelope.status === 'recovery_required'), false)
+
+  const duplicate = await runtime.processor.handle(finalSavedAck(message, { duplicate: true, eventId: undefined }))
+  assert.equal(duplicate.kind, 'chat-final-saved'); assert.equal(duplicate.status, 'duplicate')
+  assert.equal(runtime.chatInbox.findByKey(key).record.result.persistedMessageId, '501')
+  runtime.processor.stop()
+})
+
+test('final-saved duplicate ACK completes a prepared recovery after process reload and clears scheduled replay', async () => {
+  const root = temporaryDirectory(); const message = normalizeInboundMessage(durableChat(92, { route: 'INSPECT' }))
+  const seeded = new PersistentChatInbox({ rootDir: root, profile }); seeded.initialize()
+  const accepted = await seeded.accept(message); const claimed = seeded.claim(accepted.key)
+  seeded.markPrepared(claimed, { schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', inputDigest: 'sha256:' + 'a'.repeat(64) })
+  seeded.markFinalPrepared(claimed, preparedInspectionFinal(message)); seeded.recoveryRequired(claimed, 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED')
+
+  let recoveries = 0
+  const runtime = createChatRuntime(root, {
+    recoverChat: async () => { recoveries++; return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' } },
+    chatRecoveryRetryBaseMs: 60000,
+    onReject: () => {}
+  })
+  runtime.processor.chatRecoveryRetryBaseMs = 60000; runtime.processor.chatRecoveryRetryMaxMs = 60000
+  runtime.processor.start()
+  for (let attempt = 0; attempt < 50 && runtime.processor.chatRecoveryRetries.size === 0; attempt++) await new Promise(resolveWait => setTimeout(resolveWait, 10))
+  assert.equal(recoveries, 1); assert.equal(runtime.processor.chatRecoveryRetries.size, 1)
+  const outcome = await runtime.processor.handle(finalSavedAck(message, { duplicate: true, eventId: undefined }))
+  assert.equal(outcome.kind, 'chat-final-saved'); assert.equal(outcome.status, 'confirmed')
+  assert.equal(runtime.processor.chatRecoveryRetries.size, 0)
+  const archived = runtime.chatInbox.findByKey(accepted.key)
+  assert.equal(archived.state, 'archive'); assert.equal(archived.record.result.serverPersistence, 'confirmed')
+  assert.equal(archived.record.result.persistenceDuplicate, true); assert.equal(archived.record.result.persistedEventId, null)
+  runtime.processor.stop()
+})
+
+test('final-saved ACK ignores unmatched legacy events but rejects ambiguous, stale, unprepared and terminal-conflicting INSPECT bindings', async () => {
+  const root = temporaryDirectory(); const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+  const unpreparedMessage = normalizeInboundMessage(durableChat(93, { route: 'INSPECT' }))
+  const unprepared = await inbox.accept(unpreparedMessage); inbox.claim(unprepared.key)
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(unpreparedMessage)), error => error.code === 'CHAT_FINAL_ACK_PREPARED_REQUIRED')
+  assert.deepEqual(inbox.confirmFinalSaved(finalSavedAck({ ...unpreparedMessage, turnId: 'foreign-turn' })), {
+    status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH'
+  })
+  assert.throws(() => inbox.confirmFinalSaved({ ...finalSavedAck(unpreparedMessage), channel: 'foreign' }), error => error.code === 'CHAT_FINAL_ACK_INVALID')
+
+  const sharedTurn = 'stable-turn-ambiguous'
+  for (const number of [94, 95]) {
+    const message = normalizeInboundMessage(durableChat(number, { route: 'INSPECT', turnId: sharedTurn }))
+    const accepted = await inbox.accept(message); const claimed = inbox.claim(accepted.key); inbox.markFinalPrepared(claimed, preparedInspectionFinal(message))
+  }
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck({ ...unpreparedMessage, turnId: sharedTurn })), error => error.code === 'CHAT_FINAL_ACK_AMBIGUOUS')
+
+  const staleMessage = normalizeInboundMessage(durableChat(96, { route: 'INSPECT' }))
+  const staleAccepted = await inbox.accept(staleMessage); const stale = inbox.claim(staleAccepted.key)
+  inbox.markFinalPrepared(stale, preparedInspectionFinal(staleMessage)); inbox.cancelProcessing(stale)
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(staleMessage)), error => error.code === 'CHAT_FINAL_ACK_STALE')
+
+  const confirmedMessage = normalizeInboundMessage(durableChat(97, { route: 'INSPECT' }))
+  const confirmedAccepted = await inbox.accept(confirmedMessage); const confirmed = inbox.claim(confirmedAccepted.key)
+  inbox.markFinalPrepared(confirmed, preparedInspectionFinal(confirmedMessage)); inbox.confirmFinalSaved(finalSavedAck(confirmedMessage))
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(confirmedMessage, { messageId: '502', duplicate: true, eventId: undefined })), error => error.code === 'CHAT_FINAL_ACK_TERMINAL_CONFLICT')
+})
+
+test('processor ignores ordinary CHAT and unmatched legacy saved events while rejecting forged or ambiguous INSPECT acknowledgements', async () => {
+  const root = temporaryDirectory(); const rejected = []
+  const runtime = createChatRuntime(root, { onReject: error => rejected.push(error) })
+  runtime.processor.start()
+
+  const ordinary = durableChat(98, { route: 'CHAT' })
+  await runtime.processor.handle(ordinary); await runtime.processor.waitForIdle()
+  const ordinaryOutcome = await runtime.processor.handle(finalSavedAck(ordinary))
+  assert.deepEqual(ordinaryOutcome, {
+    kind: 'ignored', status: 'ignored', reason: 'NON_INSPECT_DURABLE_TURN',
+    key: (await import('../chat-runtime.mjs')).durableChatKey(normalizeInboundMessage(ordinary))
+  })
+  const legacySaved = {
+    type: 'agent_message_saved', channel: 'agent', messageId: '123', conversationId: '42', conversationType: 'normal',
+    agentId: profile.agentId, senderType: 'agent', senderName: 'Agent A', content: 'legacy text', eventId: 'legacy-event-1', timestamp: 1
+  }
+  const unmatchedOutcome = await runtime.processor.handle(legacySaved)
+  assert.deepEqual(unmatchedOutcome, { kind: 'ignored', status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH', key: null })
+  assert.deepEqual(rejected, [])
+
+  const forged = normalizeInboundMessage(durableChat(99, { route: 'INSPECT' }))
+  const forgedAccepted = await runtime.chatInbox.accept(forged); runtime.chatInbox.claim(forgedAccepted.key)
+  const forgedOutcome = await runtime.processor.handle(finalSavedAck(forged))
+  assert.equal(forgedOutcome.kind, 'rejected'); assert.equal(forgedOutcome.error.code, 'CHAT_FINAL_ACK_PREPARED_REQUIRED')
+
+  const sharedTurn = 'processor-ambiguous-inspect-turn'
+  for (const number of [100, 101]) {
+    const message = normalizeInboundMessage(durableChat(number, { route: 'INSPECT', turnId: sharedTurn }))
+    const accepted = await runtime.chatInbox.accept(message); const claimed = runtime.chatInbox.claim(accepted.key)
+    runtime.chatInbox.markFinalPrepared(claimed, preparedInspectionFinal(message))
+  }
+  const ambiguousOutcome = await runtime.processor.handle(finalSavedAck({ ...forged, turnId: sharedTurn }))
+  assert.equal(ambiguousOutcome.kind, 'rejected'); assert.equal(ambiguousOutcome.error.code, 'CHAT_FINAL_ACK_AMBIGUOUS')
+
+  const malformed = normalizeInboundMessage(durableChat(102, { route: 'INSPECT' }))
+  const malformedAccepted = await runtime.chatInbox.accept(malformed); const malformedClaimed = runtime.chatInbox.claim(malformedAccepted.key)
+  runtime.chatInbox.markFinalPrepared(malformedClaimed, preparedInspectionFinal(malformed))
+  const malformedOutcome = await runtime.processor.handle({ ...finalSavedAck(malformed), duplicate: undefined })
+  assert.equal(malformedOutcome.kind, 'rejected'); assert.equal(malformedOutcome.error.code, 'CHAT_FINAL_ACK_INVALID')
+  assert.equal(runtime.chatInbox.findByKey(malformedAccepted.key).state, 'processing')
+  assert.deepEqual(rejected.map(error => error.code), ['CHAT_FINAL_ACK_PREPARED_REQUIRED', 'CHAT_FINAL_ACK_AMBIGUOUS', 'CHAT_FINAL_ACK_INVALID'])
+  runtime.processor.stop()
+})
+
+test('production chat runner takes disabled and legacy messages directly to serialized final-only fallback', async () => {
+  const gate = new SerialExecutionGate(); const calls = []
+  const result = await runProfileChat(profile, { ...chat(), legacy: true, contextSnapshot: { get schemaVersion() { throw new Error('must not inspect snapshot') } } }, {
+    legacyGate: gate,
+    runLegacy: async (_profile, message, mode) => { calls.push([message.messageId, mode]); return { status: 'completed' } }
+  })
+  assert.deepEqual(calls, [['chat-message-1', 'chat']])
+  assert.equal(result.status, 'completed')
+})
+
+test('registration and presence truthfully advertise capability contract v1 with Fast CHAT disabled by default', () => {
+  const registration = buildAgentRegistrationPayload(profile).runtimeCapabilities
+  const presencePayload = buildAgentPresencePayload(profile, 'online')
+  const registrationPayload = buildAgentRegistrationPayload(profile)
+  const presence = presencePayload.runtimeCapabilities
+  assert.deepEqual(presence, registration)
+  assert.equal(Object.hasOwn(registrationPayload, 'typedDeliberation'), false)
+  assert.equal(Object.hasOwn(presencePayload, 'typedDeliberation'), false)
+  assert.deepEqual(
+    registration,
+    JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'u0-runtime-capabilities-v1.json'), 'utf8'))
+  )
+})
+
+
+test('completed typed inspection measurement republishes exact readiness only on an active registered socket', () => {
+  const declaration = { schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', enabled: true }
+  const statuses = []
+  const state = { disposed: false, ws: { readyState: 1 }, registration: { snapshot: () => ({ stage: 'pending_ack' }) },
+    typedInspectionProfileRuntime: { declaration: () => declaration } }
+  assert.equal(publishTypedInspectionReadiness(profile, state, { registerFn: () => true, sendStatusFn: (_profile, status) => { statuses.push(status); return true }, busyFn: () => false }), true)
+  assert.deepEqual(statuses, ['online'])
+  state.registration = { snapshot: () => ({ stage: 'idle' }) }
+  assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: () => assert.fail('must not publish before registration'), busyFn: () => false }), false)
+  state.registration = { snapshot: () => ({ stage: 'registered' }) }; state.typedInspectionProfileRuntime = { declaration: () => null }
+  assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: () => assert.fail('must not publish unready declaration'), busyFn: () => false }), false)
+})
+
+test('typed inspection declaration is absent without measured contract readback and exact when ready', () => {
+  const declaration = {
+    schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', enabled: true, profileId: 'inspection-profile',
+    engineContractId: 'engine-contract-v1', enginePolicyDigest: 'sha256:' + '1'.repeat(64), toolPolicyDigest: 'sha256:' + '2'.repeat(64),
+    inputPolicyDigest: 'sha256:' + '3'.repeat(64), toolPolicy: 'MANIFEST_READ_ONLY', recovery: 'durable-inbox-turn-readback-v1',
+    supportedInputs: [{ mediaKind: 'text', mimeType: 'text/plain', carrier: 'DIRECT_TEXT', carrierContractDigest: 'sha256:' + '4'.repeat(64) }]
+  }
+  const unavailable = { declaration: () => null }; const ready = { declaration: () => declaration }
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(profile, null, false, null, unavailable), 'typedInspection'), false)
+  assert.equal(Object.hasOwn(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: unavailable }), 'typedInspection'), false)
+  assert.deepEqual(buildAgentRegistrationPayload(profile, null, true, null, ready).typedInspection, declaration)
+  assert.deepEqual(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: ready }).typedInspection, declaration)
+})
+
+test('typed inspection CA bundle path survives exact profile and fallback normalization', () => {
+  const direct = normalizeProfile({ agentId: 'typed-ca-direct', typedInspectionCaBundlePath: '/etc/ssl/custom-ca.pem' })
+  assert.equal(direct.typedInspectionCaBundlePath, '/etc/ssl/custom-ca.pem')
+  const inherited = normalizeProfile({ agentId: 'typed-ca-inherited' }, { typedInspectionCaBundlePath: '/etc/pki/custom-ca.pem' })
+  assert.equal(inherited.typedInspectionCaBundlePath, '/etc/pki/custom-ca.pem')
+  const override = normalizeProfile({ agentId: 'typed-ca-override', typedInspectionCaBundlePath: '/opt/ca/override.pem' },
+    { typedInspectionCaBundlePath: '/etc/pki/custom-ca.pem' })
+  assert.equal(override.typedInspectionCaBundlePath, '/opt/ca/override.pem')
+})
+
+
+test('typed deliberation declaration binds the exact locally selected schema contract and defaults legacy', () => {
+  const legacy = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4']; const native = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
+  const defaultProfile = normalizeProfile({ agentId: 'typed-default' })
+  assert.equal(defaultProfile.typedDeliberationEnabled, false)
+  assert.equal(defaultProfile.appServerSchemaContractId, legacy.contractId)
+  const defaultTypedProfile = normalizeProfile({
+    agentId: 'typed-default-ready', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
+    chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained'
+  })
+  const adapter = contract => ({ closed: false, readback: { initialize: {}, schema: { ...contract, schemaContractId: contract.contractId, measured: true } } })
+  assert.equal(buildAgentRegistrationPayload(defaultTypedProfile, null, true, adapter(legacy)).typedDeliberation.state, 'READY')
+  const configured = normalizeProfile({
+    agentId: 'typed-agent', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
+    chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained',
+    appServerSchemaContractId: native.contractId
+  })
+  const liveNative = adapter(native)
+  const declaration = {
+    schemaVersion: 3, state: 'READY', carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V3', referenceModes: ['NONE', 'AVAILABLE'],
+    outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST'], engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA',
+    strictNoToolsVerified: false, toolPolicy: 'read-only-constrained'
+  }
+  assert.deepEqual(buildAgentRegistrationPayload(configured, null, true, liveNative).typedDeliberation, declaration)
+  assert.deepEqual(buildAgentPresencePayload(configured, 'online', { appServerAdapter: liveNative }).typedDeliberation, declaration)
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: adapter(legacy) }).typedDeliberation.state, 'UNAVAILABLE')
+  assert.equal(buildAgentPresencePayload({ ...configured, appServerSchemaContractId: legacy.contractId }, 'online', { appServerAdapter: liveNative }).typedDeliberation.state, 'UNAVAILABLE')
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...liveNative, closed: true } }).typedDeliberation.state, 'UNAVAILABLE')
+  const incompleteMeasured = { closed: false, readback: { initialize: {}, schema: { measured: true } } }
+  for (const inherited of [...Object.getOwnPropertyNames(Object.prototype), ' __proto__ ']) {
+    assert.equal(
+      buildAgentRegistrationPayload({ ...configured, appServerSchemaContractId: inherited }, null, true, incompleteMeasured).typedDeliberation.state,
+      'UNAVAILABLE'
+    )
+  }
+})
+
+test('capability contract advertises CHAT only after its read-only-constrained profile is configured', () => {
+  const configured = {
+    ...profile,
+    fastChatEnabled: true,
+    appServerEnabled: true,
+    chatEngine: 'app-server',
+    chatSandbox: 'read-only',
+    chatToolPolicy: 'read-only-constrained',
+    workspaceFileApiOrigin: 'https://api.example.test',
+    workspaceFileRootDir: '/private/runs'
+  }
+  const capabilities = buildAgentRegistrationPayload(configured).runtimeCapabilities
+  assert.deepEqual(capabilities.interactionModes, ['CHAT'])
+  assert.deepEqual(capabilities.profiles.CHAT, {
+    supported: true,
+    enabled: true,
+    strictNoToolsVerified: false,
+    toolPolicy: 'read-only-constrained'
+  })
+  assert.equal(capabilities.profiles.INSPECT.enabled, false)
+  assert.equal(capabilities.profiles.EXECUTE.enabled, false)
+  assert.deepEqual(capabilities.legacyCompatibility, {
+    PRIVATE: true,
+    TASK: true,
+    nativeStart: true,
+    dispatchAckTypes: ['chat.dispatch.ack']
+  })
+})
+
+test('capability contract refuses to advertise CHAT policy for a non-constrained Fast configuration', () => {
+  const capabilities = buildAgentRegistrationPayload({
+    ...profile,
+    fastChatEnabled: true,
+    appServerEnabled: true,
+    chatEngine: 'app-server',
+    chatSandbox: 'workspace-write',
+    chatToolPolicy: 'read-only-constrained'
+  }).runtimeCapabilities
+  assert.equal(capabilities.profiles.CHAT.enabled, false)
+  assert.equal('toolPolicy' in capabilities.profiles.CHAT, false)
+  assert.deepEqual(capabilities.interactionModes, [])
+})
+
+test('legacy chat run emits final only and never fabricates delta', async () => {
   const protocolTypes = []
   const legacyTypes = []
   const statuses = []
@@ -264,9 +826,7 @@ test('chat run emits only chat.message.delta and chat.message', async () => {
 
   const result = await run
   assert.equal(result.status, 'completed')
-  assert.ok(protocolTypes.includes(MESSAGE_TYPES.CHAT_MESSAGE_DELTA))
-  assert.equal(protocolTypes.at(-1), MESSAGE_TYPES.CHAT_MESSAGE)
-  assert.ok(protocolTypes.every(type => [MESSAGE_TYPES.CHAT_MESSAGE_DELTA, MESSAGE_TYPES.CHAT_MESSAGE].includes(type)))
+  assert.deepEqual(protocolTypes, [MESSAGE_TYPES.CHAT_MESSAGE])
   assert.deepEqual(legacyTypes, [])
   assert.deepEqual(statuses, [])
 })
@@ -349,6 +909,8 @@ test('legacy agent status is ignored only as a non-executable control notificati
     status: 'online'
   }), true)
   assert.equal(isLegacyInboundControlFrame({ type: 'agent_capability_index', agents: [] }), true)
+  assert.equal(isLegacyInboundControlFrame(finalSavedAck(durableChat(98))), true)
+  assert.equal(isLegacyInboundControlFrame({ type: 'chat_dispatch_acknowledged', dispatchId: 'dispatch_1', messageId: 'msg_1' }), true)
   assert.equal(isLegacyInboundControlFrame({ type: 'task_assigned', content: 'do it' }), false)
   assert.equal(isLegacyInboundControlFrame({ type: 'task.assign', content: 'do it' }), false)
   assert.equal(isLegacyInboundControlFrame({ type: 'codex.exec', content: 'do it' }), false)
@@ -368,9 +930,10 @@ test('legacy execution types, missing messageType, and ambiguous envelopes fail 
     () => normalizeInboundMessage({ ...command(1), messageType: null }),
     error => error.code === 'INVALID_MESSAGE_TYPE'
   )
-  assert.throws(
-    () => normalizeInboundMessage({ ...command(1), requestId: 'different-request' }),
-    error => error.code === 'ENVELOPE_FIELD_CONFLICT'
+  assert.equal(
+    normalizeInboundMessage({ ...command(1), requestId: 'different-request' }).messageId,
+    command(1).messageId,
+    'messageId is transport identity and may differ from requestId'
   )
   assert.throws(
     () => normalizeInboundMessage(JSON.stringify(command(1)).replace('\"schemaVersion\":1', '\"schemaVersion\":1.0')),
@@ -917,7 +1480,7 @@ test('chat failure and busy branches emit chat responses only', async () => {
     sendLegacyFn: () => assert.fail('chat must not send legacy result'),
     sendStatusFn: () => assert.fail('chat must not send presence')
   })
-  assert.deepEqual(protocol.map(entry => entry.type), [MESSAGE_TYPES.CHAT_MESSAGE_DELTA, MESSAGE_TYPES.CHAT_MESSAGE])
+  assert.deepEqual(protocol.map(entry => entry.type), [MESSAGE_TYPES.CHAT_MESSAGE])
   assert.ok(protocol.every(entry => entry.payload.senderName === profile.personaName))
 
   const gate = deferred()
@@ -926,14 +1489,14 @@ test('chat failure and busy branches emit chat responses only', async () => {
     profile,
     inbox: createInbox(temporaryDirectory()),
     runCommand: async () => { await gate.promise; return { status: 'completed' } },
-    runChat: async () => assert.fail('busy chat must not start Codex'),
+    runChat: async () => busyReplies.push('chat-ran'),
     sendChatBusy: async inbound => busyReplies.push(inbound.senderName)
   })
   processor.start()
   await processor.handle(command(20))
   const result = await processor.handle(chat())
-  assert.equal(result.kind, 'chat-busy')
-  assert.deepEqual(busyReplies, ['Caller Name'])
+  assert.equal(result.kind, 'chat')
+  assert.deepEqual(busyReplies, ['chat-ran'])
   gate.resolve()
   await processor.waitForIdle()
 })
@@ -1651,7 +2214,7 @@ test('enqueue rechecks durable quarantine after waiting for the sequence lock', 
   const rootDir = temporaryDirectory()
   const { waiting, barrierRuns } = prepareAckQuarantineLockRace(rootDir)
   const sequenceBefore = JSON.parse(readFileSync(waiting.sequencePath, 'utf8')).lastSequence
-  const highWaterBefore = readdirSync(waiting.highWaterDir).filter(name => /^\d{20}\.json$/.test(name)).length
+  const highWaterBefore = readFileSync(waiting.highWaterCheckpointPath, 'utf8')
 
   assert.throws(
     () => waiting.enqueue(buildAckEnvelope(profile, ACK_STATUS.STARTED, { commandId: 'quarantine-race' }), { kind: 'none' }),
@@ -1660,7 +2223,7 @@ test('enqueue rechecks durable quarantine after waiting for the sequence lock', 
 
   assert.equal(barrierRuns(), 1)
   assert.equal(JSON.parse(readFileSync(waiting.sequencePath, 'utf8')).lastSequence, sequenceBefore)
-  assert.equal(readdirSync(waiting.highWaterDir).filter(name => /^\d{20}\.json$/.test(name)).length, highWaterBefore)
+  assert.equal(readFileSync(waiting.highWaterCheckpointPath, 'utf8'), highWaterBefore)
 })
 
 test('replay rechecks durable quarantine after lock wait and sends nothing', () => {
@@ -2962,7 +3525,7 @@ test('non-opt-in command types do not create execution reports', async () => {
   assert.equal(outbox.pendingReports().length, 0)
 })
 
-test('ACK high-water history is fully verified once and only the durable tip is reread during runtime', () => {
+test('ACK checkpoint verification is bounded at startup and during runtime', () => {
   const rootDir = temporaryDirectory()
   const storageRoot = profileStorageRoot(rootDir)
   const writer = new AckOutbox({ rootDir: storageRoot, profile })
@@ -2987,7 +3550,8 @@ test('ACK high-water history is fully verified once and only the durable tip is 
     }
   })
   observer.initialize()
-  assert.ok(highWaterReads >= 33, 'startup must verify the complete immutable history')
+  assert.equal(highWaterReads, 3, 'startup reads initialization and checkpoint, not per-sequence history')
+  assert.deepEqual(readdirSync(observer.highWaterDir).sort(), ['checkpoint.json', 'initialized.json'])
 
   highWaterReads = 0
   const queued = observer.enqueue(
@@ -2997,10 +3561,10 @@ test('ACK high-water history is fully verified once and only the durable tip is 
   observer.pendingEnvelopes()
   observer.dequeue(queued.fileName)
 
-  assert.ok(highWaterReads <= 4, `runtime ACK operations must read only the durable tip, got ${highWaterReads} high-water reads`)
+  assert.ok(highWaterReads <= 8, `runtime ACK operations must read bounded evidence, got ${highWaterReads} high-water reads`)
 })
 
-test('ACK high-water replay verifies immutable secure markers without fsyncing each file', () => {
+test('ACK checkpoint verification repairs secure modes without scanning allocation history', () => {
   const rootDir = temporaryDirectory()
   const storageRoot = profileStorageRoot(rootDir)
   const writer = new AckOutbox({ rootDir: storageRoot, profile })
@@ -3026,7 +3590,7 @@ test('ACK high-water replay verifies immutable secure markers without fsyncing e
 
   assert.ok(fsyncCalls < 25, `secure immutable high-water verification must remain O(1), got ${fsyncCalls} fsync calls`)
 
-  const marker = resolve(observer.highWaterDir, '00000000000000000048.json')
+  const marker = observer.highWaterCheckpointPath
   chmodSync(marker, 0o644)
   const repairingObserver = new AckOutbox({ rootDir: storageRoot, profile })
   repairingObserver.initialize()
@@ -3127,10 +3691,10 @@ test('new archive and platform commands cannot fall through to generic Codex exe
 test('registration advertises only explicitly supplied supported controlled protocols', () => {
   const disabled = buildAgentRegistrationPayload(profile)
   assert.equal(Object.hasOwn(disabled, 'commandProtocols'), false)
-  const platformOnly = buildAgentRegistrationPayload(profile, ['PLATFORM_SKILL_INSTALL/v1'])
+  const platformOnly = buildAgentRegistrationPayload(profile, null, false, null, null, null, ['PLATFORM_SKILL_INSTALL/v1'])
   assert.deepEqual(platformOnly.commandProtocols, ['PLATFORM_SKILL_INSTALL/v1'])
   assert.equal(platformOnly.commandProtocols.includes('ARCHIVE_MAINTENANCE_EXECUTE/v1'), false)
-  const both = buildAgentRegistrationPayload(profile, ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1'])
+  const both = buildAgentRegistrationPayload(profile, null, false, null, null, null, ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1'])
   assert.deepEqual(both.commandProtocols, ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1'])
 })
 
@@ -3294,4 +3858,93 @@ test('failed authoritative reconciliation never marks registration ready or publ
   assert.equal(runtimeDisconnects, 2)
   assert.equal(pauses, 1)
   assert.equal(closes, 1)
+})
+
+test('default-disabled modern durable CHAT is rejected without spawning the legacy runner', async () => {
+  const rootDir = temporaryDirectory(); const chatWorkdir = resolve(rootDir, 'empty-chat'); mkdirSync(chatWorkdir, { mode: 0o700 })
+  const inbox = new PersistentCommandInbox({ rootDir, profile }); const chatInbox = new PersistentChatInbox({ rootDir, profile }); const chatAckOutbox = new ChatAckOutbox({ rootDir, profile })
+  let legacySpawns = 0; const rejected = []
+  const processor = new AgentMessageProcessor({
+    profile, inbox, chatInbox, chatAckOutbox, lanes: new FairLaneScheduler({ chatConcurrency: 1, commandConcurrency: 1 }), sendFn: () => true,
+    runCommand: async () => ({ status: 'completed' }),
+    runChat: (message, controls) => runProfileChat(profile, message, {
+      controls, chatWorkdir, runLegacy: async () => { legacySpawns++; return { status: 'completed' } }
+    }),
+    onReject: error => rejected.push(error)
+  })
+  processor.start(); const message = durableChat(91); await processor.handle(message); await processor.waitForIdle()
+  assert.equal(legacySpawns, 0)
+  assert.ok(rejected.some(error => error.code === 'FAST_CHAT_FEATURE_DISABLED'))
+  const normalized = normalizeInboundMessage(message); const item = chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
+  assert.equal(item.record.state, 'RECOVERY_REQUIRED')
+})
+
+test('pre-engine INSPECT failure resumes original durable identity once after restart without a server redispatch', async () => {
+  const root = temporaryDirectory(); const message = normalizeInboundMessage(durableChat(901, { route: 'INSPECT' }))
+  const seed = new PersistentChatInbox({ rootDir: root, profile }); seed.initialize()
+  const accepted = await seed.accept(message); const claimed = seed.claim(accepted.key)
+  seed.recoveryRequired(claimed, 'CHAT_FAILURE: fetch failed')
+  const fingerprint = claimed.record.fingerprint; const seen = []
+  const runtime = createChatRuntime(root, { runChat: async (original, controls) => {
+    seen.push(original); controls.markPrepared({ threadKey: 'original' })
+    controls.markRunning(() => {}, { threadId: 'thread-original', turnId: 'turn-original' })
+    return { status: 'completed' }
+  } })
+  runtime.processor.start(); runtime.processor.resume(); await runtime.processor.waitForIdle()
+  const item = runtime.chatInbox.findByKey(accepted.key)
+  assert.deepEqual(seen, [JSON.parse(JSON.stringify(message))]); assert.equal(item.record.fingerprint, fingerprint)
+  assert.equal(item.record.state, 'COMPLETED'); assert.ok(item.record.preEngineResumedAt)
+  const duplicate = await runtime.chatInbox.accept(message); assert.equal(duplicate.duplicate, true)
+  runtime.processor.resume(); await runtime.processor.waitForIdle(); assert.equal(seen.length, 1); runtime.processor.stop()
+})
+
+test('pre-engine failure does not spin on repeated resume and cannot replay unknown/engine/final/crash state', async () => {
+  const root = temporaryDirectory(); const seed = new PersistentChatInbox({ rootDir: root, profile }); seed.initialize()
+  const states = [
+    {}, { state: 'ACCEPTANCE_UNKNOWN' }, { recoveryReason: 'PROCESSING_OUTCOME_UNKNOWN' },
+    { preparation: {} }, { preparedAt: 1 }, { engine: {} }, { runningAt: 1 },
+    { finalPrepared: {} }, { finalPublication: {} }, { finalConfirmation: {} }
+  ]
+  for (let index = 0; index < states.length; index++) {
+    const accepted = await seed.accept(normalizeInboundMessage(durableChat(910 + index, { route: 'INSPECT' })))
+    const claimed = seed.claim(accepted.key)
+    seed.recoveryRequired(claimed, 'CHAT_FAILURE: fetch failed')
+    // Fixture-only corruption/phase variants; live inbox is never manually rewritten.
+    writeFileSync(claimed.path, JSON.stringify({ ...claimed.record, ...states[index] }))
+  }
+  const seen = []; const runtime = createChatRuntime(root, { runChat: async original => {
+    seen.push(original.dispatchId); throw new Error('fetch failed')
+  } })
+  runtime.processor.start(); await runtime.processor.waitForIdle()
+  runtime.processor.resume(); await runtime.processor.waitForIdle()
+  assert.deepEqual(seen, ['chat-dispatch-910']); assert.equal(runtime.chatInbox.listRecovery().length, states.length)
+  runtime.processor.stop()
+})
+
+test('pre-engine recovery claim checks fingerprint and durable key under the inbox lock', async () => {
+  const seed = new PersistentChatInbox({ rootDir: temporaryDirectory(), profile }); seed.initialize()
+  const accepted = await seed.accept(normalizeInboundMessage(durableChat(950, { route: 'INSPECT' })))
+  const claimed = seed.claim(accepted.key); seed.recoveryRequired(claimed, 'CHAT_FAILURE: fetch failed')
+  writeFileSync(claimed.path, JSON.stringify({ ...claimed.record, fingerprint: 'corrupted' }))
+  assert.throws(() => seed.claimPreEngineInspection(accepted.key), /CHAT_FINGERPRINT_CONFLICT/)
+  assert.equal(seed.findByKey(accepted.key).state, 'recovery')
+})
+
+
+test('merged registration retains measured typed readiness and runtime lanes alongside explicit archive protocols', () => {
+  const declaration = { schemaVersion: '1', state: 'READY', measured: true }
+  const inspection = { declaration: () => declaration }
+  const protocols = ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1']
+  const ordinary = buildAgentRegistrationPayload(profile, null, true, null, inspection)
+  const combined = buildAgentRegistrationPayload(profile, null, true, null, inspection, null, protocols)
+  const { commandProtocols, ...remaining } = combined
+  assert.deepEqual(commandProtocols, protocols)
+  assert.deepEqual(remaining, ordinary)
+  assert.deepEqual(combined.typedInspection, declaration)
+  assert.deepEqual(combined.runtimeCapabilities, buildAgentPresencePayload(profile, 'online').runtimeCapabilities)
+  assert.ok(Object.hasOwn(combined, 'nativeBountyExecution'))
+  assert.ok(Object.hasOwn(combined, 'controlledImageBountyExecutionV3'))
+  assert.ok(Object.hasOwn(combined, 'nativeProviderCredentialBinding'))
+  protocols.push('must-not-mutate-advertisement')
+  assert.equal(combined.commandProtocols.length, 2)
 })
