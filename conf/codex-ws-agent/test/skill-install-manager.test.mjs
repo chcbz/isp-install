@@ -15,6 +15,7 @@ import {
   MESSAGE_TYPES,
   PersistentCommandInbox,
   ensureProfiles,
+  normalizeProfile,
   runManagedCommand,
   startBoundedSkillResultReplay
 } from '../agent-client.mjs'
@@ -1143,7 +1144,7 @@ test('profile validation rejects equal, nested, and symlink-aliased CODEX_HOME p
   const workB = resolve(root, 'work-b')
   mkdirSync(nested, { recursive: true })
   mkdirSync(workA); mkdirSync(workB)
-  const base = (profileId, agentId, codexHome, codexWorkdir) => ({
+  const base = (profileId, agentId, codexHome, codexWorkdir) => normalizeProfile({
     ...profile(codexHome), profileId, agentId, codexHome, codexWorkdir,
     workspaceNoTaskPolicy: 'reject', workspacePolicyId: '', workspaceNonCodingCommandTypes: [],
     workspaceFallbackWorkdir: '', workspaceRole: ''
