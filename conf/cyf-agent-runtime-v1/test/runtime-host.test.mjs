@@ -607,7 +607,7 @@ test('canonical skill product installation is data; wrong raw scope/Runtime-prod
 
 // Run only the install/validate stdlib snippets against hand-written launcher
 // files. No installer, venv, npm, pip, dependency download or format library is
-// run here. These regressions do NOT prove cloud C1-C4 or Python ABI closure.
+// run here. These regressions do NOT prove actual C1-C4 or Python ABI closure.
 async function venvLauncherFixture(t) {
   const root = await mkdtemp(resolve(tmpdir(), "ur01-launcher 'quote space-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -781,9 +781,10 @@ async function consumerFixture(t) {
   const archiveSha = await hash(archive), nodeSha = await hash(nodeBin);
   assert.equal(archiveSha, 'f4dcd014e409b5a0e32f7419cd9500bf1f3e0022492f533736b366cd325f0106');
   const stat = await lstat(root), targetStat = await lstat(target);
-  const receipt = { source: { ...module.SOURCE, readbackTree: tree, finalReadbackTree: tree, members: files, installInputs,
+  const receipt = { ...module.localFixtureReceipt({ BUILD_ID: 'SYNTHETIC-HOOK-LOCAL-UNIT-NOT-INSTALL', SOURCE_ARCHIVE: archive, SOURCE_SHA256: archiveSha }, sha256(harnessSource)),
+    source: { ...module.SOURCE, readbackTree: tree, finalReadbackTree: tree, members: files, installInputs,
       archive: { sha256: archiveSha, expectedSha256: archiveSha, finalSha256: archiveSha } },
-    harness: { sha256: sha256(harnessSource) }, cloudRun: 'SYNTHETIC-HOOK-UNIT-NOT-CLOUD',
+    harness: { sha256: sha256(harnessSource) },
     // These are synthetic prerequisite states, NOT executions of the four lanes.
     acceptance: Object.fromEntries(['C1', 'C2', 'C3', 'C4'].map(key => [key, { status: 'PASS' }])),
     publication: { target, stageAbsent: true, installerSourceUnchanged: true }, targetPublished: true,
@@ -820,6 +821,47 @@ async function consumerTail(f, consumeArtifact) {
   return { exit, receipt: JSON.parse(await readFile(receiptPath, 'utf8')) };
 }
 
+test('local fixture identity and origin schema reject retired inputs before any acceptance IO', async t => {
+  const { acceptance, parseInputs, origin, describe, invocationMode, localFixtureReceipt, SOURCE } = await import('./clean-target-install.acceptance.mjs');
+  const root = await mkdtemp(resolve(tmpdir(), 'ur01-local-schema-unit-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const env = Object.fromEntries(['SOURCE_ARCHIVE', 'NODE', 'NPM_CLI', 'PYTHON', 'BASH', 'TOOLCHAIN_PROVENANCE', 'PARENT', 'RECEIPT'].map(key => [`CYF_CLEAN_INSTALL_${key}`, resolve(root, key.toLowerCase())]));
+  Object.assign(env, { CYF_CLEAN_INSTALL: '1', CYF_CLEAN_INSTALL_BUILD_ID: 'SYNTHETIC-local-schema-NOT-INSTALL', CYF_CLEAN_INSTALL_SOURCE_SHA256: 'a'.repeat(64), CYF_CLEAN_INSTALL_PATH: '/usr/bin:/bin' });
+  const input = parseInputs(env);
+  assert.equal(input.BUILD_ID, env.CYF_CLEAN_INSTALL_BUILD_ID);
+  assert.equal(Object.hasOwn(input, 'CLOUD_RUN'), false);
+  const receipt = localFixtureReceipt(input, 'b'.repeat(64));
+  assert.equal(receipt.format, 'ur01-clean-target-local-fixture-v1');
+  assert.equal(receipt.buildId, input.BUILD_ID); assert.equal(receipt.localBackendFixtureOnly, true);
+  assert.equal(Object.hasOwn(receipt, 'cloudRun'), false); assert.equal(Object.hasOwn(receipt.scope, 'cloudOnlyOptIn'), false);
+  assert.deepEqual(receipt.source.commit, SOURCE.commit); assert.deepEqual(receipt.source.tree, SOURCE.tree);
+  assert.equal(Object.values(receipt.acceptance).every(check => check.status === 'NOT_RUN'), true);
+  assert.equal(receipt.result, 'FAIL'); // schema construction is never acceptance proof
+  for (const legacyOnly of [false, true]) {
+    const legacy = { ...env, CYF_CLEAN_INSTALL_CLOUD_RUN: 'retired-input' };
+    if (legacyOnly) delete legacy.CYF_CLEAN_INSTALL_BUILD_ID;
+    assert.throws(() => parseInputs(legacy), code('INPUT_LEGACY_RUN_FORBIDDEN'));
+    await assert.rejects(acceptance(legacy), code('INPUT_LEGACY_RUN_FORBIDDEN'));
+    assert.deepEqual(await readdir(root), []);
+  }
+  for (const value of [undefined, 42, true, 'build with spaces', 'build\nsecret']) {
+    const invalid = { ...env, CYF_CLEAN_INSTALL_BUILD_ID: value };
+    assert.throws(() => parseInputs(invalid), code(value === undefined ? 'INPUT_REQUIRED_BUILD_ID' : 'INPUT_BUILD_ID_INVALID'));
+    await assert.rejects(acceptance(invalid), code(value === undefined ? 'INPUT_REQUIRED_BUILD_ID' : 'INPUT_BUILD_ID_INVALID'));
+    assert.deepEqual(await readdir(root), []);
+  }
+  for (const value of ['local-host:/usr/bin/python3', 'fixed-input:node20.20.2/sha256-abc', 'https://public.example/tool']) assert.equal(origin(value), value);
+  for (const value of ['flow-input:node', 'system-image:python', 'http://public.example/tool', 'https://user:secret@public.example/tool', 'https://public.example/tool?token=x', 'fixed-input:secret?token=x', 'local-host:', 'fixed-input:', undefined]) assert.throws(() => origin(value));
+  const description = describe();
+  assert.equal(description.format, 'ur01-clean-target-local-fixture-input-v1');
+  assert.equal(description.requiredEnvironment.includes('CYF_CLEAN_INSTALL_BUILD_ID'), true);
+  assert.equal(JSON.stringify(description).includes('cloudRun'), false);
+  assert.equal(JSON.stringify(description).includes('flow-input'), false);
+  assert.equal(description.consumer.snapshotFormat, 'ur01-accepted-local-target-v1');
+  assert.equal(invocationMode([], {}), 'local-fixture');
+  assert.equal(invocationMode([], { NODE_TEST_CONTEXT: 'child' }), 'node-test-not-acceptance');
+});
+
 test('artifact consumer callback type rejection precedes every acceptance side effect', async t => {
   const { acceptance } = await import('./clean-target-install.acceptance.mjs');
   const root = await mkdtemp(resolve(tmpdir(), 'ur01-consumer-type-')); t.after(() => rm(root, { recursive: true, force: true }));
@@ -828,7 +870,7 @@ test('artifact consumer callback type rejection precedes every acceptance side e
     await assert.rejects(acceptance(env, { consumeArtifact }), code('CONSUMER_CALLBACK_INVALID'));
     assert.deepEqual(await readdir(root), []);
   }
-  await assert.rejects(acceptance({ CYF_CLEAN_INSTALL_CONSUMER: 'must-not-load-or-exec' }), code('CLOUD_OPT_IN_REQUIRED'));
+  await assert.rejects(acceptance({ CYF_CLEAN_INSTALL_CONSUMER: 'must-not-load-or-exec' }), code('LOCAL_FIXTURE_OPT_IN_REQUIRED'));
   assert.deepEqual(await readdir(root), []);
 });
 
@@ -856,7 +898,10 @@ test('artifact consumer deep-freezes exact ordered projection and one-shot await
   const wait = new Promise(resolve => { finish = resolve; }); let calls = 0;
   const callback = async projection => {
     calls++; assert.equal(await realpath(projection.target), f.target);
-    assert.deepEqual(Object.keys(projection), ['format', 'cloudRun', 'target', 'nodeBin', 'nodeSha256', 'source', 'harnessSha256', 'checks', 'acceptedSnapshotSha256']);
+    assert.deepEqual(Object.keys(projection), ['format', 'buildId', 'target', 'nodeBin', 'nodeSha256', 'source', 'harnessSha256', 'checks', 'acceptedSnapshotSha256']);
+    assert.equal(projection.format, 'ur01-accepted-local-target-v1');
+    assert.equal(projection.buildId, f.receipt.buildId);
+    assert.equal(Object.hasOwn(projection, 'cloudRun'), false);
     assert.deepEqual(Object.keys(projection.source), ['commit', 'tree', 'files', 'archiveSha256', 'finalReadbackTree']);
     assert.deepEqual(Object.keys(projection.checks), ['C1', 'C2', 'C3', 'C4']);
     for (const value of [projection, projection.source, projection.checks]) assert.equal(Object.isFrozen(value), true);
@@ -906,7 +951,8 @@ test('artifact consumer pre-gates reject changed fixed source, archive, target i
   const cases = [
     ['source', 'CONSUMER_SOURCE_CHANGED'], ['archive', 'CONSUMER_SOURCE_CHANGED'],
     ['target', 'CONSUMER_TARGET_IDENTITY_CHANGED'], ['node', 'CONSUMER_NODE_CHANGED'], ['payload', 'CONSUMER_PAYLOAD_CHANGED'],
-    ['proof', 'CONSUMER_SOURCE_NOT_FIXED'], ['harness', 'CONSUMER_HARNESS_CHANGED'], ['catalog', 'CONSUMER_PAYLOAD_CHANGED']
+    ['proof', 'CONSUMER_SOURCE_NOT_FIXED'], ['harness', 'CONSUMER_HARNESS_CHANGED'], ['catalog', 'CONSUMER_PAYLOAD_CHANGED'],
+    ['schema', 'CONSUMER_PROJECTION_INVALID'], ['buildId', 'CONSUMER_PROJECTION_INVALID'], ['legacy', 'CONSUMER_PROJECTION_INVALID']
   ];
   for (const [kind, expected] of cases) {
     const f = await consumerFixture(t); let calls = 0;
@@ -918,6 +964,9 @@ test('artifact consumer pre-gates reject changed fixed source, archive, target i
     if (kind === 'proof') f.receipt.source.finalReadbackTree = '0'.repeat(40);
     if (kind === 'harness') f.receipt.harness.sha256 = '0'.repeat(64);
     if (kind === 'catalog') f.receipt.source.installInputs.pop();
+    if (kind === 'schema') f.receipt.localBackendFixtureOnly = false;
+    if (kind === 'buildId') delete f.receipt.buildId;
+    if (kind === 'legacy') f.receipt.cloudRun = 'retired-identity';
     const consume = f.module.createArtifactConsumer(() => { calls++; return { status: 'PASS' }; });
     assert.equal(await consume(f.context), false); assert.equal(calls, 0);
     assert.equal(f.receipt.consumer.code, expected); assert.equal(f.receipt.consumer.status, 'FAIL');

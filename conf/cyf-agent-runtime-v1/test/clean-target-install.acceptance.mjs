@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Standalone opt-in CLOUD acceptance. NOT a *.test.mjs and NOT an installer.
-// Local use: --selfcheck / --describe / node --check only. Never run the lane
-// locally. Main supplies the full fixed payload archive and explicit toolchain in Flow.
+// Standalone opt-in local backend dependency fixture. NOT a *.test.mjs or production installer.
+// Owner selfchecks are static only. Main alone runs the actual installation in an exclusive
+// non-production root with fixed full payload and explicit tools; no global packages or services.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -14,7 +14,7 @@ import { arch, release, type } from 'node:os';
 export const SOURCE = Object.freeze({ commit: '7594fd72251d38b6e1d23a1a3cca184ae0d085e7',
   tree: '0827ce904179862ab55648fe99b780cea94faf98', files: 285 });
 const SELF = fileURLToPath(import.meta.url);
-const REQUIRED = ['CLOUD_RUN', 'SOURCE_ARCHIVE', 'SOURCE_SHA256', 'NODE', 'NPM_CLI', 'PYTHON',
+const REQUIRED = ['BUILD_ID', 'SOURCE_ARCHIVE', 'SOURCE_SHA256', 'NODE', 'NPM_CLI', 'PYTHON',
   'BASH', 'PATH', 'TOOLCHAIN_PROVENANCE', 'PARENT', 'RECEIPT'];
 const RUNTIME_FILES = ['agent-runtime.mjs', 'install.sh', 'validate.sh', 'README.md', 'package.json',
   'runtime.env.example', 'manifest.example.json', 'lib/manifest.mjs', 'lib/runtime-client.mjs',
@@ -48,16 +48,19 @@ function publicUrl(value) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw fail('INPUT_REGISTRY_URL_PRIVATE_OR_INVALID');
   return url.href;
 }
-function origin(value) {
+export function origin(value) {
   if (typeof value !== 'string') throw fail('INPUT_TOOL_ORIGIN_INVALID');
-  if (/^(flow-input|system-image):[A-Za-z0-9._/@:+-]+$/.test(value)) return value;
-  return publicUrl(value);
+  if (/^(local-host|fixed-input):[A-Za-z0-9._/@:+-]+$/.test(value)) return value;
+  const url = publicUrl(value);
+  if (!url.startsWith('https://')) throw fail('INPUT_TOOL_ORIGIN_INVALID');
+  return url;
 }
 export function parseInputs(env) {
-  if (env.CYF_CLEAN_INSTALL !== '1') throw fail('CLOUD_OPT_IN_REQUIRED');
+  if (env.CYF_CLEAN_INSTALL !== '1') throw fail('LOCAL_FIXTURE_OPT_IN_REQUIRED');
+  if (Object.hasOwn(env, 'CYF_CLEAN_INSTALL_CLOUD_RUN')) throw fail('INPUT_LEGACY_RUN_FORBIDDEN');
   const get = key => env[`CYF_CLEAN_INSTALL_${key}`];
   for (const key of REQUIRED) if (!get(key)) throw fail(`INPUT_REQUIRED_${key}`);
-  if (!/^[A-Za-z0-9._:-]+$/.test(get('CLOUD_RUN'))) throw fail('INPUT_CLOUD_RUN_INVALID');
+  if (typeof get('BUILD_ID') !== 'string' || !/^[A-Za-z0-9._:-]+$/.test(get('BUILD_ID'))) throw fail('INPUT_BUILD_ID_INVALID');
   if (!/^[a-f0-9]{64}$/.test(get('SOURCE_SHA256'))) throw fail('INPUT_ARCHIVE_DIGEST_INVALID');
   const input = Object.fromEntries(REQUIRED.map(key => [key, get(key)]));
   for (const key of ['SOURCE_ARCHIVE', 'NODE', 'NPM_CLI', 'PYTHON', 'BASH', 'TOOLCHAIN_PROVENANCE', 'PARENT', 'RECEIPT']) nonProductionPath(absolute(input[key]));
@@ -500,13 +503,15 @@ export function createArtifactConsumer(consumeArtifact) {
       const nodeBin = await consumerTarget(context);
       await consumerPayload(context);
       if (await hashFile(SELF) !== receipt.harness.sha256) throw fail('CONSUMER_HARNESS_CHANGED');
-      if (!/^[A-Za-z0-9._:-]+$/.test(receipt.cloudRun) || !/^[a-f0-9]{64}$/.test(receipt.node.sha256)
+      if (receipt.format !== 'ur01-clean-target-local-fixture-v1' || receipt.localBackendFixtureOnly !== true
+          || Object.hasOwn(receipt, 'cloudRun') || Object.hasOwn(receipt.scope || {}, 'cloudOnlyOptIn')
+          || typeof receipt.buildId !== 'string' || !/^[A-Za-z0-9._:-]+$/.test(receipt.buildId) || !/^[a-f0-9]{64}$/.test(receipt.node.sha256)
           || !/^[a-f0-9]{64}$/.test(receipt.harness.sha256)) throw fail('CONSUMER_PROJECTION_INVALID');
       const artifactDigest = await artifactInventory(context.target);
       // Explicit insertion order is the snapshot contract. No receipt/env/error
       // object is copied; the final receipt hash does not exist until finally.
       const accepted = {
-        format: 'ur01-accepted-clean-target-v1', cloudRun: receipt.cloudRun,
+        format: 'ur01-accepted-local-target-v1', buildId: receipt.buildId,
         target: context.target, nodeBin, nodeSha256: receipt.node.sha256,
         source: { commit: SOURCE.commit, tree: SOURCE.tree, files: SOURCE.files,
           archiveSha256: context.input.SOURCE_SHA256, finalReadbackTree: receipt.source.finalReadbackTree },
@@ -539,17 +544,22 @@ export function createArtifactConsumer(consumeArtifact) {
   };
 }
 
-export async function acceptance(env = process.env, { consumeArtifact } = {}) {
-  const consumer = createArtifactConsumer(consumeArtifact);
-  const input = parseInputs(env);
-  const receipt = { format: 'ur01-clean-target-install-v1', startedAt: new Date().toISOString(),
+// Pure receipt construction is shared with synthetic schema tests; it performs no IO
+// and never substitutes for the actual C1-C4 execution below.
+export function localFixtureReceipt(input, harnessSha256) {
+  return { format: 'ur01-clean-target-local-fixture-v1', startedAt: new Date().toISOString(),
     source: { ...SOURCE, archive: { path: input.SOURCE_ARCHIVE, expectedSha256: input.SOURCE_SHA256 } },
-    harness: { path: SELF, sha256: await hashFile(SELF) }, cloudRun: input.CLOUD_RUN,
-    scope: { cloudOnlyOptIn: true, productionAcceptance: false,
-      excluded: ['service control', 'enrollment', 'Provider', 'Codex business execution', 'old-state migration', 'Java/DB'] },
+    harness: { path: SELF, sha256: harnessSha256 }, buildId: input.BUILD_ID, localBackendFixtureOnly: true,
+    scope: { productionAcceptance: false,
+      excluded: ['service control', 'enrollment', 'Provider', 'Codex business execution', 'old-state migration', 'production Java/DB'] },
     os: { type: type(), release: release(), architecture: arch() },
     steps: [], acceptance: Object.fromEntries(['C1', 'C2', 'C3', 'C4'].map(key => [key, { status: 'NOT_RUN', reason: 'dependency not reached' }])),
     result: 'FAIL' };
+}
+export async function acceptance(env = process.env, { consumeArtifact } = {}) {
+  const consumer = createArtifactConsumer(consumeArtifact);
+  const input = parseInputs(env);
+  const receipt = localFixtureReceipt(input, await hashFile(SELF));
   let root; let identity; let evidenceOwned = false; let current = 'input-preflight';
   const evidence = `${input.RECEIPT}.evidence`;
   await canonicalDirectory(dirname(input.RECEIPT)); await absent(input.RECEIPT); await absent(evidence);
@@ -749,40 +759,42 @@ export async function acceptance(env = process.env, { consumeArtifact } = {}) {
 }
 
 export function describe() {
-  return { format: 'ur01-clean-target-install-input-v1', source: SOURCE,
+  return { format: 'ur01-clean-target-local-fixture-input-v1', source: SOURCE,
     command: '"$CYF_CLEAN_INSTALL_NODE" /absolute/candidate/conf/cyf-agent-runtime-v1/test/clean-target-install.acceptance.mjs',
     requiredEnvironment: ['CYF_CLEAN_INSTALL=1', ...REQUIRED.map(key => `CYF_CLEAN_INSTALL_${key}`)],
     optionalEnvironment: ['CYF_CLEAN_INSTALL_NPM_REGISTRY', 'CYF_CLEAN_INSTALL_PIP_INDEX_URL'],
     toolchainProvenance: { format: 'ur01-clean-install-toolchain-v1', tools: Object.fromEntries(['node', 'npm', 'python', 'bash'].map(name => [name,
-      { path: '/absolute/explicit/tool', sha256: '<64 lowercase hex>', origin: 'flow-input:tool-artifact-or-system-image' }])) },
+      { path: '/absolute/explicit/tool', sha256: '<64 lowercase hex>', origin: 'fixed-input:immutable-tool-input' }])) },
+    toolOrigins: ['local-host:/absolute/actual/tool', 'fixed-input:immutable-tool-input', 'https://public.example/tool'],
     archive: { format: 'uncompressed git archive --format=tar; no prefix; full fixed payload tree',
       trackedFiles: SOURCE.files, reconstructedTree: SOURCE.tree, runtimeFiles: RUNTIME_FILES.map(path => `conf/cyf-agent-runtime-v1/${path}`),
       executionCatalog: 'all 46 original EXECUTION_PAYLOAD_FILES from frozen execution-adapter.mjs' },
-    receipt: ['source.archive/member modes/blob/SHA256/tree readback', 'harness SHA256', 'cloudRun', 'os/ABI',
+    receipt: ['source.archive/member modes/blob/SHA256/tree readback', 'harness SHA256', 'format=ur01-clean-target-local-fixture-v1', 'buildId', 'localBackendFixtureOnly=true', 'os/ABI',
       'toolchain actual paths/origins/SHA256/npm distribution', 'isolation and childEnvironmentKeys (not values)',
       'steps exit/signal/sanitized log SHA256', 'publication', 'python base/stage/target/health/distributions/modules/pyvenv/shebang/relocation',
       'node engine/ws/yauzl/lock distributions/ABI', 'delivery synthetic create/validate/reopen/hash', 'acceptance C1-C4', 'optional independent consumer/snapshot/integrityReadback', 'failure', 'cleanup', 'result'],
     consumer: { invocation: 'acceptance(env, { consumeArtifact }) explicit function only; never env/code loading',
       success: { status: 'PASS' }, failure: { status: 'FAIL', code: CONSUMER_FAILURE_CODES },
+      snapshotFormat: 'ur01-accepted-local-target-v1', identity: 'buildId',
       snapshot: 'ordered JSON excluding acceptedSnapshotSha256; not final receipt SHA; borrowed target until await settles',
       cleanup: 'unchanged default and failure finally; only ur04-clean-artifact.json may be added to target' },
-    boundaries: 'standalone opt-in Flow only; no services/enroll/Provider/old state/Java; no local real install; NOT_RUN is not PASS; stale stage shebang is FAIL, no automatic repair' };
+    boundaries: 'standalone explicit local backend fixture only; Main-owned private non-production install and awaited consumer; no global packages/services/enroll/Provider/old state; NOT_RUN is not PASS; stale stage shebang is FAIL, no automatic repair' };
 }
 export function invocationMode(args, env) {
   if (env.NODE_TEST_CONTEXT !== undefined) return 'node-test-not-acceptance';
   if (args.length === 1 && args[0] === '--selfcheck') return 'selfcheck';
   if (args.length === 1 && args[0] === '--describe') return 'describe';
-  if (args.length === 0) return 'cloud';
-  throw fail('USAGE_ONLY_SELFCHECK_DESCRIBE_OR_EXPLICIT_CLOUD_RUN');
+  if (args.length === 0) return 'local-fixture';
+  throw fail('USAGE_ONLY_SELFCHECK_DESCRIBE_OR_EXPLICIT_LOCAL_FIXTURE');
 }
 export function selfcheck() {
   let checks = 0;
   const yes = body => { body(); checks++; };
   const env = Object.fromEntries(REQUIRED.map(key => [`CYF_CLEAN_INSTALL_${key}`, '/tmp/input']));
-  Object.assign(env, { CYF_CLEAN_INSTALL: '1', CYF_CLEAN_INSTALL_CLOUD_RUN: 'Flow-test-input',
+  Object.assign(env, { CYF_CLEAN_INSTALL: '1', CYF_CLEAN_INSTALL_BUILD_ID: 'SYNTHETIC-static-local-build',
     CYF_CLEAN_INSTALL_SOURCE_SHA256: 'a'.repeat(64), CYF_CLEAN_INSTALL_PATH: '/usr/bin:/bin' });
   yes(() => assert.equal(parseInputs(env).NPM_REGISTRY, 'https://registry.npmjs.org/'));
-  yes(() => assert.throws(() => parseInputs({}), { code: 'CLOUD_OPT_IN_REQUIRED' }));
+  yes(() => assert.throws(() => parseInputs({}), { code: 'LOCAL_FIXTURE_OPT_IN_REQUIRED' }));
   for (const key of REQUIRED) yes(() => { const invalid = { ...env }; delete invalid[`CYF_CLEAN_INSTALL_${key}`]; assert.throws(() => parseInputs(invalid), { code: `INPUT_REQUIRED_${key}` }); });
   for (const path of ['relative', '/tmp/../bad', '/tmp/x\n', '/tmp//bad']) yes(() => assert.throws(() => absolute(path)));
   for (const path of ['../x', 'x/../y', '/x', '.git/config', 'x//y', 'x\\y', 'x\n']) yes(() => assert.throws(() => memberPath(path)));
@@ -812,10 +824,18 @@ export function selfcheck() {
   yes(() => assert.equal(invocationMode([], { NODE_TEST_CONTEXT: 'child', CYF_CLEAN_INSTALL: '1' }), 'node-test-not-acceptance'));
   yes(() => assert.equal(invocationMode(['--selfcheck'], {}), 'selfcheck'));
   yes(() => assert.equal(invocationMode(['--describe'], {}), 'describe'));
-  yes(() => assert.equal(invocationMode([], {}), 'cloud'));
-  yes(() => assert.throws(() => invocationMode(['--unknown'], {}), { code: 'USAGE_ONLY_SELFCHECK_DESCRIBE_OR_EXPLICIT_CLOUD_RUN' }));
+  yes(() => assert.equal(invocationMode([], {}), 'local-fixture'));
+  yes(() => assert.throws(() => invocationMode(['--unknown'], {}), { code: 'USAGE_ONLY_SELFCHECK_DESCRIBE_OR_EXPLICIT_LOCAL_FIXTURE' }));
+  yes(() => assert.equal(parseInputs(env).BUILD_ID, env.CYF_CLEAN_INSTALL_BUILD_ID));
+  yes(() => { const legacy = { ...env, CYF_CLEAN_INSTALL_CLOUD_RUN: 'retired-input' }; delete legacy.CYF_CLEAN_INSTALL_BUILD_ID; assert.throws(() => parseInputs(legacy), { code: 'INPUT_LEGACY_RUN_FORBIDDEN' }); });
+  yes(() => assert.throws(() => parseInputs({ ...env, CYF_CLEAN_INSTALL_CLOUD_RUN: 'retired-input' }), { code: 'INPUT_LEGACY_RUN_FORBIDDEN' }));
+  for (const value of [false, 7, '', 'build with space', 'build\nsecret']) yes(() => assert.throws(() => parseInputs({ ...env, CYF_CLEAN_INSTALL_BUILD_ID: value }), { code: value === '' || value === false ? 'INPUT_REQUIRED_BUILD_ID' : 'INPUT_BUILD_ID_INVALID' }));
+  for (const value of ['local-host:/usr/bin/python3', 'fixed-input:node20.20.2/sha256-abc', 'https://public.example/tool']) yes(() => assert.equal(origin(value), value));
+  for (const value of ['flow-input:node', 'system-image:python', 'http://public.example/tool', 'https://user:secret@public.example/tool', 'https://public.example/tool?token=private', 'local-host:', 'fixed-input:secret?token=x']) yes(() => assert.throws(() => origin(value)));
+  yes(() => { const receipt = localFixtureReceipt(parseInputs(env), 'b'.repeat(64)); assert.equal(receipt.format, 'ur01-clean-target-local-fixture-v1'); assert.equal(receipt.buildId, env.CYF_CLEAN_INSTALL_BUILD_ID); assert.equal(receipt.localBackendFixtureOnly, true); assert.equal(Object.hasOwn(receipt, 'cloudRun'), false); assert.equal(Object.hasOwn(receipt.scope, 'cloudOnlyOptIn'), false); assert.equal(Object.values(receipt.acceptance).every(check => check.status === 'NOT_RUN'), true); });
+  yes(() => assert.equal(describe().requiredEnvironment.includes('CYF_CLEAN_INSTALL_CLOUD_RUN'), false));
   // No directories created, no subprocesses/tools/install/npm/pip/venv invoked.
-  return { staticAssertions: checks, result: 'PASS', cloudAcceptance: 'NOT_RUN' };
+  return { staticAssertions: checks, result: 'PASS', localFixtureAcceptance: 'NOT_RUN' };
 }
 const direct = process.argv[1] && await realpath(resolve(process.argv[1])).catch(() => null) === SELF;
 if (direct) {
@@ -823,11 +843,11 @@ if (direct) {
     const mode = invocationMode(process.argv.slice(2), process.env);
     if (mode === 'selfcheck') console.log(JSON.stringify(selfcheck()));
     else if (mode === 'describe') console.log(JSON.stringify(describe(), null, 2));
-    else if (mode === 'cloud') process.exitCode = await acceptance();
-    else console.error(JSON.stringify({ cloudAcceptance: 'NOT_RUN', code: 'STANDALONE_CLOUD_LANE_NOT_A_NODE_TEST',
+    else if (mode === 'local-fixture') process.exitCode = await acceptance();
+    else console.error(JSON.stringify({ localFixtureAcceptance: 'NOT_RUN', code: 'STANDALONE_LOCAL_FIXTURE_NOT_A_NODE_TEST',
       note: 'Node may smoke-load this module; that file result is NOT C1-C4 evidence. Use explicit *.test.mjs selectors for default tests.' }));
   } catch (error) {
-    console.error(JSON.stringify({ result: 'FAIL', code: error.code || 'ASSERTION_OR_IO_FAILURE', cloudAcceptance: 'NOT_RUN' }));
+    console.error(JSON.stringify({ result: 'FAIL', code: error.code || 'ASSERTION_OR_IO_FAILURE', localFixtureAcceptance: 'NOT_RUN' }));
     process.exitCode = 1;
   }
 }
