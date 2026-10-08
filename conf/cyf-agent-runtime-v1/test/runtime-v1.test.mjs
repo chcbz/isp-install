@@ -203,3 +203,62 @@ test('r2 ACK nullable reference/work item is explicit; absent, blank, forged ide
   }
   assert.equal(validateCommandForManifest({ ...command(), payloadReference: 'actual-wire-reference' }, manifest(), 'RECEIVED').payloadReference, 'actual-wire-reference');
 });
+
+
+const e05LeaseUrl = (suffix = '', actor = manifest().canonicalAgentId) =>
+  `https://api.example.test/agent/tasks/task-1/work-items/work-1/reassignments/rsn_${'c'.repeat(64)}/lease${suffix}?actorAgentId=${encodeURIComponent(actor)}`;
+
+test('E05 native scope permits exactly existing POST lease/read-start-heartbeat shapes and manifest-bound actor; no wire change', async t => {
+  const calls = []; const { client } = await setup(t, async (url, options) => { calls.push({ url, options }); return response(session(7)); });
+  await client.session(); calls.length = 0;
+  for (const suffix of ['', '/start', '/heartbeat']) {
+    const body = JSON.stringify({ commandId: 'fixture-command', expectedWorkItemVersion: 5 });
+    await client.nativeFetch(e05LeaseUrl(suffix), { method: 'POST', body,
+      headers: { Authorization: 'retired', 'X-API-Key': 'retired', Cookie: 'foreign', 'X-Agent-Id': 'frame-foreign',
+        'X-Agent-Installation-Id': 'product-installation', 'X-Agent-Session-Generation': '999', 'content-type': 'application/json' } });
+    const call = calls.at(-1); const endpoint = new URL(call.url);
+    assert.deepEqual([...endpoint.searchParams], [['actorAgentId', manifest().canonicalAgentId]]);
+    for (const [key, value] of Object.entries(client.sessionHeaders())) assert.equal(call.options.headers.get(key), value);
+    assert.equal(call.options.headers.has('x-api-key'), false); assert.equal(call.options.headers.has('cookie'), false);
+    assert.equal(call.options.redirect, 'error'); assert.equal(call.options.body, body);
+  }
+  await client.nativeFetch(e05LeaseUrl().replace('task-1', encodeURIComponent('任务')), { method: 'POST' });
+  assert.equal(calls.length, 4); // transport-scope fixture, not a business lease response
+});
+
+test('E05 native wrong/missing/duplicate actor, methods, broad routes and encoded aliases fail before fetch', async t => {
+  let calls = 0; const { client } = await setup(t, async () => { calls++; return response(session(7)); });
+  await client.session(); const initial = calls; const url = e05LeaseUrl();
+  const denied = [
+    e05LeaseUrl('', 'frame-foreign'), url.split('?')[0], `${url}&actorAgentId=${manifest().canonicalAgentId}`,
+    `${url}&extra=1`, `${url}&token=secret`, url.replace('actorAgentId=', 'agentId='),
+    url.replace('task-1', 'task%2Fforeign'), url.replace('work-1', 'work%5Cforeign'),
+    url.replace('task-1', 'task%252Fforeign'), url.replace('work-1', 'work%00foreign'),
+    url.replace('work-1', 'work%3Fforeign'), url.replace('task-1', '%20task'), url.replace('task-1', 'task%'),
+    url.replace('task-1', 't'.repeat(101)), url.replace('/lease?', '/lease/read?'),
+    url.replace('/lease?', '/lease/start/extra?'), url.replace('/lease?', '/lease//start?'),
+    url.replace('/lease?', '/lease/commit?'), url.replace('/lease?', '/result?'),
+    url.replace('/lease?', '/lease/?'), url.replace('/work-items/', '/anything/'),
+    'https://api.example.test/agent/tasks', 'https://api.example.test/agent/runtime/v1/session',
+    'https://api.example.test/agent/tasks/task-1/formal-deliveries',
+    url.replace('api.example.test', 'foreign.test'), url.replace('https://', 'https://user:password@'), `${url}#fragment`
+  ];
+  for (const deniedUrl of denied) await assert.rejects(client.nativeFetch(deniedUrl, { method: 'POST' }), /RUNTIME_NATIVE_SCOPE_INVALID/);
+  for (const method of [undefined, 'GET', 'PUT', 'DELETE', 'PATCH']) await assert.rejects(client.nativeFetch(url, { method }), /RUNTIME_NATIVE_SCOPE_INVALID/);
+  assert.equal(calls, initial);
+});
+
+test('E05 native lease route is still session-fenced: invalidate aborts transport and a late old-proof response cannot confirm', async t => {
+  let release; let seen; let generation = 0;
+  const { client } = await setup(t, async (url, options) => {
+    if (String(url).endsWith('/session')) return response(session(++generation));
+    seen = options; return new Promise(resolve => { release = resolve; });
+  });
+  await client.session();
+  const pending = assert.rejects(client.nativeFetch(e05LeaseUrl('/start'), { method: 'POST' }), /RUNTIME_NATIVE_SESSION_CHANGED/);
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(seen.signal.aborted, false);
+  client.invalidateSession(); assert.equal(seen.signal.aborted, true);
+  await client.session(); release(response({})); await pending;
+  assert.equal(client.currentSession.sessionGeneration, 2);
+  client.invalidateSession(); await assert.rejects(client.nativeFetch(e05LeaseUrl(), { method: 'POST' }), /RUNTIME_SESSION_REQUIRED/);
+});

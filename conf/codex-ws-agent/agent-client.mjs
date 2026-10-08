@@ -5213,10 +5213,55 @@ export const runWorkspaceFileCommand = async ({
   return result
 }
 
+// E05 is the existing command-bound reassignment lane, not every TASK command.
+// Read the original codec payload so normalization cannot erase its lease binding.
+export const e05ReassignmentBinding = (profile, message) => {
+  const raw = message.rawPayload || message
+  const payload = raw.payload || {}
+  const context = payload.context || {}
+  const tags = context.tags
+  const signalled = context.bindingVersion != null
+    || context.reassignmentId != null || payload.reason === 'lease_expired_reassignment'
+    || Array.isArray(tags) && tags.some(tag => ['lease-expired', 'reassignment'].includes(tag))
+  if (!signalled) return null
+  runtimeCommandContext(profile, message) // match trusted complete subject BEFORE projection
+  const references = context.referenceIds
+  if (raw.commandType !== 'WORK_ITEM_EXECUTE' || payload.actionType !== 'work_item_execute'
+      || payload.reason !== 'lease_expired_reassignment'
+      || !['supervised', 'manual'].includes(payload.autonomyLevel) || payload.requiresApproval !== true
+      || context.bindingVersion !== 'e05-reassignment-v1'
+      || typeof context.reassignmentId !== 'string' || !/^rsn_[0-9a-f]{64}$/.test(context.reassignmentId)
+      || !exactRuntimeCommandField(raw.workItemId)
+      || !Array.isArray(tags) || tags.length !== 2 || tags[0] !== 'lease-expired' || tags[1] !== 'reassignment'
+      || !Array.isArray(references) || references.length !== 1
+      || typeof references[0] !== 'string' || !/^cmd_hall_action_[0-9a-f]{64}$/.test(references[0])
+      || references[0] === raw.commandId) {
+    throw new AgentProtocolError('E05_REASSIGNMENT_BINDING_INVALID', 'Reassignment requires its original command/source/work binding')
+  }
+  // Service.commandDraft and receipt.resultWorkItemVersion both use current.version+1.
+  // This is the INITIAL read/start expected version, not a predicted heartbeat CAS.
+  // Later requests must use the last confirmed lease response.workItemVersion.
+  const version = context.contextVersion
+  if (typeof version !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(version)
+      || !Number.isSafeInteger(Number(version))) {
+    throw new AgentProtocolError('E05_REASSIGNMENT_VERSION_INVALID', 'Initial work item version must have an exact nonnegative decimal representation')
+  }
+  return Object.freeze({ taskId: raw.taskId, workItemId: raw.workItemId, commandId: raw.commandId,
+    reassignmentId: context.reassignmentId, expectedWorkItemVersion: Number(version),
+    actorAgentId: profile.runtimeIdentity.canonicalAgentId })
+}
+
 export const runManagedCommand = async ({
   profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
   materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus
 }) => {
+  // The existing result service still has no frozen Runtime HTTP entrypoint. Until
+  // lease/start/heartbeat AND result commit are wired, E05 cannot use ordinary
+  // Codex/workspace/report completion as a substitute. This also fences replayed
+  // durable commands before any workspace-file, model, status or report effect.
+  if (e05ReassignmentBinding(profile, message)) {
+    throw new AgentProtocolError('E05_LEASE_RESULT_ADAPTER_UNAVAILABLE', 'E05_LEASE_RESULT_ADAPTER_UNAVAILABLE: Reassignment lease and result commit lifecycle is not connected; command was not executed')
+  }
   const workspaceFileResult = await runWorkspaceFileCommand({
     profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader, runCodexFn, materializeImageFn, sendStatusFn
   })

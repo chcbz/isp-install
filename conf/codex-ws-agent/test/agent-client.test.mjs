@@ -45,6 +45,7 @@ import {
   runProfileChat,
   materializeImageGenerationResult,
   runManagedCommand,
+  e05ReassignmentBinding,
   sanitizeWebSocketEndpoint,
   workspaceFilePrompt
 } from '../agent-client.mjs'
@@ -3696,8 +3697,8 @@ test('pre-engine recovery claim checks fingerprint and durable key under the inb
 const unifiedProfile = () => ({ ...profile, runtimeIdentity: { installationId: 'installation-a', tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId } })
 const unifiedCommand = (number = 7001, patch = {}) => ({ ...command(number), tenantId: 'tenant-a', clientId: 'client-a',
   correlationId: `correlation-${number}`, ...patch })
-function unifiedCheckpoint({ root = temporaryDirectory(), cleanup = null, run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }) } = {}) {
-  const selected = unifiedProfile()
+function unifiedCheckpoint({ root = temporaryDirectory(), selectedProfile = unifiedProfile(), cleanup = null, run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }) } = {}) {
+  const selected = selectedProfile
   const inbox = new PersistentCommandInbox({ rootDir: root, profile: selected }); inbox.initialize()
   const store = resolve(root, Buffer.from(selected.agentId).toString('hex'))
   const ledger = new DurableDedupeLedger({ rootDir: store, profile: selected }); ledger.initialize()
@@ -3830,4 +3831,114 @@ test('runtime unknown business outcome preserves all recovery material despite i
   await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
   await runtime.processor.replayAcks(); assert.equal(cleanups, 0)
   assert.equal(runtime.ledger.getEntry('command-7001').status, 'RECOVERY_REQUIRED'); runtime.processor.stop()
+})
+
+// E05 source-stage preparation: genuine codec bytes, no fabricated business lease.
+const e05Fixture = () => JSON.parse(readFileSync(new URL('../../cyf-agent-runtime-v1/test/fixtures/command-dispatch-e05.canonical.redacted.json', import.meta.url), 'utf8'))
+const e05Profile = () => {
+  const raw = e05Fixture()
+  return { ...profile, agentId: raw.targetAgentId, runtimeIdentity: { installationId: 'installation-e05',
+    tenantId: raw.tenantId, clientId: raw.clientId, canonicalAgentId: raw.targetAgentId } }
+}
+const noE05SideEffects = selected => ({ profile: selected, workspaceFileBridge: { materialize: () => assert.fail('no materialization') },
+  workspaceManager: { acquireCommandWorkspace: () => assert.fail('no workspace lock') },
+  skillInstallManager: { execute: () => assert.fail('no skill install') }, runCodexFn: () => assert.fail('no model execution'),
+  sendStatusFn: () => assert.fail('no status'), sendLegacyFn: () => assert.fail('no report') })
+
+test('E05 original codec binding maps contextVersion to INITIAL work item version and manifest actor without wire mutation', () => {
+  const raw = e05Fixture(); const before = JSON.stringify(raw)
+  const normalized = normalizeInboundMessage(raw)
+  const fingerprint = CommandFingerprint.compute(normalized)
+  const binding = e05ReassignmentBinding(e05Profile(), normalized)
+  assert.deepEqual(binding, { taskId: raw.taskId, workItemId: raw.workItemId, commandId: raw.commandId,
+    reassignmentId: raw.payload.context.reassignmentId, expectedWorkItemVersion: 5, actorAgentId: e05Profile().runtimeIdentity.canonicalAgentId })
+  assert.equal(Object.isFrozen(binding), true)
+  assert.equal(JSON.stringify(raw), before); assert.equal(CommandFingerprint.compute(normalized), fingerprint)
+  assert.equal(Object.hasOwn(binding, 'leaseToken'), false)
+  // Normalization cannot replace the trusted actor or select a different version.
+  normalized.targetAgentId = 'foreign'; normalized.payload = { context: { contextVersion: '500' } }
+  assert.deepEqual(e05ReassignmentBinding(e05Profile(), normalized), binding)
+})
+
+test('E05 context version accepts canonical exact nonnegative decimals, never rounded or predicted lease versions', () => {
+  for (const version of ['0', '5', String(Number.MAX_SAFE_INTEGER)]) {
+    const raw = e05Fixture(); raw.payload.context.contextVersion = version
+    assert.equal(e05ReassignmentBinding(e05Profile(), normalizeInboundMessage(raw)).expectedWorkItemVersion, Number(version))
+  }
+  for (const version of [undefined, null, 5, '', '05', '-1', '+5', ' 5', '5 ', '5.0', '5e0', '9007199254740992', '9223372036854775807']) {
+    const raw = e05Fixture(); raw.payload.context.contextVersion = version
+    assert.throws(() => e05ReassignmentBinding(e05Profile(), normalizeInboundMessage(raw)), { code: 'E05_REASSIGNMENT_VERSION_INVALID' })
+  }
+})
+
+test('E05 incomplete binding/source/subject fails before every existing executor path rather than falling back', async () => {
+  const changes = [
+    raw => { delete raw.payload.context.bindingVersion },
+    raw => { raw.payload.context.bindingVersion = 'foreign' },
+    raw => { delete raw.payload.context.reassignmentId },
+    raw => { raw.payload.context.reassignmentId = 'foreign' },
+    raw => { raw.commandType = 'TASK_INVITE' },
+    raw => { raw.commandType = 'SKILL_INSTALL' },
+    raw => { raw.payload.actionType = 'workspace_file_execute' },
+    raw => { raw.payload.reason = 'ordinary' },
+    raw => { raw.payload.requiresApproval = false },
+    raw => { raw.payload.autonomyLevel = 'autonomous' },
+    raw => { raw.payload.context.tags = ['reassignment', 'lease-expired'] },
+    raw => { raw.payload.context.referenceIds = [] },
+    raw => { raw.payload.context.referenceIds = [raw.commandId] },
+    raw => { raw.workItemId = null }
+  ]
+  for (const change of changes) {
+    const raw = e05Fixture(); change(raw)
+    await assert.rejects(runManagedCommand({ ...noE05SideEffects(e05Profile()), message: normalizeInboundMessage(raw) }), { code: 'E05_REASSIGNMENT_BINDING_INVALID' })
+  }
+  for (const field of ['tenantId', 'clientId', 'targetAgentId']) {
+    const raw = e05Fixture(); raw[field] = 'foreign'
+    await assert.rejects(runManagedCommand({ ...noE05SideEffects(e05Profile()), message: normalizeInboundMessage(raw) }), { code: 'RUNTIME_COMMAND_SCOPE_MISMATCH' })
+  }
+})
+
+test('E05 refuses execution even with usable CLI or caller readiness flags until real lease AND result lifecycle is connected', async () => {
+  const raw = e05Fixture()
+  raw.e05AdapterReady = true; raw.leaseReady = true
+  await assert.rejects(runManagedCommand({ ...noE05SideEffects(e05Profile()), message: normalizeInboundMessage(raw) }), { code: 'E05_LEASE_RESULT_ADAPTER_UNAVAILABLE' })
+  // No alternate old-auth execution lane for this special binding.
+  await assert.rejects(runManagedCommand({ ...noE05SideEffects(profile), message: normalizeInboundMessage(raw) }), { code: 'RUNTIME_COMMAND_SCOPE_MISMATCH' })
+})
+
+test('ordinary six TASK command paths retain existing Codex/workspace adapter; SKILL retains its adapter, not E05 lease', async () => {
+  const selected = unifiedProfile(); const manager = {}; const calls = []
+  for (const commandType of ['TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH']) {
+    const message = normalizeInboundMessage(unifiedCommand(7800, { commandType, payload: { instruction: 'ordinary existing path', context: { contextVersion: '5' } } }))
+    assert.equal(e05ReassignmentBinding(selected, message), null)
+    const outcome = await runManagedCommand({ profile: selected, message, workspaceManager: manager,
+      runCodexFn: async (p, received, mode, options) => {
+        assert.equal(p, selected); assert.equal(received, message); assert.equal(mode, 'command')
+        assert.equal(options.workspaceManager, manager); assert.equal(options.requireWorkspace, true)
+        calls.push(commandType); return { status: 'completed' }
+      } })
+    assert.equal(outcome.status, 'completed')
+  }
+  assert.equal(calls.length, 6) // dispatch-path regression with injected executor, NOT real business acceptance
+  const skill = normalizeInboundMessage(unifiedCommand(7801, { commandType: 'SKILL_INSTALL', payload: {} }))
+  assert.deepEqual(await runManagedCommand({ profile: selected, message: skill,
+    skillInstallManager: { execute: async message => { assert.equal(message, skill); return { status: 'completed' } } },
+    runCodexFn: () => assert.fail('skill cannot select Codex') }), { status: 'completed' })
+})
+
+test('real E05 fixture through unique durable processor and guarded executor cannot produce success; ACK stub is NOT HTTP/DB lease proof', async t => {
+  t.mock.method(Date, 'now', () => 2000) // original old codec expiry; production expiry unchanged
+  const raw = e05Fixture(); const selected = e05Profile(); const statuses = []
+  const runtime = unifiedCheckpoint({ selectedProfile: selected,
+    run: message => runManagedCommand({ ...noE05SideEffects(selected), message }),
+    ack: async (_context, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  try {
+    await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.deepEqual(statuses, ['RECEIVED', 'STARTED', 'FAILED'])
+    const entry = runtime.ledger.getEntry(raw.commandId)
+    assert.equal(entry.status, 'FAILED'); assert.match(entry.outcome.errorMessage, /^E05_LEASE_RESULT_ADAPTER_UNAVAILABLE:/)
+    assert.equal(JSON.stringify(entry).includes('leaseToken'), false)
+    assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'FAILED')
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+  } finally { runtime.processor.stop() }
 })

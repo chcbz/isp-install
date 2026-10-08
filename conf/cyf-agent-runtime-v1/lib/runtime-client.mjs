@@ -78,6 +78,21 @@ export function validateRuntimeAckResult(result, status, lastConfirmedVersion = 
   return Object.freeze({ kind: result.kind, status: result.status, deliveryVersion: result.deliveryVersion });
 }
 
+// Only the three existing target-only E05 lease methods live outside the native
+// /internal/agent prefix. actorAgentId confirms this manifest, never selects one.
+const isReassignmentLeaseEndpoint = (endpoint, options, manifest) => {
+  const match = /^\/agent\/tasks\/([^/]+)\/work-items\/([^/]+)\/reassignments\/([^/]+)\/lease(?:\/(?:start|heartbeat))?$/.exec(endpoint.pathname);
+  if (!match || typeof options.method !== 'string' || options.method.toUpperCase() !== 'POST') return false;
+  try {
+    if (match.slice(1).some(segment => {
+      const value = decodeURIComponent(segment);
+      return !exact(value) || [...value].length > 100 || /[\/\\%?#]/u.test(value);
+    })) return false;
+  } catch { return false; }
+  const query = [...endpoint.searchParams];
+  return query.length === 1 && query[0][0] === 'actorAgentId' && query[0][1] === manifest.canonicalAgentId;
+};
+
 export class RuntimeV1Client {
   constructor({ manifest, apiBaseUrl, stateDir, hostId, runtimeInstanceId, fetchFn = globalThis.fetch }) {
     if (typeof fetchFn !== 'function') throw fail('RUNTIME_FETCH_REQUIRED');
@@ -144,7 +159,7 @@ export class RuntimeV1Client {
   async nativeFetch(url, options = {}) {
     const endpoint = new URL(url);
     if (endpoint.origin !== this.apiBaseUrl || endpoint.username || endpoint.password || endpoint.hash
-        || !endpoint.pathname.startsWith('/internal/agent/')
+        || !(endpoint.pathname.startsWith('/internal/agent/') || isReassignmentLeaseEndpoint(endpoint, options, this.manifest))
         || [...endpoint.searchParams.keys()].some(key => /^(?:api[_-]?key|authorization|session[_-]?token|token)$/i.test(key))) throw fail('RUNTIME_NATIVE_SCOPE_INVALID');
     const session = this.currentSession; const proof = this.sessionHeaders();
     const signal = this.sessionAbort?.signal;
