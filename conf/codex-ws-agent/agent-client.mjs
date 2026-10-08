@@ -108,20 +108,6 @@ const workspaceFileToolchainEnvironment = () => {
   } : {}
 }
 
-const loadLegacyEnvironment = () => {
-  const envPath = resolve(process.cwd(), '.env')
-  if (existsSync(envPath)) {
-    for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-      const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith('#')) continue
-      const index = trimmed.indexOf('=')
-      if (index < 0) continue
-      const key = trimmed.slice(0, index).trim()
-      const value = trimmed.slice(index + 1).trim()
-      if (!process.env[key]) process.env[key] = value
-    }
-  }
-}
 
 export const PROCESS_RUNTIME_INSTANCE_ID = randomUUID()
 export const PROTOCOL_VERSION = 1
@@ -164,6 +150,7 @@ const MESSAGE_ID_REQUIRED_TYPES = new Set([
 const RESERVED_FIELDS = [
   'schemaVersion', 'tenantId', 'clientId', 'agentId', 'sourceAgentId', 'targetAgentId',
   'receiverAgentId', 'runtimeInstanceId', 'messageId', 'requestId', 'commandId', 'commandType',
+  'installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'sessionGeneration', 'payloadReference', 'runtimeCommand',
   'correlationId', 'causationId', 'conversationId', 'taskId', 'workItemId',
   'issuedAt', 'sentAt', 'timestamp', 'expiresAt', 'attempt', 'turnId', 'dispatchId', 'conversationGeneration',
   'requestRevision', 'route', 'content', 'contextSnapshotId', 'contextHash', 'contextSnapshot', 'sourceVector', 'factsManifest',
@@ -652,6 +639,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     chatDedupeRetentionMs: parsePositiveInteger(profile.chatDedupeRetentionMs ?? fallback.chatDedupeRetentionMs, 30 * 24 * 60 * 60 * 1000),
     abilities: parseStringList(profile.abilities ?? fallback.abilities),
     skills: parseStringList(profile.skills ?? fallback.skills),
+    skillInstallEnabled: parseEnabledFlag(profile.skillInstallEnabled ?? fallback.skillInstallEnabled),
     workspacePolicyId: profile.workspacePolicyId || fallback.workspacePolicyId || '',
     workspaceRole: profile.workspaceRole || fallback.workspaceRole || 'coder',
     workspaceNoTaskPolicy: profile.workspaceNoTaskPolicy || fallback.workspaceNoTaskPolicy || 'reject',
@@ -765,7 +753,9 @@ const parseProfiles = (raw, fallbackProfile, options = {}) => {
   return parsed.map((profile, index) => normalizeProfile(profile || {}, fallbackProfile, index))
 }
 
-const loadRuntimeConfig = (options = {}) => {
+// Read-only legacy input inspection for stopped-writer migration diagnostics.
+// Never used by the unified execution entry or as an authentication fallback.
+export const loadRuntimeConfig = (options = {}) => {
   const loadedProfiles = parseProfiles(loadProfilesRaw(options), legacyProfile(), options).filter(profile => profile.enabled)
   if (!loadedProfiles.length) configError('CODEX_PROFILES has no enabled profiles', options.exitOnError !== false)
   const configuredDefaultProfile = process.env.DEFAULT_CODEX_PROFILE
@@ -1413,7 +1403,9 @@ const buildFingerprintSource = normalized => {
 
 export class CommandFingerprint {
   static compute(normalized) {
-    return computeSha256(JSON.stringify(canonicalizeFingerprintValue(buildFingerprintSource(normalized))))
+    const business = buildFingerprintSource(normalized)
+    if (normalized?.canonicalAgentId) Object.assign(business, { tenantId: normalized.tenantId, clientId: normalized.clientId, canonicalAgentId: normalized.canonicalAgentId, messageId: normalized.messageId, correlationId: normalized.correlationId, payloadReference: normalized.payloadReference, expiresAt: normalized.expiresAt })
+    return computeSha256(JSON.stringify(canonicalizeFingerprintValue(business)))
   }
 }
 
@@ -1528,6 +1520,15 @@ export class DurableDedupeLedger {
     if (entry.status === LEDGER_STATUS.RECOVERY_REQUIRED && typeof entry.rejectReason !== 'string') {
       throw new Error('recovery-required ledger entry requires rejectReason')
     }
+    if (entry.runtimeAckCommits) {
+      if (!isObject(entry.runtimeAckCommits) || !isObject(entry.runtimeCommand)) throw new Error('invalid Runtime ACK checkpoint')
+      for (const receipt of Object.values(entry.runtimeAckCommits)) {
+        if (!isObject(receipt) || Object.keys(receipt).sort().join(',') !== 'contextDigest,deliveryVersion,kind,status'
+            || !['ADVANCED', 'PRIOR'].includes(receipt.kind) || !ACK_STATUS_VALUES.has(receipt.status)
+            || !Number.isSafeInteger(receipt.deliveryVersion) || receipt.deliveryVersion < 1
+            || receipt.contextDigest !== canonicalSha256(entry.runtimeCommand)) throw new Error('invalid Runtime D06 commit evidence')
+      }
+    }
     return entry
   }
 
@@ -1637,6 +1638,7 @@ export class DurableDedupeLedger {
       recoveryRequiredAt: status === LEDGER_STATUS.RECOVERY_REQUIRED ? now : null,
       rejectReason: meta.rejectReason || null,
       outcome: null,
+      ...(meta.runtimeCommand ? { runtimeCommand: { ...meta.runtimeCommand } } : {}),
       ackReceivedEmitted: false,
       ackStartedEmitted: false,
       ackCompletedEmitted: false,
@@ -1800,6 +1802,23 @@ export class DurableDedupeLedger {
     }
     this._writeEntry(commandId, recoveryEntry)
     return { entry: recoveryEntry, conflict: null }
+  }
+
+  runtimeAckCommit(commandId, messageId) {
+    const entry = this.getEntry(commandId)
+    return entry?.runtimeAckCommits?.[Buffer.from(messageId).toString('hex')] || null
+  }
+
+  markRuntimeAckCommitted(commandId, command, result) {
+    const entry = this.getEntry(commandId)
+    if (!entry || !entry.runtimeCommand || canonicalSha256(entry.runtimeCommand) !== canonicalSha256(command)) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_CONFLICT', 'Runtime HTTP result must match original persisted command context')
+    const key = Buffer.from(command.messageId).toString('hex')
+    const previous = entry.runtimeAckCommits?.[key]
+    if (!['ADVANCED', 'PRIOR'].includes(result.kind) || !ACK_STATUS_VALUES.has(result.status)
+        || !Number.isSafeInteger(result.deliveryVersion) || result.deliveryVersion < 1
+        || previous && result.deliveryVersion < previous.deliveryVersion) throw new AgentProtocolError('RUNTIME_ACK_RESULT_INVALID', 'HTTP ACK result is not a monotonic D06 commit')
+    this._writeEntry(commandId, { ...entry, runtimeAckCommits: { ...(entry.runtimeAckCommits || {}),
+      [key]: { kind: result.kind, status: result.status, deliveryVersion: result.deliveryVersion, contextDigest: canonicalSha256(command) } } })
   }
 
   markAckEmitted(commandId, ackStatus, marker = {}) {
@@ -2480,6 +2499,21 @@ export class AckOutbox {
     })
   }
 
+  commitRuntimeDelivery(expected, result, ledger) {
+    return this.withPendingEnvelopesLocked('runtime-http-commit', pending => {
+      const head = pending[0]
+      if (!head || head.fileName !== expected.fileName || canonicalSha256(head.record) !== canonicalSha256(expected.record)) throw new AgentProtocolError('RUNTIME_ACK_FIFO_CHANGED', 'ACK FIFO changed during HTTP confirmation')
+      const previous = ledger.runtimeAckCommit(head.envelope.commandId, head.envelope.runtimeCommand.messageId)
+      if (!result || result.status !== head.envelope.ackStatus || !['ADVANCED', 'PRIOR'].includes(result.kind)
+          || !Number.isSafeInteger(result.deliveryVersion) || result.deliveryVersion < 1
+          || previous && (result.deliveryVersion < previous.deliveryVersion
+            || result.kind === 'ADVANCED' && result.deliveryVersion <= previous.deliveryVersion)) throw new AgentProtocolError('RUNTIME_ACK_COMMIT_UNCONFIRMED', 'HTTP result does not confirm the queued status/version')
+      ledger.markRuntimeAckCommitted(head.envelope.commandId, head.envelope.runtimeCommand, result)
+      if (head.marker.kind !== 'none') ledger.markAckEmitted(head.envelope.commandId, head.envelope.ackStatus, head.marker)
+      this.dequeue(head.fileName)
+    })
+  }
+
   withPendingEnvelopesLocked(operation, callback) {
     this._assertHealthy()
     return this._withSequenceLock(operation, () => {
@@ -2528,16 +2562,40 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = p
   if (meta.workItemId) envelope.workItemId = meta.workItemId
   if (meta.rejectReason) envelope.rejectReason = meta.rejectReason
   if (meta.outcome) envelope.outcome = meta.outcome
+  if (profile.runtimeIdentity) {
+    delete envelope.runtimeInstanceId
+    if (!meta.runtimeCommand) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Runtime ACK requires its immutable original work context')
+    envelope.runtimeCommand = Object.freeze({ ...meta.runtimeCommand })
+  }
   return envelope
 }
 
+
+export const runtimeCommandContext = (profile, message) => {
+  if (message.runtimeCommand) {
+    const context = message.runtimeCommand
+    const fields = ['installationId','tenantId','clientId','canonicalAgentId','messageId','correlationId','commandId','taskId','workItemId','payloadReference','expiresAt']
+    if (message.rawPayload || !isObject(context) || Object.keys(context).sort().join(',') !== [...fields].sort().join(',')) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_FORBIDDEN', 'Wire cannot supply a replacement checkpoint or session proof')
+    if (['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].some(key => context[key] !== profile.runtimeIdentity[key])
+        || context.commandId !== message.commandId || context.messageId !== message.messageId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Persisted command context must match exact identity and original work')
+    return { ...context }
+  }
+  const identity = profile.runtimeIdentity
+  for (const key of ['tenantId', 'clientId', 'canonicalAgentId']) if (message[key] !== identity[key]) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Dispatch must carry its exact complete subject')
+  const expiry = typeof message.expiresAt === 'number' ? new Date(message.expiresAt).toISOString() : message.expiresAt
+  for (const value of [message.messageId, message.correlationId, message.commandId, message.taskId, message.payloadReference, expiry]) if (typeof value !== 'string' || !value.trim()) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Dispatch must carry original D06 work and payload context')
+  return { installationId: identity.installationId, tenantId: identity.tenantId, clientId: identity.clientId,
+    canonicalAgentId: identity.canonicalAgentId, messageId: message.messageId, correlationId: message.correlationId,
+    commandId: message.commandId, taskId: message.taskId, workItemId: message.workItemId || null,
+    payloadReference: message.payloadReference, expiresAt: expiry }
+}
 
 export class AgentMessageProcessor {
   constructor({
     profile, inbox, runCommand, runChat, recoverChat = null, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
     recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
     ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null, chatInbox = null, chatAckOutbox = null, lanes = null,
-    chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
+    sendCommandAckFn = null, chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
   }) {
     this.profile = profile
     this.inbox = inbox
@@ -2553,6 +2611,8 @@ export class AgentMessageProcessor {
     this.ackOutbox = ackOutbox
     this.executionReportOutbox = executionReportOutbox
     this.sendFn = sendFn
+    this.sendCommandAckFn = sendCommandAckFn
+    this.runtimeAckTail = Promise.resolve()
     this.chatInbox = chatInbox
     this.chatAckOutbox = chatAckOutbox
     this.lanes = lanes || new FairLaneScheduler()
@@ -2608,7 +2668,8 @@ export class AgentMessageProcessor {
       targetAgentId: message.targetAgentId || '',
       taskId: message.taskId || '',
       workItemId: message.workItemId || '',
-      expiresAt: message.expiresAt
+      expiresAt: message.expiresAt,
+      ...(this.profile.runtimeIdentity ? { runtimeCommand: runtimeCommandContext(this.profile, message) } : {})
     }
   }
 
@@ -3081,6 +3142,18 @@ export class AgentMessageProcessor {
       return { kind: 'rejected', error }
     }
 
+    if (this.profile.runtimeIdentity && ['sessionToken','runtimeAuthorization','enrollmentSecret','apiKey'].some(key => hasOwn(message, key) || hasOwn(message.payload || {}, key))) {
+      const error = new AgentProtocolError('RUNTIME_WIRE_CREDENTIAL_FORBIDDEN', 'Credentials must not be carried by business frames')
+      this.onReject(error, raw); return { kind: 'rejected', error }
+    }
+    if (this.profile.runtimeIdentity && message.messageType === MESSAGE_TYPES.COMMAND_DISPATCH) {
+      try {
+        runtimeCommandContext(this.profile, message)
+        const transport = getProfileState(this.profile)?.runtimeTransport
+        if (transport && (!transport.ready() || !transport.readyCommandTypes().includes(message.commandType))) throw new AgentProtocolError('RUNTIME_COMMAND_ADAPTER_UNAVAILABLE', 'Current channel does not admit this command adapter')
+      }
+      catch (error) { this.onReject(error, raw); return { kind: 'rejected', error } }
+    }
     switch (message.messageType) {
       case MESSAGE_TYPES.COMMAND_DISPATCH: {
         const commandId = message.commandId
@@ -3122,6 +3195,11 @@ export class AgentMessageProcessor {
           }
 
           if (check.action === 'conflict') {
+            // Conflicting payload cannot mutate D06 for the original command.
+            if (this.profile.runtimeIdentity) {
+              const error = new AgentProtocolError('COMMAND_FINGERPRINT_CONFLICT', 'Duplicate command has different immutable context/payload')
+              this.onReject(error, raw); return { kind: 'rejected', error }
+            }
             this._emitAck(ACK_STATUS.REJECTED, {
               ...meta,
               commandId,
@@ -3204,6 +3282,8 @@ export class AgentMessageProcessor {
 
   async runDrain() {
     while (!this.paused && !this.stopped && !this.failClosedError) {
+      if (this.profile.runtimeIdentity && !await this.replayAcks()) { this.pause(); return }
+      if (this.paused || this.stopped || this.failClosedError) return
       let item
       try {
         item = this.inbox.claimNext()
@@ -3249,6 +3329,7 @@ export class AgentMessageProcessor {
             ...this._commandMeta(validated.normalized),
             commandId: validated.normalized.commandId
           })
+          if (startedAck.confirmation) await startedAck.confirmation
           if (!startedAck.persisted || !startedAck.sent || !startedAck.markerPersisted
               || !startedAck.dequeued || this.failClosedError) {
             let reason
@@ -3426,6 +3507,7 @@ export class AgentMessageProcessor {
       dequeued: false
     }
     if (!this.ackOutbox) return delivery
+    if (this.profile.runtimeIdentity) return this._emitRuntimeAck(ackStatus, meta, marker)
     const envelope = buildAckEnvelope(this.profile, ackStatus, meta)
     try {
       this.ackOutbox.enqueueAndWithPendingEnvelopesLocked(envelope, marker, (pending, queued) => {
@@ -3443,7 +3525,47 @@ export class AgentMessageProcessor {
     return delivery
   }
 
+  _emitRuntimeAck(status, meta, marker) {
+    const delivery = { persisted: false, sent: false, markerPersisted: false, dequeued: false }
+    try {
+      const command = meta.runtimeCommand
+      const queued = this.ackOutbox.enqueue(buildAckEnvelope(this.profile, status, meta), marker)
+      delivery.persisted = true
+      delivery.confirmation = this._scheduleRuntimeAckFlush(queued.fileName).then(confirmed => {
+        if (confirmed) Object.assign(delivery, { sent: true, markerPersisted: true, dequeued: true })
+        return confirmed
+      })
+    } catch (error) { this._failClosed(new AgentProtocolError('ACK_OUTBOX_PERSIST_ERROR', error.message), meta) }
+    return delivery
+  }
+
+  _scheduleRuntimeAckFlush(target = '') {
+    const operation = this.runtimeAckTail.catch(() => false).then(async () => {
+      let confirmed = !target
+      while (typeof this.sendCommandAckFn === 'function' && !this.stopped) {
+        const head = this.ackOutbox.pendingEnvelopes()[0] // lock ends before HTTP wait
+        if (!head) return confirmed
+        const command = head.envelope.runtimeCommand
+        if (!command) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_REQUIRED', 'Legacy ACK requires stopped-writer migration, not an auth fallback')
+        const prior = this.ledger.runtimeAckCommit(head.envelope.commandId, command.messageId)
+        let result
+        try { result = await this.sendCommandAckFn(command, head.envelope.ackStatus, prior?.deliveryVersion ?? null) }
+        catch (error) {
+          // Retain FIFO on real transport or protocol rejection; never infer commit.
+          this.runtimeAckFailure = error
+          return false
+        }
+        this.ackOutbox.commitRuntimeDelivery(head, result, this.ledger)
+        if (head.fileName === target) confirmed = true
+      }
+      return false
+    }).catch(error => { this._failClosed(new AgentProtocolError(error.code || 'RUNTIME_ACK_CHECKPOINT_ERROR', error.message), {}); return false })
+    this.runtimeAckTail = operation
+    return operation
+  }
+
   replayAcks() {
+    if (this.profile.runtimeIdentity) return this._scheduleRuntimeAckFlush()
     if (!this.ackOutbox || !this.sendFn) return 0
     let replayed = 0
     try {
@@ -3569,22 +3691,8 @@ const removeApiKeyQuery = parsed => {
 
 export const sanitizeWebSocketEndpoint = url => removeApiKeyQuery(new URL(url)).toString()
 
-export const buildWebSocketUrl = (url, apiKey, profile, runtimeInstanceId = profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID) => {
-  const parsed = removeApiKeyQuery(new URL(url))
-  if (profile?.agentId) {
-    parsed.searchParams.set('agent_id', profile.agentId)
-    parsed.searchParams.set('agentId', profile.agentId)
-  }
-  parsed.searchParams.set('runtime_instance_id', runtimeInstanceId)
-  parsed.searchParams.set('runtimeInstanceId', runtimeInstanceId)
-  return parsed.toString()
-}
-
-export const buildWebSocketOptions = (apiKey, profile) => {
-  const selectedApiKey = profile?.apiKey || apiKey
-  if (!selectedApiKey) throw new Error('WebSocket API key is required')
-  return { headers: { 'X-API-Key': selectedApiKey } }
-}
+export const buildWebSocketUrl = () => { throw new AgentProtocolError('RUNTIME_INSTALLATION_SESSION_REQUIRED', 'WebSocket authorization requires the installation-derived session') }
+export const buildWebSocketOptions = () => { throw new AgentProtocolError('RUNTIME_INSTALLATION_SESSION_REQUIRED', 'API-key WebSocket authentication is retired') }
 
 export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInstanceId = profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID) => ({
   ...payload,
@@ -3609,6 +3717,7 @@ const MAX_WS_BUFFERED_BYTES = 1024 * 1024
 const sendRaw = (event, profile = defaultProfile) => {
   const state = getProfileState(profile)
   if (profile?.runtimeIdentity) return state?.runtimeTransport?.send?.(event) === true
+  if (!profile?.runtimeIdentity) return false
   if (!state?.ws || state.ws.readyState !== WebSocketClient.OPEN) return false
   if (Number(state.ws.bufferedAmount || 0) > MAX_WS_BUFFERED_BYTES) return false
   state.ws.send(typeof event === 'string' ? event : JSON.stringify(event))
@@ -4721,7 +4830,7 @@ const profileConfigurationErrors = profile => {
     errors.push('workspaceFileApiOrigin and workspaceFileRootDir must be configured together')
   }
   if (profile.workspaceFileRuntimeAuthHeader) {
-    errors.push('workspaceFileRuntimeAuthHeader must not be configured; use the current WebSocket registration token only')
+    errors.push('workspaceFileRuntimeAuthHeader must not be configured; use the current installation-derived Runtime session only')
   }
   if (workspaceFileControls.every(value => Boolean(value)) && !workspaceFileToolchain().ready) {
     errors.push('release-local workspace delivery toolchain is missing or incomplete')
@@ -4768,7 +4877,7 @@ export const buildConfigurationReport = runtimeConfig => ({
       appServerSchemaContractId: profile.appServerSchemaContractId,
       codexModel: profile.codexModel || null,
       modelSource: profile.codexModel ? 'agent --model' : 'Codex configuration/default',
-      websocketAuthSource: profile.apiKey ? 'profile.apiKey' : (process.env.OPENCLAW_API_KEY ? 'OPENCLAW_API_KEY' : 'missing'),
+      websocketAuthSource: profile.runtimeIdentity ? 'installation-derived-session' : 'retired-api-key',
       workspacePolicyId: profile.workspacePolicyId || null,
       workspaceFileRuntime: profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
         ? 'awaiting-current-registration' : 'disabled',
@@ -4962,7 +5071,7 @@ export const runWorkspaceFileCommand = async ({
 }) => {
   const command = strictWorkspaceFileCommand(message)
   if (!command) return null
-  if (!workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(workspaceFileRuntimeAuthHeader)) {
+  if (!workspaceFileBridge || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(workspaceFileRuntimeAuthHeader)) {
     return workspaceFileFailure(message, new AgentProtocolError(
       'WORKSPACE_FILE_RUNTIME_UNAVAILABLE',
       'Strict workspace file command requires controlled runtime API origin, root, and AgentRuntime authorization configuration'
@@ -5018,7 +5127,7 @@ export const runWorkspaceFileCommand = async ({
     result = workspaceFileFailure(message, error instanceof WorkspaceFileBridgeError || error instanceof AgentProtocolError
       ? error
       : new AgentProtocolError('WORKSPACE_FILE_ERROR', 'workspace file command failed'))
-    if (error?.code === 'START_OUTCOME_UNKNOWN') result.status = 'recovery_required'
+    if (['START_OUTCOME_UNKNOWN', 'COMMIT_FAILED', 'UPLOAD_FAILED'].includes(error?.code)) result.status = 'recovery_required'
   } finally {
     if (materialized && result?.status === 'failed') {
       const match = /^([A-Z][A-Z0-9_]{0,99}):/.exec(result.errorMessage || '')
@@ -5028,9 +5137,9 @@ export const runWorkspaceFileCommand = async ({
           runtimeAgentId: profile.agentId,
           runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
         })
-      } catch {}
+      } catch { result.status = 'recovery_required' }
     }
-    if (materialized) {
+    if (materialized && !profile.runtimeIdentity && result?.status !== 'recovery_required') {
       try { workspaceFileBridge.cleanup(message.payload) } catch (error) {
         result = workspaceFileFailure(message, error)
       }
@@ -5085,10 +5194,10 @@ const exactResponseUrl = (response, endpoint) => {
  * existing persistent inbox so crashes/restarts retain the same dedupe and recovery semantics as
  * websocket-delivered commands.
  */
-export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = globalThis.fetch } = {}) => {
+export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = state?.runtimeTransport?.nativeFetch || globalThis.fetch } = {}) => {
   if (!profile || !state?.workspaceFileBridge || !state?.processor) return { dispatched: 0, rejected: 0 }
   const auth = state.workspaceFileRuntimeAuthHeader || ''
-  if (!/^AgentRuntime [0-9a-f]{32}$/.test(auth) || typeof fetchFn !== 'function') {
+  if (!/^AgentRuntime rts1_[0-9a-f]{64}$/.test(auth) || typeof fetchFn !== 'function') {
     throw new AgentProtocolError('WORKSPACE_FILE_RUNTIME_UNAVAILABLE', 'workspace runtime polling is not configured')
   }
   const endpoint = new URL(WORKSPACE_FILE_QUEUE_PATH, state.workspaceFileBridge.apiOrigin)
@@ -5098,7 +5207,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = glob
       Authorization: auth,
       Accept: 'application/json',
       'X-Agent-Id': profile.agentId,
-      'X-Agent-Runtime-Id': PROCESS_RUNTIME_INSTANCE_ID
+      'X-Agent-Runtime-Id': profile.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
     }
   }
   let response
@@ -5170,7 +5279,7 @@ const stopWorkspaceFilePoller = state => {
 
 const startWorkspaceFilePoller = (profile, state) => {
   stopWorkspaceFilePoller(state)
-  if (!state?.workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
+  if (!state?.workspaceFileBridge || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
   const tick = async () => {
     if (state.workspaceFilePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.workspaceFilePollInFlight = true
@@ -5197,7 +5306,7 @@ const stopNativeConversationPoller = state => {
 }
 const startNativeConversationPoller = (profile, state) => {
   stopNativeConversationPoller(state)
-  if (!state?.conversationNativeLane || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
+  if (!state?.conversationNativeLane || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
   const tick = async () => {
     if (state.conversationNativePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.conversationNativePollInFlight = true
@@ -5222,7 +5331,7 @@ export const stopControlledImageV3ConversationPoller = state => {
 export const startControlledImageV3ConversationPoller = (profile, state) => {
   stopControlledImageV3ConversationPoller(state)
   if (!state?.conversationControlledImageV3Lane
-      || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return false
+      || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return false
   const tick = async () => {
     const openState = WebSocketClient?.OPEN ?? 1
     if (state.conversationControlledImageV3PollInFlight || state.ws?.readyState !== openState
@@ -5613,23 +5722,28 @@ const createProfileState = (profile, profileConfig = config) => {
     ? new WorkspaceFileBridge({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir,
-      fetchFn: globalThis.fetch,
+      fetchFn: (url, options) => getProfileState(profile)?.runtimeTransport?.nativeFetch(url, options) || Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Native session required')),
       validateOutput: validateWorkspaceFileOutput
     })
     : null
+  const nativeFetch = profile.runtimeIdentity ? (url, options) => {
+    const transport = getProfileState(profile)?.runtimeTransport
+    if (!transport?.nativeFetch) return Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Current native session is required'))
+    return transport.nativeFetch(url, options)
+  } : globalThis.fetch
   const nativeBountyExecutionRuntime = createNativeBountyExecutionRuntime({
     profile,
     workspaceFileBridge,
     getAuth: () => getProfileState(profile)?.workspaceFileRuntimeAuthHeader || '',
     ...(profile.runtimeIdentity ? { controlledEnv: profile.runtimeProviderEnvironment || {} } : {}),
-    runtimeInstanceId
+    runtimeInstanceId, nativeFetchFn: nativeFetch
   })
   const conversationNativeLane = nativeBountyExecutionRuntime.pollProtocol
   const controlledImageV3SourceRuntime = createControlledImageV3SourceRuntime({
     profile,
     getAuth: () => getProfileState(profile)?.workspaceFileRuntimeAuthHeader || '',
     ...(profile.runtimeIdentity ? { controlledEnv: profile.runtimeProviderEnvironment || {} } : {}),
-    runtimeInstanceId
+    runtimeInstanceId, nativeFetchFn: nativeFetch
   })
   const conversationControlledImageV3Lane = controlledImageV3SourceRuntime.pollProtocol
   const inbox = new PersistentCommandInbox({
@@ -5656,7 +5770,7 @@ const createProfileState = (profile, profileConfig = config) => {
     ? new TypedInspectionMaterializer({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
-      fetchFn: globalThis.fetch,
+      fetchFn: nativeFetch,
       getRuntimeAuth: () => getProfileState(profile)?.workspaceFileRuntimeAuthHeader || '',
       agentId: profile.agentId,
       runtimeInstanceId: runtimeInstanceId,
@@ -5687,11 +5801,11 @@ const createProfileState = (profile, profileConfig = config) => {
     profile,
     stateRoot: defaultSkillInstallStateRoot(profileConfig.commandInboxDir, profile, profileConfig.wsUrl),
     wsUrl: profileConfig.wsUrl,
-    apiKey: profileConfig.apiKey,
-    enabled: profileConfig.skillInstallEnabled,
+    enabled: profile.runtimeIdentity ? profile.skillInstallEnabled === true : profileConfig.skillInstallEnabled,
+    getRuntimeHeaders: profile.runtimeIdentity ? () => getProfileState(profile)?.runtimeTransport?.headers() : null,
     maxPackageBytes: profileConfig.skillInstallMaxBytes,
     maxExtractedBytes: profileConfig.skillInstallMaxExtractedBytes,
-    fetchFn: globalThis.fetch,
+    fetchFn: nativeFetch,
     sendResultFn: envelope => sendRaw(envelope, profile),
     runtimeInstanceId: runtimeInstanceId
   })
@@ -5706,6 +5820,10 @@ const createProfileState = (profile, profileConfig = config) => {
     profile,
     sessionStore: profile.runtimeIdentity ? createCodexSessionStore(resolve(profile.runtimeStateRoot, 'codex-session-map.json')) : null,
     runtimeTransport: null,
+    commandAdapterReady: profile.runtimeIdentity ? (() => {
+      const probe = spawnSync(profile.codexBin, ['--version'], { encoding: 'utf8', env: buildRuntimeExecutionEnvironment(profile), timeout: 15000 })
+      return probe.status === 0 && /^codex-cli [0-9]+\.[0-9]+\.[0-9]+\s*$/.test(probe.stdout || '')
+    })() : true,
     ws: null,
     heartbeatTimer: null,
     workspaceFilePollTimer: null,
@@ -5900,6 +6018,7 @@ const createProfileState = (profile, profileConfig = config) => {
     ackOutbox,
     executionReportOutbox,
     sendFn: sendAckFn,
+    sendCommandAckFn: profile.runtimeIdentity ? (...args) => state.runtimeTransport?.acknowledge(...args) || Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Current Runtime session required')) : null,
     chatInbox,
     chatAckOutbox,
     lanes
@@ -5934,7 +6053,7 @@ export const observeTypedRuntimeAuthentication = async ({ profile, receipt, auth
   if (!binding || binding.scheme !== 'native-runtime-v1' || binding.agentId !== profile.agentId ||
       binding.runtimeInstanceId !== runtimeInstanceId || binding.tenantId !== profile.managedTenantId ||
       binding.clientId !== profile.managedClientId || binding.ownerJiacn !== profile.managedOwnerJiacn ||
-      !/^AgentRuntime [0-9a-f]{32}$/.test(authHeader || '')) return { state: 'RECEIPT_BINDING_MISMATCH' }
+      !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(authHeader || '')) return { state: 'RECEIPT_BINDING_MISMATCH' }
   try {
     const origin = new URL(apiOrigin)
     if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password) {
@@ -5948,85 +6067,6 @@ export const observeTypedRuntimeAuthentication = async ({ profile, receipt, auth
     await response.body?.cancel()
     return { state: response.status === 401 ? 'CURRENT_BINDING_DENIED' : 'HTTP_OBSERVED', httpStatus: response.status }
   } catch { return { state: 'TRANSPORT_ERROR' } }
-}
-
-const handleMessage = async (profile, raw) => {
-  let parsed
-  try { parsed = JSON.parse(raw.toString()) } catch (error) {
-    getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_JSON', `Invalid JSON message: ${error.message}`), raw.toString())
-    return
-  }
-  if (!isObject(parsed)) {
-    getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object'), parsed)
-    return
-  }
-  const state = getProfileState(profile)
-  const registrationOutcome = state?.registration.observe(parsed)
-  if (registrationOutcome === 'registered') {
-    if (profile.typedDeliberationEnabled) {
-      const receipt = parsed.payload || parsed
-      console.log(`typed runtime registration | agent=${profile.agentId} | requested=${buildTypedDeliberationDeclaration(profile, state.appServerAdapter)?.state || 'UNDECLARED'} | receipt=${receipt.typedDeliberation?.state || 'UNDECLARED'} | schema=${state.appServerAdapter?.readback?.schema?.schemaContractId || 'unmeasured'}`)
-    }
-    // The API rotates this registration token. Keep it only in memory for this live socket binding.
-    state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
-    if (profile.typedDeliberationEnabled && profile.managedGeneration) {
-      const origin = new URL(config.wsUrl)
-      origin.protocol = origin.protocol === 'wss:' ? 'https:' : 'http:'
-      void observeTypedRuntimeAuthentication({ profile, receipt: parsed.payload || parsed,
-        authHeader: state.workspaceFileRuntimeAuthHeader, apiOrigin: origin.origin
-      }).then(observation => console.log(`typed runtime authentication | agent=${profile.agentId} | state=${observation.state} | http=${observation.httpStatus ?? 'none'}`))
-    }
-    startWorkspaceFilePoller(profile, state)
-    startNativeConversationPoller(profile, state)
-    startControlledImageV3ConversationPoller(profile, state)
-  }
-  if (isLegacyInboundControlFrame(parsed)) {
-    if (parsed.type === 'agent_message_saved') {
-      await state?.processor?.handle(parsed)
-    } else if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
-      const state = getProfileState(profile)
-      if (state?.managedEngine?.ready && !state.managedRegistered) {
-        state.managedRegistered = true
-        if (!canPublishProfileOnline(profile, state)) return
-        sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-        resumeRegisteredProfile(profile, state)
-      }
-    } else if (parsed.type === 'connected') {
-      registerAgent(profile)
-      sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-    } else if (parsed.type === 'ping') {
-      sendLegacy('pong', {}, profile)
-    }
-    return
-  }
-  if (profile.managedGeneration && !getProfileState(profile)?.managedRegistered) return
-  await getProfileState(profile)?.processor?.handle(raw.toString())
-}
-
-const doReconnect = profile => {
-  const state = getProfileState(profile)
-  if (!state || shuttingDown || state.reconnectScheduled) return
-  const now = Date.now()
-  if (!state.reconnectStartedAt) state.reconnectStartedAt = now
-  const elapsed = now - state.reconnectStartedAt
-  if (elapsed >= config.reconnectMaxMs) {
-    if (profile.managedGeneration) {
-      state.managedRegistered = false
-      state.processor.pause()
-      console.warn(`managed reconnect deferred | profile=${profile.profileId}`)
-      return // Rent reconciliation may retry; never restart unrelated legacy profiles.
-    }
-    shutdown(1, `reconnect timeout for profile ${profile.profileId}`)
-    return
-  }
-  const delay = Math.min(30000, 1000 * 2 ** state.reconnectAttempt, config.reconnectMaxMs - elapsed)
-  state.reconnectAttempt += 1
-  state.reconnectScheduled = true
-  state.reconnectTimer = setTimeout(() => {
-    state.reconnectScheduled = false
-    state.reconnectTimer = null
-    connectProfile(profile)
-  }, delay)
 }
 
 export const startBoundedExecutionReportReplay = ({ outbox, sendFn, isStable = () => true, schedule = callback => setImmediate(callback) }) => {
@@ -6056,95 +6096,6 @@ export const startBoundedSkillResultReplay = ({
   }
   schedule(run)
   return () => { cancelled = true }
-}
-
-const resumeRegisteredProfile = (profile, state) => {
-  clearInterval(state.heartbeatTimer)
-  state.resultReplayCancel?.()
-  state.executionReportReplayCancel?.()
-  const replaySocket = state.ws
-  const replayToken = `connection:${randomUUID()}`
-  state.executionReportReplayCancel = startBoundedExecutionReportReplay({
-    outbox: state.executionReportOutbox,
-    sendFn: envelope => sendRaw(envelope, profile),
-    isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN
-  })
-  state.resultReplayCancel = startBoundedSkillResultReplay({
-    manager: state.skillInstallManager,
-    replayToken,
-    isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN,
-    onBatch: replayed => {
-      if (replayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${replayed}`)
-    }
-  })
-  const replayed = state.processor.replayAcks()
-  if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
-  state.processor.resume()
-  startWorkspaceFilePoller(profile, state)
-  startNativeConversationPoller(profile, state)
-  startControlledImageV3ConversationPoller(profile, state)
-  state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
-}
-
-const connectProfile = profile => {
-  const state = getProfileState(profile)
-  if (!state) return
-  clearReconnectState(state)
-  clearInterval(state.heartbeatTimer)
-  stopWorkspaceFilePoller(state)
-  stopNativeConversationPoller(state)
-  stopControlledImageV3ConversationPoller(state)
-  state.registration.disconnect()
-  state.workspaceFileRuntimeAuthHeader = ''
-  if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
-    try { state.ws.close() } catch {}
-  }
-  let closeFired = false
-  state.managedRegistered = false
-  state.ws = new WebSocketClient(
-    buildWebSocketUrl(config.wsUrl, config.apiKey, profile),
-    buildWebSocketOptions(config.apiKey, profile)
-  )
-  const socket = state.ws
-  socket.addEventListener('open', () => {
-    if (state.ws !== socket) return
-    clearReconnectState(state)
-    state.reconnectAttempt = 0
-    state.reconnectStartedAt = 0
-    registerAgent(profile)
-    if (canPublishProfileOnline(profile, state)) {
-      sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-      resumeRegisteredProfile(profile, state)
-    }
-  })
-  socket.addEventListener('message', event => { if (state.ws === socket) void handleMessage(profile, event.data) })
-  socket.addEventListener('close', () => {
-    if (state.ws !== socket) return
-    state.managedRegistered = false
-    state.registration.disconnect()
-    state.workspaceFileRuntimeAuthHeader = ''
-    closeFired = true
-    state.resultReplayCancel?.()
-    state.resultReplayCancel = null
-    state.executionReportReplayCancel?.()
-    state.executionReportReplayCancel = null
-    clearInterval(state.heartbeatTimer)
-    stopWorkspaceFilePoller(state)
-    stopNativeConversationPoller(state)
-    stopControlledImageV3ConversationPoller(state)
-    state.processor.pause()
-    if (!shuttingDown) doReconnect(profile)
-  })
-  socket.addEventListener('error', error => {
-    if (state.ws !== socket) return
-    console.error(`websocket error | profile=${profile.profileId}:`, error.message || error)
-    setTimeout(() => {
-      if (state.ws === socket && !closeFired && !shuttingDown && !state.reconnectScheduled) {
-        try { state.ws?.close() } catch {}
-        doReconnect(profile)
-      }
-    }, 1000)
-  })
 }
 
 export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) => {
@@ -6218,113 +6169,8 @@ const disposeProfileStateOnce = async (state, reason) => {
     }
   }
   state.processor.stop()
-  if (profile.runtimeIdentity) await state.processor.waitForIdle()
+  if (profile.runtimeIdentity) { await state.processor.runtimeAckTail; await state.processor.waitForIdle() }
   if (getProfileState(profile) === state) profileStates.delete(profileStateKey(profile))
-}
-
-const disconnectProfile = async (profile, reason = 'profile removed') => {
-  const state = getProfileState(profile)
-  if (state) await disposeProfileState(state, reason)
-}
-
-const applyProfileConfig = async (nextProfiles, nextDefaultProfileId, reason = 'config reload') => {
-  const previousProfiles = config.profiles
-  if (managedHostModule) nextProfiles = managedHostModule.preserveManagedProfiles(previousProfiles, nextProfiles)
-  const previousByAgentId = new Map(previousProfiles.map(profile => [profile.agentId, profile]))
-  const nextByAgentId = new Map(nextProfiles.map(profile => [profile.agentId, profile]))
-  for (const previousProfile of previousProfiles) {
-    const next = nextByAgentId.get(previousProfile.agentId)
-    const state = profileStates.get(previousProfile.agentId)
-    if ((!next || !sameProfileConfig(previousProfile, next)) && state?.processor?.isBusy()) {
-      shutdown(1, `${reason}: defer active profile replacement to process restart`)
-      return
-    }
-  }
-  for (const previousProfile of previousProfiles) {
-    const next = nextByAgentId.get(previousProfile.agentId)
-    if (!next || !sameProfileConfig(previousProfile, next)) await disconnectProfile(previousProfile, reason)
-  }
-  config.profiles = nextProfiles
-  config.defaultProfileId = nextDefaultProfileId
-  defaultProfile = getProfileById(nextDefaultProfileId) || nextProfiles[0]
-  for (const nextProfile of nextProfiles) {
-    const previous = previousByAgentId.get(nextProfile.agentId)
-    const state = profileStates.get(nextProfile.agentId)
-    if (state && previous && sameProfileConfig(previous, nextProfile)) {
-      state.profile = nextProfile
-      continue
-    }
-    const created = createProfileState(nextProfile)
-    profileStates.set(nextProfile.agentId, created)
-    connectProfile(nextProfile)
-  }
-  lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
-}
-
-const reloadProfiles = async (reason = 'config reload') => {
-  if (shuttingDown || shutdownStarted || profileReloadInFlight) return
-  profileReloadInFlight = true
-  try {
-    const next = loadRuntimeConfig({ exitOnError: false })
-    ensureProfiles(next.profiles, next.defaultProfileId, config.workspacePolicies, false)
-    if (profileSignature(next.profiles, next.defaultProfileId) !== lastProfileSignature) {
-      await applyProfileConfig(next.profiles, next.defaultProfileId, reason)
-    }
-  } catch (error) {
-    console.warn(`profile config reload skipped | reason=${reason} | ${error.message}`)
-  } finally {
-    profileReloadInFlight = false
-  }
-}
-
-const startProfileWatcher = () => {
-  lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
-  if (config.profileReloadMs <= 0) return
-  const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-  if (profilesFile) {
-    const resolvedProfilesFile = resolve(profilesFile)
-    watchFile(resolvedProfilesFile, { interval: config.profileReloadMs }, (current, previous) => {
-      if (current.mtimeMs !== previous.mtimeMs || current.size !== previous.size) void reloadProfiles(`file changed: ${resolvedProfilesFile}`)
-    })
-  } else {
-    profileReloadTimer = setInterval(() => { void reloadProfiles('periodic CODEX_PROFILES check') }, config.profileReloadMs)
-  }
-}
-
-const shutdown = (exitCode = 0, reason = '') => {
-  if (shutdownPromise) return shutdownPromise
-  shutdownStarted = true
-  shuttingDown = true
-  shutdownPromise = (async () => {
-    if (reason) console.warn(`shutting down codex-ws-agent | reason=${reason}`)
-    managedHostChannel?.close()
-    terminateAllRuns()
-    if (profileReloadTimer) clearInterval(profileReloadTimer)
-    const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-    if (profilesFile) unwatchFile(resolve(profilesFile))
-    const adapterShutdowns = []
-    for (const profile of config.profiles) {
-      const state = getProfileState(profile)
-      state?.processor.pause()
-      state?.resultReplayCancel?.()
-      state?.executionReportReplayCancel?.()
-      if (state) { state.resultReplayCancel = null; state.executionReportReplayCancel = null }
-      clearReconnectState(state)
-      clearInterval(state?.heartbeatTimer)
-      stopWorkspaceFilePoller(state)
-      stopNativeConversationPoller(state)
-      stopControlledImageV3ConversationPoller(state)
-      state?.registration.disconnect()
-      if (state) adapterShutdowns.push(disposeAppServerState(state, { timeoutMs: 5000 }).catch(error => console.error(`app-server shutdown failed | profile=${profile.profileId} | ${error.message}`)))
-      sendStatus(profile, 'offline')
-      try { state?.ws?.close() } catch {}
-    }
-    await Promise.all(adapterShutdowns)
-    cleanupCodexAppServerSnapshots()
-    await new Promise(resolveExit => setTimeout(resolveExit, 100))
-    process.exit(exitCode)
-  })()
-  return shutdownPromise
 }
 
 // UR-01 executor injection seam. Transport/session validation is injected by the
@@ -6339,11 +6185,12 @@ export const buildRuntimeExecutionEnvironment = (profile, overrides = {}) => {
   return { ...inherited, ...overrides, HOME: profile.codexHome, CODEX_HOME: profile.codexHome }
 }
 
-export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigin, workspacePolicies = new Map(), providerEnvironments = new Map() }) => {
+export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigin, workspacePolicies = new Map(), providerEnvironments = new Map(), webSocketClient = null }) => {
   if (runtimeExecutionOwner || profileStates.size) throw new AgentProtocolError('RUNTIME_EXECUTOR_HOST_BUSY', 'Only one execution host may own this process')
   if (!Array.isArray(agents) || !agents.length || typeof runtimeInstanceId !== 'string' || !runtimeInstanceId) throw new AgentProtocolError('RUNTIME_EXECUTOR_CONFIG_REQUIRED', 'Explicit Runtime configuration is required')
   const origin = new URL(apiOrigin)
   if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== '/') throw new AgentProtocolError('RUNTIME_API_ORIGIN_INVALID', 'Runtime API origin must not contain credentials or routing data')
+  if (webSocketClient) WebSocketClient = webSocketClient
   const owner = Symbol('runtime execution host')
   const entries = new Map(agents.map(agent => {
     const manifest = agent.manifest
@@ -6392,6 +6239,42 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           if (!entry.state || entry.closed || !transport || typeof transport.ready !== 'function' || typeof transport.send !== 'function') throw new AgentProtocolError('RUNTIME_TRANSPORT_REQUIRED', 'A bound Runtime transport is required')
           entry.state.runtimeTransport = transport
         },
+        attachSocket: socket => { entry.state.ws = socket },
+        durableStateHealthy: () => {
+          const state = entry.state
+          if (!state || state.disposed || state.processor.failClosedError || state.ledger.hasCorruption() || state.ackOutbox.hasCorruption()) return false
+          try { state.ackOutbox.pendingEnvelopes(); return true } catch { return false }
+        },
+        registrationPayload: () => buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
+          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime),
+        readyCommandTypes: () => {
+          const state = entry.state
+          if (!state || state.disposed || state.processor.failClosedError) return []
+          const types = []
+          if (state.workspaceManager && state.commandAdapterReady) types.push('TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH')
+          // WORK_ITEM_CANCEL has no independently verified exact command cancel
+          // adapter; CHAT cancellation retains its original exact turn contract.
+          if (state.skillInstallManager.enabled) types.push('SKILL_INSTALL')
+          return types
+        },
+        chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
+        acceptFrame: frame => entry.state.processor.handle(frame),
+        resume: async () => {
+          const state = entry.state
+          if (!state.runtimeTransport?.reportReady()) return
+          state.workspaceFileRuntimeAuthHeader = state.runtimeTransport.headers().Authorization
+          const confirmed = await state.processor.replayAcks()
+          if (state.runtimeTransport.ready() && confirmed) state.processor.resume()
+          state.executionReportOutbox.sendPending(envelope => sendRaw(envelope, entry.profile))
+          state.skillInstallManager.replayResults()
+          if (state.runtimeTransport.ready()) {
+            startWorkspaceFilePoller(entry.profile, state)
+            startNativeConversationPoller(entry.profile, state)
+            startControlledImageV3ConversationPoller(entry.profile, state)
+          }
+        },
+        suspendAdmission: () => { const state = entry.state; state.processor.pause(); stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state) },
+        disconnected: () => { const state = entry.state; state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
         ready: () => Boolean(!entry.closed && entry.state && !entry.state.disposed && !entry.state.processor.failClosedError && entry.state.runtimeTransport?.ready?.()),
         pause: async () => { entry.state?.processor.pause(); if (entry.state) { entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
         close: () => closeEntry(entry),
@@ -6419,126 +6302,7 @@ export const loadWebSocketClient = async () => {
 }
 
 export const main = async () => {
-  loadLegacyEnvironment()
-  const runtimeConfig = loadRuntimeConfig()
-  if (hasFlag('--inspect-config')) {
-    // Do not initialize worktrees, read auth.json/session state, or open a WebSocket.
-    const report = buildConfigurationReport(runtimeConfig)
-    console.log(JSON.stringify(report, null, 2))
-    if (report.profiles.some(profile => profile.errors.length)) process.exitCode = 1
-    return
-  }
-  WebSocketClient = await loadWebSocketClient()
-  config = {
-    wsUrl: process.env.WS_URL || 'wss://api.chaoyoufan.cn/ws/agent/channel',
-    apiKey: process.env.OPENCLAW_API_KEY || '',
-    profiles: runtimeConfig.profiles,
-    defaultProfileId: runtimeConfig.defaultProfileId,
-    workspacePolicies: runtimeConfig.workspacePolicies,
-    heartbeatMs: parseNonNegativeMs(process.env.HEARTBEAT_MS, 30000),
-    registrationAckTimeoutMs: parseNonNegativeMs(process.env.REGISTRATION_ACK_TIMEOUT_MS, 10000),
-    reconnectMaxMs: parseNonNegativeMs(process.env.RECONNECT_MAX_MS, 30 * 60 * 1000),
-    profileReloadMs: parseNonNegativeMs(process.env.CODEX_PROFILE_RELOAD_MS, 5000),
-    commandInboxDir: resolve(process.env.COMMAND_INBOX_DIR || '/home/isp/apps/codex-ws-agent/data/inbox'),
-    commandInboxSuccessPolicy: process.env.COMMAND_INBOX_SUCCESS_POLICY || 'archive',
-    skillInstallEnabled: parseEnabledFlag(process.env.AGENT_SKILL_INSTALL_ENABLED),
-    skillInstallMaxBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_BYTES, 16 * 1024 * 1024),
-    skillInstallMaxExtractedBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_EXTRACTED_BYTES, 64 * 1024 * 1024)
-  }
-  if (!config.apiKey && !config.profiles.every(profile => profile.apiKey)) {
-    configError('OPENCLAW_API_KEY is required unless every profile defines apiKey')
-  }
-  if (!['archive', 'delete'].includes(config.commandInboxSuccessPolicy)) {
-    configError('COMMAND_INBOX_SUCCESS_POLICY must be archive or delete')
-  }
-  ensureProfiles(config.profiles, config.defaultProfileId, config.workspacePolicies)
-  defaultProfile = getProfileById(config.defaultProfileId) || config.profiles[0]
-  codexSessionStore = createCodexSessionStore(
-    process.env.CODEX_SESSION_MAP_FILE || resolve(process.cwd(), 'codex-session-map.json')
-  )
-
-  if (hasFlag('--validate')) {
-    if (process.env.AGENT_MANAGED_CHAT_SCOPES_FILE) loadManagedChatScopes(process.env.AGENT_MANAGED_CHAT_SCOPES_FILE)
-    for (const profile of buildConfigurationReport(runtimeConfig).profiles) {
-      for (const warning of profile.warnings) console.warn(`configuration warning | profile=${profile.profileId} | ${warning}`)
-    }
-    for (const policy of config.workspacePolicies.values()) {
-      new GitWorkspaceManager({ policy, agentId: 'validation-agent', role: 'validator' }).initialize()
-    }
-    console.log(`configuration valid | profiles=${config.profiles.length} | workspacePolicies=${config.workspacePolicies.size} | defaultProfile=${defaultProfile.profileId} | runtimeInstanceId=${PROCESS_RUNTIME_INSTANCE_ID}`)
-    return
-  }
-
-  for (const profile of config.profiles) profileStates.set(profileStateKey(profile), createProfileState(profile))
-  process.on('SIGINT', () => { void shutdown(0, 'SIGINT') })
-  process.on('SIGTERM', () => { void shutdown(0, 'SIGTERM') })
-  for (const profile of config.profiles) connectProfile(profile)
-  startProfileWatcher()
-  // Inert unless explicitly configured at release. Never entered by --validate.
-  if (process.env.AGENT_MANAGED_HOST_ENABLED === 'true') {
-    try {
-      managedHostModule = await import('./managed-host.mjs')
-      const { ManagedHost, startManagedHostSocket } = managedHostModule
-      const required = name => {
-        const value = process.env[name]
-        if (!value || value !== value.trim()) throw new Error(`Missing managed host release setting ${name}`)
-        return value
-      }
-      const root = required('AGENT_MANAGED_HOST_ROOT')
-      const workspacePolicyId = required('AGENT_MANAGED_HOST_WORKSPACE_POLICY_ID')
-      if (!config.workspacePolicies.has(workspacePolicyId)) throw new Error('Managed hosting requires an existing trusted workspace policy')
-      if (config.profiles.some(profile => profile.codexHome &&
-          (resolve(profile.codexHome) === root || resolve(profile.codexHome).startsWith(`${root}/`) || root.startsWith(`${resolve(profile.codexHome)}/`)))) {
-        throw new Error('Managed data root overlaps existing profiles')
-      }
-      let managedImageScopes = emptyManagedImageScopeAuthorizations()
-      const managedImageScopesPath = process.env.AGENT_MANAGED_IMAGE_SCOPES_FILE
-      if (managedImageScopesPath) {
-        try {
-          managedImageScopes = loadManagedImageScopeAuthorizations(managedImageScopesPath, { reservedProfiles: config.profiles })
-        } catch (error) {
-          console.warn(`managed image scopes unavailable; controlled image remains disabled (${error.message})`)
-        }
-      }
-      const managedChatScopes = process.env.AGENT_MANAGED_CHAT_SCOPES_FILE
-        ? loadManagedChatScopes(process.env.AGENT_MANAGED_CHAT_SCOPES_FILE) : emptyManagedChatScopes()
-      const host = new ManagedHost({ root, workspacePolicyId, templateHome: required('AGENT_MANAGED_HOST_TEMPLATE_HOME'),
-        codexBin: required('AGENT_MANAGED_HOST_CODEX_BIN'), runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
-        tenantId: required('AGENT_MANAGED_HOST_TENANT_ID'), clientId: required('AGENT_MANAGED_HOST_CLIENT_ID'),
-        ownerJiacn: required('AGENT_MANAGED_HOST_OWNER_JIACN'),
-        conflicts: (ownerJiacn, agentId, generation) => config.profiles.some(profile => profile.agentId === agentId &&
-          (profile.managedOwnerJiacn !== ownerJiacn || profile.managedGeneration !== generation)),
-        profileState: (ownerJiacn, agentId) => {
-          const state = profileStates.get(agentId)
-          return state ? { registered: state.managedRegistered && state.ws?.readyState === WebSocketClient.OPEN,
-            ownerJiacn: state.profile.managedOwnerJiacn, generation: state.profile.managedGeneration,
-            runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
-        },
-        attachProfile: async (profile, engine) => {
-          profile = resolveManagedRuntimeProfile(profile, defaultProfile, managedImageScopes, managedChatScopes)
-          let state = getProfileState(profile)
-          if (state && (state.profile.managedOwnerJiacn !== profile.managedOwnerJiacn ||
-              state.profile.managedGeneration !== profile.managedGeneration)) throw new Error('Managed profile collision')
-          if (!state) {
-            state = createProfileState(profile)
-            profileStates.set(profileStateKey(profile), state)
-            config.profiles.push(profile)
-            state.managedEngine = engine
-            connectProfile(profile)
-          } else {
-            state.managedEngine = engine
-            if (state.ws?.readyState !== WebSocketClient.OPEN && !state.reconnectScheduled) connectProfile(profile)
-          }
-          // Registration normally arrives on a later poll; never manufacture synchronous online proof.
-        }
-      })
-      const recovery = await host.restore()
-      if (recovery.restored || recovery.skipped) console.log(`managed hosting recovery | restored=${recovery.restored} | skipped=${recovery.skipped}`)
-      managedHostChannel = await startManagedHostSocket({ socketPath: required('AGENT_MANAGED_HOST_SOCKET'), host })
-    } catch (error) {
-      console.warn(`managed hosting channel unavailable; legacy profiles unchanged (${error.code || error.name || 'configuration error'})`)
-    }
-  }
+  throw new AgentProtocolError('UNIFIED_RUNTIME_ENTRY_REQUIRED', 'Use the installation-authorized unified Runtime --config entry; legacy API-key execution is retired')
 }
 
 const canonicalMainModuleUrl = entry => {

@@ -956,24 +956,11 @@ test('legacy execution types, missing messageType, and ambiguous envelopes fail 
 })
 
 test('runtimeInstanceId is process-scoped while WebSocket API keys use headers', () => {
-  const url = new URL(buildWebSocketUrl('wss://example.test/ws', 'secret', profile))
-  assert.equal(url.searchParams.get('runtimeInstanceId'), PROCESS_RUNTIME_INSTANCE_ID)
-  assert.equal(url.searchParams.get('runtime_instance_id'), PROCESS_RUNTIME_INSTANCE_ID)
-  assert.equal(url.searchParams.has('api_key'), false)
-  const legacy = new URL(buildWebSocketUrl('wss://example.test/ws?api_key=legacy&API_KEY=legacy2&keep=1', 'secret', profile))
-  assert.equal([...legacy.searchParams.keys()].some(key => key.toLowerCase() === 'api_key'), false)
-  assert.equal(legacy.searchParams.get('keep'), '1')
+  assert.throws(() => buildWebSocketUrl('wss://example.test/ws', 'retired', profile), /installation-derived session/)
+  assert.throws(() => buildWebSocketOptions('retired', profile), /retired/)
   const sanitized = new URL(sanitizeWebSocketEndpoint('wss://example.test/ws?api_key=legacy&keep=1'))
   assert.equal(sanitized.searchParams.has('api_key'), false)
   assert.equal(sanitized.searchParams.get('keep'), '1')
-  assert.deepEqual(buildWebSocketOptions('fallback-secret', profile), {
-    headers: { 'X-API-Key': 'fallback-secret' }
-  })
-  assert.deepEqual(buildWebSocketOptions('fallback-secret', { ...profile, apiKey: 'profile-secret' }), {
-    headers: { 'X-API-Key': 'profile-secret' }
-  })
-  assert.throws(() => buildWebSocketOptions('', { ...profile, apiKey: '' }), /required/)
-
   const register = buildProtocolEnvelope(MESSAGE_TYPES.AGENT_REGISTER, {}, profile)
   const presence = buildProtocolEnvelope(MESSAGE_TYPES.AGENT_PRESENCE, {}, profile)
   assert.equal(register.runtimeInstanceId, PROCESS_RUNTIME_INSTANCE_ID)
@@ -1247,29 +1234,28 @@ test('installing Codex skills does not change scheduling abilities', () => {
   assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, [])
 })
 
-test('real ws upgrade sends X-API-Key header and no query credential', async () => {
+test('real ws upgrade uses memory session proof, no API key or URL credential', async () => {
+  const { RuntimeV1Client } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
   const observed = await new Promise((resolvePromise, rejectPromise) => {
     const server = createServer()
     server.on('upgrade', (request, socket) => {
-      const result = { url: request.url, apiKey: request.headers['x-api-key'] }
+      const result = { url: request.url, headers: request.headers }
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
-      socket.destroy()
-      server.close(() => resolvePromise(result))
+      socket.destroy(); server.close(() => resolvePromise(result))
     })
     server.listen(0, '127.0.0.1', async () => {
       try {
         const implementation = await loadWebSocketClient()
-        const address = server.address()
-        const target = buildWebSocketUrl(`ws://127.0.0.1:${address.port}/ws?api_key=legacy`, 'secret', profile)
-        const client = new implementation(target, buildWebSocketOptions('secret', profile))
-        client.on('error', () => {})
-      } catch (error) {
-        server.close(() => rejectPromise(error))
-      }
+        const runtime = new RuntimeV1Client({ manifest: {}, apiBaseUrl: `http://127.0.0.1:${server.address().port}`, fetchFn() {} })
+        runtime.currentSession = { sessionToken: 'rts1_' + 'a'.repeat(64), canonicalAgentId: 'agent-a', installationId: 'installation-a', hostId: 'host-a', runtimeInstanceId: 'boot-a', sessionGeneration: 7, websocketPath: '/ws/agent/channel' }
+        const client = new implementation(runtime.websocketUrl(), runtime.websocketOptions()); client.on('error', () => {})
+      } catch (error) { server.close(() => rejectPromise(error)) }
     })
   })
-  assert.equal(observed.apiKey, 'secret')
-  assert.equal(new URL(observed.url, 'ws://127.0.0.1').searchParams.has('api_key'), false)
+  assert.equal(observed.headers.authorization, 'AgentRuntime rts1_' + 'a'.repeat(64))
+  assert.equal(observed.headers['x-api-key'], undefined)
+  assert.equal(observed.headers['x-agent-session-generation'], '7')
+  assert.equal(observed.url, '/ws/agent/channel')
 })
 
 test('fsync and rename failures fail closed before command execution', async () => {
@@ -1500,7 +1486,7 @@ test('chat failure and busy branches emit chat responses only', async () => {
   await processor.waitForIdle()
 })
 
-test('public envelope preserves explicit sender identity and validate works without global WebSocket', () => {
+test('public envelope preserves sender identity; retired main rejects even without global WebSocket', () => {
   const envelope = buildProtocolEnvelope(MESSAGE_TYPES.CHAT_MESSAGE, {
     senderName: 'Explicit Sender',
     personaName: 'Explicit Persona'
@@ -1508,25 +1494,11 @@ test('public envelope preserves explicit sender identity and validate works with
   assert.equal(envelope.senderName, 'Explicit Sender')
   assert.equal(envelope.personaName, 'Explicit Persona')
 
-  const bootstrap = `
+  assert.throws(() => execFileSync(process.execPath, ['--input-type=module', '--eval', `
     delete globalThis.WebSocket;
-    process.argv.push('validate-bootstrap', '--validate');
-    const { main } = await import('./agent-client.mjs');
-    await main();
-  `
-  const output = execFileSync(process.execPath, ['--input-type=module', '--eval', bootstrap], {
-    cwd: resolve(import.meta.dirname, '..'),
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      OPENCLAW_API_KEY: 'test',
-      CODEX_PROFILES_FILE: '',
-      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
-      DEFAULT_CODEX_PROFILE: 'validate',
-      CODEX_PROFILE_RELOAD_MS: '0'
-    }
-  })
-  assert.match(output, /configuration valid/)
+    const { main } = await import('./agent-client.mjs'); await main();
+  `], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8', stdio: 'pipe' }),
+    error => error.stderr.includes('UNIFIED_RUNTIME_ENTRY_REQUIRED'))
 })
 
 
@@ -2999,39 +2971,18 @@ test('all 5 ACK status constants are defined', () => {
   assert.equal(ACK_STATUS.REJECTED, 'REJECTED')
 })
 
-test('symlinked standalone entry executes validation instead of exiting as a no-op', () => {
-  const root = temporaryDirectory()
-  const linkedEntry = resolve(root, 'agent-client.mjs')
-  symlinkSync(resolve(import.meta.dirname, '..', 'agent-client.mjs'), linkedEntry)
-  const output = execFileSync(process.execPath, [linkedEntry, '--validate'], {
-    cwd: root,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      OPENCLAW_API_KEY: 'test',
-      CODEX_PROFILES_FILE: '',
-      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate-link', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
-      DEFAULT_CODEX_PROFILE: 'validate-link',
-      CODEX_PROFILE_RELOAD_MS: '0'
-    }
-  })
-  assert.match(output, /configuration valid/)
+test('symlinked retired engine entry fails closed instead of exiting as a no-op', () => {
+  const root = temporaryDirectory(); const entry = resolve(root, 'agent-client.mjs')
+  symlinkSync(resolve(import.meta.dirname, '..', 'agent-client.mjs'), entry)
+  assert.throws(() => execFileSync(process.execPath, [entry, '--validate'], { cwd: root, encoding: 'utf8', stdio: 'pipe' }),
+    error => error.stderr.includes('legacy API-key execution is retired'))
 })
 
-test('standalone --validate still works with a06 additions', () => {
-  const output = execFileSync(process.execPath, ['agent-client.mjs', '--validate'], {
-    cwd: resolve(import.meta.dirname, '..'),
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      OPENCLAW_API_KEY: 'test',
-      CODEX_PROFILES_FILE: '',
-      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
-      DEFAULT_CODEX_PROFILE: 'validate',
-      CODEX_PROFILE_RELOAD_MS: '0'
-    }
-  })
-  assert.match(output, /configuration valid/)
+test('retired standalone --validate cannot revive old execution credentials', () => {
+  assert.throws(() => execFileSync(process.execPath, ['agent-client.mjs', '--validate'], {
+    cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8', stdio: 'pipe',
+    env: { ...process.env, OPENCLAW_API_KEY: 'retired-test', CODEX_PROFILES: '[{"agentId":"agent-a"}]' }
+  }), error => error.stderr.includes('legacy API-key execution is retired'))
 })
 
 
@@ -3087,7 +3038,7 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
   }
   const message = normalizeInboundMessage({
     ...command(250),
@@ -3157,12 +3108,12 @@ test('image workspace delivery materializes the one built-in imagegen raster bef
     }
   })
   const outcome = await runManagedCommand({
-    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}` },
+    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}` },
     message: normalizeInboundMessage({ ...command(253), instruction: 'remove the background', payload }),
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
     workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
     workspaceFileBridge: bridge,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
     runCodexFn: async (_profile, codexMessage, _mode, overrides) => {
       assert.match(codexMessage.prompt, /authenticated Codex imagegen capability/)
       assert.match(codexMessage.prompt, /Do not create a PNG\/JPEG yourself/)
@@ -3193,12 +3144,12 @@ test('missing built-in imagegen result fails stably and reports it to the runtim
     }
   })
   const outcome = await runManagedCommand({
-    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}` },
+    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}` },
     message: normalizeInboundMessage({ ...command(254), payload }),
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
     workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
     workspaceFileBridge: bridge,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
     runCodexFn: async () => ({ status: 'completed', exitCode: 0 }),
     sendLegacyFn: () => {}, sendStatusFn: () => {}
   })
@@ -3237,7 +3188,7 @@ test('workspace command polling accepts only exact native queue envelopes and di
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
   }
   const bridge = new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => assert.fail('bridge download is not expected') })
   const valid = {
@@ -3304,7 +3255,7 @@ test('workspace command polling retries one stale undici socket before dispatchi
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
   }
   const bridge = new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => assert.fail('bridge download is not expected') })
   const state = {
@@ -3343,7 +3294,7 @@ test('workspace command polling exposes safe failure categories while failing cl
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
   }
   const state = { workspaceFileBridge: new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => {} }), workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader, processor: {} }
   const nativeUrl = 'https://api.example.test/internal/agent/tasks/workspace-executions/commands'
@@ -3394,7 +3345,7 @@ test('strict workspace file runtime failure reports failed only and command fing
   assert.deepEqual(reports, [])
 })
 
-test('workspace file upload failure is reported failed after Codex and never completed', async () => {
+test('workspace file ambiguous upload preserves recovery materials after Codex and never reports completion', async () => {
   const input = Buffer.from('workspace input\n')
   const root = temporaryDirectory()
   let posts = 0
@@ -3413,13 +3364,13 @@ test('workspace file upload failure is reported failed after Codex and never com
       ...profile,
       workspaceFileApiOrigin: 'https://api.example.test',
       workspaceFileRootDir: root,
-      workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+      workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
     },
     message: normalizeInboundMessage({ ...command(252), payload: workspaceFilePayload(input) }),
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
     workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
     workspaceFileBridge: bridge,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
     runCodexFn: async (_profile, _message, _mode, overrides) => {
       mkdirSync(resolve(overrides.codexWorkdir, 'outputs'), { recursive: true })
       writeFileSync(resolve(overrides.codexWorkdir, 'outputs/result.json'), '{}')
@@ -3428,11 +3379,11 @@ test('workspace file upload failure is reported failed after Codex and never com
     sendLegacyFn: (type, payload) => reports.push({ type, payload }),
     sendStatusFn: () => {}
   })
-  assert.equal(posts, 2)
-  assert.equal(outcome.status, 'failed')
+  assert.equal(posts, 1)
+  assert.equal(outcome.status, 'recovery_required')
   assert.match(outcome.errorMessage, /^UPLOAD_FAILED:/)
   assert.ok(reports.every(report => report.payload.status === 'failed'))
-  assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), false)
+  assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), true)
 })
 
 test('opt-in command execution persists and replays an exact Protocol-v1 work.result until its matching receipt', async () => {
@@ -3624,7 +3575,7 @@ test('late correlated registration ACK restores native queue pickup without repe
   const fetchFn = async (url, options) => {
     queueCalls++
     assert.equal(options.method, 'GET')
-    assert.equal(options.headers.Authorization, `AgentRuntime ${'a'.repeat(32)}`)
+    assert.equal(options.headers.Authorization, `AgentRuntime rts1_${'a'.repeat(64)}`)
     return { status: 200, redirected: false, url: url.toString(),
       headers: { get: () => 'application/json' }, json: async () => ({ items: [valid] }) }
   }
@@ -3633,8 +3584,8 @@ test('late correlated registration ACK restores native queue pickup without repe
   assert.equal(queueCalls, 0)
   assert.equal(observer.observe({ type: 'agent_registered', agentId: profile.agentId,
     messageId: 'registration-late-queue', runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
-    status: 'online', token: 'a'.repeat(32) }), 'registered')
-  state.workspaceFileRuntimeAuthHeader = observer.runtimeAuthHeader
+    status: 'online', durableStateHealthy: true, readyCommandTypes: [] }), 'registered')
+  state.workspaceFileRuntimeAuthHeader = `AgentRuntime rts1_${'a'.repeat(64)}` // derived separately, never minted by registration
   assert.deepEqual(await pollWorkspaceFileCommands({ profile, state, fetchFn }), { dispatched: 1, rejected: 0 })
   assert.equal(queueCalls, 1)
   assert.deepEqual(handled, [valid])
@@ -3660,7 +3611,7 @@ for (const startCase of ['transport', 'wrong-run', 'server-error', 'rejected']) 
     })
     const outcome = await runManagedCommand({ profile,
       message: normalizeInboundMessage({ ...command(987), payload: workspaceFilePayload(input) }),
-      workspaceFileBridge: bridge, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+      workspaceFileBridge: bridge, workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
       runCodexFn: async () => assert.fail('Provider must not run without exact start receipt'),
       sendLegacyFn: () => assert.fail('must not send legacy completion'), sendStatusFn: () => {}
     })
@@ -3739,4 +3690,103 @@ test('pre-engine recovery claim checks fingerprint and durable key under the inb
   writeFileSync(claimed.path, JSON.stringify({ ...claimed.record, fingerprint: 'corrupted' }))
   assert.throws(() => seed.claimPreEngineInspection(accepted.key), /CHAT_FINGERPRINT_CONFLICT/)
   assert.equal(seed.findByKey(accepted.key).state, 'recovery')
+})
+
+// UR-01 M3: mature checkpoint is authoritative. Session proofs never persisted.
+const unifiedProfile = () => ({ ...profile, runtimeIdentity: { installationId: 'installation-a', tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId } })
+const unifiedCommand = (number = 7001, patch = {}) => ({ ...command(number), tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId,
+  correlationId: `correlation-${number}`, payloadReference: `payload-${number}`, ...patch })
+function unifiedCheckpoint({ root = temporaryDirectory(), run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }) } = {}) {
+  const selected = unifiedProfile()
+  const inbox = new PersistentCommandInbox({ rootDir: root, profile: selected }); inbox.initialize()
+  const store = resolve(root, Buffer.from(selected.agentId).toString('hex'))
+  const ledger = new DurableDedupeLedger({ rootDir: store, profile: selected }); ledger.initialize()
+  const outbox = new AckOutbox({ rootDir: store, profile: selected }); outbox.initialize()
+  const rejected = []
+  const processor = new AgentMessageProcessor({ profile: selected, inbox, ledger, ackOutbox: outbox, runCommand: run,
+    runChat: async () => {}, sendCommandAckFn: ack, onReject: error => rejected.push(error) })
+  processor.start({ drain: false })
+  return { root, inbox, ledger, outbox, processor, rejected }
+}
+
+test('unified command confirms RECEIVED/STARTED before side effects; checkpoints exact versions without tokens', async () => {
+  const calls = []; let runtime
+  runtime = unifiedCheckpoint({ ack: async (context, status, version) => {
+    // Calling pending scan inside HTTP callback proves no checkpoint lock held.
+    assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, status)
+    assert.deepEqual(Object.keys(context).sort(), ['installationId','tenantId','clientId','canonicalAgentId','messageId','correlationId','commandId','taskId','workItemId','payloadReference','expiresAt'].sort())
+    calls.push({ status, version }); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 10 }
+  }, run: async () => {
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'STARTED'); calls.push({ status: 'EXECUTE' }); return { status: 'completed' }
+  } })
+  await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.deepEqual(calls, [{ status: 'RECEIVED', version: null }, { status: 'STARTED', version: 10 }, { status: 'EXECUTE' }, { status: 'SUCCEEDED', version: 20 }])
+  assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+  assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 30)
+  const checkpoint = runtime.ledger.getEntry('command-7001')
+  assert.equal(JSON.stringify(checkpoint).includes('sessionGeneration'), false); assert.equal(JSON.stringify(checkpoint).includes('sessionToken'), false)
+  runtime.processor.stop()
+})
+
+test('wrong status/version HTTP result cannot dequeue ACK or run command even with injected client', async () => {
+  for (const wrong of [{ kind: 'ADVANCED', status: 'SUCCEEDED', deliveryVersion: 1 }, { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: 0 }]) {
+    let runs = 0; const runtime = unifiedCheckpoint({ ack: async () => wrong, run: async () => { runs++; return { status: 'completed' } } })
+    await runtime.processor.handle(unifiedCommand()); await runtime.processor.runtimeAckTail
+    runtime.processor.resume(); await runtime.processor.waitForIdle()
+    assert.equal(runs, 0); assert.equal(runtime.outbox.pendingEnvelopes().length, 1)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001'), null)
+    assert.equal(runtime.processor.failClosedError.code, 'RUNTIME_ACK_COMMIT_UNCONFIRMED'); runtime.processor.stop()
+  }
+})
+
+test('unknown STARTED HTTP response becomes recovery-required; restart never re-executes', async () => {
+  let runs = 0; let confirmations = 0
+  const runtime = unifiedCheckpoint({ ack: async (_context, status, version) => {
+    if (status === 'STARTED') throw Object.assign(Error('synthetic transport loss'), { code: 'ECONNRESET' })
+    confirmations++; return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  }, run: async () => { runs++; return { status: 'completed' } } })
+  await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.equal(runs, 0); assert.equal(confirmations, 1)
+  assert.equal(runtime.inbox.count('recovery_required'), 1)
+  assert.equal(runtime.ledger.getEntry('command-7001').status, 'RECOVERY_REQUIRED'); runtime.processor.stop()
+  const restarted = unifiedCheckpoint({ root: runtime.root, run: async () => { runs++; return { status: 'completed' } } })
+  restarted.processor.resume(); await restarted.processor.waitForIdle(); assert.equal(runs, 0); restarted.processor.stop()
+})
+
+test('duplicate changed context/payload and cross-subject dispatch cannot alter original checkpoint or execute', async () => {
+  const runtime = unifiedCheckpoint(); const original = unifiedCommand()
+  await runtime.processor.handle(original); await runtime.processor.runtimeAckTail
+  const before = runtime.ledger.getEntry(original.commandId)
+  for (const patch of [{ tenantId: 'foreign' }, { canonicalAgentId: 'foreign' }, { payloadReference: 'other' }, { payload: { instruction: 'changed' } }]) {
+    const result = await runtime.processor.handle({ ...original, ...patch }); assert.equal(result.kind, 'rejected')
+  }
+  assert.equal(runtime.ledger.getEntry(original.commandId).fingerprint, before.fingerprint)
+  assert.equal(runtime.outbox.pendingEnvelopes().length, 0); runtime.processor.stop()
+})
+
+test('completed terminal checkpoint replays after restart with last confirmed version, never re-executes', async () => {
+  let runs = 0; let failed = false
+  const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } }, ack: async (_context, status, version) => {
+    if (status === 'SUCCEEDED') { failed = true; throw Object.assign(Error('synthetic'), { code: 'ECONNRESET' }) }
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  } })
+  await runtime.processor.handle(unifiedCommand(7001, { expiresAt: Date.now() + 100000 })); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.equal(runs, 1); assert.equal(failed, true); assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'SUCCEEDED')
+  runtime.processor.stop()
+  const replay = []; const restarted = unifiedCheckpoint({ root: runtime.root, run: async () => { runs++; return { status: 'completed' } }, ack: async (context, status, version) => {
+    replay.push({ context, status, version }); return { kind: 'ADVANCED', status, deliveryVersion: version + 1 }
+  } })
+  await restarted.processor.replayAcks(); restarted.processor.resume(); await restarted.processor.waitForIdle()
+  assert.equal(runs, 1); assert.equal(replay[0].status, 'SUCCEEDED'); assert.equal(replay[0].version, 2)
+  assert.equal(restarted.outbox.pendingEnvelopes().length, 0); restarted.processor.stop()
+})
+
+test('wire cannot inject replacement runtimeCommand or session secrets into immutable checkpoint', async () => {
+  const runtime = unifiedCheckpoint(); const original = unifiedCommand()
+  for (const patch of [{ runtimeCommand: { ...original, sessionToken: 'rts1_' + 'a'.repeat(64) } },
+    { sessionToken: 'rts1_' + 'a'.repeat(64) }, { runtimeAuthorization: 'synthetic-install-secret' }]) {
+    const result = await runtime.processor.handle({ ...original, ...patch }); assert.equal(result.kind, 'rejected')
+  }
+  assert.equal(runtime.inbox.count('pending'), 0); assert.equal(runtime.ledger.getEntry(original.commandId), null)
+  assert.equal(runtime.outbox.pendingEnvelopes().length, 0); runtime.processor.stop()
 })

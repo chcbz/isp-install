@@ -66,7 +66,7 @@ export class RuntimeHost {
     return { hostId: this.config.hostId, instanceId: this.instanceId, agents: [...this.agents.entries()].map(([subjectKey, state]) => ({
       subjectKey, installationId: state.agent.manifest.installationId, phase: state.phase,
       // Local initialization is not authentication or execution-channel readiness.
-      ready: state.phase === 'READY' && state.executor?.ready?.() === true, reasonCode: state.reasonCode
+      ready: ['READY', 'INITIALIZED'].includes(state.phase) && state.executor?.ready?.() === true, reasonCode: state.reasonCode
     })) };
   }
 
@@ -119,8 +119,8 @@ export class RuntimeHost {
       if (this.stopping || state.phase !== 'INITIALIZED') throw error('RUNTIME_AGENT_NOT_INITIALIZED');
       try {
         await state.executor.activate(session);
-        if (state.executor.ready() !== true) throw error('RUNTIME_AGENT_NOT_READY');
-        state.phase = 'READY';
+        state.phase = state.executor.ready() === true ? 'READY' : 'INITIALIZED';
+        state.reasonCode = state.executor.ready() === true ? null : 'RUNTIME_ADAPTER_UNAVAILABLE';
       } catch (cause) {
         state.phase = 'ISOLATED'; state.reasonCode = 'RUNTIME_AGENT_AUTHORIZATION_FAILED';
         await state.executor.pause?.(); throw cause;

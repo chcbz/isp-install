@@ -904,6 +904,7 @@ export class SkillInstallManager {
     stateRoot,
     wsUrl,
     apiKey,
+    getRuntimeHeaders = null,
     enabled = false,
     maxPackageBytes = DEFAULT_MAX_PACKAGE_BYTES,
     maxExtractedBytes = DEFAULT_MAX_EXTRACTED_BYTES,
@@ -926,7 +927,8 @@ export class SkillInstallManager {
     this.stateRoot = resolve(stateRoot)
     this.wsUrl = wsUrl
     this.scopePath = resolve(this.stateRoot, STATE_SCOPE_FILE)
-    this.apiKey = profile.apiKey || apiKey || ''
+    if (profile.apiKey || apiKey) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'legacy API-key authorization is retired')
+    this.getRuntimeHeaders = getRuntimeHeaders
     this.enabled = enabled === true
     this.maxPackageBytes = maxPackageBytes
     this.maxExtractedBytes = maxExtractedBytes
@@ -1614,7 +1616,11 @@ export class SkillInstallManager {
   }
 
   async _download(command) {
-    if (!this.apiKey) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'managed Agent API credential is unavailable')
+    if (typeof this.getRuntimeHeaders !== 'function') throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'installation-derived Runtime session is required')
+    const headers = this.getRuntimeHeaders()
+    if (!/^AgentRuntime rts1_[0-9a-f]{64}$/.test(headers?.Authorization || '')
+        || headers['X-Agent-Id'] !== this.profile.agentId
+        || ['X-Agent-Installation-Id', 'X-Agent-Host-Id', 'X-Agent-Runtime-Id', 'X-Agent-Session-Generation'].some(key => typeof headers[key] !== 'string' || !headers[key])) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'complete Runtime session proof is required')
     if (typeof this.fetchFn !== 'function') throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'fetch implementation is unavailable')
     const endpoint = buildSkillDownloadUrl(this.wsUrl, command.downloadPath)
     let response
@@ -1622,7 +1628,7 @@ export class SkillInstallManager {
       response = await this.fetchFn(endpoint, {
         method: 'GET',
         redirect: 'error',
-        headers: { 'X-API-Key': this.apiKey, Accept: 'application/zip' }
+        headers: { ...headers, Accept: 'application/zip' }
       })
     } catch (error) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `package download failed: ${error.message}`)

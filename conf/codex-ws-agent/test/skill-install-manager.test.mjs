@@ -30,6 +30,8 @@ import {
 } from '../skill-install-manager.mjs'
 
 
+const runtimeHeaders = { Authorization: `AgentRuntime rts1_${'a'.repeat(64)}`, 'X-Agent-Id': 'agent-a', 'X-Agent-Installation-Id': 'installation-a', 'X-Agent-Host-Id': 'host-a', 'X-Agent-Runtime-Id': 'boot-a', 'X-Agent-Session-Generation': '1' }
+
 const temporaryDirectories = []
 afterEach(() => {
   while (temporaryDirectories.length) rmSync(temporaryDirectories.pop(), { recursive: true, force: true })
@@ -231,7 +233,7 @@ const managerForExistingState = ({ profile: selectedProfile, stateRoot, sendResu
   profile: selectedProfile,
   stateRoot,
   wsUrl: 'wss://api.example.test/ws/agent/channel',
-  apiKey: 'existing-secret',
+  getRuntimeHeaders: () => runtimeHeaders,
   enabled: true,
   fetchFn: async () => { throw new Error('network must not be used during recovery') },
   sendResultFn,
@@ -249,7 +251,7 @@ const managerRuntime = ({ enabled = true, packageBytes = validPackage(), sendRes
     profile: selectedProfile,
     stateRoot,
     wsUrl: 'wss://api.example.test/ws/agent/channel?keep=1',
-    apiKey: 'existing-secret',
+    getRuntimeHeaders: () => runtimeHeaders,
     enabled,
     fetchFn: fetchFn || (async () => responseFor(packageBytes)),
     sendResultFn,
@@ -322,7 +324,7 @@ test('strict command, target, path, and declared-size validation perform no down
   }
 })
 
-test('same-origin download uses only X-API-Key and digest mismatch fails before extraction', async () => {
+test('same-origin download uses only installation-derived session proof and digest mismatch fails before extraction', async () => {
   const bytes = validPackage()
   const observed = []
   const runtime = managerRuntime({
@@ -340,7 +342,7 @@ test('same-origin download uses only X-API-Key and digest mismatch fails before 
   assert.equal(endpoint.origin, 'https://api.example.test')
   assert.equal(endpoint.pathname, '/internal/agent/skill-installations/si_1/package')
   assert.equal(endpoint.search, '')
-  assert.deepEqual(observed[0].options.headers, { 'X-API-Key': 'existing-secret', Accept: 'application/zip' })
+  assert.deepEqual(observed[0].options.headers, { ...runtimeHeaders, Accept: 'application/zip' })
   assert.equal(JSON.stringify(runtime.manager.pendingResults()).includes('existing-secret'), false)
 })
 
@@ -534,7 +536,7 @@ test('processor preserves ACK order and persists work.result before terminal suc
     profile: selectedProfile,
     stateRoot: resolve(root, 'skill-state'),
     wsUrl: 'wss://api.example.test/ws/agent/channel',
-    apiKey: 'secret',
+    getRuntimeHeaders: () => runtimeHeaders,
     enabled: true,
     fetchFn: async () => responseFor(bytes),
     sendResultFn: envelope => { wire.push(`RESULT:${envelope.status}`); return true },
@@ -601,7 +603,7 @@ test('restart reuses an exact installation and conflicting installationId/fence 
     profile: first.profile,
     stateRoot: first.stateRoot,
     wsUrl: 'wss://api.example.test/ws/agent/channel',
-    apiKey: 'existing-secret',
+    getRuntimeHeaders: () => runtimeHeaders,
     enabled: true,
     fetchFn: async () => { downloads += 1; return responseFor(bytes) },
     sendResultFn: () => true,
@@ -635,7 +637,7 @@ test('durable work.result survives restart and replays the identical envelope', 
     profile: first.profile,
     stateRoot: first.stateRoot,
     wsUrl: 'wss://api.example.test/ws/agent/channel',
-    apiKey: 'existing-secret',
+    getRuntimeHeaders: () => runtimeHeaders,
     enabled: true,
     fetchFn: async () => { throw new Error('network must not be used during result replay') },
     sendResultFn: envelope => { replayed.push(envelope); return true },
@@ -1098,7 +1100,7 @@ test('startup reconciles committed installer evidence with a recovery-required i
   const stateRoot = resolve(root, 'skill-state')
   const manager = new SkillInstallManager({
     profile: selectedProfile, stateRoot,
-    wsUrl: 'wss://api.example.test/ws', apiKey: 'secret', enabled: true,
+    wsUrl: 'wss://api.example.test/ws', getRuntimeHeaders: () => runtimeHeaders, enabled: true,
     fetchFn: async () => responseFor(bytes), sendResultFn: () => false,
     runtimeInstanceId: 'runtime-before-crash'
   })
@@ -1169,4 +1171,14 @@ test('profile validation rejects equal, nested, and symlink-aliased CODEX_HOME p
     base('a', 'agent-a', resolve(realParent, 'future-home'), workA),
     base('b', 'agent-b', resolve(parentAlias, 'future-home', 'nested'), workB)
   ], 'a', new Map(), false), /must not be equal or overlap/)
+})
+
+test('legacy API key cannot authorize a skill download; incomplete session proof fails before fetch', async () => {
+  const root = temporaryDirectory(); const selected = profile(root)
+  assert.throws(() => new SkillInstallManager({ profile: selected, stateRoot: resolve(root, 'legacy'), wsUrl: 'wss://api.example.test/ws', apiKey: 'retired', enabled: true }), /retired/)
+  let downloads = 0
+  const manager = new SkillInstallManager({ profile: selected, stateRoot: resolve(root, 'incomplete'), wsUrl: 'wss://api.example.test/ws', enabled: true,
+    getRuntimeHeaders: () => ({ Authorization: runtimeHeaders.Authorization }), fetchFn: async () => { downloads++; assert.fail('no incomplete proof fetch') } })
+  manager.initialize(); const result = await manager.execute(dispatch(validPackage()))
+  assert.equal(result.status, 'failed'); assert.equal(downloads, 0)
 })

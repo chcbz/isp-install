@@ -44,7 +44,7 @@ install -m 0755 "$(readlink -f "$NODE_BIN")" "$STAGE/node/bin/node"
 for file in agent-runtime.mjs install.sh validate.sh; do
     install -m 0755 "$SOURCE_DIR/$file" "$STAGE/runtime/$file"
 done
-for file in package.json runtime.env.example manifest.example.json lib/manifest.mjs lib/runtime-client.mjs \
+for file in README.md package.json runtime.env.example manifest.example.json lib/manifest.mjs lib/runtime-client.mjs \
     lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs systemd/cyf-agent-runtime-v1@.service; do
     install -m 0644 "$SOURCE_DIR/$file" "$STAGE/runtime/$file"
 done

@@ -5,13 +5,11 @@ const framePayload = frame => isObject(frame?.data) ? frame.data : frame
 const traceMatches = (payload, messageId, runtimeInstanceId) =>
   exactValue(payload?.messageId, messageId, 128) &&
   exactValue(payload?.runtimeInstanceId, runtimeInstanceId, 128)
-const validToken = token => typeof token === 'string' && Buffer.byteLength(token) > 0 &&
-  Buffer.byteLength(token) <= 512 && token.trim() === token && !/[\x00-\x1f\x7f]/u.test(token)
-
 /** Track only request-correlated server registration outcomes without logging identity or payloads. */
 export class RegistrationAckObserver {
   constructor({ agentId, runtimeInstanceId, timeoutMs = 10000,
-    schedule = setTimeout, cancel = clearTimeout, logger = console } = {}) {
+    sessionProof = null, schedule = setTimeout, cancel = clearTimeout, logger = console } = {}) {
+    this.sessionProof = sessionProof
     this.agentId = agentId
     this.runtimeInstanceId = runtimeInstanceId
     this.timeoutMs = timeoutMs
@@ -20,15 +18,11 @@ export class RegistrationAckObserver {
     this.logger = logger
     this.stage = 'idle'
     this.messageId = null
-    this.runtimeToken = null
     this.timer = null
     this.waiters = new Set()
   }
 
   get registered() { return this.stage === 'registered' }
-
-  // Token remains process-memory only; snapshots and logs must never expose it.
-  get runtimeAuthHeader() { return /^[0-9a-f]{32}$/.test(this.runtimeToken || '') ? `AgentRuntime ${this.runtimeToken}` : '' }
 
   // Registration timeout is observational: a slow exact ACK can still release
   // native readers. No token is returned, persisted or included in failures.
@@ -62,7 +56,6 @@ export class RegistrationAckObserver {
     this.clearTimer()
     this.stage = 'pending_ack'
     this.messageId = messageId
-    this.runtimeToken = null
     this.log('log', this.stage)
     this.timer = this.schedule(() => {
       if (this.stage !== 'pending_ack' || this.messageId !== messageId) return
@@ -89,9 +82,10 @@ export class RegistrationAckObserver {
     const payload = framePayload(frame)
     if (!isObject(payload) || !traceMatches(payload, this.messageId, this.runtimeInstanceId)) return null
     if (frame.type === 'agent_registered' && exactValue(payload.agentId, this.agentId, 100) &&
-        payload.status === 'online' && validToken(payload.token)) {
+        payload.status === 'online' && !Object.hasOwn(payload, 'token') && !Object.hasOwn(payload, 'sessionToken')
+        && typeof payload.durableStateHealthy === 'boolean' && Array.isArray(payload.readyCommandTypes)
+        && (!this.sessionProof || ['installationId', 'hostId', 'sessionGeneration'].every(key => payload[key] === this.sessionProof[key]))) {
       this.clearTimer()
-      this.runtimeToken = payload.token
       this.stage = 'registered'
       this.messageId = null
       this.settleWaiters(true)
@@ -112,7 +106,6 @@ export class RegistrationAckObserver {
     this.stage = 'disconnected'
     this.messageId = null
     this.settleWaiters(false)
-    this.runtimeToken = null
   }
 }
 

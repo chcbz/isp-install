@@ -7,6 +7,6 @@
   "engines": { "node": "=20.20.2" },
   "scripts": {
     "test": "node --test",
-    "validate": "node agent-runtime.mjs validate --manifest manifest.example.json"
+    "validate": "node agent-runtime.mjs validate"
   }
 }

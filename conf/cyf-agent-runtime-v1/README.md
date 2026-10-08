@@ -1,67 +1,128 @@
-# CYF Agent Runtime v1
+# Unified Agent Runtime (UR-01, 2026-10-08)
 
-A separate Node 20 Runtime v1 package. It does not reuse `codex-ws-agent`, WebSocket URLs, `.env` files, legacy `api_key` configuration, profiles, or state.
+One Runtime host reuses `codex-ws-agent`; it is not a heartbeat sidecar or a new
+model executor. The current source is an **offline M3 candidate**, not an accepted
+migration or authorized release. The old engine CLI/API-key execution entry is
+retired; do not run the old service with the new ACK format.
 
-## Offline validation and installation
+## Artifact and configuration
 
-```bash
-./validate.sh --manifest manifest.example.json
-npm test
+`install.sh --target ABSOLUTE_NEW_DIRECTORY` prepares a new artifact containing
+`runtime/`, `codex-ws-agent/` and pinned `node/bin/node` (20.20.2), npm lock graph
+and release-local Python delivery tools. It neither enables services nor adopts,
+rewrites, enrolls or deletes existing Agent state. Python still needs a compatible
+target ABI/stdlib; mocked installer tests do not prove clean-target installation.
+
+Configuration lives **outside** the artifact. A host config has exactly:
+
+```json
+{
+  "configVersion": 1,
+  "hostId": "operator-provisioned-persistent-host",
+  "stateRoot": "/private/host-state",
+  "agents": [
+    {
+      "manifestPath": "/private/agent-a/manifest.json",
+      "profilePath": "/private/agent-a/profile.json",
+      "stateRoot": "/private/agent-a/state"
+    }
+  ]
+}
 ```
 
-The repository release profile also provides `./install.sh runtime-v1` (which invokes
-`shell/cyf_agent_runtime_v1_install.sh`) and the `systemd/cyf-agent-runtime-v1@.service`
-template. The copied Runtime v1 payload contains its own `install.sh`, `validate.sh`, and
-`systemd/` template. Both installers create a **new** directory and never copy, read, stop,
-or overwrite `codex-ws-agent` files.
+Each sealed manifest contains exact `installationId`, `tenantId`, `clientId`,
+`canonicalAgentId`, `manifestVersion`, `runtimeProtocolVersion: "v1"`, and
+`manifestSha256` (`sha256:` + SHA256 of recursively key-sorted unsigned JSON).
+Each profile explicitly selects the same `agentId`, a `profileId`, `codexBin`,
+`codexHome`, `codexWorkdir`, and existing per-operation executor policies. For
+example, `appServerEnabled`, `fastChatEnabled`, and `skillInstallEnabled` are
+explicit booleans; none imply readiness without the real adapter. No profile may
+supply API keys, installation/session credentials or reserved Runtime identity.
 
-For a standalone sealed package delivery, use the payload installer with a real manifest:
+Pre-create private state roots (0700, current UID). Config/manifest/profile files
+must be current-UID regular files, not group/other writable; credential files are
+0600. Duplicate full subjects/installations and equal/nested/symlink-alias writable
+roots across Agents are rejected. Host state cannot overlap Agent writable roots.
+Same-UID malicious code is **not** a strong isolation boundary. Provision workspace
+policies separately; do not share writable workspaces between subjects. Existing
+cross-process locks retain ownership until confirmed shutdown; crashed writer locks
+require stopped-writer reconciliation, never automatic theft or state clearing.
 
-```bash
-./install.sh --target /home/isp/apps/cyf-agent-runtime-v1/AGENT_INSTANCE \
-  --manifest /secure/channel/manifest.json
-```
+## Entry and authorization
 
-It copies only Runtime v1 files, validates the installed manifest, creates a private
-`runtime-state/` directory, and does not enable or start a service.
-
-A deployment channel must deliver a real read-only `manifest.json` with exact `tenantId`, `clientId`, `canonicalAgentId`, `installationId`, `manifestVersion`, and `manifestSha256`. `manifestSha256` is calculated as `sha256:` plus the lowercase SHA-256 of the recursively key-sorted JSON object with the `manifestSha256` member omitted. This local packaging rule is deliberately isolated because the API design does not yet specify a manifest canonicalization wire format.
-
-## Runtime configuration
-
-Set only `CYF_RUNTIME_V1_API_BASE_URL` plus one enrollment source:
-
-- `CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE`: regular non-symlink file with mode `0600`; or
-- `CYF_RUNTIME_V1_ENROLLMENT_SECRET`: protected service-manager environment.
-
-The CLI deliberately has no enrollment-secret option. Runtime authorization is persisted only below `--state-dir` in private (`0700` directory, `0600` file) storage. Do not retain the enrollment secret after a successful enrollment. Do not put any authorization value in a URL, shell history, manifest, browser, or normal log.
-
-## Commands
+Use the artifact-local Node; installation/enrollment and service activation are
+separate operations, requiring their own authorization:
 
 ```bash
-node agent-runtime.mjs validate --manifest manifest.json
-node agent-runtime.mjs enroll --manifest manifest.json --state-dir runtime-state
-node agent-runtime.mjs session --manifest manifest.json --state-dir runtime-state
-node agent-runtime.mjs heartbeat --manifest manifest.json --state-dir runtime-state
-node agent-runtime.mjs ack --manifest manifest.json --state-dir runtime-state --command command.json --status RECEIVED
-node agent-runtime.mjs run --manifest manifest.json --state-dir runtime-state
+ARTIFACT=/path/to/prepared-artifact
+"$ARTIFACT/node/bin/node" "$ARTIFACT/runtime/agent-runtime.mjs" validate --config /private/host.json
+"$ARTIFACT/runtime/validate.sh" --root "$ARTIFACT" --config /private/host.json
+# Explicit enrollment for exactly one SHA256 full-subject storage key:
+"$ARTIFACT/node/bin/node" "$ARTIFACT/runtime/agent-runtime.mjs" enroll --config /private/host.json --subject SUBJECT_KEY
+"$ARTIFACT/node/bin/node" "$ARTIFACT/runtime/agent-runtime.mjs" run --config /private/host.json
 ```
 
-`ack` validates command target identity, expiry, required command fields, and monotonic state before a private durable queue is written. Reconnection resends the same `messageId` ACK; terminal acknowledgement records are retained to avoid execution replay and terminal rewrites.
+`CYF_RUNTIME_V1_API_BASE_URL` must be an HTTP(S) origin without routing data or
+credentials. Enrollment alone consumes one protected environment secret or
+`CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE` (non-symlink 0600 regular file). Do not retain
+that secret in the running service environment. Each Agent persists only its own
+installation authorization in `stateRoot/runtime-authorization.json`.
 
-## API integration assumptions requiring confirmation
+Wire r1 is frozen by API commit **87c894dc297145ee2da338107727087ac74e81b1**;
+fixture SHA256 **56d7c3d31a33191eb23b0209158dd0395c184f661aa694eb7cc29f0942322adb**.
+Session POST `/agent/runtime/v1/session` uses installation Bearer plus sealed
+identity/host/boot. Only exact `JsonResult.data` identity, host, boot and increasing
+server generation is accepted. WS `/ws/agent/channel`, native `/internal/agent/`
+and command HTTP ACK use memory-only `AgentRuntime rts1_<64-lowercase-hex>` and
+five X-Agent proof headers (Id, Installation-Id, Host-Id, Runtime-Id,
+Session-Generation). No URL credentials, API-key fallback, registration-minted
+replacement token or session secrets in logs/checkpoints.
 
-The frozen design specifies endpoint paths but not request/response schemas or command-channel transport. This package therefore sends the documented identity fields to all Runtime v1 HTTP endpoints and assumes:
+## Frozen persistence and lifecycle boundaries
 
-1. enrollment accepts `enrollmentSecret` and returns `data.runtimeAuthorization` in CYF's common JSON envelope;
-2. runtime authorization is sent as `Authorization: Bearer <runtimeAuthorization>`;
-3. ACK body uses `status` and returns `data.kind: ADVANCED|PRIOR`;
-4. session/heartbeat return `data.status`, including `REBINDS_REQUIRED`.
+- Event catalog stays the mature Protocol v1 catalog, including command.dispatch,
+  CHAT, exact chat.stop, work.result and their own business receipts. No new command.
+- Unique command authority is the existing per-Agent ledger + inbox + ACK outbox
+  checkpoint. No `pending-acks.json`, sidecar ACK CLI or duplicate durable queue.
+- Lock order: lifetime host/Agent ownership → per-Agent lifecycle gate → existing
+  short checkpoint locks. HTTP waits occur **outside** the short filesystem lock;
+  response commits reacquire it, revalidate FIFO head/original-context digest,
+  persist exact D06 receipt + emitted marker, then durably dequeue. A crash between
+  these steps retains idempotent replay evidence.
+- Immutable ACK context contains installation/full subject, original message,
+  correlation, command, task, nullable workItem, payloadReference and expiresAt.
+  Session proof is appended only when sending. First deliveryVersion is null;
+  later it is the last confirmed value, not a predicted CAS version. Only matching
+  status + valid monotonic version + ADVANCED/PRIOR confirms commit. Injected
+  clients cannot bypass the checkpoint's independent result validation.
+- RECEIVED follows durable fingerprint/inbox; STARTED is durable and HTTP-confirmed
+  before business side effects. Unknown STARTED or business write outcomes are
+  recovery-required, never automatic rerun. Expiry denies new admission, not known
+  terminal reporting. Unknown native start/upload/commit retains recovery materials.
+- Registration is token-free and request/identity/boot/session-correlated;
+  readyCommandTypes comes from measured actual adapters, empty admits no commands.
+  durableStateHealthy is computed from actual stores, not a heartbeat assertion.
+  Health loss pauses admission but allows lawful terminal/result replay. Recovery
+  refreshes registration before readmission. Chat `profiles.EXECUTE` stays disabled.
+- Each Agent has its own session, socket, reconnect and queues. Revocation isolates
+  only that subject. SIGTERM aborts owned transport work and waits for confirmed
+  engine shutdown before releasing writer locks. No permanent legacy auth path.
 
-No command-polling or command-channel transport is invented here: `run` establishes a session, heartbeats, and flushes already durable ACKs. An API-owned command channel contract is required before it can consume commands or execute F01/E05 work.
+## Owner test coverage and remaining gates
 
-## Run-loop recovery
+Targeted tests: `test/runtime-v1.test.mjs` (r1 request/proof/result/expiry/security),
+`test/runtime-host.test.mjs` (config/locks/isolated lifecycle/generation/health/close),
+engine `test/agent-client.test.mjs` (mature queue + D06 FIFO/STARTED/unknown result/
+restart/conflicting payload; CHAT/result dedicated confirmation),
+`test/registration-ack.test.mjs` and `test/skill-install-manager.test.mjs`.
+They use private synthetic roots/mock HTTP/socket and a local WS handshake;
+**they are not cross-end API, clean-target install, Flow or online evidence**.
 
-The `run` command keeps the same manifest identity and session/heartbeat/ACK protocol. It retries transient `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `EAI_AGAIN`, `UND_ERR_SOCKET`, `UND_ERR_CONNECT_TIMEOUT`, and HTTP `408`, `429`, or `5xx` failures with exponential backoff capped at 60 seconds; a successful cycle resets the delay. HTTP `401`/`403`, `REBINDS_REQUIRED`, and other non-transient failures (including TLS certificate/identity errors) stop with fixed exit status `78`; both source units prevent restart for that status. The unit uses a 5-second restart delay for other process failures; permanent auth/rebind failures never trigger identity rebinding or work replay. Retry logs contain only a fixed category and, for HTTP errors, the numeric status.
-
-`SIGTERM`/`SIGINT` abort the active request or backoff wait. The loop does not start another ACK flush after cancellation. Durable pending ACK records remain governed by the existing monotonic ACK queue, and no task execution/replay behavior is added.
+Remaining M3 work is tracked in Owner handoff: full exact command.dispatch
+payloadReference/canonical identity fixture integration; authorized native lane
+32hex validator replacement; bounded terminal-confirmed workspace cleanup; full
+per-operation capability/cancellation/reconnect verification. Retaining recovery
+material is intentional until confirmation, not permission to clear it manually.
+Dynamic online identity/maintenance ownership, stopped-writer state migration,
+Flow version/commit/artifact proof and three-Agent real business acceptance remain
+release gates. Current task is incomplete: **do not publish or switch production**.

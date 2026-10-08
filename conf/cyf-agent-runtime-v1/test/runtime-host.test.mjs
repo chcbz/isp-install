@@ -210,7 +210,7 @@ test('injected adapter refuses guessed sessions and never imports legacy environ
   f.cleanup(() => adapter.close());
   const executor = adapter.createExecutor({ agent: config.agents[0], subjectKey: config.agents[0].subjectKey });
   await executor.initialize(); assert.equal(executor.ready(), false);
-  await assert.rejects(executor.activate({ madeUpToken: 'fake' }), code('RUNTIME_WIRE_ADAPTER_REQUIRED'));
+  await assert.rejects(executor.activate({ madeUpToken: 'fake' }), code('RUNTIME_ENROLLMENT_REQUIRED'));
   await executor.close();
 });
 
@@ -282,7 +282,7 @@ test('multi-Agent validate CLI reads config without engine effects; run fails cl
   assert.deepEqual(JSON.parse(stdout), { valid: true, hostId: 'stable-host', agentCount: 3 });
   assert.deepEqual(await readdir(f.raw.stateRoot), []);
   const { main } = await import(entry);
-  await assert.rejects(main(['run', '--config', f.path], {}), code('RUNTIME_WIRE_ADAPTER_REQUIRED'));
+  await assert.rejects(main(['run', '--config', f.path], {}), code('RUNTIME_API_ORIGIN_REQUIRED'));
   assert.deepEqual(await Promise.all(f.entries.map(entry => readdir(entry.stateRoot))), [[], [], []]);
 });
 
@@ -345,4 +345,145 @@ test('toolchain validation refuses a host-global interpreter alias instead of fa
   await mkdir(resolve(artifact, '.toolchain/bin'), { recursive: true });
   await symlink('/usr/bin/python3', resolve(artifact, '.toolchain/bin/python'));
   await assert.rejects(validateExecutionPayload(artifact, { dependencies: false }), code('RUNTIME_TOOLCHAIN_PATH_UNSAFE'));
+});
+
+// M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
+// lifecycle. Synthetic socket/HTTP only; no server/production claim.
+async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true } = {}) {
+  const { EventEmitter } = await import('node:events');
+  const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
+  const f = await fixture(t, { count: 2 }); const config = await f.config();
+  const requests = []; const sockets = []; const engines = new Map();
+  const socketEvents = new EventEmitter();
+  class Socket extends EventEmitter {
+    constructor(url, options) {
+      super(); this.url = url; this.headers = options.headers; this.readyState = 0; this.sent = []; sockets.push(this);
+      queueMicrotask(() => { if (this.readyState === 0) { this.readyState = 1; this.emit('open'); socketEvents.emit('opened', this); } });
+    }
+    send(bytes) {
+      const frame = JSON.parse(bytes); this.sent.push(frame);
+      if (frame.messageType === 'agent.register' && ackRegistration) queueMicrotask(() => this.receive({ type: 'agent_registered',
+        messageId: frame.messageId, agentId: frame.agentId, runtimeInstanceId: frame.runtimeInstanceId,
+        installationId: frame.installationId, hostId: frame.hostId, sessionGeneration: frame.sessionGeneration,
+        status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes }));
+    }
+    receive(frame) { this.emit('message', Buffer.from(JSON.stringify(frame))); }
+    close(code = 1000) { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.emit('close', code)); }
+    terminate() { this.close(); }
+  }
+  const module = {
+    buildProtocolEnvelope: (messageType, payload) => ({ schemaVersion: 1, messageType, ...payload }),
+    createRuntimeExecutionHost: () => ({
+      createExecutor: ({ subjectKey, agent }) => {
+        const state = { profile: agent.profile, processor: { pause: () => { state.paused = true; } }, healthy,
+          accepted: [], closed: false, resumed: 0, types: [...types], paused: true, transport: null };
+        engines.set(subjectKey, state);
+        return {
+          initialize: async () => {}, bindTransport: transport => { state.transport = transport; }, attachSocket: socket => { state.socket = socket; },
+          durableStateHealthy: () => state.healthy, readyCommandTypes: () => state.types, chatReady: () => chatReady,
+          registrationPayload: () => ({ runtimeCapabilities: { profiles: { EXECUTE: { available: false } } } }),
+          acceptFrame: async frame => { state.accepted.push(frame); }, resume: async () => { state.resumed++; },
+          disconnected: () => { state.paused = true; }, suspendAdmission: () => { state.paused = true; },
+          close: async () => { state.closed = true; }, state: () => state
+        };
+      }, close: async () => {}
+    })
+  };
+  for (const agent of config.agents) await f.json(resolve(agent.stateRoot, 'runtime-authorization.json'), { installationId: agent.manifest.installationId, runtimeAuthorization: 'synthetic-' + agent.manifest.installationId });
+  const generation = new Map();
+  const adapters = await createExecutionAdapterFactory({ config, instanceId: 'boot-fixture', apiOrigin: 'https://api.example.test', socketFactory: Socket,
+    loadEngine: async () => module, clientFactory: settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
+      const body = JSON.parse(options.body); requests.push({ url, options, body });
+      if (url.endsWith('/session')) {
+        const current = (generation.get(body.installationId) || 6) + 1; generation.set(body.installationId, current);
+        return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: { ...Object.fromEntries(['installationId','tenantId','clientId','canonicalAgentId','hostId','runtimeInstanceId'].map(key => [key, body[key]])), sessionGeneration: current,
+          scheme: 'AgentRuntime', sessionToken: 'rts1_' + 'a'.repeat(64), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' } }) };
+      }
+      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: { kind: 'ADVANCED', status: body.status, deliveryVersion: (body.deliveryVersion ?? 0) + 1 } }) };
+    } }) });
+  f.cleanup(() => adapters.close());
+  const executors = config.agents.map(agent => adapters.createExecutor({ subjectKey: agent.subjectKey, agent }));
+  for (const executor of executors) await executor.initialize();
+  return { f, config, adapters, sockets, requests, executors, engines, states: () => [...engines.values()], opened: () => sockets.some(socket => socket.readyState === 1) ? Promise.resolve() : new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), tick: () => new Promise(resolveTick => setImmediate(resolveTick)) };
+}
+
+test('two independent session channels activate only exact receipt; health revocation keeps terminal reporting', async t => {
+  const c = await channelFixture(t);
+  await Promise.all(c.executors.map(executor => executor.activate()));
+  assert.deepEqual(c.executors.map(executor => executor.ready()), [true, true]);
+  assert.equal(c.requests[0].options.headers.Authorization.startsWith('Bearer synthetic-'), true);
+  const first = c.sockets[0].sent[0]; assert.deepEqual(first.readyCommandTypes, ['TASK_INVITE']);
+  assert.equal(first.durableStateHealthy, true); assert.equal(Object.hasOwn(first, 'sessionToken'), false);
+  assert.equal(c.sockets[0].headers['X-API-Key'], undefined); assert.equal(c.sockets[0].url, 'wss://api.example.test/ws/agent/channel');
+  const state = c.states()[0]; state.healthy = false; await c.adapters.heartbeat();
+  assert.deepEqual(c.executors.map(executor => executor.ready()), [false, true]);
+  assert.equal(state.transport.reportReady(), true); assert.equal(state.paused, true);
+  const command = { ...Object.fromEntries(['installationId','tenantId','clientId','canonicalAgentId'].map(key => [key, c.config.agents[0].manifest[key]])), messageId: 'original-message', correlationId: 'original-correlation', commandId: 'original-command', taskId: 'task', workItemId: null, payloadReference: 'payload', expiresAt: '2000-01-01T00:00:00Z' };
+  const result = await state.transport.acknowledge(command, 'SUCCEEDED', 10);
+  assert.equal(result.deliveryVersion, 11); assert.equal(c.requests.at(-1).body.sessionGeneration, 7);
+  const presence = c.sockets[0].sent.findLast(frame => frame.messageType === 'agent.presence'); assert.equal(presence.durableStateHealthy, false);
+  state.healthy = true; await c.adapters.heartbeat(); await c.tick(); assert.equal(c.executors[0].ready(), true);
+});
+
+test('zero real adapters authenticate channel but never advertise or become execution-ready', async t => {
+  const c = await channelFixture(t, { types: [], healthy: false });
+  await c.executors[0].activate(); assert.equal(c.executors[0].ready(), false);
+  assert.deepEqual(c.sockets[0].sent[0].readyCommandTypes, []); assert.equal(c.sockets[0].sent[0].durableStateHealthy, false);
+});
+
+test('stale generation or outer/nested proof mismatch cannot activate/enter engine; CHAT/result keep their own channel', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0]; const registration = socket.sent[0];
+  const receipt = { type: 'agent_registered', messageId: registration.messageId, agentId: registration.agentId, runtimeInstanceId: registration.runtimeInstanceId,
+    installationId: registration.installationId, hostId: registration.hostId, sessionGeneration: registration.sessionGeneration, status: 'online', durableStateHealthy: true, readyCommandTypes: registration.readyCommandTypes };
+  socket.receive({ ...receipt, sessionGeneration: 6 }); await c.tick(); assert.equal(c.executors[0].ready(), false);
+  socket.receive({ ...receipt, token: 'old-auth' }); await c.tick(); assert.equal(c.executors[0].ready(), false);
+  socket.receive(receipt); await activating;
+  socket.receive({ messageType: 'chat.message', sessionGeneration: 6 });
+  socket.receive({ messageType: 'chat.message', tenantId: 'foreign', data: {} });
+  socket.receive({ messageType: 'command.ack' });
+  socket.receive({ type: 'agent_message_saved', turnId: 'chat-own-turn' });
+  socket.receive({ messageType: 'work.result.receipt', commandId: 'result-own-command' });
+  await c.tick(); assert.deepEqual(c.states()[0].accepted.map(frame => frame.messageType || frame.type), ['agent_message_saved','work.result.receipt']);
+  assert.equal(c.states()[0].transport.send({ messageType: 'command.ack' }), false);
+});
+
+test('closing pending registration releases activation and only owned executor, no shutdown deadlock', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = assert.rejects(c.executors[0].activate(), code('RUNTIME_CHANNEL_STOPPED'));
+  await c.tick(); await c.executors[0].close(); await activating;
+  assert.equal(c.states()[0].closed, true); assert.equal(c.states()[1].closed, false);
+});
+
+test('policy revocation isolates one subject while peer channel remains ready', async t => {
+  const c = await channelFixture(t); await Promise.all(c.executors.map(executor => executor.activate()));
+  c.sockets[0].close(1008); await c.tick(); assert.deepEqual(c.executors.map(executor => executor.ready()), [false,true]);
+});
+
+test('unified SIGTERM while registration activation waits closes transports before host lifecycle gate', async t => {
+  const { runUnifiedRuntime } = await import('../agent-runtime.mjs');
+  const f = await fixture(t, { count: 2 }); const config = await f.config(); const controller = new AbortController();
+  let entered; const began = new Promise(resolveBegan => { entered = resolveBegan; }); const states = [];
+  const createAdapters = async () => {
+    const adapter = { createExecutor: () => {
+      const state = { closed: false, releaseActivation: null }; states.push(state);
+      return { initialize: async () => {}, activate: () => { entered(); return new Promise(resolveActivation => { state.releaseActivation = resolveActivation; }); },
+        ready: () => false, pause: async () => {}, close: async () => { state.closed = true; state.releaseActivation?.(); } };
+    }, heartbeat: async () => assert.fail('must not heartbeat pending activation'), close: async () => { for (const state of states) { state.closed = true; state.releaseActivation?.(); } } };
+    return adapter;
+  };
+  const running = runUnifiedRuntime({ config, apiOrigin: 'https://api.example.test', instanceId: 'boot-signal', signal: controller.signal, createAdapters });
+  await began; controller.abort(); const snapshot = await running;
+  assert.deepEqual(snapshot.agents.map(agent => agent.phase), ['STOPPED','STOPPED']); assert.ok(states.every(state => state.closed));
+  assert.deepEqual(await readdir(config.stateRoot), []); assert.deepEqual(await Promise.all(config.agents.map(agent => readdir(agent.stateRoot))), [[],[]]);
+});
+
+test('unified runtime heartbeat stops after SIGTERM and does not create a second ACK authority', async t => {
+  const { runUnifiedRuntime } = await import('../agent-runtime.mjs');
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const controller = new AbortController(); let heartbeats = 0;
+  const fake = executors();
+  await runUnifiedRuntime({ config, apiOrigin: 'https://api.example.test', instanceId: 'boot-signal', signal: controller.signal,
+    createAdapters: async () => ({ createExecutor: fake.createExecutor, heartbeat: async () => { heartbeats++; controller.abort(); }, close: async () => {} }) });
+  assert.equal(heartbeats, 1); assert.deepEqual(await readdir(config.agents[0].stateRoot), []);
 });

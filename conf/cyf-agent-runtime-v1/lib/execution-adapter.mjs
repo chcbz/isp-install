@@ -1,26 +1,141 @@
-// Thin injection adapter around codex-ws-agent, not a replacement executor.
-// It cannot activate a raw/guessed session DTO. A frozen wire adapter must bind
-// current installation identity, generation, transport and command ACK first.
-export async function createExecutionAdapterFactory({ config, instanceId, apiOrigin, workspacePolicies, providerEnvironments, bindSession, loadEngine } = {}) {
-  const load = loadEngine || (() => import('../../codex-ws-agent/agent-client.mjs'));
-  const module = await load();
-  const engine = module.createRuntimeExecutionHost({ agents: config.agents, runtimeInstanceId: instanceId, apiOrigin, workspacePolicies, providerEnvironments });
+// Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
+// Session credentials live only here; outbound work checkpoints hold no proof.
+import { randomUUID } from 'node:crypto';
+import { RuntimeV1Client, classifyRuntimeError } from './runtime-client.mjs';
+const adapterError = code => Object.assign(new Error(code), { code });
+const wait = (ms, signal) => new Promise(resolve => {
+  if (signal.aborted) return resolve();
+  const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
+  const timer = setTimeout(done, ms); signal.addEventListener('abort', done, { once: true });
+});
+
+export async function createExecutionAdapterFactory({ config, instanceId, apiOrigin, workspacePolicies,
+  providerEnvironments, loadEngine, socketFactory, clientFactory, logger = () => {} } = {}) {
+  const module = await (loadEngine || (() => import('../../codex-ws-agent/agent-client.mjs')))();
+  const Socket = socketFactory || await module.loadWebSocketClient();
+  const { RegistrationAckObserver } = await import('../../codex-ws-agent/registration-ack.mjs');
+  const engine = module.createRuntimeExecutionHost({ agents: config.agents, runtimeInstanceId: instanceId,
+    apiOrigin, workspacePolicies, providerEnvironments, webSocketClient: Socket });
+  const attached = new Map();
   return {
     createExecutor: options => {
       const executor = engine.createExecutor(options);
-      return {
-        initialize: () => executor.initialize(),
-        activate: async session => {
-          if (typeof bindSession !== 'function') throw Object.assign(new Error('RUNTIME_WIRE_ADAPTER_REQUIRED'), { code: 'RUNTIME_WIRE_ADAPTER_REQUIRED' });
-          await bindSession({ session, agent: options.agent, instanceId, executor });
-          if (!executor.ready()) throw Object.assign(new Error('RUNTIME_SESSION_NOT_READY'), { code: 'RUNTIME_SESSION_NOT_READY' });
-        },
-        ready: () => executor.ready(),
-        pause: () => executor.pause(),
-        close: () => executor.close()
+      const client = (clientFactory || (settings => new RuntimeV1Client(settings)))({ manifest: options.agent.manifest,
+        apiBaseUrl: apiOrigin, stateDir: options.agent.stateRoot, hostId: config.hostId, runtimeInstanceId: instanceId });
+      let socket = null; let observer = null; let abort = null; let loop = null; let channelConfirmed = false;
+      let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
+      let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false;
+      const durable = () => executor.durableStateHealthy() === true;
+      const usable = () => executor.readyCommandTypes().length > 0 || executor.chatReady();
+      const ready = () => admitted && channelConfirmed && declaredHealthy && durable() && usable() && socket?.readyState === 1;
+      const send = envelope => {
+        if (!client.currentSession || socket?.readyState !== 1 || envelope.messageType === 'command.ack') return false;
+        const session = client.currentSession;
+        const current = { ...envelope, tenantId: session.tenantId, clientId: session.clientId, agentId: session.canonicalAgentId,
+          sourceAgentId: session.canonicalAgentId, installationId: session.installationId, hostId: session.hostId,
+          runtimeInstanceId: session.runtimeInstanceId, sessionGeneration: session.sessionGeneration };
+        socket.send(JSON.stringify(current)); return true;
       };
+      const register = () => {
+        if (!client.currentSession || socket?.readyState !== 1) return false;
+        const healthy = durable(); declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
+        const envelope = module.buildProtocolEnvelope('agent.register', { ...executor.registrationPayload(),
+          messageId: randomUUID(), durableStateHealthy: healthy, readyCommandTypes: requestTypes }, executor.state().profile, instanceId);
+        observer.begin(envelope.messageId); channelConfirmed = false;
+        if (!send(envelope)) observer.sendFailed(envelope.messageId);
+        return true;
+      };
+      const transport = {
+        ready, reportReady: () => admitted && channelConfirmed && !!client.currentSession && socket?.readyState === 1, send, readyCommandTypes: () => ready() ? executor.readyCommandTypes().filter(type => requestTypes.includes(type)) : [], headers: () => client.sessionHeaders(),
+        acknowledge: (command, status, version) => client.acknowledge(command, status, version, { signal: abort?.signal }), nativeFetch: (url, opts) => client.nativeFetch(url, opts),
+        refreshCapabilities: register
+      };
+      const disconnect = () => { channelConfirmed = false; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const connectOnce = async signal => {
+        const session = await client.session({ signal });
+        if (signal.aborted) return;
+        observer = new RegistrationAckObserver({ agentId: session.canonicalAgentId, runtimeInstanceId: instanceId,
+          sessionProof: session, logger: { log() {}, warn() {} } });
+        const current = new Socket(client.websocketUrl(), client.websocketOptions()); socket = current;
+        executor.attachSocket(current); executor.state().registration = observer; executor.bindTransport(transport);
+        return new Promise((resolveConnection, rejectConnection) => {
+          const stopped = () => current.close(); signal.addEventListener('abort', stopped, { once: true });
+          let ended = false;
+          const end = error => { if (ended) return; ended = true; signal.removeEventListener('abort', stopped); if (socket === current) disconnect(); error ? rejectConnection(error) : resolveConnection(); };
+          current.on('open', () => { if (socket === current && !signal.aborted) register(); });
+          current.on('error', error => { if (socket === current && !signal.aborted) logger('runtime-channel-error', { category: classifyRuntimeError(error).kind }); });
+          current.on('close', (code) => end(code === 1008 ? Object.assign(adapterError('RUNTIME_CHANNEL_REVOKED'), { status: 403 }) : null));
+          current.on('unexpected-response', (_request, response) => { current.terminate(); end(Object.assign(adapterError('RUNTIME_HANDSHAKE_REJECTED'), { status: response.statusCode })); });
+          current.on('message', bytes => {
+            if (socket !== current || signal.aborted) return;
+            let frame;
+            try { frame = JSON.parse(bytes.toString()); } catch { logger('runtime-frame-rejected', { code: 'INVALID_JSON' }); return; }
+            if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
+            const payload = frame.data && typeof frame.data === 'object' && !Array.isArray(frame.data) ? frame.data : frame;
+            if (['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration'].some(key => Object.hasOwn(frame, key) && frame[key] !== session[key])) return;
+            if (['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration'].some(key => Object.hasOwn(payload, key) && payload[key] !== session[key])) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH' }); return; }
+            const observed = observer.observe(frame);
+            if (observed === 'registered') {
+              if (payload.readyCommandTypes.length !== requestTypes.length || payload.readyCommandTypes.some(type => !requestTypes.includes(type)) || !payload.durableStateHealthy && requestTypes.length) {
+                channelConfirmed = false; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
+              }
+              channelConfirmed = true; resolveActivated?.(); void executor.resume().catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' })); return;
+            }
+            if (observed === 'rejected') { rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 })); current.close(1008); return; }
+            if (frame.type === 'connected' || frame.type === 'agent_registered') return;
+            if (frame.type === 'ping') { send({ schemaVersion: 1, messageType: 'pong', type: 'pong', messageId: randomUUID() }); return; }
+            if (!channelConfirmed) return;
+            // Results/CHAT persistence receipts remain WS business confirmations.
+            // Commands go through the existing durable processor, never a new queue.
+            if (frame.messageType === 'command.ack') return;
+            ingress = ingress.catch(() => {}).then(() => { if (socket === current && client.currentSession === session && channelConfirmed && !signal.aborted) return executor.acceptFrame(frame); }).catch(error => logger('runtime-frame-rejected', { code: error.code || 'INVALID_FRAME' }));
+          });
+          if (signal.aborted) current.close();
+        });
+      };
+      const startChannel = () => {
+        if (loop) return activation;
+        abort = new AbortController(); activation = new Promise((resolve, reject) => { resolveActivated = resolve; rejectActivated = reject; });
+        loop = (async () => {
+          let attempt = 0;
+          while (!abort.signal.aborted) {
+            try { await connectOnce(abort.signal); attempt = 0; }
+            catch (error) {
+              if (abort.signal.aborted) break;
+              const category = classifyRuntimeError(error).kind;
+              if (!['transient-network', 'transient-http'].includes(category)) { rejectActivated(error); admitted = false; logger('runtime-agent-isolated', { subjectKey: options.subjectKey, category }); return; }
+              logger('runtime-channel-retry', { subjectKey: options.subjectKey, category });
+            }
+            if (!abort.signal.aborted) await wait(Math.min(1000 * 2 ** Math.min(attempt++, 6), 60000), abort.signal);
+          }
+        })();
+        return activation;
+      };
+      const api = {
+        initialize: () => executor.initialize(), activate: async () => { await startChannel(); }, ready,
+        pause: async () => { admitted = false; executor.state()?.processor.pause(); },
+        heartbeat: async () => {
+          if (!client.currentSession || socket?.readyState !== 1) return;
+          const healthy = durable();
+          send(module.buildProtocolEnvelope('agent.presence', { messageId: randomUUID(), status: ready() ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId));
+          // Health revocation never removes authorization to report known outcomes.
+          if (!healthy) { declaredHealthy = false; executor.suspendAdmission(); }
+          else if (!declaredHealthy) register();
+          if (channelConfirmed) await executor.resume();
+        },
+        close: () => {
+          if (!closed) closed = (async () => {
+            admitted = false; abort?.abort(); socket?.close(); rejectActivated?.(adapterError('RUNTIME_CHANNEL_STOPPED'));
+            await loop; await executor.close(); await ingress; client.invalidateSession();
+          })();
+          return closed;
+        },
+        state: () => executor.state()
+      };
+      attached.set(options.subjectKey, api); return api;
     },
-    close: () => engine.close()
+    heartbeat: () => Promise.allSettled([...attached.values()].map(executor => executor.heartbeat())),
+    close: async () => { await Promise.all([...attached.values()].map(executor => executor.close())); await engine.close(); }
   };
 }
 
