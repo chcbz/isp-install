@@ -1,16 +1,28 @@
-# `wuyong` dual-mode install candidate
+# Historical `wuyong` dual-mode policy/provenance candidate — NOT an installer
 
 This directory is an inert, redacted candidate for one existing `wuyong` identity. It does not create or bind an identity, install a release, restart a service, or call a Provider. An existing persona binding is identity evidence only and is not controlled-image credential-binding evidence. Numeric values are not globally unique across namespaces, so the checker does not blacklist historical IDs. The controlled-image `bindingId` and positive decimal `bindingEpoch` are platform Operator-selected configuration fences: no upstream Provider binding-issuance API or external binding object is required. Evidence remains `UNVERIFIED` when only the Client/API declarations exist.
 
-## Freeze inputs
+## Current installation entry
 
-Main and the API configuration Owner must separately freeze every placeholder before installation:
+This is historical audit/provider-policy data, **not** the latest Agent installation
+procedure. The old broker, standalone engine launcher and unit source entries are
+retired. New installations use `shell/cyf_agent_runtime_v1_install.sh` and
+`conf/cyf-agent-runtime-v1/README.md`, explicit sealed multi-Agent configuration
+and per-installation enrollment. Never restore old API-key authentication, infer
+new authority from a persona, or automatically adopt/replay old queues.
+The checker remains a read-only historical validator and is not packaged in the
+unified Runtime artifact. Its existing static provider-contract/provenance tests
+use a labelled test-only historical catalog, not a working old installer.
+
+## Historical freeze inputs (audit only)
+
+Main and the API configuration Owner must separately freeze every placeholder for historical evidence validation (not new installation):
 
 - existing `wuyong` agent ID, private Codex home, workspace/API origin, and WebSocket URL;
 - controlled-image HTTPS origin and exact model ID supplied by the Provider/account custodian;
 - platform Operator-selected binding ID and positive decimal binding epoch, changed when the local credential/configuration fence is rotated;
 - exact API tenant/client/owner/target-agent policy, custody, issuer, revision, expiry, and the same model/binding tuple;
-- private `0600` values for `OPENCLAW_API_KEY` and `CYF_CONTROLLED_IMAGE_API_KEY`.
+- historical private Agent credential references (audit only, never new Runtime authorization), separately from controlled-image Provider credential references.
 
 Do not place either secret in the profile, freeze JSON, registration capture, or logs. `producerRequestRevision` is server-owned under API contract commit `9ab62d6665c695a574b8b3bde9cfff3ea3ca13d4`; the Client profile, declaration, command, and freeze must not add or override it.
 
@@ -46,45 +58,19 @@ This is not the Responses understanding contract. Static validation, model-list 
 
 The independent file has exact top-level keys `schemaVersion`, `artifactType`, `sourceContractCommit`, `sourceReference`, and `operatorPolicy`; `artifactType` is `CONTROLLED_IMAGE_OPERATOR_BINDING_FREEZE_V1`. If that independently owned file is unavailable, keep all three source fields null and status `UNVERIFIED`.
 
-## Stable payload freeze (no Provider request)
+## Historical freeze and readback are not current install evidence
 
-Run from the exact source checkout against the exact collated release and installer used to create it. The output path must not already exist:
+Retain historical manifests, source/installer hashes, non-secret provider tuples,
+independent Operator freeze evidence and redacted registration/presence captures
+as audit records. The checker can prove consistency of those historical records;
+it cannot enroll an installation, prove current session/fence ownership or accept
+a new Runtime release. No runnable legacy installation, engine CLI validation,
+service start or API-key readback procedure is prescribed here.
 
-```bash
-node conf/codex-ws-agent/install-candidate/install-candidate-check.mjs verify-template
-node conf/codex-ws-agent/install-candidate/install-candidate-check.mjs freeze \
-  --profile /private/codex-profiles.private.json \
-  --env-file /private/wuyong-dual-mode.env \
-  --api-policy /private/controlled-image-api-policy.frozen.json \
-  --release /private/collated-release \
-  --installer shell/codex_ws_agent_install.sh \
-  --source-commit "$SOURCE_COMMIT" \
-  --source-tree "$SOURCE_TREE" \
-  --output /private/wuyong-dual-mode.freeze.json
-chmod 0600 /private/wuyong-dual-mode.freeze.json
-```
-
-For a policy explicitly marked `VERIFIED`, add `--operator-binding-freeze /private/operator-controlled-image-binding-freeze.json`. Do not add that option to an `UNVERIFIED` candidate.
-
-The checker verifies every `release-manifest.sha256` entry byte-for-byte, release provenance/integrity, installer digest, source commit/tree, normalized non-secret profile and minimal environment, secret-reference names, CA bytes, carrier-evidence bytes, provider-local partial API properties, provider-binding evidence status, and the synthetic expected declarations. The freeze digest excludes secret bytes, release-root paths, runtime instance IDs, process IDs, random ports, timestamps, nftables counters, and request/turn IDs. Thus another process using the identical source, payload, profile, policy, CA, and evidence has the same contract digest; native isolation remains a per-execution check and is not replaced by this freeze.
-
-## Post-start readback checklist (zero Provider calls)
-
-1. Confirm exactly one owned runtime is live for the frozen agent ID; do not stop or alter a foreign runtime.
-2. Read back `current`, `release-provenance.json`, `release-manifest.sha256`, and `release-integrity.sha256`; run `sha256sum --quiet -c` for both manifests and compare source commit/tree and installer/payload digests with the freeze.
-3. Under the private environment, run `node current/agent-client.mjs --inspect-config` and `node current/agent-client.mjs --validate`. Capture redacted output only; neither command may register, poll, or call the Provider.
-4. Start only through the separately authorized service action. Capture the authenticated `agent.register` and subsequent `agent.presence` payloads without credentials, commands, grants, source payloads, or secret headers.
-5. Verify both captures against the freeze:
-
-   ```bash
-   node current/install-candidate/install-candidate-check.mjs readback \
-     --freeze /private/wuyong-dual-mode.freeze.json \
-     --registration /private/agent-register.redacted.json \
-     --presence /private/agent-presence.redacted.json
-   ```
-
-   `READBACK_MATCH` requires one matching runtime instance and exact enabled INSPECT, provider binding, GENERATE_IMAGE, and EDIT_IMAGE declarations. Any drift fails closed.
-6. With an authenticated read-only API credential, capture `GET /agent/capabilities` and `GET /agent/tasks/{taskId}/point-and-start-controlled-image-capability?targetAgentId={frozenAgentId}`. Verify the registered target and exact policy tuple. Before explicit execution consent/grant, the task capability must remain consent-required/not executable and `paidExecutionAuthorized=false` (or the exact equivalent in the frozen API contract).
-7. Verify bootstrap created no command, lease, turn, Provider HTTP call, result, or ledger execution entry. Do not use a generation/edit call as a readiness check.
-
-A readback match is not overall installation readiness. Do not call readiness complete until the placeholders are frozen, the installed hashes match, the authenticated API accepts the registration, both live declarations match this freeze, and the API policy readback names the same target/provider/model/binding tuple.
+The current unified installer excludes these tools/templates and fails if they
+are reintroduced into its execution payload. New readiness comes from the current
+installation-derived authenticated channel, actual adapters and durable state,
+not a historical STATIC_VALID/READBACK_MATCH or heartbeat. Main/runner must still
+verify actual Java/D06/DB/native/skill boundaries and fixed commit/Flow artifacts.
+Provider calls, paid business, production credential/state migration and old unit
+retirement require separate exact authorization; no such operation was performed.

@@ -194,20 +194,32 @@ Historical install-candidate policy/provenance/readback tests use only a labelle
 baseline catalog fixture, never an executable old installer. That test fixture
 and all test directories are excluded from the unified artifact.
 
-**Inventory, not edits to other Owners' paths:** root `install.sh` still lists
-`codex-ws-agent`/`codex` and agent/full profile references; they now reach the
-retired installer, not a working old execution path. Its minimal future UI cleanup
-is remove the obsolete aliases and explicitly configure the Runtime component,
-not map existing profile names to installations. `bin/codex_ws_agent.sh` and
-`systemd/codex-ws-agent.service`/`systemd/codex-ws-agent@.service` remain historical
-maintenance sources outside this slice, are not copied into the unified artifact,
-and do not grant new execution authority. Their controlled removal follows actual
-installed-unit/PID/maintenance-Owner and stopped-writer inventory, not a source
-script that stops arbitrary processes. Historical `conf/codex-ws-agent/README.md`,
-`env.example`, `codex-profiles.conf`, `install-candidate/*`,
-`install-policy-check.mjs`, `migrate-ack-high-water.mjs` and `contracts/probes/*`
-remain repository audit/diagnostic inputs only, never the new installation guide
-or an active authentication fallback. No online binary, unit or history is altered.
+### Registry, launcher and unit source convergence
+
+`install.sh` advertises only `cyf-agent-runtime-v1`/`runtime-v1` for Agent artifacts;
+profile `agent` selects the canonical Runtime component without a generic Node
+upgrade. Other component mappings and full-profile order are preserved, with only
+the retired Agent component replaced. `codex-ws-agent`/`codex` are rejected before
+any component installation, even in a mixed argument list. `shell/sh_list.txt`
+lists only the current Runtime installer. Explicit instance, prepared canonical
+parent and Node 20.20.2 prerequisites still apply; no identity is inferred.
+
+`bin/codex_ws_agent.sh` is a no-effects retired diagnostic for **all** arguments,
+not a redirect that can start, stop, kill, archive or repair historical services.
+The two old `systemd/codex-ws-agent*.service` source templates are deleted. Only the
+existing unified Runtime template is shipped, using artifact-local pinned Node,
+external host configuration and separately authorized activation. These are source
+changes, **not** removal/stop/restart of any installed service or historical PID.
+`skills/codex-ws-agent-install/SKILL.md` now documents the same sole Runtime entry;
+`install-candidate/INSTALL-CANDIDATE.md` is labelled historical policy/provenance
+audit, not a runnable API-key installation/readback guide.
+
+Historical engine `README.md`, `env.example`, `codex-profiles.conf`, candidate
+fixtures/checker, policy checker, offline ACK migration and diagnostic probes remain
+repository audit/diagnostic inputs, never an active auth fallback or installation
+payload. Existing workspace locks and exact Runtime child ownership/shutdown tests
+remain; old launcher-only tests are replaced with stronger no-operation retirement
+negatives, not skipped as if its removed implementation were still supported.
 
 ## Old/new state migration requirements — no migration performed
 

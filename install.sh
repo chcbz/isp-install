@@ -46,6 +46,7 @@ show_help() {
     echo "  web-server          Web 服务器 (Nginx + PHP + MySQL)"
     echo "  dev-env             开发环境 (JDK + Maven + Git + Node)"
     echo "  db-server           数据库服务器 (MySQL + Redis)"
+    echo "  agent               统一多Agent Runtime 制品 (需显式实例/工具链)"
     echo "  full                完整安装 (所有组件)"
     echo ""
     echo "示例:"
@@ -77,6 +78,10 @@ list_profiles() {
     echo "  包含: JDK, Jenkins, Nexus, Git"
     echo ""
     
+    echo -e "${BLUE}agent${NC} - 统一多Agent Runtime 制品 (不启用服务/不迁移状态)"
+    echo "  包含: cyf-agent-runtime-v1; 需显式 CYF_RUNTIME_V1_INSTANCE 和 Node 20.20.2"
+    echo ""
+
     echo -e "${BLUE}full${NC} - 完整安装"
     echo "  包含: 所有组件"
     echo ""
@@ -87,6 +92,7 @@ list_profiles() {
     echo "  rabbitmq, openldap, elasticsearch"
     echo "  jenkins, nexus, pureftpd"
     echo "  xray"
+    echo "  cyf-agent-runtime-v1 (别名 runtime-v1); 需准备 canonical artifact parent"
 }
 
 #===============================================================
@@ -115,8 +121,6 @@ declare -A COMPONENT_SCRIPTS=(
     ["nexus"]="nexus_install.sh"
     ["pureftpd"]="pureftpd_install.sh"
     ["ftp"]="pureftpd_install.sh"
-    ["codex-ws-agent"]="codex_ws_agent_install.sh"
-    ["codex"]="codex_ws_agent_install.sh"
     ["cyf-agent-runtime-v1"]="cyf_agent_runtime_v1_install.sh"
     ["runtime-v1"]="cyf_agent_runtime_v1_install.sh"
     ["xray"]="xray_install.sh"
@@ -131,8 +135,8 @@ declare -A PROFILES=(
     ["dev-env"]="jdk maven git node python"
     ["db-server"]="mysql redis rabbitmq"
     ["ci-cd"]="jdk maven git jenkins nexus"
-    ["agent"]="node codex-ws-agent"
-    ["full"]="jdk maven node python git mysql redis nginx php rabbitmq openldap elasticsearch jenkins nexus pureftpd codex-ws-agent"
+    ["agent"]="cyf-agent-runtime-v1"
+    ["full"]="jdk maven node python git mysql redis nginx php rabbitmq openldap elasticsearch jenkins nexus pureftpd cyf-agent-runtime-v1"
 )
 
 #===============================================================
@@ -178,7 +182,7 @@ interactive_select() {
     local i=1
     
     for comp in "${!COMPONENT_SCRIPTS[@]}"; do
-        if [[ ! "$comp" =~ ^(java|mvn|py|es|ldap|ftp|codex)$ ]]; then  # 跳过别名
+        if [[ ! "$comp" =~ ^(java|mvn|py|es|ldap|ftp|runtime-v1)$ ]]; then  # 跳过别名
             echo "  $i) $comp"
             components+=("$comp")
             ((i++))
@@ -232,6 +236,7 @@ interactive_select() {
         for comp in "${failed[@]}"; do
             echo "  - $comp"
         done
+        return 1
     fi
     
     echo ""
@@ -272,6 +277,10 @@ main() {
                 ;;
             -v|--verbose)
                 VERBOSE=true
+                ;;
+            codex|codex-ws-agent)
+                echo 'UNIFIED_RUNTIME_ENTRY_REQUIRED: retired Agent component; use cyf-agent-runtime-v1 with explicit installation configuration' >&2
+                return 2
                 ;;
             *)
                 components+=("$1")
@@ -319,6 +328,7 @@ main() {
             for comp in "${failed[@]}"; do
                 echo "  - $comp"
             done
+            return 1
         fi
         
         echo ""

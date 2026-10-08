@@ -1,73 +1,62 @@
 ---
 name: codex-ws-agent-install
-description: Use when installing or configuring codex-ws-agent from this repository, including Node.js dependency, durable command inbox, .env generation, profile configuration, public WSS endpoint setup, helper script installation, and systemd service enablement.
+description: Install the latest unified multi-Agent Runtime artifact from this repository, with pinned toolchain and explicit installation/configuration boundaries. The old codex-ws-agent service/API-key provisioning entry is retired.
 ---
 
-# Codex WS Agent Install
+# Unified Agent Runtime installation
 
-## Preconditions
+The skill name is a repository discovery label, not a legacy execution alias.
+The only current installer is `shell/cyf_agent_runtime_v1_install.sh` (dispatcher
+component `cyf-agent-runtime-v1`, alias `runtime-v1`, profile `agent`).
+See `conf/cyf-agent-runtime-v1/README.md` for the actual configuration and recovery
+contract. Do not install or launch the retired engine CLI/service.
 
-- Node.js 20 or newer is installed from this repo or otherwise available as `node`.
-- `codex` CLI exists on the target host.
-- The service account can create, rename, delete, and `fsync` files below `/home/isp/apps/codex-ws-agent/data/inbox`.
-- For A07 coding commands, prepare a trusted Git repository and a `0700` workspace root (default `/home/isp/hosts/cyf/agent-workspaces`). Prefer a dedicated bare repository/mirror rather than a shared main checkout.
+## Preconditions and staging
 
-## Command
+- Fix the authorized source commit and source/artifact evidence. This candidate is
+  not release approval; formal verification and versioned release belong to Main.
+- Supply Node **20.20.2**, an npm CLI and compatible Python/stdlib/ABI. Do not upgrade
+  the host's generic Node as an implicit Agent installation step.
+- Prepare a canonical artifact parent and choose a new explicit instance; existing
+  targets are rejected, never adopted. Set `CYF_RUNTIME_V1_INSTANCE`,
+  `CYF_RUNTIME_V1_NODE_BIN`, `CYF_RUNTIME_V1_NPM_CLI`, `CYF_RUNTIME_V1_PYTHON_BIN`
+  and `ISP_APPS` deliberately for the intended offline/disposable target.
+- The direct entry stages one artifact: `runtime/`, execution library,
+  pinned local Node, locked npm graph and Python delivery tools. It neither enrolls
+  identities nor copies old env/profiles, enables units, restarts services or
+  migrates state. Dispatcher profile `agent` selects this same artifact entry.
 
-- Direct install: `sudo ./shell/codex_ws_agent_install.sh`
-- Via profile: `sudo ./install.sh --profile agent`
-- Helper script after install: `/home/isp/bin/codex_ws_agent.sh start`
+```bash
+# Only on an explicitly authorized target with the prerequisites above:
+./shell/cyf_agent_runtime_v1_install.sh
+# Alternative dispatcher (same entry, no extra legacy component):
+./install.sh --profile agent
+```
 
-After files are installed, run `cd /home/isp/apps/codex-ws-agent && npm ci --omit=dev` so Node 20 can load the declared `ws` dependency. Node runtimes with a built-in WebSocket remain supported.
+## Configuration and authorization are separate
 
-A06 runtime notes:
-- keep one canonical `agentId` on one client at a time; the durable inbox, dedupe ledger, and ACK outbox are profile-local
-- `commandId` dedupe uses canonical business-payload fingerprints; transport redelivery metadata is ignored, deep payload/array changes are significant, and conflicts are stored separately without changing the original terminal entry
-- never auto-rerun a recovered `processing/` record; A06 moves it to `recovery-required/`, persists a `REJECTED` ACK, and pauses for reconciliation or a new server-issued `commandId`
-- reconnects must call the built-in ACK replay path; do not clear the outbox on send failure, marker failure, corrupt-record quarantine, or uncertain recovery
-- each ACK has an independent `messageId`; only `correlationId` references the dispatch `messageId`
+Use an explicit external host JSON with sealed manifest/profile/state paths for
+**each full subject** (tenant/client/canonicalAgentId); persona names do not grant
+permission. Reject identity/installation duplication and overlapping/symlink
+writable roots. Each Agent gets independent installation enrollment, derived
+in-memory session, queue, workspace and model-provider environment. Never use an
+old Agent API key or profile as enrollment evidence or copy a template credential
+across Agents. Model/provider auth is not Runtime execution auth.
 
-## A07 workspace policy
+Run the artifact's `runtime/validate.sh --root ARTIFACT --config HOST_JSON` for
+local validation. Execution uses only `ARTIFACT/node/bin/node
+ARTIFACT/runtime/agent-runtime.mjs run --config HOST_JSON` and the current
+`cyf-agent-runtime-v1@.service` template. Neither this skill nor the installer grants
+service activation, deployment, enrollment or historical maintenance authorization.
 
-1. Copy `/home/isp/apps/codex-ws-agent/workspace-policies.example.json` to `workspace-policies.json` and set mode `0600`.
-2. Set only trusted local values for `root`, `repository`, `baseRef`, `trustedRemoteUrl`, and `trustedRemoteRef`; never derive them from a dispatch payload. This version accepts only credential-free HTTPS publication URLs and one fixed `refs/heads/*` ref; SSH, local paths, and `file://` are rejected.
-3. Set `CODEX_WORKSPACE_POLICIES_FILE=/home/isp/apps/codex-ws-agent/workspace-policies.json`.
-4. Add `workspacePolicyId=<policy>` and `workspaceRole=coder` to every coding Agent profile.
-5. Keep `workspaceNoTaskPolicy=reject` unless a specific non-coding command type needs compatibility. If needed, use `dedicated-workdir`, list exact command types, and provide a non-Git `workspaceFallbackWorkdir` with no overlap in either direction with repository or workspace root.
+## State and recovery safeguards
 
-Each `taskId + canonical agentId` receives one deterministic worktree. Creation is cross-process locked and durable metadata must match the repository, fixed baseline commit, trusted remote, branch, role, and path before reuse. Policy loading rejects duplicate/overlapping canonical repositories or roots across policy IDs. Missing policy/task id, path traversal, symlink escape, branch collision, unknown partial state, or Git failure is fail-closed.
-
-There is no automatic cleanup. Operators may inspect or explicitly archive with `/home/isp/bin/codex_ws_agent.sh workspace ...`; archive requires the Agent service to be stopped and refuses dirty, ignored/untracked, unmerged, index-hidden (`skip-worktree`, `assume-unchanged`, or other non-normal index flags), stat-cache-hidden content/mode differences, or unpushed work. Every tracked regular file/symlink is hashed and mode-checked against the index. Publication is proven only in a fresh temporary bare repository with system/global/local config and inherited Git/proxy/askpass/SSH environment excluded, TLS verification forced, and the exact trusted HTTPS URL/ref fetched. Never expose archive arguments to Agent-generated commands.
-
-## Config files
-
-- App dir: `/home/isp/apps/codex-ws-agent`
-- Main env: `/home/isp/apps/codex-ws-agent/.env`
-- Env template: `/home/isp/apps/codex-ws-agent/.env.example`
-- Profiles: `/home/isp/apps/codex-ws-agent/codex-profiles.conf`
-- Durable inbox: `/home/isp/apps/codex-ws-agent/data/inbox`
-- Workspace manager: `/home/isp/apps/codex-ws-agent/workspace-manager.mjs`
-- Workspace policies: `/home/isp/apps/codex-ws-agent/workspace-policies.json`
-- Default workspace root: `/home/isp/hosts/cyf/agent-workspaces`
-
-## Required settings
-
-- `WS_URL=wss://api.chaoyoufan.cn/ws/agent/channel`
-- `OPENCLAW_API_KEY=<key>`
-- `DEFAULT_CODEX_PROFILE=codex-default`
-- `CODEX_PROFILES_FILE=/home/isp/apps/codex-ws-agent/codex-profiles.conf`
-- `COMMAND_INBOX_DIR=/home/isp/apps/codex-ws-agent/data/inbox`
-- `COMMAND_INBOX_SUCCESS_POLICY=archive`
-- `CODEX_WORKSPACE_POLICIES_FILE=/home/isp/apps/codex-ws-agent/workspace-policies.json`
-- profile: `workspacePolicyId=<trusted-policy>` and `workspaceRole=coder`
-
-Use `archive` for initial rollout. Do not run old and new clients concurrently for the same canonical `agentId`. A rollback must preserve `pending/`, `processing/`, `recovery-required/`, ledger, conflict, blocked/quarantine, and ACK outbox state; the old client cannot consume these records safely.
-
-## Verify
-
-- `cd /home/isp/apps/codex-ws-agent && npm ci --omit=dev`
-- `node -v` (must be Node 20+)
-- `cd /home/isp/apps/codex-ws-agent && node agent-client.mjs --validate`
-- `/home/isp/bin/codex_ws_agent.sh workspace inspect --policy <id> --task <taskId> --agent <agentId> --role coder`
-- `systemctl status codex-ws-agent`
-- `journalctl -u codex-ws-agent -f`
+Preserve existing workspace policies/trusted repositories and their locks. ACK
+confirmation is matching Runtime HTTP D06 status/version, not successful WS send;
+CHAT/results keep their own dedicated receipts. Unknown STARTED/native/business
+outcomes retain recovery materials and never auto-rerun. No automatic workspace
+archive, paid replay or queue clearing. Inventory all dynamic/shared identities
+and stop exact writers only under separate maintenance authorization. Migration
+and rollback must cover code, state format, identity mappings and unknown outcomes;
+old/new writers cannot run together and binary-only rollback is unsafe. Source-only
+removal of old unit templates does not remove any installed service.
