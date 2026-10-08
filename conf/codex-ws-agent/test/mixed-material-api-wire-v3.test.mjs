@@ -117,7 +117,7 @@ test('actual API dispatch fetches original bytes, prepares native inputs and sen
       })
       options.onAccepted({ threadId: 'mixed-api-thread', turnId: 'mixed-api-turn' })
       return { threadId: 'mixed-api-thread', turnId: 'mixed-api-turn', content: JSON.stringify({ schemaVersion: 3,
-        kind: 'ANSWER', text: '已查阅全部资料。', clarification: null, action: null }) }
+        kind: 'ANSWER', text: '已查阅全部资料。\n验证短语：Quartz river 729.', clarification: null, action: null }) }
     }
   }
   await runTypedInspection(profile, message, { adapter, materializer, isolationReadback: isolation,

@@ -249,6 +249,7 @@ test('two explicit instances install isolated roots and preserve the exact relea
       const expectedPayload = payloadSource.split('\n').map(line => line.match(/^\s+"([^"]+)"$/)[1])
       assert.deepEqual([...manifest.keys()].sort(), expectedPayload.sort())
       assert.equal(manifest.get('migrate-ack-high-water.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/migrate-ack-high-water.mjs')))
+      assert.equal(manifest.get('managed-chat-scope-config.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/managed-chat-scope-config.mjs')))
       assert.equal(manifest.get('controlled-image-delivery-retention-v3.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/controlled-image-delivery-retention-v3.mjs')))
       for (const [relative, digest] of manifest) assert.equal(sha256(resolve(releaseRoot, relative)), digest, relative)
       // Collation uses a stub validator; independently close every release-local import.

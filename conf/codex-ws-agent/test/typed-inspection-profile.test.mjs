@@ -227,3 +227,19 @@ test('real bwrap profile performs a non-paid native app-server handshake with pr
     finally { await allowedAdapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose(); rmSync(allowedState.directory, { recursive: true, force: true }); await new Promise(resolveClose => target.close(() => resolveClose())) }
   } finally { await runtime.dispose(); await secondRuntime.dispose(); rmSync(root, { recursive: true, force: true }) }
 })
+
+test('recovery of missing original engine state fails before creating directories, staging credentials or spawning an adapter', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-recovery-state-missing-')); chmodSync(root, 0o700)
+  try {
+    const binding = { schemaVersion: 1, requestKey: 'original-key', authorizationId: 'original-auth',
+      manifestDigest: `sha256:${'a'.repeat(64)}`, requestId: 'original-request', turnId: 'original-turn', inputPolicyDigest: `sha256:${'b'.repeat(64)}` }
+    const runtime = { stateRoot: root, profile: {} }
+    assert.throws(() => TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime, binding, { requireExistingState: true }),
+      error => error.code === 'TYPED_INSPECTION_RECOVERY_STATE_MISSING')
+    assert.equal(existsSync(resolve(root, 'requests')), false)
+    const directory = resolve(root, 'requests', canonicalSha256(binding).slice('sha256:'.length)); mkdirSync(directory, { recursive: true, mode: 0o700 })
+    assert.throws(() => TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime, binding, { requireExistingState: true }),
+      error => error.code === 'TYPED_INSPECTION_RECOVERY_STATE_MISSING')
+    assert.equal(existsSync(resolve(directory, 'codex-home')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

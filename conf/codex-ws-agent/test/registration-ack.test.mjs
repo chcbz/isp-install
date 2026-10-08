@@ -249,3 +249,28 @@ test('late nested ACK cannot rotate token again after exact registration complet
   for (const value of Object.values(secret)) assert.equal(f.logs.join('\n').includes(value), false)
   assert.equal(f.logs.join('\n').includes('c'.repeat(32)), false)
 })
+
+test('native readiness waits for the latest exact registration ACK across supersession and slow ACK', async () => {
+  const f = fixture(); f.observer.begin('before-measurement')
+  f.observer.observe({ type: 'agent_registered', agentId: profile.agentId, status: 'online', token: 'a'.repeat(32), messageId: 'before-measurement', runtimeInstanceId })
+  f.observer.begin('inspection-measured'); let released = false
+  const pending = f.observer.waitForRegistration().then(value => { released = true; return value })
+  f.observer.begin('latest-measured'); f.fireTimers()
+  f.observer.observe({ type: 'agent_registered', agentId: profile.agentId, status: 'online', token: 'b'.repeat(32), messageId: 'inspection-measured', runtimeInstanceId })
+  await Promise.resolve(); assert.equal(released, false)
+  f.observer.observe({ type: 'agent_registered', agentId: profile.agentId, status: 'online', token: 'c'.repeat(32), messageId: 'latest-measured', runtimeInstanceId })
+  assert.deepEqual(await pending, { stage: 'registered', registered: true })
+  assert.equal(f.observer.runtimeAuthHeader, `AgentRuntime ${'c'.repeat(32)}`)
+  assert.equal(JSON.stringify(f.logs).includes('c'.repeat(32)), false)
+})
+
+test('native readiness rejects disconnected, rejected and failed registrations without exposing credentials', async () => {
+  for (const terminal of ['disconnect', 'rejected', 'sendFailed']) {
+    const f = fixture(); f.observer.begin('inspection-measured')
+    const pending = assert.rejects(f.observer.waitForRegistration(), error => error.code === 'NATIVE_RUNTIME_REGISTRATION_UNAVAILABLE')
+    if (terminal === 'rejected') f.observer.observe({ messageType: 'protocol.error', messageId: 'inspection-measured', runtimeInstanceId })
+    else f.observer[terminal](...terminal === 'sendFailed' ? ['inspection-measured'] : [])
+    await pending; assert.equal(f.observer.waiters.size, 0)
+    await assert.rejects(f.observer.waitForRegistration(), error => error.code === 'NATIVE_RUNTIME_REGISTRATION_REQUIRED')
+  }
+})

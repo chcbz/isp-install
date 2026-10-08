@@ -262,9 +262,12 @@ export class TypedInspectionProfileRuntime {
     const directory = ensurePrivateDirectory(mkdtempSync(resolve(root, `.${label}-`)))
     return { directory, markerPath: null, created: true, bindingDigest: null, ...stageCodexHome(this.profile, directory) }
   }
-  _prepareRequestState(rawBinding) {
-    const binding = engineStateBinding(rawBinding); const root = ensurePrivateDirectory(resolve(this.stateRoot, 'requests'))
-    const bindingDigest = canonicalSha256(binding); const directory = resolve(root, bindingDigest.slice('sha256:'.length)); const created = !existsSync(directory)
+  _prepareRequestState(rawBinding, { requireExistingState = false } = {}) {
+    const binding = engineStateBinding(rawBinding); const rootPath = resolve(this.stateRoot, 'requests')
+    const bindingDigest = canonicalSha256(binding); const directory = resolve(rootPath, bindingDigest.slice('sha256:'.length))
+    if (requireExistingState && (!existsSync(directory) || !existsSync(resolve(directory, 'binding.json'))))
+      fail('TYPED_INSPECTION_RECOVERY_STATE_MISSING')
+    const root = ensurePrivateDirectory(rootPath); const created = !existsSync(directory)
     if (created) { mkdirSync(directory, { mode: 0o700 }); chmodSync(directory, 0o700); fsyncDirectory(root) }
     ensurePrivateDirectory(directory); const markerPath = stateMarker(directory, binding)
     return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory) }
@@ -336,7 +339,7 @@ export class TypedInspectionProfileRuntime {
       rmSync(isolatedState.directory, { recursive: true, force: true }); rmSync(probeDirectory, { recursive: true, force: true }); try { rmSync(outsideCanary, { force: true }) } catch {}
     }
   }
-  async openAdapter(inputDirectory, requestKey = '', requestBinding = null) {
+  async openAdapter(inputDirectory, requestKey = '', requestBinding = null, { requireExistingState = false } = {}) {
     const measurement = await this.measure(); if (!measurement.contractReady) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_REQUIRED')
     if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
     if (!nonblank(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
@@ -346,7 +349,7 @@ export class TypedInspectionProfileRuntime {
       if (!active.adapter.closed && active.inputDirectory === realpathSync(inputDirectory) && active.engineState.bindingDigest === bindingDigest) return active.adapter
       fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     }
-    const engineState = this._prepareRequestState(binding)
+    const engineState = this._prepareRequestState(binding, { requireExistingState })
     const egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs }); await egress.start()
     const adapter = this._spawnAdapter({ inputDirectory, engineState, schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
     try {

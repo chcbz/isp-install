@@ -206,6 +206,16 @@ const fingerprintSource = message => {
 export const chatFingerprint = message => canonicalSha256(fingerprintSource(message))
 export const durableChatKey = message => createHash('sha256').update(message.dedupeKey).digest('hex')
 
+// INSPECT persists preparation synchronously before thread/start or turn/start.
+// Only an explicit pre-preparation failure is safe to materialize again. Missing
+// state after a crash, unknown acceptance and any engine/final evidence fail closed.
+export const canResumePreEngineInspection = record => object(record) &&
+  (record.message?.route || record.message?.routing?.interactionMode) === 'INSPECT' &&
+  record.state === 'RECOVERY_REQUIRED' && typeof record.recoveryReason === 'string' &&
+  record.recoveryReason.startsWith('CHAT_FAILURE: ') &&
+  ['preparation', 'preparedAt', 'engine', 'runningAt', 'finalPrepared', 'finalPublication', 'finalConfirmation']
+    .every(key => !Object.hasOwn(record, key))
+
 export class PersistentChatInbox {
   constructor({
     rootDir, profile,
@@ -578,6 +588,19 @@ export class PersistentChatInbox {
       return { key, state: 'processing', path: target, record: claimed }
     })
   }
+  claimPreEngineInspection(key) {
+    return this._withLock(() => {
+      const item = this.findByKey(key)
+      if (!item || item.state !== 'recovery' || !canResumePreEngineInspection(item.record)) return null
+      // Verify identity before moving the original record; never synthesize a dispatch.
+      if (durableChatKey(item.record.message) !== key || chatFingerprint(item.record.message) !== item.record.fingerprint)
+        throw new Error('CHAT_FINGERPRINT_CONFLICT')
+      const target = this.path('processing', key)
+      const record = { ...item.record, state: 'STARTING', claimedAt: Date.now(), preEngineResumedAt: Date.now() }
+      atomicJson(item.path, record); durableRename(item.path, target)
+      return { key, state: 'processing', path: target, record }
+    })
+  }
   markPrepared(item, preparation) { return this._withLock(() => {
     if (!item || item.state !== 'processing' || !object(preparation)) throw new Error('CHAT_PREPARATION_INVALID')
     const record = { ...item.record, state: 'PREPARED', preparation, preparedAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item
@@ -791,7 +814,12 @@ export function prepareChatWorkdir({ rootDir, profile, forbidden = [] }) {
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== process.getuid() || (rootStat.mode & 0o077)) throw new Error('FAST_CHAT_WORKDIR_ROOT_UNSAFE')
   const root = realpathSync(rootDir)
   if (root !== resolve(rootDir)) throw new Error('FAST_CHAT_WORKDIR_ROOT_UNSAFE')
-  const path = resolve(root, Buffer.from(profile.agentId).toString('hex'))
+  const identity = profile.managedGeneration
+    ? canonicalSha256({ tenantId: profile.managedTenantId, clientId: profile.managedClientId,
+        ownerJiacn: profile.managedOwnerJiacn, agentId: profile.agentId,
+        generation: profile.managedGeneration, profileId: profile.profileId })
+    : Buffer.from(profile.agentId).toString('hex')
+  const path = resolve(root, identity)
   if (!existsSync(path)) { mkdirSync(path, { mode: 0o700 }); directoryFsync(root) }
   const stat = lstatSync(path); if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('FAST_CHAT_WORKDIR_UNSAFE')
   const canonicalPath = realpathSync(path); if (canonicalPath !== path) throw new Error('FAST_CHAT_WORKDIR_UNSAFE')

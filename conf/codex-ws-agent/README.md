@@ -649,3 +649,33 @@ Targeted regression command (disposable fixtures only):
 node --test /absolute/path/to/source/conf/codex-ws-agent/test/ack-checkpoint.test.mjs \
   /absolute/path/to/source/conf/codex-ws-agent/test/agent-client.test.mjs
 ```
+## Managed native CHAT activation
+
+`AGENT_MANAGED_CHAT_SCOPES_FILE` points to a canonical private operator-owned JSON
+file: `{ "schemaVersion": 1, "authorizations": [...] }`. Each authorization has
+exact `tenantId`, `clientId`, `ownerJiacn`, `agentId`, `generation`, `profileId`,
+and a supported `appServerSchemaContractId` bound to the measured native version.
+Only this exact managed identity receives native CHAT/typed controls; other
+managed identities do not inherit global CHAT activation. CHAT cwd is allocated
+from the managed profile identity, not copied from a template. A scope enables
+measurement, not READY: the installed binary/schema and initialized adapter
+still determine readiness. This does not enable INSPECT or image generation.
+
+
+### 原生 API 单一地址（2026-10-06）
+
+接应程序的 `workspaceFileApiOrigin` 是所有原生 HTTP lane 的唯一 API 地址，包含任务文件、受控执行和 INSPECT 资料读取；由操作员的来源 profile 配置，managed profile 不得覆盖。复用相同 origin 校验：远端 HTTPS，或同机显式 loopback HTTP；不含凭据、路径、query 或 fragment，不硬编码端口，不通过公开业务 proxy 暴露 `/internal`。
+
+精确 managed CHAT scope 的 `inspection` 只包含身份授权下的输入/状态目录、测量 profile、provider 和 carrier policy，不再包含 `apiOrigin`。旧独立字段 `inspection.apiOrigin`、`typedInspectionApiOrigin` 必须移除，不能双轨兼容。既有 private roots、AgentRuntime 身份与manifest/字节完整性、provider HTTPS及隔离测量不变。
+
+### INSPECT 模型启动前失败恢复（2026-10-06）
+
+收到 durable ACK 的原 dispatch 不依赖服务端重新派发。客户端启动/恢复时，仅对明确 `CHAT_FAILURE`、`RECOVERY_REQUIRED` 且没有 preparation/engine/final 及其时间证据的 INSPECT 原记录，在 profile lock 内核对原 key/fingerprint 后转为 processing，沿原身份重新测量、读取及校验资料。`markPrepared` 在 thread/start 与 turn/start 前同步持久化，因此这条路径不重跑已经启动的模型。每个客户端进程对同 key 仅尝试一次，不因反复 resume 盲重试。
+
+已有 preparation/engine、未知 acceptance 或进程中断状态禁止重新启动；已有 final 只恢复原最终消息发布/服务端持久确认。不得手工移动 inbox 文件、重置数据库 outbox 或新建业务请求替代恢复。
+
+INSPECT 测量完成会触发携带最新声明的重新注册。读取资料和恢复引擎前必须等待当前精确 registration ACK；旧 ACK、presence 和仅本地测量成功均不能释放原生读取。慢 ACK 继续等待，不增加强制业务 deadline；拒绝/断线/发送失败则关闭此路径。资料 GET 非200只记录 HTTP 数字状态，不读取或输出错误正文、凭据。
+
+INSPECT 的 v3 原生输出 schema 进一步固定 `deliverable=false`、`deliveryRelation=null`，不把资料读取回复关联成可验收成果。模型终态返回后，即使成果关联/其他严格校验拒绝回复，也必须保留原私有引擎状态供只读核对，不得在 finally 删除唯一终态，再用新模型 turn 补偿。历史已被删除的引擎状态不可能由本修复补回；缺少原终态时不能伪造成功。
+
+恢复只允许打开已存在且有精确 binding marker 的原引擎目录。原目录/marker 缺失时返回 `TYPED_INSPECTION_RECOVERY_STATE_MISSING`，不重建目录、不复制新凭据、不启动新 adapter 或模型 turn；必须另行安排明确的全新验证请求，不能冒充原 turn 的终态恢复。

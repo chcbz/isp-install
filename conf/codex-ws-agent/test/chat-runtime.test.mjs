@@ -18,7 +18,7 @@ import {
   reclaimStaleCodexAppServerSnapshots, resolveCodexAppServerSchemaContract,
   verifyCodexAppServerBinaryIdentity, verifySpawnedAppServerExecutable
 } from '../app-server-adapter.mjs'
-import { normalizeInboundMessage, runFastChat, runProfileChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
+import { bindChatDispatchAckToSession, normalizeInboundMessage, runFastChat, runProfileChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
 
 const profile = { profileId: 'profile-A', agentId: 'hosted-a', fastChatEnabled: false, appServerEnabled: false }
 const fixturePath = resolve(import.meta.dirname, '..', 'contracts', 'api-hosted-wire-v1.json')
@@ -338,6 +338,26 @@ test('durable wire rejects numeric Long tokens, context drift, and non-canonical
   assert.throws(() => normalizeInboundMessage(nestedLong), error => error.code === 'INVALID_LONG_WIRE_TYPE')
   assert.throws(() => validateChatDispatch({ ...wire, contextHash: `${wire.contextHash}-drift` }), /CONTEXT_BINDING_MISMATCH/)
   assert.throws(() => validateChatDispatch({ ...wire, contextSnapshot: { ...wire.contextSnapshot, contextHash: 'sha256:' + '0'.repeat(64) } }), /CONTEXT_HASH_MISMATCH/)
+})
+
+test('durable wire preserves negotiated capability declaration types without weakening Long scope', () => {
+  const wire = apiWire()
+  const capability = { decision: 'ALLOW', profile: 'CHAT', capabilityContractVersion: 1,
+    runtimeVersion: 'juyiting-fast-context-runtime-v2',
+    policy: { supported: true, enabled: true, strictNoToolsVerified: true, toolPolicy: 'strict-no-tools' } }
+  wire.targetCapability = capability; wire.payload.targetCapability = structuredClone(capability)
+  for (const source of [wire, JSON.stringify(wire)]) {
+    const normalized = normalizeInboundMessage(source)
+    assert.equal(normalized.targetCapability.runtimeVersion, capability.runtimeVersion)
+    assert.equal(normalized.targetCapability.capabilityContractVersion, 1)
+  }
+  for (const [path, value] of [['conversationGeneration', 3], ['stateVersion', 1], ['taskRevision', 2]]) {
+    const changed = structuredClone(wire)
+    if (path === 'taskRevision') changed.targetCapability.policy.taskRevision = value
+    else changed[path] = value
+    assert.throws(() => normalizeInboundMessage(changed), error => error.code === 'INVALID_LONG_WIRE_TYPE')
+    assert.throws(() => normalizeInboundMessage(JSON.stringify(changed)), error => error.code === 'INVALID_LONG_WIRE_TYPE')
+  }
 })
 
 test('durable inbox applies hard file and byte backpressure before acceptance', async () => {
@@ -798,4 +818,37 @@ test('full snapshot byte boundary replaces nested byte caps without weakening st
   const changed = structuredClone(wire); changed.factsManifest.actionContinuation.instruction += '改'
   changed.contextSnapshot.facts = changed.factsManifest
   assert.throws(() => validateChatDispatch(changed), /CONTEXT_HASH_MISMATCH/)
+})
+
+
+test('actual durable CHAT ACK send binding carries current process identity without changing dispatch CAS', () => {
+  const agent = { agentId: 'agt_' + 'a'.repeat(32) }
+  const message = { messageId: 'message-1', dispatchId: 'dispatch-1' }
+  const durable = buildChatDispatchAck(agent, message)
+  assert.equal(durable.runtimeInstanceId, undefined)
+  const current = bindChatDispatchAckToSession(durable, agent, 'process-current')
+  assert.equal(current.runtimeInstanceId, 'process-current')
+  assert.equal(current.sourceAgentId, agent.agentId)
+  assert.equal(current.messageId, message.messageId)
+  assert.equal(current.dispatchId, message.dispatchId)
+  assert.equal(current.schemaVersion, 1)
+  assert.equal(durable.runtimeInstanceId, undefined)
+  assert.equal(bindChatDispatchAckToSession({ ...current, runtimeInstanceId: 'old-process' }, agent, 'new-process').runtimeInstanceId, 'new-process')
+  assert.throws(() => bindChatDispatchAckToSession(durable, { agentId: 'agent-other' }, 'process-current'), /current Agent session/)
+  assert.throws(() => bindChatDispatchAckToSession(durable, agent, agent.agentId), /current Agent session/)
+})
+
+test('persisted CHAT ACK drain uses fresh socket identity on replay and preserves command ACKs', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-ack-session-'))
+  const agent = { agentId: 'agent-a' }
+  try {
+    const box = new ChatAckOutbox({ rootDir: root, profile: agent }).initialize()
+    box.enqueue(buildChatDispatchAck(agent, { messageId: 'message-2', dispatchId: 'dispatch-2' }))
+    const sent = []
+    assert.equal(box.drain(ack => { sent.push(bindChatDispatchAckToSession(ack, agent, 'live-process')); return true }), 1)
+    assert.equal(box.count(), 0)
+    assert.equal(sent[0].runtimeInstanceId, 'live-process')
+    const command = { messageType: 'command.ack', runtimeInstanceId: 'command-runtime' }
+    assert.equal(bindChatDispatchAckToSession(command, agent, 'live-process'), command)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

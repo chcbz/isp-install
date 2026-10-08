@@ -63,6 +63,8 @@ export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs } = 
     transport: 'fixed-connect-proxy-v1',
     connectTimeoutMs: String(connectTimeoutMs),
     namespace: 'private-slirp4netns-v1',
+    slirpMountIsolation: 'unshare-mount-recursive-private-v1',
+    slirpTarget: 'exact-owner-netns-path-v1',
     directEgress: 'nft-default-drop-readback-v1',
     hostLoopback: 'proxy-port-only',
     dns: 'proxy-side-only'
@@ -79,26 +81,26 @@ const closeServer = server => new Promise(resolve => {
 })
 const collectChild = (child, signal, input = null) => new Promise((resolve, reject) => {
   let stdout = ''; let stderr = ''; let settled = false
-  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('exit', exit) }
+  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('close', close) }
   const finish = (callback, value) => { if (settled) return; settled = true; cleanup(); callback(value) }
   const abort = () => { try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}; const errorValue = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); errorValue.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; finish(reject, errorValue) }
   const error = value => finish(reject, value)
-  const exit = (status, exitSignal) => finish(resolve, { status, signal: exitSignal, stdout, stderr })
+  const close = (status, exitSignal) => finish(resolve, { status, signal: exitSignal, stdout, stderr })
   child.stdout?.on('data', chunk => { if (stdout.length < 65536) stdout += chunk.toString('utf8') })
   child.stderr?.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString('utf8') })
-  child.once('error', error); child.once('exit', exit); signal?.addEventListener('abort', abort, { once: true })
+  child.once('error', error); child.once('close', close); signal?.addEventListener('abort', abort, { once: true })
   if (input === null) child.stdin?.end(); else child.stdin?.end(input)
 })
 const waitForSlirpReady = (child, signal) => new Promise((resolve, reject) => {
   let settled = false; const ready = child.stdio?.[3]
-  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('exit', exit); ready?.off('data', data) }
+  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('close', close); ready?.off('data', data) }
   const finish = (callback, value) => { if (settled) return; settled = true; cleanup(); callback(value) }
   const abort = () => { try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}; const value = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); value.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; finish(reject, value) }
   const error = value => finish(reject, value)
-  const exit = () => { const value = new Error('TYPED_INSPECTION_EGRESS_SLIRP_FAILED'); value.code = 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED'; finish(reject, value) }
+  const close = () => { const value = new Error('TYPED_INSPECTION_EGRESS_SLIRP_FAILED'); value.code = 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED'; finish(reject, value) }
   const data = chunk => { if (chunk.length > 0) finish(resolve) }
   if (!ready) { const value = new Error('TYPED_INSPECTION_EGRESS_SLIRP_READY_FD_MISSING'); value.code = 'TYPED_INSPECTION_EGRESS_SLIRP_READY_FD_MISSING'; reject(value); return }
-  child.once('error', error); child.once('exit', exit); ready.once('data', data); signal?.addEventListener('abort', abort, { once: true })
+  child.once('error', error); child.once('close', close); ready.once('data', data); signal?.addEventListener('abort', abort, { once: true })
 })
 const hostCanaryControl = (port, timeoutMs) => new Promise((resolve, reject) => {
   const socket = connect(port, '127.0.0.1'); let received = ''
@@ -123,9 +125,21 @@ export const verifyRestrictedNftReadback = (readback, proxyPort, canaryPort) => 
   if (!/policy drop;/.test(input) || !/policy drop;/.test(output) || inputAccepts.length !== 2 || outputAccepts.length !== 3 ||
       !inputAccepts.includes('ct state established,related accept') || !inputAccepts.includes('iifname "lo" accept') ||
       !outputAccepts.includes('ct state established,related accept') || !outputAccepts.includes('oifname "lo" accept') ||
-      !outputAccepts.some(line => proxyRule.test(line)) || readback.includes(`dport ${canaryPort}`)) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH')
+      !outputAccepts.some(line => proxyRule.test(line)) || readback.includes(`dport ${canaryPort}`)) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH', `nft exact readback ${JSON.stringify({ proxyPort, canaryPort, readback })}`)
   return Object.freeze({ validated: true, digest: `sha256:${createHash('sha256').update(readback).digest('hex')}` })
 }
+
+// slirp's sandbox may unmount inherited paths. Detach the complete mount tree
+// BEFORE executing slirp; a private root alone leaves shared submounts unsafe.
+// Use the exact guarded netns path, not PID-mode implicit userns entry.
+// SUID bwrap can expose a descendant userns that does not own its netns.
+// No direct-slirp fallback: unshare errors must fail the readiness handshake.
+export const isolatedSlirpCommand = (slirpBin, pid) => ({
+  executable: '/usr/bin/unshare',
+  args: ['--mount', '--propagation', 'private', '--', slirpBin,
+    '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
+    '--enable-seccomp', '--ready-fd=3', '--netns-type=path', `/proc/${pid}/ns/net`, 'tap0']
+})
 
 export class RestrictedProviderEgress {
   constructor({ providerBaseUrl, networkConnectTimeoutMs, slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector } = {}) {
@@ -224,7 +238,8 @@ export class RestrictedProviderEgress {
     if (listed.status !== 0) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_FAILED', listed.stderr || 'nft readback failed')
     const ruleReadback = verifyRestrictedNftReadback(listed.stdout, this.port, this.canaryPort)
     this._assertOwner()
-    this.slirp = this.spawnFn(this.slirpBin, ['--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox', '--enable-seccomp', '--ready-fd=3', String(pid), 'tap0'], { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env: { PATH: '' } })
+    const slirpCommand = isolatedSlirpCommand(this.slirpBin, pid)
+    this.slirp = this.spawnFn(slirpCommand.executable, slirpCommand.args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env: { PATH: '' } })
     let stderr = ''; this.slirp.stderr?.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString('utf8') })
     try { await waitForSlirpReady(this.slirp, signal) } catch (error) { if (error.code === 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED' && stderr.trim()) error.message = stderr.trim(); throw error }
     this._assertOwner()

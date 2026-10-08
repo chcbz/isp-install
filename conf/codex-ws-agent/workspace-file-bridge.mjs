@@ -189,7 +189,7 @@ const isLoopback = hostname => {
   return Boolean(match && match.slice(1).every(part => Number(part) <= 255) && Number(match[1]) === 127)
 }
 
-const parseApiOrigin = value => {
+export const parseNativeApiOrigin = value => {
   let url
   try { url = new URL(value) } catch { fail('CONFIG_INVALID', 'apiOrigin must be an absolute URL origin') }
   if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password
@@ -446,7 +446,7 @@ export class WorkspaceFileBridge {
   #runs = new Map()
 
   constructor({ apiOrigin, rootDir, fetchFn = globalThis.fetch, validateOutput = null } = {}) {
-    this.#apiOrigin = parseApiOrigin(apiOrigin)
+    this.#apiOrigin = parseNativeApiOrigin(apiOrigin)
     if (typeof rootDir !== 'string' || !isAbsolute(rootDir)) fail('CONFIG_INVALID', 'rootDir must be an absolute path')
     this.#rootDir = resolve(rootDir)
     ensureDirectory(this.#rootDir)

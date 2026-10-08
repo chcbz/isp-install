@@ -62,7 +62,8 @@ import {
   loadManagedImageScopeAuthorizations,
   managedImageScopeMatches
 } from './managed-image-scope-config.mjs'
-import { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
+import { emptyManagedChatScopes, loadManagedChatScopes, applyManagedChatScope } from './managed-chat-scope-config.mjs'
+import { canResumePreEngineInspection, buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import {
   AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
   measureCodexAppServerBinary, resolveCodexAppServerSchemaContract
@@ -168,7 +169,7 @@ const RESERVED_FIELDS = [
 ]
 const INBOUND_CONTROL_TYPES = new Set([
   'connected', 'ping', 'pong', 'agent_registered', 'agent_status_updated', 'agent_status',
-  'agent_capability_index', 'protocol_error', 'error', 'task_reported', 'agent_message_saved'
+  'agent_capability_index', 'protocol_error', 'error', 'task_reported', 'agent_message_saved', 'chat_dispatch_acknowledged'
 ])
 const DISABLED_PROFILE_STATUSES = new Set(['disabled', 'inactive', 'unavailable'])
 
@@ -302,6 +303,10 @@ const semanticLongPath = (path, parent = null) => {
   const normalized = path[0] === 'payload' ? path.slice(1) : path
   if (normalized.includes('metadata')) return false // API metadata is non-authoritative DATA and may retain legacy JSON numbers.
   const field = normalized.at(-1)
+  // Negotiated runtime declaration fields are not durable SQL Longs: runtimeVersion
+  // is an opaque identifier and capabilityContractVersion is a JSON schema integer.
+  if (normalized.length === 2 && normalized[0] === 'targetCapability' &&
+      ['runtimeVersion', 'capabilityContractVersion'].includes(field)) return false
   if (isRawLongPath(path)) return true
   if (['occurredAt', 'createdAt', 'updatedAt', 'stateVersion', 'lastDeltaSeq', 'fencingToken', 'attemptCount'].includes(field)) return true
   if (field && field !== 'schemaVersion' && /(?:Generation|Revision|Version|Sequence|Seq)$/.test(field)) return true
@@ -591,6 +596,8 @@ const parseOptionalPositiveInteger = value => {
 }
 
 export const normalizeProfile = (profile, fallback = {}, index = 0) => {
+  if (Object.hasOwn(profile, 'typedInspectionApiOrigin') || Object.hasOwn(fallback, 'typedInspectionApiOrigin') || process.env.CODEX_TYPED_INSPECTION_API_ORIGIN)
+    throw new Error('Separate typedInspectionApiOrigin is not supported; configure workspaceFileApiOrigin for all native lanes')
   const agentId = profile.agentId || fallback.agentId || `local-codex-${index + 1}`
   const status = String(profile.status || fallback.status || '').trim().toLowerCase()
   return {
@@ -619,7 +626,6 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
     typedDeliberationEnabled: parseEnabledFlag(profile.typedDeliberationEnabled ?? fallback.typedDeliberationEnabled),
     typedInspectionEnabled: parseEnabledFlag(profile.typedInspectionEnabled ?? fallback.typedInspectionEnabled),
-    typedInspectionApiOrigin: String(profile.typedInspectionApiOrigin ?? fallback.typedInspectionApiOrigin ?? '').trim(),
     typedInspectionRootDir: String(profile.typedInspectionRootDir ?? fallback.typedInspectionRootDir ?? '').trim(),
     typedInspectionStateRoot: String(profile.typedInspectionStateRoot ?? fallback.typedInspectionStateRoot ?? '').trim(),
     typedInspectionProfileId: String(profile.typedInspectionProfileId ?? fallback.typedInspectionProfileId ?? '').trim(),
@@ -690,7 +696,6 @@ const legacyProfile = () => normalizeProfile({
   trueDeltaEnabled: process.env.CODEX_TRUE_DELTA_ENABLED || false,
   typedDeliberationEnabled: process.env.CODEX_TYPED_DELIBERATION_ENABLED || false,
   typedInspectionEnabled: process.env.CODEX_TYPED_INSPECTION_ENABLED || false,
-  typedInspectionApiOrigin: process.env.CODEX_TYPED_INSPECTION_API_ORIGIN || '',
   typedInspectionRootDir: process.env.CODEX_TYPED_INSPECTION_ROOT_DIR || '',
   typedInspectionStateRoot: process.env.CODEX_TYPED_INSPECTION_STATE_ROOT || '',
   typedInspectionProfileId: process.env.CODEX_TYPED_INSPECTION_PROFILE_ID || '',
@@ -2492,6 +2497,18 @@ export class SerialExecutionGate {
   }
 }
 
+// Durable CHAT acknowledgements are replayable across process restarts. Their
+// dispatch/message identity remains durable; the authenticated socket identity
+// must be bound at send time, never omitted or replayed from an old process.
+export const bindChatDispatchAckToSession = (envelope, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
+  if (envelope?.messageType !== 'chat.dispatch.ack') return envelope
+  if (envelope.agentId !== profile?.agentId || typeof runtimeInstanceId !== 'string' ||
+      !runtimeInstanceId || runtimeInstanceId === profile.agentId) {
+    throw new AgentProtocolError('CHAT_ACK_SESSION_BINDING_INVALID', 'CHAT acknowledgement does not match the current Agent session')
+  }
+  return { ...envelope, sourceAgentId: profile.agentId, runtimeInstanceId }
+}
+
 export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
   const envelope = {
     schemaVersion: PROTOCOL_VERSION,
@@ -2540,6 +2557,7 @@ export class AgentMessageProcessor {
     this.activeChats = new Map()
     this.chatAckRetries = new Map()
     this.chatRecoveryRetries = new Map()
+    this.preEngineRecoveryAttempts = new Set()
     this.chatRecoveryRetryBaseMs = chatRecoveryRetryBaseMs
     this.chatRecoveryRetryMaxMs = chatRecoveryRetryMaxMs
     this.drainPromise = null
@@ -2904,8 +2922,12 @@ export class AgentMessageProcessor {
   }
   _schedulePendingChats() { if (!this.chatInbox || this.paused || this.stopped) return; for (const item of this.chatInbox.listPending()) this._scheduleChat(item) }
   _scheduleRecoveryChats() {
-    if (!this.chatInbox || !this.recoverChat || this.paused || this.stopped) return
-    for (const item of this.chatInbox.listRecovery()) if ((item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' && item.record.preparation) this._scheduleChatRecovery(item)
+    if (!this.chatInbox || this.paused || this.stopped) return
+    for (const item of this.chatInbox.listRecovery()) {
+      if (canResumePreEngineInspection(item.record)) {
+        if (!this.preEngineRecoveryAttempts.has(item.key)) this._scheduleChat(item, true)
+      } else if (this.recoverChat && (item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' && (item.record.preparation || item.record.finalPrepared)) this._scheduleChatRecovery(item)
+    }
   }
   _retryChatRecovery(item) {
     if (!item || this.stopped || this.paused) return
@@ -2974,13 +2996,14 @@ export class AgentMessageProcessor {
     try { void this.lanes.enqueue('inspect', this._chatFairness(message), task, `recovery:${this._chatTurnKey(message)}`).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_ERROR', error.message), message.rawPayload) }) }
     catch (error) { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_FULL', error.message), message.rawPayload) }
   }
-  _scheduleChat(item) {
+  _scheduleChat(item, preEngineRecovery = false) {
     if (!item || this.activeChats.has(item.key)) return
     const message = item.record.message; const active = { key: item.key, state: 'QUEUED', message, cancelRequested: false, cancel: null }
     this.activeChats.set(item.key, active)
     const task = async () => {
       if (active.cancelRequested) { this.activeChats.delete(item.key); return }
-      const claimed = this.chatInbox.claim(item.key); if (!claimed) { this.activeChats.delete(item.key); return }
+      if (preEngineRecovery) this.preEngineRecoveryAttempts.add(item.key)
+      const claimed = preEngineRecovery ? this.chatInbox.claimPreEngineInspection(item.key) : this.chatInbox.claim(item.key); if (!claimed) { this.activeChats.delete(item.key); return }
       active.state = 'STARTING'; active.item = claimed; this.chatActive = true
       const controls = {
         markPrepared: preparation => { active.state = 'PREPARED'; this.chatInbox.markPrepared(claimed, preparation) },
@@ -4068,10 +4091,18 @@ const sendStatus = (profile, status, extra = {}) => {
   }), profile)
 }
 
-export const publishTypedInspectionReadiness = (profile, state, { sendStatusFn = sendStatus, busyFn = isProfileBusy } = {}) => {
+// The server activates capability declarations only from an acknowledged registration.
+// Presence is status-only, so a measured readiness transition must refresh registration.
+export const publishMeasuredRuntimeCapabilities = (profile, state, { registerFn = registerAgent } = {}) => {
   const stage = state?.registration?.snapshot?.().stage
-  if (!state || state.disposed || !state.typedInspectionProfileRuntime?.declaration?.() ||
-      !['pending_ack', 'ack_timeout', 'registered'].includes(stage) || state.ws?.readyState !== 1) return false
+  if (!state || state.disposed || state.ws?.readyState !== 1 ||
+      !['pending_ack', 'ack_timeout', 'registered'].includes(stage)) return false
+  return registerFn(profile) === true
+}
+
+export const publishTypedInspectionReadiness = (profile, state, { registerFn = registerAgent, sendStatusFn = sendStatus, busyFn = isProfileBusy } = {}) => {
+  if (!state?.typedInspectionProfileRuntime?.declaration?.()) return false
+  if (!publishMeasuredRuntimeCapabilities(profile, state, { registerFn })) return false
   return sendStatusFn(profile, busyFn(profile) ? 'busy' : 'online') === true
 }
 
@@ -4643,8 +4674,8 @@ const profileConfigurationErrors = profile => {
   if (profile.fastChatEnabled && (profile.chatSandbox !== 'read-only' || profile.chatToolPolicy !== 'read-only-constrained')) {
     errors.push('Fast CHAT requires chatSandbox=read-only and chatToolPolicy=read-only-constrained; approval never is not deny-all')
   }
-  const typedInspectionControls = [profile.typedInspectionApiOrigin, profile.typedInspectionRootDir, profile.typedInspectionStateRoot]
-  if (typedInspectionControls.some(value => Boolean(value)) && typedInspectionControls.some(value => !value)) errors.push('typedInspectionApiOrigin, typedInspectionRootDir and typedInspectionStateRoot must be configured together')
+  const typedInspectionControls = [profile.workspaceFileApiOrigin, profile.typedInspectionRootDir, profile.typedInspectionStateRoot]
+  if ([profile.typedInspectionRootDir, profile.typedInspectionStateRoot].some(Boolean) && !typedInspectionControls.every(Boolean)) errors.push('INSPECT requires the shared workspaceFileApiOrigin and distinct private input/state roots')
   if (profile.typedInspectionEnabled && (!profile.appServerEnabled || !typedInspectionControls.every(Boolean) || !profile.typedInspectionSupportedInputs.length)) errors.push('typedInspectionEnabled requires appServerEnabled plus fixed API origin plus distinct private input/state roots; runtime remains unavailable until isolation measurement is attached')
   if (!['isolated', 'restricted-proxy'].includes(profile.typedInspectionProviderNetwork)) errors.push('typedInspectionProviderNetwork must be isolated or restricted-proxy')
   if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an exact provider id and HTTPS base URL')
@@ -5344,8 +5375,8 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}, managedI
   }
 }
 
-export const resolveManagedRuntimeProfile = (profile, source = {}, managedImageScopes = emptyManagedImageScopeAuthorizations()) =>
-  inheritManagedRuntimeCapabilities(profile, source, managedImageScopes?.resolve?.(profile) || null)
+export const resolveManagedRuntimeProfile = (profile, source = {}, managedImageScopes = emptyManagedImageScopeAuthorizations(), managedChatScopes = emptyManagedChatScopes()) =>
+  applyManagedChatScope(inheritManagedRuntimeCapabilities(profile, source, managedImageScopes?.resolve?.(profile) || null), source, managedChatScopes)
 
 /** Fully composed source-aware v3 runtime for production registration and polling. */
 export const createControlledImageV3SourceRuntime = ({
@@ -5608,9 +5639,9 @@ const createProfileState = profile => {
     rootDir: resolve(config.commandInboxDir, 'chat-workdirs'), profile,
     forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
   })
-  const typedInspectionMaterializer = profile.typedInspectionApiOrigin && profile.typedInspectionRootDir
+  const typedInspectionMaterializer = profile.workspaceFileApiOrigin && profile.typedInspectionRootDir
     ? new TypedInspectionMaterializer({
-      apiOrigin: profile.typedInspectionApiOrigin,
+      apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
       fetchFn: globalThis.fetch,
       getRuntimeAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || '',
@@ -5633,7 +5664,7 @@ const createProfileState = profile => {
   const hostedWireContract = profile.fastChatEnabled && profile.appServerEnabled ? verifyHostedWireContract() : null
   const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 256 })
   const legacyExecutionGate = new SerialExecutionGate()
-  const sendAckFn = envelope => sendRaw(envelope, profile)
+  const sendAckFn = envelope => sendRaw(bindChatDispatchAckToSession(envelope, profile), profile)
   const executionReportOutbox = new ExecutionReportOutbox({
     profile,
     rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile), 'execution-report-outbox'),
@@ -5726,6 +5757,8 @@ const createProfileState = profile => {
     }).catch(error => {
       state.typedInspectionProfileFailure = error
       console.warn(`typed inspection profile unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
+      // Only locally generated nft rules are logged; never dump provider errors or credentials.
+      if (['TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH', 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED'].includes(error.code)) console.warn(`typed inspection local network diagnosis | ${error.message}`)
       return null
     })
     await state.typedInspectionProfilePromise
@@ -5765,17 +5798,20 @@ const createProfileState = profile => {
           if (state.appServerAdapter === adapter) state.appServerAdapter = null
           state.appServerPromise = null
           if (!isCurrent()) return
+          if (profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
           if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
           state.appServerRestartAttempt++; scheduleRestart()
         }
         state.appServerExitListener = exitListener
         adapter.once('exit', exitListener)
         state.appServerAdapter = adapter; state.appServerRestartAttempt = 0; state.appServerNotBefore = 0
+        if (profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
         if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
         return adapter
       }).catch(error => {
         state.appServerAdapter = null; state.appServerRestartAttempt++; state.appServerNotBefore = 0
         if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') state.appServerPermanentFailure = error
+        if (isCurrent() && profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
         console.warn(`app-server unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
         if (isCurrent() && !state.appServerPermanentFailure) scheduleRestart()
         return null
@@ -5796,6 +5832,7 @@ const createProfileState = profile => {
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
       if (isTypedInspectionDispatch(message)) {
         const inspectionProfile = await state.ensureTypedInspectionProfile()
+        await state.registration.waitForRegistration()
         return runReadOnlyInspection(profile, message, {
           profileRuntime: inspectionProfile, bindingStore: threadBindingStore, controls, materializer: state.typedInspectionMaterializer,
           nativeInputAdapters: state.typedInspectionNativeInputAdapters,
@@ -5811,6 +5848,7 @@ const createProfileState = profile => {
       const route = message.route || message.routing?.interactionMode
       if (route !== 'INSPECT') return { status: 'recovery_required', reconciliationStatus: 'UNSUPPORTED_ROUTE' }
       const inspectionProfile = await state.ensureTypedInspectionProfile()
+      await state.registration.waitForRegistration()
       try {
         return await recoverTypedInspection(profile, message, record, {
           profileRuntime: inspectionProfile, controls,
@@ -5866,6 +5904,32 @@ const isProfileBusy = profile => getProfileState(profile)?.processor?.isBusy() |
 export const canPublishProfileOnline = (profile, state) => !profile.managedGeneration ||
   Boolean(state?.managedRegistered && state?.managedEngine?.ready)
 
+// Diagnostic only: one read-only queue GET, no dispatch, retries, or receipt body logging.
+// Run only for an explicitly enabled managed CHAT profile and its exact native receipt.
+export const observeTypedRuntimeAuthentication = async ({ profile, receipt, authHeader, apiOrigin,
+  runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID, fetchFn = globalThis.fetch } = {}) => {
+  if (!profile?.typedDeliberationEnabled || !profile.managedGeneration ||
+      receipt?.typedDeliberation?.state !== 'READY') return { state: 'NOT_APPLICABLE' }
+  const binding = receipt.runtimeAuth
+  if (!binding || binding.scheme !== 'native-runtime-v1' || binding.agentId !== profile.agentId ||
+      binding.runtimeInstanceId !== runtimeInstanceId || binding.tenantId !== profile.managedTenantId ||
+      binding.clientId !== profile.managedClientId || binding.ownerJiacn !== profile.managedOwnerJiacn ||
+      !/^AgentRuntime [0-9a-f]{32}$/.test(authHeader || '')) return { state: 'RECEIPT_BINDING_MISMATCH' }
+  try {
+    const origin = new URL(apiOrigin)
+    if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password) {
+      return { state: 'INVALID_API_ORIGIN' }
+    }
+    const response = await fetchFn(new URL('/internal/agent/tasks/workspace-executions/commands', origin), {
+      method: 'GET', redirect: 'error', headers: { Authorization: authHeader, Accept: 'application/json',
+        'X-Agent-Id': profile.agentId, 'X-Agent-Runtime-Id': runtimeInstanceId }
+    })
+    // A queue read never claims or executes a command. Do not retain any returned work data.
+    await response.body?.cancel()
+    return { state: response.status === 401 ? 'CURRENT_BINDING_DENIED' : 'HTTP_OBSERVED', httpStatus: response.status }
+  } catch { return { state: 'TRANSPORT_ERROR' } }
+}
+
 const handleMessage = async (profile, raw) => {
   let parsed
   try { parsed = JSON.parse(raw.toString()) } catch (error) {
@@ -5879,8 +5943,19 @@ const handleMessage = async (profile, raw) => {
   const state = getProfileState(profile)
   const registrationOutcome = state?.registration.observe(parsed)
   if (registrationOutcome === 'registered') {
+    if (profile.typedDeliberationEnabled) {
+      const receipt = parsed.payload || parsed
+      console.log(`typed runtime registration | agent=${profile.agentId} | requested=${buildTypedDeliberationDeclaration(profile, state.appServerAdapter)?.state || 'UNDECLARED'} | receipt=${receipt.typedDeliberation?.state || 'UNDECLARED'} | schema=${state.appServerAdapter?.readback?.schema?.schemaContractId || 'unmeasured'}`)
+    }
     // The API rotates this registration token. Keep it only in memory for this live socket binding.
     state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
+    if (profile.typedDeliberationEnabled && profile.managedGeneration) {
+      const origin = new URL(config.wsUrl)
+      origin.protocol = origin.protocol === 'wss:' ? 'https:' : 'http:'
+      void observeTypedRuntimeAuthentication({ profile, receipt: parsed.payload || parsed,
+        authHeader: state.workspaceFileRuntimeAuthHeader, apiOrigin: origin.origin
+      }).then(observation => console.log(`typed runtime authentication | agent=${profile.agentId} | state=${observation.state} | http=${observation.httpStatus ?? 'none'}`))
+    }
     startWorkspaceFilePoller(profile, state)
     startNativeConversationPoller(profile, state)
     startControlledImageV3ConversationPoller(profile, state)
@@ -6246,6 +6321,7 @@ export const main = async () => {
   )
 
   if (hasFlag('--validate')) {
+    if (process.env.AGENT_MANAGED_CHAT_SCOPES_FILE) loadManagedChatScopes(process.env.AGENT_MANAGED_CHAT_SCOPES_FILE)
     for (const profile of buildConfigurationReport(runtimeConfig).profiles) {
       for (const warning of profile.warnings) console.warn(`configuration warning | profile=${profile.profileId} | ${warning}`)
     }
@@ -6287,6 +6363,8 @@ export const main = async () => {
           console.warn(`managed image scopes unavailable; controlled image remains disabled (${error.message})`)
         }
       }
+      const managedChatScopes = process.env.AGENT_MANAGED_CHAT_SCOPES_FILE
+        ? loadManagedChatScopes(process.env.AGENT_MANAGED_CHAT_SCOPES_FILE) : emptyManagedChatScopes()
       const host = new ManagedHost({ root, workspacePolicyId, templateHome: required('AGENT_MANAGED_HOST_TEMPLATE_HOME'),
         codexBin: required('AGENT_MANAGED_HOST_CODEX_BIN'), runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
         tenantId: required('AGENT_MANAGED_HOST_TENANT_ID'), clientId: required('AGENT_MANAGED_HOST_CLIENT_ID'),
@@ -6300,7 +6378,7 @@ export const main = async () => {
             runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
         },
         attachProfile: async (profile, engine) => {
-          profile = resolveManagedRuntimeProfile(profile, defaultProfile, managedImageScopes)
+          profile = resolveManagedRuntimeProfile(profile, defaultProfile, managedImageScopes, managedChatScopes)
           let state = profileStates.get(profile.agentId)
           if (state && (state.profile.managedOwnerJiacn !== profile.managedOwnerJiacn ||
               state.profile.managedGeneration !== profile.managedGeneration)) throw new Error('Managed profile collision')
