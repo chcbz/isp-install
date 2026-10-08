@@ -93,7 +93,10 @@ function atomic(path, value) {
 export function initializeHostingEngine(profile, { spawnFn = spawn, timeoutMs = 15000 } = {}) {
   return new Promise((resolveEngine, reject) => {
     const child = spawnFn(profile.codexBin, ['app-server'], {
-      cwd: profile.codexWorkdir, env: { ...process.env, CODEX_HOME: profile.codexHome },
+      cwd: profile.codexWorkdir, env: {
+        ...Object.fromEntries(['PATH', 'LANG', 'LC_ALL', 'TZ'].filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]])),
+        HOME: profile.codexHome, CODEX_HOME: profile.codexHome
+      },
       stdio: ['pipe', 'pipe', 'pipe'], shell: false
     })
     const engine = { ready: false, closed: false, threadId: null, close: () => child.kill('SIGTERM') }
