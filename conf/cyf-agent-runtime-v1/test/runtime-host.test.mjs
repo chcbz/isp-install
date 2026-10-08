@@ -353,6 +353,59 @@ test('validator checks full artifact-local dependency/toolchain graph instead of
   await assert.rejects(validateExecutionPayload(resolve(artifact, 'codex-ws-agent'), { toolchain: false }), code('RUNTIME_DEPENDENCY_VERSION_MISMATCH'));
 });
 
+// Exercise the validator's exact eval command with real collated source and an
+// explicit copy of this worktree's existing JS dependencies, as above. No installer,
+// npm/pip, Python/config/auth or service runs; this is NOT clean-target C1-C4 proof.
+async function validatorImportFixture(t) {
+  const root = await mkdtemp(resolve(tmpdir(), 'ur01-validator import-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const artifact = resolve(root, 'artifact'); await mkdir(artifact);
+  const engine = resolve(artifact, 'codex-ws-agent');
+  await collateExecutionPayload(engineSource, engine);
+  await cp(resolve(engineSource, 'node_modules'), resolve(engine, 'node_modules'), { recursive: true });
+  await validateExecutionPayload(engine, { toolchain: false });
+  const source = await readFile(resolve(repo, 'conf/cyf-agent-runtime-v1/validate.sh'), 'utf8');
+  const start = source.indexOf('# The import must resolve from this artifact');
+  const end = source.indexOf('if [ -n "$CONFIG" ]; then', start);
+  assert.ok(start >= 0 && end > start, 'validator import command boundaries are present');
+  const command = source.slice(start, end);
+  const options = { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH || '', NODE_BIN: process.execPath, PACKAGE_ROOT: artifact } };
+  return { root, engine, options, run: () => execFileSync('bash', ['--noprofile', '--norc', '-c', command], options) };
+}
+
+test('validator artifact import loads the real engine without invoking its retired CLI', async t => {
+  const f = await validatorImportFixture(t);
+  const before = await readdir(f.root);
+  assert.equal(f.run(), '');
+  assert.deepEqual(await readdir(f.root), before);
+  for (const name of ['.env', 'data', '.toolchain', 'codex-session-map.json']) {
+    await assert.rejects(lstat(resolve(f.engine, name)), cause => cause.code === 'ENOENT');
+  }
+});
+
+test('validator artifact import regression reproduces eval ambiguity and keeps direct engine CLI retired', async t => {
+  const f = await validatorImportFixture(t);
+  const entry = resolve(f.engine, 'agent-client.mjs');
+  const originalEval = 'await import((await import("node:url")).pathToFileURL(process.argv[1]));';
+  const denied = cause => cause.status === 1 && /legacy API-key execution is retired/.test(cause.stderr);
+  assert.throws(() => execFileSync(process.execPath, ['--input-type=module', '-e', originalEval, entry], f.options), denied);
+  for (const args of [[], ['--validate']]) {
+    assert.throws(() => execFileSync(process.execPath, [entry, ...args], f.options), denied);
+  }
+});
+
+test('validator artifact import fails closed for a missing local module or execution host export', async t => {
+  const f = await validatorImportFixture(t);
+  const dependency = resolve(f.engine, 'workspace-manager.mjs');
+  const source = await readFile(dependency);
+  await rm(dependency);
+  assert.throws(f.run, cause => cause.status !== 0 && /ERR_MODULE_NOT_FOUND/.test(cause.stderr));
+  await writeFile(dependency, source);
+  await writeFile(resolve(f.engine, 'agent-client.mjs'), 'export const unrelated = true;\n');
+  assert.throws(f.run, cause => cause.status !== 0 && /Runtime execution host export is missing/.test(cause.stderr));
+});
+
 test('single-artifact units pin local Node and shared host config; shell entry has no activation/reload', async () => {
   const units = await Promise.all([resolve(repo, 'systemd/cyf-agent-runtime-v1@.service'), resolve(repo, 'conf/cyf-agent-runtime-v1/systemd/cyf-agent-runtime-v1@.service')].map(path => readFile(path, 'utf8')));
   assert.equal(units[0], units[1]);

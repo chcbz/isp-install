@@ -34,8 +34,14 @@ done
   await validateExecutionPayload(process.argv[2]);
 ' "$PACKAGE_ROOT/runtime/lib/execution-adapter.mjs" "$PACKAGE_ROOT/codex-ws-agent"
 # The import must resolve from this artifact, never a globally installed engine.
-"$NODE_BIN" --input-type=module -e 'await import((await import("node:url")).pathToFileURL(process.argv[1]));' \
-    "$PACKAGE_ROOT/codex-ws-agent/agent-client.mjs"
+# An eval argument is argv[1], not a main module: pass the root so importing the
+# engine cannot be mistaken for its retired standalone CLI by the main guard.
+"$NODE_BIN" --input-type=module -e '
+  const { resolve } = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  const engine = await import(pathToFileURL(resolve(process.argv[1], "codex-ws-agent/agent-client.mjs")));
+  if (typeof engine.createRuntimeExecutionHost !== "function") throw new Error("Runtime execution host export is missing");
+' "$PACKAGE_ROOT"
 if [ -n "$CONFIG" ]; then
     "$NODE_BIN" "$PACKAGE_ROOT/runtime/agent-runtime.mjs" validate --config "$CONFIG" >/dev/null
 fi
