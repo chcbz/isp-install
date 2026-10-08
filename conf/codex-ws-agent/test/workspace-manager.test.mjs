@@ -23,6 +23,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PassThrough } from 'node:stream'
 import test, { afterEach } from 'node:test'
+import { scanRuntimeModuleClosure } from './module-import-scanner.mjs'
 
 import { runCodex } from '../agent-client.mjs'
 import {
@@ -1288,18 +1289,7 @@ const trackedReleasePayload = () => {
     .sort()
 }
 
-const runtimeModuleClosure = () => {
-  const pending = ['agent-client.mjs']; const closure = new Set()
-  while (pending.length) {
-    const relative = pending.pop()
-    if (closure.has(relative)) continue
-    closure.add(relative)
-    const source = readFileSync(resolve(clientSourceRoot, relative), 'utf8')
-    const imports = source.matchAll(/(?:from\s+|import\s*\(\s*)['"]\.\/([^'"]+\.mjs)['"]/g)
-    for (const match of imports) if (!closure.has(match[1])) pending.push(match[1])
-  }
-  return [...closure].sort()
-}
+const runtimeModuleClosure = () => scanRuntimeModuleClosure(clientSourceRoot)
 
 const prepareInstallerIsolation = ({ root, appHome }) => {
   const instanceRoot = resolve(root, 'instances')

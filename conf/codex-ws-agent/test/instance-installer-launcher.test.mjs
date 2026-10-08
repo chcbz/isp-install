@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
+import { relativeModuleSpecifiers } from './module-import-scanner.mjs'
 
 const repositoryRoot = resolve(import.meta.dirname, '..', '..', '..')
 const installer = resolve(repositoryRoot, 'shell/codex_ws_agent_install.sh')
@@ -258,12 +259,11 @@ test('two explicit instances install isolated roots and preserve the exact relea
         if (!relative.endsWith('.mjs')) continue
         const modulePath = resolve(releaseRoot, relative)
         const source = readFileSync(modulePath, 'utf8')
-        const relativeImports = /(?:from\s*|import\s*\(\s*|import\s*)['"](\.{1,2}\/[^'"]+)['"]/g
-        for (const match of source.matchAll(relativeImports)) {
-          const dependency = resolve(dirname(modulePath), match[1])
-          assert.equal(existsSync(dependency), true, `${relative} imports missing ${match[1]}`)
+        for (const specifier of relativeModuleSpecifiers(source)) {
+          const dependency = resolve(dirname(modulePath), specifier)
+          assert.equal(existsSync(dependency), true, `${relative} imports missing ${specifier}`)
           assert.equal([...manifest.keys()].some(path => resolve(releaseRoot, path) === dependency), true,
-            `${relative} imports unhashed ${match[1]}`)
+            `${relative} imports unhashed ${specifier}`)
         }
       }
       const provenance = JSON.parse(readFileSync(resolve(releaseRoot, 'release-provenance.json'), 'utf8'))
