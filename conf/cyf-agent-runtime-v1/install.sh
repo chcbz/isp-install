@@ -59,7 +59,7 @@ done
 "$STAGE/codex-ws-agent/.toolchain/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir --upgrade 'pip<22'
 "$STAGE/codex-ws-agent/.toolchain/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir \
     -r "$STAGE/codex-ws-agent/toolchain/requirements.txt"
-# Prepare generated venv launchers BEFORE observing/validating the stage. Python
+# Prepare generated venv launchers and cfg audit metadata BEFORE validating the stage. Python
 # --copies relocates the interpreter, not pip's absolute shebangs or activation.
 # Relative shell/Python trampolines work both before and after mv, including long
 # paths; no base-interpreter/stdlib portability or production compiler claim.
@@ -74,6 +74,36 @@ def save(path, data):
     # Preserve original executable/ownership modes; all paths are in our stage.
     with open(path, 'wb') as stream: stream.write(data)
     changed[path] = data
+
+# Python 3.11 adds a command audit field to pyvenv.cfg. Its final env_dir is
+# raw text (not shell-quoted by CPython), even for paths with spaces/quotes.
+# Rewrite only that recognized final operand; never strip markers or rewrite
+# home/base-executable/unknown fields. This audit line is never executed.
+cfg_path = os.path.join(venv, 'pyvenv.cfg')
+assert os.path.isfile(cfg_path) and not os.path.islink(cfg_path), 'VENV_CONFIG_UNSAFE'
+with open(cfg_path, 'rb') as stream: cfg_data = stream.read()
+if stage.encode() in cfg_data or b'.cyf-agent-runtime.stage.' in cfg_data:
+    cfg_text = cfg_data.decode('utf-8')
+    cfg_lines = cfg_text.splitlines(True)
+    commands = [(index, re.fullmatch(r'(command\s*=\s*)([^\r\n]*)(\r?\n)?', line))
+                for index, line in enumerate(cfg_lines) if re.match(r'command\s*=', line)]
+    assert len(commands) == 1 and commands[0][1], 'VENV_CONFIG_COMMAND_NOT_RECOGNIZED'
+    index, match = commands[0]
+    value = match.group(2)
+    # Exact suffix, not an arbitrary occurrence or predicted stage path. Keep
+    # original quoting style if the audit producer explicitly POSIX-quoted it.
+    if value.endswith(' ' + venv):
+        prefix, destination = value[:-len(venv)], final_venv
+    elif value.endswith(' ' + shlex.quote(venv)):
+        prefix, destination = value[:-len(shlex.quote(venv))], shlex.quote(final_venv)
+    else:
+        raise AssertionError('VENV_CONFIG_COMMAND_NOT_RECOGNIZED')
+    assert re.fullmatch(r'(/.+) -m venv --copies(?: --without-pip)? ', prefix), 'VENV_CONFIG_COMMAND_NOT_RECOGNIZED'
+    assert stage not in prefix and '.cyf-agent-runtime.stage.' not in prefix, 'VENV_CONFIG_BASE_CONTAINS_STAGE'
+    cfg_lines[index] = match.group(1) + prefix + destination + (match.group(3) or '')
+    cfg_text = ''.join(cfg_lines)
+    assert stage not in cfg_text and '.cyf-agent-runtime.stage.' not in cfg_text, 'VENV_CONFIG_STAGE_REFERENCE_NOT_RECOGNIZED'
+    save(cfg_path, cfg_text.encode('utf-8'))
 
 def interpreter_name(value):
     assert value.startswith(bin_dir + '/'), 'VENV_LAUNCHER_INTERPRETER_OUTSIDE_STAGE'
