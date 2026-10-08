@@ -4,8 +4,13 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import { NativeConversationLane, parseNativeConversationCommand, validateNativeConversationOutput } from '../conversation-native.mjs'
+import { NativeConversationLane, parseNativeConversationCommand, validateNativeConversationOutput, nativeSessionHeaders } from '../conversation-native.mjs'
 
+const sessionProof = (auth, agentId = 'agent-1', runtimeInstanceId = 'instance-1') => ({
+  Authorization: auth, 'X-Agent-Id': agentId, 'X-Agent-Runtime-Id': runtimeInstanceId,
+  'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host',
+  'X-Agent-Session-Generation': '7'
+})
 const command = Object.freeze({ schemaVersion: 1, taskId: 'task-1', runId: 'run-1', conversationId: 'conv-1',
   commandId: 'cmd-1', messageId: 'msg-1', instruction: 'Create an authorized image with no referenced materials',
   outputContentMimeType: 'image/png', outputId: 'output_1' })
@@ -16,8 +21,8 @@ const json = (url, body, status = 200) => ({ status, url: url.href, redirected: 
   headers: { get: () => 'application/json' }, json: async () => body })
 const reference = Object.freeze({ inputRef: 'input_1', fileId: 'ref-1', version: 2,
   originalFilename: '../do-not-use.png', contentMimeType: 'image/png', byteLength: bytes.length, sha256: digest })
-const setup = ({ execute, response, inputSnapshot, referenceBytes = bytes,
-  auth = `AgentRuntime ${'a'.repeat(32)}` } = {}) => {
+const setup = ({ execute, response, inputSnapshot, renewResponse, referenceBytes = bytes,
+  auth = `AgentRuntime rts1_${'a'.repeat(64)}` } = {}) => {
   const root = mkdtempSync(resolve(tmpdir(), 'mmd-native-test-'))
   const calls = []
   const fetchFn = async (url, init) => {
@@ -33,7 +38,7 @@ const setup = ({ execute, response, inputSnapshot, referenceBytes = bytes,
       assert.deepEqual(JSON.parse(init.body), { commandId: command.commandId, messageId: command.messageId })
       return json(url, { executionId: 'exec-1', version: 1, token, expiresAt: Date.now() + 900000 })
     }
-    if (path.endsWith('/lease/renew')) return json(url, { executionId: 'exec-1', version: 1, token, expiresAt: Date.now() + 900000 })
+    if (path.endsWith('/lease/renew')) return renewResponse ? renewResponse(url, init) : json(url, { executionId: 'exec-1', version: 1, token, expiresAt: Date.now() + 900000 })
     if (path.endsWith('/conversation/inputs')) {
       assert.deepEqual(JSON.parse(init.body), { version: 1, token })
       return json(url, inputSnapshot || { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
@@ -60,7 +65,7 @@ const setup = ({ execute, response, inputSnapshot, referenceBytes = bytes,
     throw new Error('Unexpected API endpoint')
   }
   const lane = new NativeConversationLane({ apiOrigin: 'http://127.0.0.1:10018', rootDir: root,
-    fetchFn, agentId: 'agent-1', runtimeInstanceId: 'instance-1', getAuth: () => auth, execute })
+    fetchFn, agentId: 'agent-1', runtimeInstanceId: 'instance-1', getRuntimeHeaders: () => sessionProof(auth), execute })
   return { lane, root, calls, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 test('rejects malformed or reference-bearing queue commands before any claim', async () => {
@@ -195,7 +200,7 @@ test('ambiguous Provider START never invokes engine, retries, uploads, or report
     try { await assert.rejects(s.lane.poll(), /CONVERSATION_PROVIDER_START_UNCERTAIN/)
       assert.equal(executed, false)
       assert.equal(s.calls.length, 4)
-      assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
+      assert.equal(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')).length, 1, 'unknown START retains its only recovery run')
     } finally { s.cleanup() }
   }
 })
@@ -234,7 +239,7 @@ test('invalid, foreign or tampered references never reach executor or output upl
       assert.ok(s.calls.every(x => !x.path.includes('/output-commits/') &&
         !x.path.endsWith('/output_1/content') && !x.path.endsWith('/provider-start')))
       const root = resolve(s.root, 'conversation-runs', 'agent-1')
-      if (existsSync(root)) assert.deepEqual(readdirSync(root), [])
+      if (existsSync(root)) assert.equal(readdirSync(root).length, expected.includes('UNCERTAIN') ? 1 : 0)
     } finally { s.cleanup() }
   }
 })
@@ -267,4 +272,47 @@ test('multimedia output validator checks bytes rather than filename or declared 
   assert.equal(validateNativeConversationOutput('text/plain', Buffer.from([0xc3, 0x28])), false)
   assert.equal(validateNativeConversationOutput('audio/wav', Buffer.from('RIFF0000WEBP')), false)
   assert.equal(validateNativeConversationOutput('image/svg+xml', Buffer.from('<svg/>')), false)
+})
+
+
+test('native session proof requires rts1 and all five exact headers; no old-token or partial-proof fallback', () => {
+  const valid = sessionProof(`AgentRuntime rts1_${'a'.repeat(64)}`)
+  assert.deepEqual(nativeSessionHeaders(valid, 'agent-1', 'instance-1'), valid)
+  for (const field of Object.keys(valid)) {
+    const missing = { ...valid }; delete missing[field]
+    assert.throws(() => nativeSessionHeaders(missing, 'agent-1', 'instance-1'), /CONVERSATION_AUTH_UNAVAILABLE/)
+  }
+  for (const patch of [{ Authorization: `AgentRuntime ${'a'.repeat(32)}` },
+    { Authorization: `AgentRuntime rts1_${'A'.repeat(64)}` }, { 'X-Agent-Id': 'foreign' },
+    { 'X-Agent-Runtime-Id': 'foreign' }, { 'X-Agent-Session-Generation': '07' },
+    { 'X-Agent-Session-Generation': '9007199254740992' }, { 'X-API-Key': 'retired' }, { Cookie: 'foreign' }]) {
+    assert.throws(() => nativeSessionHeaders({ ...valid, ...patch }, 'agent-1', 'instance-1'), /CONVERSATION_AUTH_UNAVAILABLE/)
+  }
+})
+
+
+test('native terminal poll joins owned in-flight renewal before cleanup and writer release', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let finishExecute; let enteredExecute; let startedRenew; let finishRenew
+  const entered = new Promise(resolve => { enteredExecute = resolve })
+  const executing = new Promise(resolve => { finishExecute = resolve })
+  const renewing = new Promise(resolve => { startedRenew = resolve })
+  const s = setup({ execute: async () => {
+    enteredExecute(); await executing
+    return { outputId: 'output_1', contentType: 'image/png', bytes }
+  }, renewResponse: url => { startedRenew(); return new Promise(resolve => {
+    finishRenew = () => resolve(json(url, { executionId: 'exec-1', version: 1, token, expiresAt: Date.now() + 900000 }))
+  }) } })
+  let settled = false
+  const polling = s.lane.poll().finally(() => { settled = true })
+  try {
+    await entered; t.mock.timers.tick(450001); await renewing
+    finishExecute(); await new Promise(resolve => setImmediate(resolve))
+    assert.ok(s.calls.some(call => call.path.includes('/output-commits/')))
+    assert.equal(settled, false, 'terminal receipt does not finish poll while renewal owns HTTP')
+    assert.equal(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')).length, 1)
+    finishRenew(); assert.deepEqual(await polling, { processed: 1 })
+    assert.equal(settled, true)
+    assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
+  } finally { finishExecute(); finishRenew?.(); await polling; s.cleanup() }
 })

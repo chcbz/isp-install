@@ -1,7 +1,7 @@
 # Unified Agent Runtime (UR-01, 2026-10-08)
 
 One Runtime host reuses `codex-ws-agent`; it is not a heartbeat sidecar or a new
-model executor. The current source is an **offline M3 candidate**, not an accepted
+model executor. The current source is an **offline M3b candidate**, not an accepted
 migration or authorized release. The old engine CLI/API-key execution entry is
 retired; do not run the old service with the new ACK format.
 
@@ -104,6 +104,23 @@ replacement token or session secrets in logs/checkpoints.
   durableStateHealthy is computed from actual stores, not a heartbeat assertion.
   Health loss pauses admission but allows lawful terminal/result replay. Recovery
   refreshes registration before readmission. Chat `profiles.EXECUTE` stays disabled.
+- Native v1, controlled-image v2/v3 and typed inspection receive the six exact
+  current session headers from the trusted transport at every HTTP send. They
+  reject old 32hex credentials, missing proof, wrong Agent/boot and non-canonical
+  generation. They neither synthesize installation identity nor mint credentials.
+  Session rotation aborts only its owned native network and rejects late responses;
+  no new request deadline or forced business replay is added.
+- Workspace material cleanup requires its known native terminal plus matching
+  durable HTTP D06 terminal. The existing completed inbox/ledger stores only local
+  command fingerprint/directory/device/inode, never session proof. After restart,
+  cleanup uses that exact directory identity without input download or re-execution;
+  absent paths are idempotent, replacement/symlink/foreign paths fail closed. Cleanup
+  IO failure retains retry authority in the same ledger, not a new queue. Native
+  v1/v2/v3 unknown START/upload/commit/failure also retains its private run.
+- Stopping polls does not release an in-flight guard; shutdown awaits owned native
+  operations (including an in-flight lease renewal) and engine closure before releasing writer locks. Exact CHAT stop
+  remains request/turn/dispatch/Agent-correlated and current-channel/generation
+  checked; unverified WORK_ITEM_CANCEL is not advertised.
 - Each Agent has its own session, socket, reconnect and queues. Revocation isolates
   only that subject. SIGTERM aborts owned transport work and waits for confirmed
   engine shutdown before releasing writer locks. No permanent legacy auth path.
@@ -115,14 +132,26 @@ Targeted tests: `test/runtime-v1.test.mjs` (r1 request/proof/result/expiry/secur
 engine `test/agent-client.test.mjs` (mature queue + D06 FIFO/STARTED/unknown result/
 restart/conflicting payload; CHAT/result dedicated confirmation),
 `test/registration-ack.test.mjs` and `test/skill-install-manager.test.mjs`.
+Native lane/runtime, workspace-file-bridge and inspection tests cover the proof
+migration, prior function/Provider-start/lease/input/output boundaries and recovery
+retention. Integrated UR03 `unified-runtime-acceptance.test.mjs` keeps its cross-end
+HTTP test explicitly NOT_RUN (skip), not a synthetic PASS.
 They use private synthetic roots/mock HTTP/socket and a local WS handshake;
 **they are not cross-end API, clean-target install, Flow or online evidence**.
 
-Remaining M3 work is tracked in Owner handoff: full exact command.dispatch
-payloadReference/canonical identity fixture integration; authorized native lane
-32hex validator replacement; bounded terminal-confirmed workspace cleanup; full
-per-operation capability/cancellation/reconnect verification. Retaining recovery
-material is intentional until confirmation, not permission to clear it manually.
+The exact API canonical dispatch fixture (commit
+`a2dbe65062ff4c1c511094c19233b1b25c076f3e`, SHA256
+`057a4626387846f4bf420cab046d7d0bb4d12cdae6569e90839af00161cbd5a3`)
+exposes a real pending wire conflict: it has tenant/client/targetAgentId, not
+canonicalAgentId/Runtime installationId/payloadReference; expiresAt is epoch
+milliseconds. Current frozen ACK projection requires canonicalAgentId and a
+nonempty payloadReference. No references are invented; production dispatch remains
+fail-closed until the two Owners receive the same revised projection. Skill's
+product installationId is not Runtime installation identity. Remaining M3 gates
+include that projection integration, verified WORK_ITEM_CANCEL if its existing
+adapter/codec can prove exact binding, and actual client/server HTTP/native/skill
+acceptance. Retaining uncertain recovery material is intentional, not permission
+to clear it manually.
 Dynamic online identity/maintenance ownership, stopped-writer state migration,
 Flow version/commit/artifact proof and three-Agent real business acceptance remain
 release gates. Current task is incomplete: **do not publish or switch production**.

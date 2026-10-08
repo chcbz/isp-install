@@ -404,7 +404,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
   f.cleanup(() => adapters.close());
   const executors = config.agents.map(agent => adapters.createExecutor({ subjectKey: agent.subjectKey, agent }));
   for (const executor of executors) await executor.initialize();
-  return { f, config, adapters, sockets, requests, executors, engines, states: () => [...engines.values()], opened: () => sockets.some(socket => socket.readyState === 1) ? Promise.resolve() : new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), tick: () => new Promise(resolveTick => setImmediate(resolveTick)) };
+  return { f, config, adapters, sockets, requests, executors, engines, states: () => [...engines.values()], nextOpened: () => new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), opened: () => sockets.some(socket => socket.readyState === 1) ? Promise.resolve() : new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), tick: () => new Promise(resolveTick => setImmediate(resolveTick)) };
 }
 
 test('two independent session channels activate only exact receipt; health revocation keeps terminal reporting', async t => {
@@ -487,3 +487,23 @@ test('unified runtime heartbeat stops after SIGTERM and does not create a second
     createAdapters: async () => ({ createExecutor: fake.createExecutor, heartbeat: async () => { heartbeats++; controller.abort(); }, close: async () => {} }) });
   assert.equal(heartbeats, 1); assert.deepEqual(await readdir(config.agents[0].stateRoot), []);
 });
+
+
+test('normal reconnect rotates only owned session; old socket, old generation and peer stop never reach cancel adapter', async t => {
+  const c = await channelFixture(t); await Promise.all(c.executors.map(executor => executor.activate()))
+  const old = c.sockets[0]; const nextOpened = c.nextOpened(); old.close()
+  await c.tick(); assert.deepEqual(c.executors.map(executor => executor.ready()), [false, true])
+  const stop = { messageType: 'chat.stop', requestId: 'request', turnId: 'turn', dispatchId: 'dispatch',
+    targetAgentId: c.config.agents[0].manifest.canonicalAgentId, sessionGeneration: 7 }
+  old.receive(stop); await c.tick(); assert.equal(c.states()[0].accepted.length, 0)
+  const current = await nextOpened; await c.tick()
+  assert.equal(current.headers['X-Agent-Session-Generation'], '8'); assert.deepEqual(c.executors.map(executor => executor.ready()), [true, true])
+  current.receive(stop) // old-generation cancellation must remain harmless
+  current.receive({ ...stop, sessionGeneration: 8, installationId: c.config.agents[1].manifest.installationId })
+  old.receive({ ...stop, sessionGeneration: 8 })
+  current.receive({ ...stop, sessionGeneration: 8 })
+  await c.tick(); assert.equal(c.states()[0].accepted.length, 1); assert.equal(c.states()[0].accepted[0].sessionGeneration, 8)
+  assert.equal(c.states()[1].accepted.length, 0)
+  const proofs = c.requests.filter(row => row.url.endsWith('/session')); assert.equal(proofs.length, 3)
+  assert.equal(c.sockets[1].headers['X-Agent-Session-Generation'], '7')
+})

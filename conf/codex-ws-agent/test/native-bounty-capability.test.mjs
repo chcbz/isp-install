@@ -1,3 +1,4 @@
+import { PROCESS_RUNTIME_INSTANCE_ID as proofRuntimeId } from '../agent-client.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -9,6 +10,11 @@ import {
   normalizeProfile
 } from '../agent-client.mjs'
 
+const sessionProof = (auth, agentId = 'native-server', runtimeInstanceId = proofRuntimeId) => ({
+  Authorization: auth, 'X-Agent-Id': agentId, 'X-Agent-Runtime-Id': runtimeInstanceId,
+  'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host',
+  'X-Agent-Session-Generation': '7'
+})
 const configuredProfile = overrides => normalizeProfile({
   profileId: 'native-server',
   agentId: 'native-server',
@@ -27,7 +33,7 @@ const runtimeFor = (profile, hooks = {}) => createNativeBountyExecutionRuntime({
   profile,
   workspaceFileBridge: hooks.workspaceFileBridge === undefined ? {} : hooks.workspaceFileBridge,
   toolchainReady: hooks.toolchainReady === undefined ? true : hooks.toolchainReady,
-  getAuth: () => `AgentRuntime ${'a'.repeat(32)}`,
+  getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'a'.repeat(64)}`, profile.agentId),
   executeImage: hooks.executeImage || (async () => { throw new Error('declaration must not execute Provider work') }),
   createPollProtocol: hooks.createPollProtocol || (options => ({ poll: async () => ({ processed: 0 }), options }))
 })

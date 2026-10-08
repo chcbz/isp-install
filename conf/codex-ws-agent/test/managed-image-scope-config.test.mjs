@@ -154,7 +154,9 @@ test('exact managed authorization reaches real registration and poll runtime com
   const managed = resolveManagedRuntimeProfile(profile(), source(), parseManagedImageScopeAuthorizations(document(scope())))
   const runtime = createControlledImageV3SourceRuntime({
     profile: managed,
-    getAuth: () => `AgentRuntime ${'a'.repeat(32)}`,
+    getRuntimeHeaders: () => ({ Authorization: `AgentRuntime rts1_${'a'.repeat(64)}`,
+      'X-Agent-Id': managed.agentId, 'X-Agent-Runtime-Id': 'managed-runtime-fixture',
+      'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host', 'X-Agent-Session-Generation': '7' }),
     controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' },
     providerFetchFn: async () => assert.fail('Provider fetch must not run during registration or idle poll wiring'),
     nativeFetchFn: async () => assert.fail('native fetch is owned by the fake poll protocol in this fixture'),

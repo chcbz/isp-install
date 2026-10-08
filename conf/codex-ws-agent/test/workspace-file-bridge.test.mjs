@@ -649,3 +649,30 @@ test('native start is bound to verified inputs and validates the exact direct re
   assert.deepEqual(JSON.parse(requests[1].options.body), { commandId: options.commandId, messageId: options.messageId })
   bridge.cleanup(command)
 })
+
+test('confirmed cleanup recovers only original inode without re-materializing or downloading on restart', async () => {
+  const root = temporaryDirectory(); const raw = commandFor(); const bridge = bridgeFor(root)
+  const run = await bridge.materializeInputs(raw, { runtimeAuthHeader: 'AgentRuntime token', runtimeAgentId: 'agent-a', runtimeInstanceId: 'runtime-a' })
+  assert.equal(existsSync(run.runDirectory), true)
+  const restarted = bridgeFor(root, async () => assert.fail('cleanup must not download or execute'))
+  assert.deepEqual(restarted.cleanupConfirmed(raw, run.cleanupProof), { removed: true })
+  assert.equal(existsSync(run.runDirectory), false)
+  assert.deepEqual(restarted.cleanupConfirmed(raw, run.cleanupProof), { alreadyRemoved: true })
+})
+
+test('confirmed cleanup refuses foreign manifest, sibling path, replaced inode and symlink alias without deleting them', async () => {
+  const root = temporaryDirectory(); const raw = commandFor(); const bridge = bridgeFor(root)
+  const run = await bridge.materializeInputs(raw, { runtimeAuthHeader: 'AgentRuntime token', runtimeAgentId: 'agent-a', runtimeInstanceId: 'runtime-a' })
+  const sibling = resolve(root, raw.taskId, 'foreign-run'); mkdirSync(sibling, { mode: 0o700 }); writeFileSync(resolve(sibling, 'keep'), 'foreign')
+  for (const proof of [{ ...run.cleanupProof, runDirectory: sibling }, { ...run.cleanupProof, fingerprint: '0'.repeat(64) },
+    { ...run.cleanupProof, inode: '900719925474099999' }]) {
+    assert.throws(() => bridge.cleanupConfirmed(raw, proof), error => error.code.startsWith('CLEANUP_'))
+    assert.equal(existsSync(run.runDirectory), true); assert.equal(readFileSync(resolve(sibling, 'keep'), 'utf8'), 'foreign')
+  }
+  const saved = `${run.runDirectory}.owned-original`
+  // Rename retains the original inode and proves an unrelated replacement isn't ours.
+  const { renameSync } = await import('node:fs'); renameSync(run.runDirectory, saved)
+  symlinkSync(sibling, run.runDirectory)
+  assert.throws(() => bridge.cleanupConfirmed(raw, run.cleanupProof), error => error.code === 'PATH_UNSAFE')
+  assert.equal(readFileSync(resolve(sibling, 'keep'), 'utf8'), 'foreign'); assert.equal(existsSync(saved), true)
+})

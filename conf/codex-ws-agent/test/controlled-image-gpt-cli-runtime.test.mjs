@@ -13,6 +13,11 @@ import {
 } from '../agent-client.mjs'
 import { controlledImageV3InputDigest } from '../conversation-reference-inputs-v3.mjs'
 
+const sessionProof = (auth, agentId, runtimeInstanceId) => ({
+  Authorization: auth, 'X-Agent-Id': agentId, 'X-Agent-Runtime-Id': runtimeInstanceId,
+  'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host',
+  'X-Agent-Session-Generation': '7'
+})
 const PYTHON = process.env.CYF_GPT_IMAGE_CLI_TEST_PYTHON || ''
 const CODEX_DIR = process.env.CYF_GPT_IMAGE_CLI_TEST_CODEX_DIR || '/root/.codex'
 const RUNNER = `${CODEX_DIR}/skills/gpt-image-cli/scripts/run.py`
@@ -71,6 +76,7 @@ actual('local CLI profile registers and completes the real v3 poll START input s
   })
   let providerCalls = 0; let startCalls = 0; let stagedBytes = null; let committed = 0
   const nativeFetchFn = async (url, init) => {
+    for (const [key, value] of Object.entries(sessionProof(`AgentRuntime rts1_${'a'.repeat(64)}`, profile.agentId, 'runtime-cli-v3-test'))) assert.equal(init.headers[key], value)
     if (url.pathname.endsWith('/controlled-image-v3-commands')) return json(url, { items: [command] })
     if (url.pathname.endsWith('/lease')) return json(url, { executionId: command.executionId, version: 1, token,
       expiresAt: Date.now() + 900000 })
@@ -97,7 +103,7 @@ actual('local CLI profile registers and completes the real v3 poll START input s
     return json(url, { data: [{ b64_json: png.toString('base64') }] })
   }
   const runtime = createControlledImageV3SourceRuntime({ profile, controlledEnv: { CONTROLLED_IMAGE_KEY: 'fixture-secret' },
-    getAuth: () => `AgentRuntime ${'a'.repeat(32)}`, nativeFetchFn, providerFetchFn,
+    getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'a'.repeat(64)}`, profile.agentId, 'runtime-cli-v3-test'), nativeFetchFn, providerFetchFn,
     runtimeInstanceId: 'runtime-cli-v3-test' })
   assert.equal(runtime.adapterKind, 'GPT_IMAGE_CLI_V1')
   assert.equal(runtime.controlledImageV3Ready, true)

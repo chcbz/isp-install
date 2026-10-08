@@ -82,7 +82,7 @@ export class RuntimeV1Client {
     if (typeof fetchFn !== 'function') throw fail('RUNTIME_FETCH_REQUIRED');
     this.manifest = manifest; this.apiBaseUrl = normalizeRuntimeOrigin(apiBaseUrl); this.stateDir = stateDir;
     this.hostId = hostId; this.runtimeInstanceId = runtimeInstanceId; this.fetchFn = fetchFn;
-    this.currentSession = null; this.lastGeneration = 0;
+    this.currentSession = null; this.lastGeneration = 0; this.sessionAbort = null;
   }
   authorizationPath() { return `${this.stateDir}/runtime-authorization.json`; }
   async request(path, body, headers = {}, { signal } = {}) {
@@ -109,14 +109,15 @@ export class RuntimeV1Client {
   }
   async session(options = {}) {
     if (!exact(this.hostId) || !exact(this.runtimeInstanceId) || this.hostId === this.runtimeInstanceId) throw fail('RUNTIME_HOST_PROOF_REQUIRED');
-    this.currentSession = null;
+    this.invalidateSession();
     const response = await this.request('/agent/runtime/v1/session', { ...identityOf(this.manifest), hostId: this.hostId, runtimeInstanceId: this.runtimeInstanceId },
       { Authorization: `Bearer ${await this.loadAuthorization()}` }, options);
     this.currentSession = validateRuntimeSession(response, { manifest: this.manifest, hostId: this.hostId, runtimeInstanceId: this.runtimeInstanceId, previousGeneration: this.lastGeneration });
+    this.sessionAbort = new AbortController();
     this.lastGeneration = this.currentSession.sessionGeneration;
     return this.currentSession;
   }
-  invalidateSession() { this.currentSession = null; }
+  invalidateSession() { this.sessionAbort?.abort(); this.sessionAbort = null; this.currentSession = null; }
   sessionHeaders() { return runtimeSessionHeaders(this.currentSession); }
   websocketOptions() { return { headers: this.sessionHeaders(), followRedirects: false }; }
   websocketUrl() {
@@ -144,9 +145,14 @@ export class RuntimeV1Client {
     if (endpoint.origin !== this.apiBaseUrl || endpoint.username || endpoint.password || endpoint.hash
         || !endpoint.pathname.startsWith('/internal/agent/')
         || [...endpoint.searchParams.keys()].some(key => /^(?:api[_-]?key|authorization|session[_-]?token|token)$/i.test(key))) throw fail('RUNTIME_NATIVE_SCOPE_INVALID');
+    const session = this.currentSession; const proof = this.sessionHeaders();
+    const signal = this.sessionAbort?.signal;
     const headers = new Headers(options.headers);
-    for (const key of ['x-api-key', 'origin', ...Object.keys(this.sessionHeaders())]) headers.delete(key);
-    for (const [key, value] of Object.entries(this.sessionHeaders())) headers.set(key, value);
-    return this.fetchFn(endpoint, { ...options, redirect: 'error', headers });
+    for (const key of ['x-api-key', 'cookie', 'proxy-authorization', 'origin', ...Object.keys(proof)]) headers.delete(key);
+    for (const [key, value] of Object.entries(proof)) headers.set(key, value);
+    const response = await this.fetchFn(endpoint, { ...options, redirect: 'error', headers,
+      ...(signal ? { signal: options.signal ? AbortSignal.any([signal, options.signal]) : signal } : {}) });
+    if (this.currentSession !== session) throw fail('RUNTIME_NATIVE_SESSION_CHANGED');
+    return response;
   }
 }

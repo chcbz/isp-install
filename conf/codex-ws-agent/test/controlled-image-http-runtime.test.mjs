@@ -1,3 +1,4 @@
+import { PROCESS_RUNTIME_INSTANCE_ID as proofRuntimeId } from '../agent-client.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -11,6 +12,11 @@ import {
   normalizeProfile
 } from '../agent-client.mjs'
 
+const sessionProof = (auth, agentId = 'controlled-agent', runtimeInstanceId = proofRuntimeId) => ({
+  Authorization: auth, 'X-Agent-Id': agentId, 'X-Agent-Runtime-Id': runtimeInstanceId,
+  'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host',
+  'X-Agent-Session-Generation': '7'
+})
 const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(24, 5)])
 const digest = createHash('sha256').update(png).digest('hex')
 const token = '12345678-1234-1234-1234-123456789abc'
@@ -77,7 +83,7 @@ const setup = (t, { startMode = 'success' } = {}) => {
   const nativeFetchFn = async (url, init) => {
     events.push(`native:${url.pathname}`)
     assert.equal(init.redirect, 'error')
-    assert.equal(init.headers.Authorization, `AgentRuntime ${'a'.repeat(32)}`)
+    assert.equal(init.headers.Authorization, `AgentRuntime rts1_${'a'.repeat(64)}`)
     if (url.pathname.endsWith('/commands')) return json(url, { items: [command] })
     if (url.pathname.endsWith('/lease')) return json(url, {
       executionId: 'execution-1', version: 1, token, expiresAt: Date.now() + 900000
@@ -122,7 +128,7 @@ const setup = (t, { startMode = 'success' } = {}) => {
     profile,
     workspaceFileBridge: null,
     toolchainReady: false,
-    getAuth: () => `AgentRuntime ${'a'.repeat(32)}`,
+    getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'a'.repeat(64)}`),
     controlledEnv: { CONTROLLED_IMAGE_KEY: 'provider-secret' },
     nativeFetchFn,
     providerFetchFn

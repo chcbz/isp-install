@@ -1120,7 +1120,8 @@ export class PersistentCommandInbox {
       outcome: {
         status: outcome?.status || 'completed',
         exitCode: outcome?.exitCode ?? null,
-        errorMessage: outcome?.errorMessage || ''
+        errorMessage: outcome?.errorMessage || '',
+        ...(outcome?.workspaceCleanup ? { workspaceCleanup: outcome.workspaceCleanup } : {})
       }
     }
     atomicWriteJson(this.fs, item.path, completed)
@@ -1529,6 +1530,7 @@ export class DurableDedupeLedger {
             || receipt.contextDigest !== canonicalSha256(entry.runtimeCommand)) throw new Error('invalid Runtime D06 commit evidence')
       }
     }
+    if (entry.runtimeCleanupConfirmedDigest && (!entry.outcome?.workspaceCleanup || entry.runtimeCleanupConfirmedDigest !== canonicalSha256(entry.outcome.workspaceCleanup))) throw new Error('invalid Runtime cleanup checkpoint')
     return entry
   }
 
@@ -1725,7 +1727,8 @@ export class DurableDedupeLedger {
       outcome: {
         status: outcome?.status || 'completed',
         exitCode: outcome?.exitCode ?? null,
-        errorMessage: outcome?.errorMessage || ''
+        errorMessage: outcome?.errorMessage || '',
+        ...(outcome?.workspaceCleanup ? { workspaceCleanup: outcome.workspaceCleanup } : {})
       }
     }
     this._writeEntry(commandId, entry)
@@ -1802,6 +1805,14 @@ export class DurableDedupeLedger {
     }
     this._writeEntry(commandId, recoveryEntry)
     return { entry: recoveryEntry, conflict: null }
+  }
+
+  markRuntimeCleanupConfirmed(commandId, digest) {
+    const entry = this.getEntry(commandId)
+    const receipt = this.runtimeAckCommit(commandId, entry?.runtimeCommand?.messageId || '')
+    if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry?.status) || !entry.outcome?.workspaceCleanup
+        || receipt?.status !== entry.status || digest !== canonicalSha256(entry.outcome.workspaceCleanup)) throw new AgentProtocolError('RUNTIME_CLEANUP_CHECKPOINT_CONFLICT', 'Cleanup marker requires immutable terminal proof')
+    this._writeEntry(commandId, { ...entry, runtimeCleanupConfirmedDigest: digest })
   }
 
   runtimeAckCommit(commandId, messageId) {
@@ -2595,7 +2606,7 @@ export class AgentMessageProcessor {
     profile, inbox, runCommand, runChat, recoverChat = null, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
     recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
     ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null, chatInbox = null, chatAckOutbox = null, lanes = null,
-    sendCommandAckFn = null, chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
+    sendCommandAckFn = null, onCommandTerminalConfirmed = null, chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
   }) {
     this.profile = profile
     this.inbox = inbox
@@ -2611,6 +2622,7 @@ export class AgentMessageProcessor {
     this.ackOutbox = ackOutbox
     this.executionReportOutbox = executionReportOutbox
     this.sendFn = sendFn
+    this.onCommandTerminalConfirmed = onCommandTerminalConfirmed
     this.sendCommandAckFn = sendCommandAckFn
     this.runtimeAckTail = Promise.resolve()
     this.chatInbox = chatInbox
@@ -3387,7 +3399,8 @@ export class AgentMessageProcessor {
       const durableOutcome = {
         status: outcome?.status === 'failed' ? 'failed' : 'completed',
         exitCode: outcome?.exitCode,
-        errorMessage: outcome?.errorMessage || ''
+        errorMessage: outcome?.errorMessage || '',
+        ...(outcome?.workspaceCleanup ? { workspaceCleanup: outcome.workspaceCleanup } : {})
       }
       try {
         const completed = this.inbox.markCompleted(item, durableOutcome)
@@ -3544,7 +3557,7 @@ export class AgentMessageProcessor {
       let confirmed = !target
       while (typeof this.sendCommandAckFn === 'function' && !this.stopped) {
         const head = this.ackOutbox.pendingEnvelopes()[0] // lock ends before HTTP wait
-        if (!head) return confirmed
+        if (!head) { await this._cleanupRuntimeTerminals(); return confirmed }
         const command = head.envelope.runtimeCommand
         if (!command) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_REQUIRED', 'Legacy ACK requires stopped-writer migration, not an auth fallback')
         const prior = this.ledger.runtimeAckCommit(head.envelope.commandId, command.messageId)
@@ -3562,6 +3575,29 @@ export class AgentMessageProcessor {
     }).catch(error => { this._failClosed(new AgentProtocolError(error.code || 'RUNTIME_ACK_CHECKPOINT_ERROR', error.message), {}); return false })
     this.runtimeAckTail = operation
     return operation
+  }
+
+  async _cleanupRuntimeTerminals() {
+    if (typeof this.onCommandTerminalConfirmed !== 'function') return
+    const index = this.inbox.commandStateIndex()
+    for (const entry of this.ledger.listEntries()) {
+      if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry.status) || !entry.outcome?.workspaceCleanup) continue
+      const digest = canonicalSha256(entry.outcome.workspaceCleanup)
+      if (entry.runtimeCleanupConfirmedDigest === digest) continue
+      const receipt = this.ledger.runtimeAckCommit(entry.commandId, entry.runtimeCommand?.messageId || '')
+      if (!receipt || receipt.status !== entry.status || receipt.contextDigest !== canonicalSha256(entry.runtimeCommand)) continue
+      const items = index.get(entry.commandId) || []
+      if (items.length !== 1 || items[0].record.state !== 'completed' || CommandFingerprint.compute(items[0].normalized) !== entry.fingerprint
+          || canonicalSha256(items[0].record.outcome.workspaceCleanup) !== digest) throw new AgentProtocolError('RUNTIME_CLEANUP_CHECKPOINT_CONFLICT', 'Terminal cleanup must match original completed command checkpoint')
+      try {
+        await this.onCommandTerminalConfirmed(items[0].normalized, entry.outcome.workspaceCleanup)
+        // Original checkpoint remains the only cleanup retry authority as well.
+        this.ledger.markRuntimeCleanupConfirmed(entry.commandId, digest)
+      } catch (error) {
+        this.runtimeCleanupFailure = error.code || 'RUNTIME_CLEANUP_UNCONFIRMED'
+        this.onReject(new AgentProtocolError(this.runtimeCleanupFailure, 'Terminal materials retained for exact cleanup reconciliation'), {})
+      }
+    }
   }
 
   replayAcks() {
@@ -5079,7 +5115,7 @@ export const runWorkspaceFileCommand = async ({
   }
 
   const title = message.title || message.currentTaskTitle || 'Codex 执行任务'
-  let materialized = false
+  let materialized = false; let cleanupProof; let terminalConfirmed = false
   const imageResults = []
   let result
   sendStatusFn(profile, 'busy', { taskId: message.taskId || command.taskId, title })
@@ -5089,7 +5125,7 @@ export const runWorkspaceFileCommand = async ({
       runtimeAgentId: profile.agentId,
       runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
     })
-    materialized = true
+    materialized = true; cleanupProof = materializedRun.cleanupProof
     await workspaceFileBridge.startExecution(message.payload, {
       commandId: message.commandId,
       messageId: message.messageId,
@@ -5121,6 +5157,7 @@ export const runWorkspaceFileCommand = async ({
         runtimeAgentId: profile.agentId,
         runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
       })
+      terminalConfirmed = true
       result = { ...outcome, workspaceFileManifestId: committed.manifestId }
     }
   } catch (error) {
@@ -5137,8 +5174,10 @@ export const runWorkspaceFileCommand = async ({
           runtimeAgentId: profile.agentId,
           runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
         })
+        terminalConfirmed = true
       } catch { result.status = 'recovery_required' }
     }
+    if (profile.runtimeIdentity && terminalConfirmed && cleanupProof && result?.status !== 'recovery_required') result.workspaceCleanup = cleanupProof
     if (materialized && !profile.runtimeIdentity && result?.status !== 'recovery_required') {
       try { workspaceFileBridge.cleanup(message.payload) } catch (error) {
         result = workspaceFileFailure(message, error)
@@ -5274,7 +5313,7 @@ const stopWorkspaceFilePoller = state => {
   if (!state) return
   clearInterval(state.workspaceFilePollTimer)
   state.workspaceFilePollTimer = null
-  state.workspaceFilePollInFlight = false
+  // Stopping admission must not release an in-flight owner's guard.
 }
 
 const startWorkspaceFilePoller = (profile, state) => {
@@ -5284,7 +5323,8 @@ const startWorkspaceFilePoller = (profile, state) => {
     if (state.workspaceFilePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.workspaceFilePollInFlight = true
     try {
-      const result = await pollWorkspaceFileCommands({ profile, state })
+      const polling = pollWorkspaceFileCommands({ profile, state }); state.workspaceFilePollPromise = polling
+      const result = await polling
       if (result.rejected) console.warn(`workspace command rejected | profile=${profile.profileId} | count=${result.rejected}`)
     } catch (error) {
       // Do not include request/header values in diagnostics.
@@ -5310,7 +5350,7 @@ const startNativeConversationPoller = (profile, state) => {
   const tick = async () => {
     if (state.conversationNativePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.conversationNativePollInFlight = true
-    try { await state.conversationNativeLane.poll() } catch (error) {
+    try { const polling = state.conversationNativeLane.poll(); state.conversationNativePollPromise = polling; await polling } catch (error) {
       const code = typeof error?.code === 'string' && /^CONVERSATION_[A-Z_]{1,80}$/.test(error.code)
         ? error.code : 'CONVERSATION_UNAVAILABLE'
       console.warn(`native conversation poll unavailable | profile=${profile.profileId} | code=${code}`)
@@ -5337,7 +5377,7 @@ export const startControlledImageV3ConversationPoller = (profile, state) => {
     if (state.conversationControlledImageV3PollInFlight || state.ws?.readyState !== openState
         || state.processor.paused || state.disposed) return
     state.conversationControlledImageV3PollInFlight = true
-    try { await state.conversationControlledImageV3Lane.poll() } catch (error) {
+    try { const polling = state.conversationControlledImageV3Lane.poll(); state.conversationControlledImageV3PollPromise = polling; await polling } catch (error) {
       const code = typeof error?.code === 'string' && /^CONVERSATION_[A-Z_]{1,80}$/.test(error.code)
         ? error.code : 'CONVERSATION_UNAVAILABLE'
       console.warn(`controlled image v3 poll unavailable | profile=${profile.profileId} | code=${code}`)
@@ -5498,7 +5538,7 @@ export const resolveManagedRuntimeProfile = (profile, source = {}, managedImageS
 /** Fully composed source-aware v3 runtime for production registration and polling. */
 export const createControlledImageV3SourceRuntime = ({
   profile,
-  getAuth = () => '',
+  getRuntimeHeaders = () => null,
   controlledEnv = process.env,
   providerFetchFn = globalThis.fetch,
   nativeFetchFn = globalThis.fetch,
@@ -5525,7 +5565,7 @@ export const createControlledImageV3SourceRuntime = ({
     cliConfig
   })
   if (profile?.enabled === false || profile?.controlledImageHttpEnabled !== true || !httpPollEnabled
-      || !profile?.workspaceFileApiOrigin || !profile?.workspaceFileRootDir || typeof getAuth !== 'function') return unavailable()
+      || !profile?.workspaceFileApiOrigin || !profile?.workspaceFileRootDir || typeof getRuntimeHeaders !== 'function') return unavailable()
   if (declaredAdapterKind && ![CONTROLLED_IMAGE_PROVIDER_LANE, CONTROLLED_IMAGE_GPT_CLI_ADAPTER].includes(declaredAdapterKind)) {
     return unavailable()
   }
@@ -5555,7 +5595,7 @@ export const createControlledImageV3SourceRuntime = ({
     const executor = args => controlledExecutor.execute(args)
     const pollProtocol = createPollProtocol({ apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir, agentId: profile.agentId, runtimeInstanceId,
-      getAuth, fetchFn: nativeFetchFn, execute: executor, controlledConfig })
+      getRuntimeHeaders, fetchFn: nativeFetchFn, execute: executor, controlledConfig })
     if (typeof pollProtocol?.poll !== 'function') return unavailable({ controlledConfig, cliConfig, credentialReady: true })
     return Object.freeze({
       configReady: true,
@@ -5574,7 +5614,7 @@ export const createControlledImageV3SourceRuntime = ({
 export const createNativeBountyExecutionRuntime = ({
   profile,
   workspaceFileBridge,
-  getAuth = () => '',
+  getRuntimeHeaders = () => null,
   toolchainReady = workspaceFileToolchain().ready,
   createPollProtocol = options => new NativeConversationLane(options),
   createControlledPollProtocol = options => new ControlledImageConversationLane(options),
@@ -5605,7 +5645,7 @@ export const createNativeBountyExecutionRuntime = ({
     && httpPollEnabled
     && profile?.workspaceFileApiOrigin
     && profile?.workspaceFileRootDir
-    && typeof getAuth === 'function'
+    && typeof getRuntimeHeaders === 'function'
   )
 
   if (controlledSelected) {
@@ -5653,7 +5693,7 @@ export const createNativeBountyExecutionRuntime = ({
       rootDir: profile.workspaceFileRootDir,
       agentId: profile.agentId,
       runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID,
-      getAuth,
+      getRuntimeHeaders,
       fetchFn: nativeFetchFn,
       execute: executor,
       controlledConfig
@@ -5691,7 +5731,7 @@ export const createNativeBountyExecutionRuntime = ({
     rootDir: profile.workspaceFileRootDir,
     agentId: profile.agentId,
     runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID,
-    getAuth,
+    getRuntimeHeaders,
     fetchFn: nativeFetchFn,
     execute: executor
   })
@@ -5734,14 +5774,14 @@ const createProfileState = (profile, profileConfig = config) => {
   const nativeBountyExecutionRuntime = createNativeBountyExecutionRuntime({
     profile,
     workspaceFileBridge,
-    getAuth: () => getProfileState(profile)?.workspaceFileRuntimeAuthHeader || '',
+    getRuntimeHeaders: () => getProfileState(profile)?.runtimeTransport?.headers(),
     ...(profile.runtimeIdentity ? { controlledEnv: profile.runtimeProviderEnvironment || {} } : {}),
     runtimeInstanceId, nativeFetchFn: nativeFetch
   })
   const conversationNativeLane = nativeBountyExecutionRuntime.pollProtocol
   const controlledImageV3SourceRuntime = createControlledImageV3SourceRuntime({
     profile,
-    getAuth: () => getProfileState(profile)?.workspaceFileRuntimeAuthHeader || '',
+    getRuntimeHeaders: () => getProfileState(profile)?.runtimeTransport?.headers(),
     ...(profile.runtimeIdentity ? { controlledEnv: profile.runtimeProviderEnvironment || {} } : {}),
     runtimeInstanceId, nativeFetchFn: nativeFetch
   })
@@ -5771,7 +5811,7 @@ const createProfileState = (profile, profileConfig = config) => {
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
       fetchFn: nativeFetch,
-      getRuntimeAuth: () => getProfileState(profile)?.workspaceFileRuntimeAuthHeader || '',
+      getRuntimeHeaders: () => getProfileState(profile)?.runtimeTransport?.headers(),
       agentId: profile.agentId,
       runtimeInstanceId: runtimeInstanceId,
       forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
@@ -6005,6 +6045,10 @@ const createProfileState = (profile, profileConfig = config) => {
       ? executionReportOutbox.acknowledgeReceipt(message)
       : skillInstallManager.acknowledgeResultReceipt(message),
     recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message),
+    onCommandTerminalConfirmed: profile.runtimeIdentity ? (message, proof) => {
+      if (!strictWorkspaceFileCommand(message) || !workspaceFileBridge) throw new AgentProtocolError('RUNTIME_CLEANUP_CONTEXT_INVALID', 'Cleanup requires original workspace command')
+      return workspaceFileBridge.cleanupConfirmed(message.payload, proof)
+    } : null,
     onReject: (error, raw) => {
       console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
       sendProtocol(MESSAGE_TYPES.PROTOCOL_ERROR, {
@@ -6169,7 +6213,11 @@ const disposeProfileStateOnce = async (state, reason) => {
     }
   }
   state.processor.stop()
-  if (profile.runtimeIdentity) { await state.processor.runtimeAckTail; await state.processor.waitForIdle() }
+  if (profile.runtimeIdentity) {
+    // Keep host/Agent writer locks until every owned native operation actually ends.
+    await Promise.allSettled([state.workspaceFilePollPromise, state.conversationNativePollPromise, state.conversationControlledImageV3PollPromise].filter(Boolean))
+    await state.processor.runtimeAckTail; await state.processor.waitForIdle()
+  }
   if (getProfileState(profile) === state) profileStates.delete(profileStateKey(profile))
 }
 

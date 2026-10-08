@@ -10,6 +10,11 @@ import { resolveActionChatRequest } from '../juyiting-action-outcome.mjs'
 import { TypedInspectionMaterializer, resolveTypedInspectionRequest, runTypedInspection, recoverTypedInspection } from '../typed-inspection-runtime.mjs'
 import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
 
+const sessionProof = (auth, agentId = 'agent', runtimeInstanceId = 'runtime-1') => ({
+  Authorization: auth, 'X-Agent-Id': agentId, 'X-Agent-Runtime-Id': runtimeInstanceId,
+  'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host',
+  'X-Agent-Session-Generation': '7'
+})
 const file = resolve(import.meta.dirname, 'fixtures/mixed-material-api-wire-v3.json')
 const raw = readFileSync(file)
 const fixture = JSON.parse(raw)
@@ -87,7 +92,7 @@ test('actual API dispatch fetches original bytes, prepares native inputs and sen
     recovery: 'durable-inbox-turn-readback-v1', supportedInputs: formats.map(s => ({ mediaKind: s.mediaKind,
       mimeType: s.mimeType, carrier: s.carrier, carrierContractDigest: s.carrierContractDigest })) }
   const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example/', rootDir: root,
-    agentId: profile.agentId, runtimeInstanceId: 'runtime-1', getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`,
+    agentId: profile.agentId, runtimeInstanceId: 'runtime-1', getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`),
     parsers: { 'application/json': { parserConfigDigest: `sha256:${sha(Buffer.from('json-topic-parser'))}`, parse: ({ bytes }) => JSON.parse(bytes.toString('utf8')).topic } },
     fetchFn: async (url, options) => {
       const source = typed.manifest.sources.find(s => url.endsWith(`/${s.sourceRefId}/content`))

@@ -140,10 +140,10 @@ test('expiry blocks new RECEIVED/STARTED, not executed terminal reports; context
 test('native fetch enforces same origin/prefix, appends current session proof and strips old auth', async t => {
   const calls = []; const { client } = await setup(t, async (url, options) => { calls.push({ url, options }); return response(session(7)); });
   await client.session();
-  await client.nativeFetch('https://api.example.test/internal/agent/tasks/workspace-executions/commands', { headers: { 'X-API-Key': 'retired', Authorization: 'retired', Origin: 'foreign', Accept: 'application/json' } });
+  await client.nativeFetch('https://api.example.test/internal/agent/tasks/workspace-executions/commands', { headers: { 'X-API-Key': 'retired', Cookie: 'foreign-cookie', 'Proxy-Authorization': 'foreign-proxy', Authorization: 'retired', Origin: 'foreign', Accept: 'application/json' } });
   const actual = calls[1].options.headers;
   assert.equal(actual.get('Authorization'), `AgentRuntime ${token}`); assert.equal(actual.get('X-Agent-Session-Generation'), '7');
-  assert.equal(actual.has('X-API-Key'), false); assert.equal(actual.has('Origin'), false); assert.equal(calls[1].options.redirect, 'error');
+  assert.equal(actual.has('X-API-Key'), false); assert.equal(actual.has('Cookie'), false); assert.equal(actual.has('Proxy-Authorization'), false); assert.equal(actual.has('Origin'), false); assert.equal(calls[1].options.redirect, 'error');
   for (const url of ['https://foreign.test/internal/agent/a', 'https://api.example.test/agent/runtime/v1/session', 'https://user:pass@api.example.test/internal/agent/a']) await assert.rejects(client.nativeFetch(url), /SCOPE_INVALID/);
   client.invalidateSession(); await assert.rejects(client.nativeFetch('https://api.example.test/internal/agent/a'), /SESSION_REQUIRED/);
 });
@@ -167,3 +167,30 @@ test('source systemd templates suppress permanent exit and back off restarts', a
     const unit = await readFile(path, 'utf8'); assert.match(unit, /^RestartPreventExitStatus=78$/m); assert.match(unit, /^RestartSec=5s$/m);
   }
 });
+
+
+test('native session rotation aborts only owned transport and rejects late responses from the old proof', async t => {
+  let release; let captured; let requests = 0
+  const { client } = await setup(t, async (url, options) => {
+    if (String(url).endsWith('/session')) return response(session(++requests))
+    captured = options; return new Promise(resolve => { release = resolve })
+  })
+  await client.session()
+  const pending = assert.rejects(client.nativeFetch('https://api.example.test/internal/agent/tasks/test'), /RUNTIME_NATIVE_SESSION_CHANGED/)
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(captured.signal.aborted, false)
+  client.invalidateSession(); assert.equal(captured.signal.aborted, true)
+  await client.session(); release(response({ started: true })); await pending
+  assert.equal(client.currentSession.sessionGeneration, 2)
+})
+
+test('native explicit user cancellation composes with session signal without invalidating peers or the session', async t => {
+  let seenSignal
+  const { client } = await setup(t, async (url, options) => {
+    if (String(url).endsWith('/session')) return response(session(7))
+    seenSignal = options.signal; return response({})
+  })
+  await client.session(); const user = new AbortController()
+  await client.nativeFetch('https://api.example.test/internal/agent/tasks/test', { signal: user.signal })
+  assert.equal(seenSignal.aborted, false); user.abort(); assert.equal(seenSignal.aborted, true)
+  assert.equal(client.currentSession.sessionGeneration, 7)
+})

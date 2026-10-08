@@ -3696,7 +3696,7 @@ test('pre-engine recovery claim checks fingerprint and durable key under the inb
 const unifiedProfile = () => ({ ...profile, runtimeIdentity: { installationId: 'installation-a', tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId } })
 const unifiedCommand = (number = 7001, patch = {}) => ({ ...command(number), tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId,
   correlationId: `correlation-${number}`, payloadReference: `payload-${number}`, ...patch })
-function unifiedCheckpoint({ root = temporaryDirectory(), run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }) } = {}) {
+function unifiedCheckpoint({ root = temporaryDirectory(), cleanup = null, run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }) } = {}) {
   const selected = unifiedProfile()
   const inbox = new PersistentCommandInbox({ rootDir: root, profile: selected }); inbox.initialize()
   const store = resolve(root, Buffer.from(selected.agentId).toString('hex'))
@@ -3704,7 +3704,7 @@ function unifiedCheckpoint({ root = temporaryDirectory(), run = async () => ({ s
   const outbox = new AckOutbox({ rootDir: store, profile: selected }); outbox.initialize()
   const rejected = []
   const processor = new AgentMessageProcessor({ profile: selected, inbox, ledger, ackOutbox: outbox, runCommand: run,
-    runChat: async () => {}, sendCommandAckFn: ack, onReject: error => rejected.push(error) })
+    runChat: async () => {}, sendCommandAckFn: ack, onCommandTerminalConfirmed: cleanup, onReject: error => rejected.push(error) })
   processor.start({ drain: false })
   return { root, inbox, ledger, outbox, processor, rejected }
 }
@@ -3789,4 +3789,45 @@ test('wire cannot inject replacement runtimeCommand or session secrets into immu
   }
   assert.equal(runtime.inbox.count('pending'), 0); assert.equal(runtime.ledger.getEntry(original.commandId), null)
   assert.equal(runtime.outbox.pendingEnvelopes().length, 0); runtime.processor.stop()
+})
+
+
+const syntheticCleanupProof = () => ({ fingerprint: 'a'.repeat(64), runDirectory: '/synthetic/private/task/run', device: '1', inode: '2' })
+test('runtime terminal cleanup waits for native proof and durable HTTP terminal, never WS send or uncertain ACK', async () => {
+  let blocked = true; let cleaned = 0; let runtime
+  runtime = unifiedCheckpoint({ run: async () => ({ status: 'completed', workspaceCleanup: syntheticCleanupProof() }),
+    ack: async (_context, status, version) => { if (status === 'SUCCEEDED' && blocked) throw Error('response unknown'); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } },
+    cleanup: async (message, proof) => {
+      assert.equal(message.commandId, 'command-7001'); assert.deepEqual(proof, syntheticCleanupProof())
+      assert.equal(runtime.ledger.runtimeAckCommit(message.commandId, message.messageId).status, 'SUCCEEDED')
+      assert.equal(runtime.outbox.pendingEnvelopes().length, 0, 'cleanup outside committed checkpoint lock')
+      cleaned++
+    } })
+  await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.equal(cleaned, 0); assert.equal(runtime.outbox.pendingEnvelopes().length, 1)
+  assert.deepEqual(runtime.ledger.getEntry('command-7001').outcome.workspaceCleanup, syntheticCleanupProof())
+  blocked = false; assert.equal(await runtime.processor.replayAcks(), true); assert.equal(cleaned, 1)
+  assert.ok(runtime.ledger.getEntry('command-7001').runtimeCleanupConfirmedDigest)
+  await runtime.processor.replayAcks(); assert.equal(cleaned, 1); runtime.processor.stop()
+})
+
+test('runtime cleanup IO failure retries from same checkpoint after restart without re-executing business', async () => {
+  let runs = 0; let cleanups = 0
+  const initial = unifiedCheckpoint({ run: async () => { runs++; return { status: 'failed', workspaceCleanup: syntheticCleanupProof() } },
+    cleanup: async () => { cleanups++; throw Object.assign(Error('retain'), { code: 'CLEANUP_FAILED' }) } })
+  await initial.processor.handle(unifiedCommand()); initial.processor.resume(); await initial.processor.waitForIdle(); await initial.processor.runtimeAckTail
+  assert.equal(runs, 1); assert.ok(cleanups >= 1); assert.equal(initial.outbox.pendingEnvelopes().length, 0)
+  assert.equal(initial.ledger.getEntry('command-7001').runtimeCleanupConfirmedDigest, undefined); initial.processor.stop()
+  let restoredCleanups = 0
+  const restarted = unifiedCheckpoint({ root: initial.root, run: async () => assert.fail('no replay'), cleanup: async () => { restoredCleanups++ } })
+  await restarted.processor.replayAcks(); restarted.processor.resume(); await restarted.processor.waitForIdle()
+  assert.equal(restoredCleanups, 1); assert.equal(runs, 1); restarted.processor.stop()
+})
+
+test('runtime unknown business outcome preserves all recovery material despite injected cleanup proof', async () => {
+  let cleanups = 0
+  const runtime = unifiedCheckpoint({ run: async () => ({ status: 'recovery_required', workspaceCleanup: syntheticCleanupProof() }), cleanup: async () => { cleanups++ } })
+  await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  await runtime.processor.replayAcks(); assert.equal(cleanups, 0)
+  assert.equal(runtime.ledger.getEntry('command-7001').status, 'RECOVERY_REQUIRED'); runtime.processor.stop()
 })

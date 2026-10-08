@@ -14,6 +14,11 @@ import {
 } from '../typed-inspection-runtime.mjs'
 import { TYPED_INSPECTION_OUTPUT_SCHEMA, validateTypedInspectionOutcome, validateTypedInteractionOutcome } from '../juyiting-typed-outcome.mjs'
 
+const sessionProof = (auth, agentId = 'agent-1', runtimeInstanceId = 'runtime-1') => ({
+  Authorization: auth, 'X-Agent-Id': agentId, 'X-Agent-Runtime-Id': runtimeInstanceId,
+  'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host',
+  'X-Agent-Session-Generation': '7'
+})
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const prefixed = value => `sha256:${digest(Buffer.from(value))}`
 const contract = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
@@ -78,14 +83,14 @@ test('non-empty fixed-origin materialization succeeds without freezing Buffer vi
   const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-materializer-')); chmodSync(root, 0o700)
   const calls = []
   const materializer = new TypedInspectionMaterializer({
-    apiOrigin: 'https://platform.example/', rootDir: root, getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`,
+    apiOrigin: 'https://platform.example/', rootDir: root, getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`),
     agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', fetchFn: async (url, options) => { calls.push({ url, options }); return response({ url, bytes }) }
   })
   const result = await materializer.materialize({ message, typed })
   assert.equal(result.sources.length, 1); assert.equal(Buffer.isBuffer(result.sources[0].bytes), true); assert.deepEqual(result.sources[0].bytes, bytes)
   assert.deepEqual(readFileSync(result.sources[0].path), bytes)
   assert.equal(lstatSync(result.directory).mode & 0o077, 0); assert.equal(lstatSync(result.sources[0].path).mode & 0o777, 0o400)
-  assert.equal(calls[0].options.redirect, 'manual'); assert.equal(calls[0].options.headers.Authorization, `AgentRuntime ${'b'.repeat(32)}`)
+  assert.equal(calls[0].options.redirect, 'manual'); assert.equal(calls[0].options.headers.Authorization, `AgentRuntime rts1_${'b'.repeat(64)}`)
   assert.equal(calls[0].options.headers['X-Inspection-Manifest-Digest'], typed.manifestDigest)
   assert.equal(new URL(calls[0].url).origin, 'https://platform.example')
   await assert.rejects(() => materializer.materialize({ message, typed }), error => error.code === 'TYPED_INSPECTION_REQUEST_DIRECTORY_EXISTS')
@@ -103,7 +108,7 @@ test('materializer rejects redirect, response URL drift, MIME, declared length a
   const codes = ['TYPED_INSPECTION_REDIRECT_FORBIDDEN', 'TYPED_INSPECTION_RESPONSE_URL_MISMATCH', 'TYPED_INSPECTION_CONTENT_TYPE_MISMATCH', 'TYPED_INSPECTION_CONTENT_LENGTH_MISMATCH', 'TYPED_INSPECTION_CONTENT_DIGEST_MISMATCH']
   for (let index = 0; index < variants.length; index++) {
     const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-reject-')); chmodSync(root, 0o700)
-    const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example/', rootDir: root, getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`,
+    const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example/', rootDir: root, getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`),
       agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', fetchFn: (url, options) => variants[index]({ url, options }) })
     await assert.rejects(() => materializer.materialize({ message, typed }), error => error.code === codes[index])
   }
@@ -113,7 +118,7 @@ test('private root symlink is rejected and concrete PNG decoder inflates actual 
   const parent = mkdtempSync(resolve(tmpdir(), 'typed-inspection-symlink-')); chmodSync(parent, 0o700)
   const real = resolve(parent, 'real'); const link = resolve(parent, 'link')
   mkdirPrivate(real); symlinkSync(real, link)
-  assert.throws(() => new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example/', rootDir: link, getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`, agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', fetchFn: async () => null }), error => error.code === 'TYPED_INSPECTION_PRIVATE_DIRECTORY_UNSAFE')
+  assert.throws(() => new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example/', rootDir: link, getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`), agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', fetchFn: async () => null }), error => error.code === 'TYPED_INSPECTION_PRIVATE_DIRECTORY_UNSAFE')
   const crc32 = bytes => { let crc = 0xffffffff; for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0) } return (crc ^ 0xffffffff) >>> 0 }
   const chunk = (type, data) => { const length = Buffer.alloc(4); length.writeUInt32BE(data.length); const body = Buffer.concat([Buffer.from(type), data]); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body)); return Buffer.concat([length, body, crc]) }
   const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4); ihdr[8] = 8; ihdr[9] = 6
@@ -292,7 +297,7 @@ test('missing runtime authentication and unavailable parser fail before fetch or
   const adapter = { closed: false, readback: adapterReadback(), startOrResumeThread: async () => { starts++; return { threadId: 'forbidden' } } }
   const unauthenticated = new TypedInspectionMaterializer({
     apiOrigin: 'https://platform.example/', rootDir: mkdtempSync(resolve(tmpdir(), 'typed-inspection-noauth-')),
-    getRuntimeAuth: () => '', agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1',
+    getRuntimeHeaders: () => '', agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1',
     fetchFn: async () => { fetches++; throw new Error('must not fetch') }
   })
   await assert.rejects(() => runTypedInspection(profile, directMessage, {
@@ -305,7 +310,7 @@ test('missing runtime authentication and unavailable parser fail before fetch or
   const parsedMessage = messageFor(parsedSource); const parsedTyped = resolveTypedInspectionRequest(profile, parsedMessage)
   const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-noparser-')); chmodSync(root, 0o700)
   const noParser = new TypedInspectionMaterializer({
-    apiOrigin: 'https://platform.example/', rootDir: root, getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`,
+    apiOrigin: 'https://platform.example/', rootDir: root, getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`),
     agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', fetchFn: async url => { fetches++; return response({ url, bytes, mimeType: parsedSource.mimeType }) }
   })
   await assert.rejects(() => runTypedInspection(profile, parsedMessage, {
@@ -490,7 +495,7 @@ test('full v3 wire carries 32 mixed actual material bytes through native prepara
   const fetched = []; const finals = []; let calls = 0
   try {
     const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example/', rootDir: root,
-      getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`, agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1',
+      getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`), agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1',
       parsers: { 'application/json': { parserConfigDigest: prefixed('json-topic-parser'), parse: ({ bytes }) => JSON.parse(bytes.toString('utf8')).topic } },
       fetchFn: async (url, options) => {
         const source = marker.manifest.sources.find(s => url.endsWith(`/${s.sourceRefId}/content`))
@@ -558,7 +563,7 @@ test('materializer reuses native origin validation, permitting configured loopba
   const rootDir = mkdtempSync(resolve(tmpdir(), 'typed-inspection-shared-origin-'))
   try {
     const construct = apiOrigin => new TypedInspectionMaterializer({ apiOrigin, rootDir,
-      getRuntimeAuth: () => '', agentId: 'fixture-agent', runtimeInstanceId: 'fixture-runtime',
+      getRuntimeHeaders: () => '', agentId: 'fixture-agent', runtimeInstanceId: 'fixture-runtime',
       fetchFn: () => assert.fail('Origin configuration check must not fetch') })
     for (const apiOrigin of ['http://127.0.0.1:19001', 'http://[::1]:28082', 'https://native.example.test:9443'])
       assert.equal(construct(apiOrigin).origin, apiOrigin)
@@ -581,7 +586,7 @@ test('real materializer fetch failure leaves no engine/preparation evidence and 
       startOrResumeThread: async () => { threadStarts++; throw new Error('must not start') },
       runTurn: async () => { turnStarts++; throw new Error('must not run') } }
     const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example', rootDir: resolve(root, 'inputs'),
-      agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`,
+      agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`),
       fetchFn: async () => { throw new TypeError('fetch failed') } })
     await assert.rejects(() => runTypedInspection(profile, message, { adapter, isolationReadback: readback(typed), materializer,
       controls: { markPrepared: value => inbox.markPrepared(claimed, value), markRunning: (_cancel, value) => inbox.markRunning(claimed, value) },
@@ -602,7 +607,7 @@ test('content rejection records only HTTP status while retaining strict no-model
     const message = messageFor(); const typed = resolveTypedInspectionRequest(profile, message)
     for (const status of [401, 403, 404, 409, 503]) {
       const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example', rootDir: root,
-        agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', getRuntimeAuth: () => `AgentRuntime ${'b'.repeat(32)}`,
+        agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1', getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`),
         fetchFn: async () => ({ status, json: () => { throw new Error('peer body must not be read/logged') } }) })
       await assert.rejects(() => materializer.materialize({ message, typed }), error =>
         error.code === 'TYPED_INSPECTION_CONTENT_FETCH_FAILED' && error.httpStatus === status && error.message === `TYPED_INSPECTION_CONTENT_FETCH_FAILED: HTTP ${status}`)

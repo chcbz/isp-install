@@ -14,7 +14,7 @@ import { materializeNativeConversationInputs, parseNativeConversationInputs } fr
 const BASE = '/internal/agent/tasks'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/
 const TOKEN = /^[0-9a-fA-F-]{36}$/
-const AUTH = /^AgentRuntime [0-9a-f]{32}$/
+const AUTH = /^AgentRuntime rts1_[0-9a-f]{64}$/
 const MIME = new Map([['image/png','png'],['image/jpeg','jpg'],['image/webp','webp'],['image/gif','gif'],['audio/mpeg','mp3'],['audio/wav','wav'],['audio/ogg','ogg'],['audio/webm','webm'],['text/plain','txt'],['text/markdown','md'],['application/json','json'],['application/octet-stream','bin']])
 const SHA = bytes => createHash('sha256').update(bytes).digest('hex')
 const ascii = (bytes, offset, text) => bytes.length >= offset + text.length && Buffer.from(text).equals(bytes.subarray(offset, offset + text.length))
@@ -38,6 +38,22 @@ export class NativeConversationError extends Error {
   constructor(code) { super(code); this.code = code }
 }
 const deny = code => { throw new NativeConversationError(code) }
+// Only the current installation-derived session proof may enter native HTTP.
+// No registration token, API key or partial identity fallback. Copy only the six
+// transport headers; none become lease/fingerprint/checkpoint business fields.
+export const nativeSessionHeaders = (value, agentId, runtimeInstanceId) => {
+  let headers
+  try { headers = new Headers(value) } catch { deny('CONVERSATION_AUTH_UNAVAILABLE') }
+  const keys = ['Authorization', 'X-Agent-Id', 'X-Agent-Installation-Id', 'X-Agent-Host-Id',
+    'X-Agent-Runtime-Id', 'X-Agent-Session-Generation']
+  const proof = Object.fromEntries(keys.map(key => [key, headers.get(key)]))
+  const generation = proof['X-Agent-Session-Generation']
+  if (!AUTH.test(proof.Authorization || '') || headers.has('x-api-key') || headers.has('cookie')
+      || proof['X-Agent-Id'] !== agentId || proof['X-Agent-Runtime-Id'] !== runtimeInstanceId
+      || !keys.every(key => typeof proof[key] === 'string' && proof[key].trim() === proof[key] && proof[key])
+      || !/^[1-9][0-9]*$/.test(generation || '') || !Number.isSafeInteger(Number(generation))) deny('CONVERSATION_AUTH_UNAVAILABLE')
+  return Object.freeze(proof)
+}
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const id = value => typeof value === 'string' && ID.test(value)
 const isFence = value => object(value) && Number.isSafeInteger(value.version) && value.version > 0 && TOKEN.test(value.token || '')
@@ -70,18 +86,16 @@ const checkDirect = (reply, endpoint, status) => {
 export class NativeConversationLane {
   #origin; #root; #fetch; #agentId; #instanceId; #auth; #run; #execute; #active = false
   constructor({ apiOrigin, rootDir, fetchFn = globalThis.fetch, agentId, runtimeInstanceId,
-    getAuth, execute = null }) {
+    getRuntimeHeaders, execute = null }) {
     this.#origin = originOf(apiOrigin)
     if (!rootDir || !isAbsolute(rootDir) || typeof fetchFn !== 'function' ||
-        !id(agentId) || !id(runtimeInstanceId) || typeof getAuth !== 'function') deny('CONVERSATION_CONFIG_INVALID')
+        !id(agentId) || !id(runtimeInstanceId) || typeof getRuntimeHeaders !== 'function') deny('CONVERSATION_CONFIG_INVALID')
     this.#root = resolve(rootDir, 'conversation-runs', agentId)
     this.#fetch = fetchFn; this.#agentId = agentId; this.#instanceId = runtimeInstanceId
-    this.#auth = getAuth; this.#execute = execute
+    this.#auth = getRuntimeHeaders; this.#execute = execute
   }
   #headers() {
-    const auth = this.#auth()
-    if (!AUTH.test(auth || '')) deny('CONVERSATION_AUTH_UNAVAILABLE')
-    return { Authorization: auth, 'X-Agent-Id': this.#agentId, 'X-Agent-Runtime-Id': this.#instanceId }
+    return nativeSessionHeaders(this.#auth(), this.#agentId, this.#instanceId)
   }
   async #request(path, method, data, status = 200) {
     const endpoint = new URL(path, `${this.#origin}/`)
@@ -155,17 +169,17 @@ export class NativeConversationLane {
     })
     if (!isLease(lease)) deny('CONVERSATION_LEASE_UNCERTAIN')
     const fence = { version: lease.version, token: lease.token }
-    let timer; let running = true; let renewalError; let currentExpiry = lease.expiresAt
+    let timer; let renewalPromise; let running = true; let renewalError; let currentExpiry = lease.expiresAt
     const renew = async () => {
       try {
         const next = await this.#request(`${path}/lease/renew`, 'POST', fence)
         if (!isLease(next) || next.executionId !== lease.executionId || next.version !== fence.version || next.token !== fence.token)
           deny('CONVERSATION_LEASE_UNCERTAIN')
         currentExpiry = next.expiresAt
-        if (running) timer = setTimeout(() => { void renew() }, Math.max(1, Math.floor((next.expiresAt - Date.now()) / 2)))
+        if (running) timer = setTimeout(() => { renewalPromise = renew() }, Math.max(1, Math.floor((next.expiresAt - Date.now()) / 2)))
       } catch (error) { renewalError = error }
     }
-    let runDirectory
+    let runDirectory; let terminalConfirmed = false
     try {
       // A claimed lease alone does not attest the exact grant materials. Refuse
       // unknown/foreign manifests; never fall back to the old unfenced /inputs.
@@ -177,7 +191,7 @@ export class NativeConversationLane {
       if (realpathSync(this.#root) !== this.#root) deny('CONVERSATION_RUN_ROOT_UNSAFE')
       runDirectory = mkdtempSync(resolve(this.#root, `${command.runId}-${randomUUID()}-`))
       for (const part of ['inputs', 'outputs', 'scratch']) mkdirSync(resolve(runDirectory, part), { mode: 0o700 })
-      timer = setTimeout(() => { void renew() }, Math.max(1, Math.floor((lease.expiresAt - Date.now()) / 2)))
+      timer = setTimeout(() => { renewalPromise = renew() }, Math.max(1, Math.floor((lease.expiresAt - Date.now()) / 2)))
       // The production runtime still has NO executor by default; do not download
       // private references if this capability was not explicitly enabled.
       if (typeof this.#execute !== 'function') deny('CONVERSATION_EXECUTOR_NOT_AUTHORIZED')
@@ -218,6 +232,7 @@ export class NativeConversationLane {
           || !Array.isArray(committed.items) || committed.items.length !== 1
           || committed.items[0].outputId !== command.outputId || committed.items[0].sha256 !== sha256)
         deny('CONVERSATION_COMMIT_UNCERTAIN')
+      terminalConfirmed = true
       return { committed: true }
     } catch (error) {
       const code = typeof error?.code === 'string' && error.code.startsWith('CONVERSATION_')
@@ -227,10 +242,13 @@ export class NativeConversationLane {
       const failed = await this.#request(`${path}/failure`, 'POST', { fence, code })
       if (!object(failed) || failed.state !== 'FAILED' || failed.executionId !== lease.executionId)
         deny('CONVERSATION_FAILURE_UNCERTAIN')
+      terminalConfirmed = true
       return { failed: true, code }
     } finally {
       running = false; clearTimeout(timer)
-      if (runDirectory) rmSync(runDirectory, { recursive: true, force: false })
+      // A poll owns its renewal HTTP too; do not release writer ownership early.
+      await renewalPromise
+      if (runDirectory && terminalConfirmed) rmSync(runDirectory, { recursive: true, force: false })
     }
   }
 }
