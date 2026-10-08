@@ -59,3 +59,9 @@ The frozen design specifies endpoint paths but not request/response schemas or c
 4. session/heartbeat return `data.status`, including `REBINDS_REQUIRED`.
 
 No command-polling or command-channel transport is invented here: `run` establishes a session, heartbeats, and flushes already durable ACKs. An API-owned command channel contract is required before it can consume commands or execute F01/E05 work.
+
+## Run-loop recovery
+
+The `run` command keeps the same manifest identity and session/heartbeat/ACK protocol. It retries transient `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `EAI_AGAIN`, `UND_ERR_SOCKET`, `UND_ERR_CONNECT_TIMEOUT`, and HTTP `408`, `429`, or `5xx` failures with exponential backoff capped at 60 seconds; a successful cycle resets the delay. HTTP `401`/`403`, `REBINDS_REQUIRED`, and other non-transient failures (including TLS certificate/identity errors) stop with fixed exit status `78`; both source units prevent restart for that status. The unit uses a 5-second restart delay for other process failures; permanent auth/rebind failures never trigger identity rebinding or work replay. Retry logs contain only a fixed category and, for HTTP errors, the numeric status.
+
+`SIGTERM`/`SIGINT` abort the active request or backoff wait. The loop does not start another ACK flush after cancellation. Durable pending ACK records remain governed by the existing monotonic ACK queue, and no task execution/replay behavior is added.

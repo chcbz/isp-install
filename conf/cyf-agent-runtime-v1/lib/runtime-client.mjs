@@ -2,6 +2,33 @@ import { readPrivateJson, writePrivateJson } from './security.mjs';
 
 const ACK_STATES = ['RECEIVED', 'STARTED', 'SUCCEEDED', 'FAILED', 'REJECTED'];
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'REJECTED']);
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN',
+  'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'
+]);
+const PERMANENT_TLS_CODES = new Set([
+  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_REVOKED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'ERR_TLS_CERT_ALTNAME_INVALID'
+]);
+
+export function classifyRuntimeError(error) {
+  if (error?.name === 'AbortError') return { kind: 'cancelled' };
+  if (error?.code === 'REBINDS_REQUIRED') return { kind: 'rebind' };
+  const status = Number(error?.status);
+  if (status === 401 || status === 403) return { kind: 'authorization', status };
+  if (status === 408 || status === 429 || status >= 500 && status <= 599) return { kind: 'transient-http', status };
+  if (status) return { kind: 'permanent-http', status };
+  const causes = [];
+  for (let cause = error; cause; cause = cause.cause) causes.push(cause);
+  if (causes.some(cause => PERMANENT_TLS_CODES.has(cause.code)
+      || typeof cause.code === 'string' && (cause.code.startsWith('ERR_TLS_') || cause.code.startsWith('ERR_SSL_')))) {
+    return { kind: 'permanent' };
+  }
+  if (causes.some(cause => TRANSIENT_NETWORK_CODES.has(cause.code))) return { kind: 'transient-network' };
+  return { kind: 'permanent' };
+}
+
 const REQUIRED_COMMAND_FIELDS = [
   'messageId', 'correlationId', 'commandId', 'taskId', 'workItemId',
   'tenantId', 'clientId', 'canonicalAgentId', 'payloadReference', 'expiresAt'
@@ -48,21 +75,22 @@ export class RuntimeV1Client {
   authorizationPath() { return `${this.stateDir}/runtime-authorization.json`; }
   pendingAcksPath() { return `${this.stateDir}/pending-acks.json`; }
 
-  async request(path, body, authorization) {
+  async request(path, body, authorization, { signal } = {}) {
     const response = await this.fetchFn(`${this.apiBaseUrl}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(authorization ? { authorization: `Bearer ${authorization}` } : {}) },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {})
     });
-    let json = {};
-    const contentType = response.headers?.get?.('content-type') ?? '';
-    if (contentType.includes('application/json')) json = await response.json();
-    else if (response.status !== 204) json = { message: await response.text() };
     if (!response.ok) {
       const error = new Error(`Runtime v1 API ${response.status}`);
       error.status = response.status;
       throw error;
     }
+    let json = {};
+    const contentType = response.headers?.get?.('content-type') ?? '';
+    if (contentType.includes('application/json')) json = await response.json();
+    else if (response.status !== 204) json = { message: await response.text() };
     // CYF Runtime v1 uses the common JsonResult envelope. Keep the transport
     // boundary here so the rest of the client deals only with the v1 payload.
     if (json && typeof json === 'object' && !Array.isArray(json)
@@ -84,12 +112,12 @@ export class RuntimeV1Client {
     return response;
   }
 
-  async session(health = 'HEALTHY') {
-    return this.request('/agent/runtime/v1/session', { ...identityOf(this.manifest), health }, await this.loadAuthorization());
+  async session(health = 'HEALTHY', options = {}) {
+    return this.request('/agent/runtime/v1/session', { ...identityOf(this.manifest), health }, await this.loadAuthorization(), options);
   }
 
-  async heartbeat(health = 'HEALTHY') {
-    return this.request('/agent/runtime/v1/heartbeat', { ...identityOf(this.manifest), health }, await this.loadAuthorization());
+  async heartbeat(health = 'HEALTHY', options = {}) {
+    return this.request('/agent/runtime/v1/heartbeat', { ...identityOf(this.manifest), health }, await this.loadAuthorization(), options);
   }
 
   async queueAck(command, status, now) {
@@ -117,30 +145,40 @@ export class RuntimeV1Client {
     return { queued: true };
   }
 
-  async flushAcks() {
+  async flushAcks({ signal } = {}) {
     const authorization = await this.loadAuthorization();
     const store = await readPrivateJson(this.pendingAcksPath(), { version: 1, pending: [], completed: [] });
     const remaining = [];
+    let retryableFailure;
     for (const record of store.pending) {
+      if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
       let delivered = 0;
       try {
         for (const ack of record.acks) {
+          if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
           const response = await this.request(
             `/agent/runtime/v1/commands/${encodeURIComponent(record.command.messageId)}/acks`,
-            { ...record.command, status: ack.status }, authorization
+            { ...record.command, status: ack.status }, authorization, { signal }
           );
+          if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
           if (!response || !['ADVANCED', 'PRIOR'].includes(response.kind)) throw new Error('unexpected ACK result');
           delivered += 1;
         }
-      } catch {
+      } catch (error) {
+        if (signal?.aborted || error?.name === 'AbortError') throw error;
+        const failure = classifyRuntimeError(error);
+        if (!['transient-http', 'transient-network'].includes(failure.kind)) throw error;
+        retryableFailure ??= error;
         remaining.push({ ...record, acks: record.acks.slice(delivered) });
       }
       if (delivered === record.acks.length && TERMINAL.has(record.acks.at(-1)?.status)) store.completed.push({ messageId: record.command.messageId, status: record.acks.at(-1).status });
       else if (delivered === record.acks.length) remaining.push(record);
     }
+    if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
     store.pending = remaining;
     store.completed = [...new Map(store.completed.map(item => [item.messageId, item])).values()];
     await writePrivateJson(this.pendingAcksPath(), store);
+    if (retryableFailure) throw retryableFailure;
     return { pending: remaining.length };
   }
 }
