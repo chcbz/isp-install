@@ -94,6 +94,18 @@ const isReassignmentLeaseEndpoint = (endpoint, options, manifest) => {
   return query.length === 1 && query[0][0] === 'actorAgentId' && query[0][1] === manifest.canonicalAgentId;
 };
 
+// The new E05 internal namespace is narrower than unrelated native APIs.
+// No caller-selected actor, query, encoded alias or GET body is accepted.
+const e05InternalScope = (endpoint, options) => {
+  let decoded;
+  try { decoded = decodeURIComponent(endpoint.pathname); } catch { return false; }
+  if (!/^\/internal\/agent\/tasks\/.*\/reassignments/.test(decoded)) return true;
+  const match = /^\/internal\/agent\/tasks\/([A-Za-z0-9][A-Za-z0-9._:-]{0,99})\/work-items\/([A-Za-z0-9][A-Za-z0-9._:-]{0,99})\/reassignments\/([A-Za-z0-9][A-Za-z0-9._:-]{0,99})\/commands\/([A-Za-z0-9][A-Za-z0-9._:-]{0,99})\/(lease|result-commit)$/.exec(endpoint.pathname);
+  const method = typeof options.method === 'string' ? options.method.toUpperCase() : 'GET';
+  return !!match && !endpoint.href.includes('?') && (method === 'GET' && options.body == null
+    || method === 'POST' && match[5] === 'result-commit');
+};
+
 const ENROLLMENT_AUTHORIZATION = /^rta1_[0-9a-f]{64}$/;
 const safeEpoch = value => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime());
 export function validateEnrollmentResult(response, manifest) {
@@ -191,6 +203,7 @@ export class RuntimeV1Client {
     const endpoint = new URL(url);
     if (endpoint.origin !== this.apiBaseUrl || endpoint.username || endpoint.password || endpoint.hash
         || !(endpoint.pathname.startsWith('/internal/agent/') || isReassignmentLeaseEndpoint(endpoint, options, this.manifest))
+        || !e05InternalScope(endpoint, options)
         || [...endpoint.searchParams.keys()].some(key => /^(?:api[_-]?key|authorization|session[_-]?token|token)$/i.test(key))) throw fail('RUNTIME_NATIVE_SCOPE_INVALID');
     const session = this.currentSession; const proof = this.sessionHeaders();
     const signal = this.sessionAbort?.signal;

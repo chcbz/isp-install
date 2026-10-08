@@ -370,3 +370,30 @@ test('enrollment invalid secret and unsafe attempt path reject before HTTP and p
   await assert.rejects(client.enroll('one-time-synthetic-secret'), /symlinks/);
   assert.equal(await readFile(privateFile, 'utf8'), 'preserve');
 });
+
+const e05InternalUrl = suffix => `https://api.example.test/internal/agent/tasks/task-1/work-items/work-1/reassignments/rsn-1/commands/command-1/${suffix}`;
+test('E05 internal result and lease allow only frozen three method/path pairs, no caller actor/body/query', async t => {
+  const calls = [];
+  const { client } = await setup(t, async (url, options) => { calls.push({ url: String(url), options }); return response(session(7)); });
+  await client.session();
+  for (const [method, suffix, body] of [['GET', 'lease', undefined], ['GET', 'result-commit', undefined], ['POST', 'result-commit', '{"workItemId":"work-1"}']]) {
+    await client.nativeFetch(e05InternalUrl(suffix), { method, body, headers: { Authorization: 'old', 'X-Agent-Id': 'frame-foreign' } });
+    const request = calls.at(-1);
+    assert.equal(request.options.headers.get('Authorization'), `AgentRuntime ${token}`);
+    assert.equal(request.options.headers.get('X-Agent-Id'), manifest().canonicalAgentId);
+    assert.equal(request.options.headers.get('X-Agent-Session-Generation'), '7');
+    assert.equal(request.options.body, body);
+  }
+  const before = calls.length;
+  for (const [url, options] of [
+    [e05InternalUrl('lease'), { method: 'POST' }], [e05InternalUrl('lease/start'), { method: 'GET' }],
+    [e05InternalUrl('result-commit'), { method: 'PUT' }], [e05InternalUrl('result-commit') + '?actorAgentId=' + manifest().canonicalAgentId, { method: 'GET' }],
+    [e05InternalUrl('lease') + '?probe=1', {}], [e05InternalUrl('lease') + '?', {}],
+    [e05InternalUrl('lease').replace('/reassignments/', '/%72eassignments/'), {}], [e05InternalUrl('lease'), { body: '{}' }],
+    [e05InternalUrl('lease').replace('task-1', '%74ask-1'), {}], [e05InternalUrl('unknown'), {}],
+    [e05InternalUrl('lease').replace('/commands/command-1', ''), {}], [e05InternalUrl('lease').replace('command-1', 'x%2Fy'), {}]
+  ]) await assert.rejects(client.nativeFetch(url, options), /RUNTIME_NATIVE_SCOPE_INVALID/);
+  assert.equal(calls.length, before);
+  await client.nativeFetch('https://api.example.test/internal/agent/tasks/task-1/context-pack', { method: 'GET' });
+  assert.equal(calls.length, before + 1); // no blanket rewrite of unrelated native APIs
+});

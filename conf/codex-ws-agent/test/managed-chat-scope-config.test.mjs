@@ -85,7 +85,7 @@ const nativeReceipt = { typedDeliberation: { state: 'READY' }, runtimeAuth: {
 test('typed native diagnostics reads once without claiming, exposing tokens, or reading work bodies', async () => {
   let calls = 0, cancelled = false
   const result = await observeTypedRuntimeAuthentication({ profile: { ...profile, typedDeliberationEnabled: true },
-    receipt: nativeReceipt, authHeader: 'AgentRuntime ' + '1'.repeat(32), apiOrigin: 'http://localhost:10018',
+    receipt: nativeReceipt, authHeader: 'AgentRuntime rts1_' + '1'.repeat(64), apiOrigin: 'http://localhost:10018',
     runtimeInstanceId: 'fixture-runtime', fetchFn: async (url, options) => {
       calls++; assert.equal(url.pathname, '/internal/agent/tasks/workspace-executions/commands')
       assert.equal(options.method, 'GET'); assert.equal(options.redirect, 'error')
@@ -100,7 +100,7 @@ test('typed native diagnostics never queries another scope, disabled profile, or
       { receipt: { ...nativeReceipt, runtimeAuth: { ...nativeReceipt.runtimeAuth, ownerJiacn: 'other-owner' } } },
       { authHeader: '' }, { runtimeInstanceId: 'other-runtime' }, { apiOrigin: 'http://user:password@localhost' } ]) {
     const result = await observeTypedRuntimeAuthentication({ profile: { ...profile, typedDeliberationEnabled: true },
-      receipt: nativeReceipt, authHeader: 'AgentRuntime ' + '1'.repeat(32), apiOrigin: 'http://localhost:10018',
+      receipt: nativeReceipt, authHeader: 'AgentRuntime rts1_' + '1'.repeat(64), apiOrigin: 'http://localhost:10018',
       runtimeInstanceId: 'fixture-runtime', ...args, fetchFn: () => assert.fail('Unexpected diagnostic read') })
     assert.notEqual(result.state, 'HTTP_OBSERVED')
   }
@@ -174,4 +174,14 @@ test('scope cannot override the native API destination; missing/unsafe shared or
 test('independent INSPECT API profile setting is rejected, not silently retained as a compatibility path', () => {
   assert.throws(() => normalizeProfile({ typedInspectionApiOrigin: 'https://other.example.test' }), /Separate typedInspectionApiOrigin/)
   assert.throws(() => normalizeProfile({}, { typedInspectionApiOrigin: 'http://127.0.0.1:19001' }), /Separate typedInspectionApiOrigin/)
+})
+
+// Current unified transport never restores the retired native credential format.
+test('typed native diagnostics rejects retired32hex and redacted credentials before fetch', async () => {
+  for (const authHeader of ['AgentRuntime ' + '1'.repeat(32), 'AgentRuntime REDACTED_SESSION_TOKEN', 'Bearer legacy-key']) {
+    const result = await observeTypedRuntimeAuthentication({ profile: { ...profile, typedDeliberationEnabled: true },
+      receipt: nativeReceipt, authHeader, apiOrigin: 'http://localhost:10018', runtimeInstanceId: 'fixture-runtime',
+      fetchFn: () => assert.fail('retired authorization cannot enter HTTP execution') })
+    assert.equal(result.state, 'RECEIPT_BINDING_MISMATCH')
+  }
 })

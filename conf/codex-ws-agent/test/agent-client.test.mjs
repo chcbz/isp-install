@@ -46,6 +46,9 @@ import {
   materializeImageGenerationResult,
   runManagedCommand,
   e05ReassignmentBinding,
+  createE05LeaseAdapter,
+  recoverE05Result,
+  validateE05Result,
   sanitizeWebSocketEndpoint,
   workspaceFilePrompt
 } from '../agent-client.mjs'
@@ -3940,5 +3943,415 @@ test('real E05 fixture through unique durable processor and guarded executor can
     assert.equal(JSON.stringify(entry).includes('leaseToken'), false)
     assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'FAILED')
     assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+  } finally { runtime.processor.stop() }
+})
+
+const e05Wire = () => JSON.parse(readFileSync(new URL('../../cyf-agent-runtime-v1/test/fixtures/e05-runtime-lease-result.redacted.json', import.meta.url), 'utf8'))
+const e05BusinessToken = 'synthetic_business_lease_original' // never redacted fixture authorization
+const e05Binding = () => e05ReassignmentBinding(e05Profile(), normalizeInboundMessage(e05Fixture()))
+const e05Dto = (patch = {}) => ({ ...e05Wire().getLease.response, leaseToken: e05BusinessToken, ...patch })
+const e05Response = (url, dto, status = 200) => ({ status, redirected: false, url: String(url), headers: new Headers({ 'Content-Type': 'application/json' }), json: async () => structuredClone(dto) })
+const e05Digest = value => {
+  const sort = v => Array.isArray(v) ? v.map(sort) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sort(v[k])])) : v
+  return 'sha256:' + createHash('sha256').update(JSON.stringify(sort(value))).digest('hex')
+}
+const e05ViewFor = body => {
+  const { expectedPreviousVersion, contentBytes, ...artifact } = body.artifact
+  return { taskId: 'task-1', workItemId: body.workItemId, status: 'submitted', workItemVersion: body.expectedWorkItemVersion + 1, submittedAt: 2000,
+    artifact: { ...artifact, contentMimeType: 'text/plain', taskId: 'task-1', managedStorage: false, createdAt: 2000 } }
+}
+
+test('E05 actual serializer fixture pin, no redacted lease credential accepted, original result fields exact', async () => {
+  const bytes = readFileSync(new URL('../../cyf-agent-runtime-v1/test/fixtures/e05-runtime-lease-result.redacted.json', import.meta.url))
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), 'cd0d4fb0b087d140360f5a844f3e8cdd635fac0565341d0764a050dd14d4fcfa')
+  const { leaseToken, ...material } = e05Wire().postResult.request
+  assert.deepEqual(validateE05Result(e05Binding(), material, e05Wire().postResult.response), { status: 'completed', exitCode: 0 })
+  const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+    nativeFetch: async url => e05Response(url, e05Wire().getLease.response) })
+  await assert.rejects(lease.readback(), { code: 'E05_LEASE_PROOF_INVALID' })
+  assert.equal(JSON.stringify(material).includes(leaseToken), false)
+})
+
+test('E05 lease serial read5/start6/heartbeat confirmed only, no-op allowed and token memory-only', async () => {
+  const requests = []
+  let version = 5; let status = 'claimed'
+  const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+    nativeFetch: async (url, opts) => {
+      const body = JSON.parse(opts.body); requests.push({ path: url.pathname, query: url.searchParams.toString(), body })
+      assert.equal(body.expectedWorkItemVersion, version)
+      assert.equal(url.searchParams.get('actorAgentId'), e05Binding().actorAgentId)
+      if (url.pathname.endsWith('/start')) { version = 6; status = 'running' }
+      if (url.pathname.endsWith('/heartbeat') && requests.length === 3) version = 8 // never assume +1
+      return e05Response(url, e05Dto({ status, workItemVersion: version }))
+    } })
+  await lease.read(); await lease.start(); await lease.heartbeat(900000); await lease.heartbeat(900000)
+  assert.deepEqual(requests.map(r => r.body.expectedWorkItemVersion), [5, 5, 6, 8])
+  assert.equal(lease.current().workItemVersion, 8)
+  assert.equal(JSON.stringify(lease).includes(e05BusinessToken), false)
+  assert.equal(JSON.stringify(lease.current()).includes(e05BusinessToken), false)
+  assert.equal(JSON.stringify(requests).includes(e05BusinessToken), false)
+})
+
+test('E05 start/heartbeat lost response uses exact GET live receipt, never repeats mutation', async () => {
+  for (const lost of ['start', 'heartbeat']) {
+    const methods = []; let version = 5; let status = 'claimed'; let lostOnce = false
+    const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+      nativeFetch: async (url, opts) => {
+        methods.push(`${opts.method} ${url.pathname}`)
+        if (opts.method === 'GET') { assert.equal(url.search, ''); assert.equal(opts.body, undefined); return e05Response(url, e05Dto({ status, workItemVersion: version })) }
+        const request = JSON.parse(opts.body); assert.equal(request.expectedWorkItemVersion, version)
+        if (url.pathname.endsWith('/start')) { version = 6; status = 'running' }
+        if (url.pathname.endsWith('/heartbeat')) version = 9
+        if (url.pathname.endsWith(`/${lost}`) && !lostOnce) { lostOnce = true; throw new Error('socket includes private secret that must never escape') }
+        return e05Response(url, e05Dto({ status, workItemVersion: version }))
+      } })
+    await lease.read(); await lease.start(); await lease.heartbeat(900000)
+    assert.equal(methods.filter(m => m.startsWith('GET')).length, 1)
+    assert.equal(methods.filter(m => m.startsWith('POST') && m.endsWith(`/${lost}`)).length, 1)
+    assert.equal(lease.current().workItemVersion, 9)
+  }
+})
+
+test('E05 lease foreign identity/token, expired/noninteger/rollback/status/attempt and raw-envelope negatives', async () => {
+  for (const change of [dto => { dto.taskId = 'foreign' }, dto => { dto.workItemId = 'foreign' }, dto => { dto.agentId = 'frame-agent' },
+    dto => { dto.commandId = 'foreign' }, dto => { dto.reassignmentId = 'foreign' }, dto => { dto.leaseUntil = 2000 },
+    dto => { dto.workItemVersion = 5.1 }, dto => { dto.workItemVersion = 4 }, dto => { dto.status = 'submitted' },
+    dto => { dto.attemptCount = 4 }, dto => { dto.changedAt = '2000' }, dto => ({ data: dto })]) {
+    const nativeFetch = async url => { let dto = e05Dto({ status: 'claimed', workItemVersion: 5 }); dto = change(dto) ?? dto; return e05Response(url, dto) }
+    const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000, nativeFetch })
+    await assert.rejects(lease.read(), { code: 'E05_LEASE_PROOF_INVALID' })
+    assert.throws(() => lease.current(), { code: 'E05_LEASE_READBACK_REQUIRED' })
+  }
+  let changed = false
+  const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+    nativeFetch: async url => e05Response(url, changed ? e05Dto({ leaseToken: 'foreign-token' }) : e05Dto({ status: 'claimed', workItemVersion: 5 })) })
+  await lease.read(); changed = true
+  await assert.rejects(lease.start(), { code: 'E05_LEASE_PROOF_INVALID' })
+})
+
+test('E05 in-flight mutation cannot issue another POST with an unconfirmed version', async () => {
+  let resolveResponse; let calls = 0
+  const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+    nativeFetch: url => { calls++; return new Promise(resolve => { resolveResponse = () => resolve(e05Response(url, e05Dto({ status: 'claimed', workItemVersion: 5 }))) }) } })
+  const pending = lease.read()
+  await assert.rejects(lease.read(), { code: 'E05_LEASE_OPERATION_IN_FLIGHT' })
+  assert.equal(calls, 1); resolveResponse(); await pending
+})
+
+const e05OfflineNative = ({ requests = [], lostResult = false, readStatus = 200, changeResult = v => v, onCommit = () => {} } = {}) => {
+  let committed = null
+  const fetch = async (url, opts) => {
+    requests.push({ method: opts.method, path: url.pathname, query: url.search, body: opts.body ? JSON.parse(opts.body) : null })
+    if (url.pathname.endsWith('/result-commit')) {
+      if (opts.method === 'POST') {
+        const body = JSON.parse(opts.body); assert.equal(body.leaseToken, e05BusinessToken); onCommit(body)
+        committed = e05ViewFor(body)
+        if (lostResult) throw new Error('lost response')
+        return e05Response(url, changeResult(structuredClone(committed)))
+      }
+      return e05Response(url, committed && changeResult(structuredClone(committed)), readStatus)
+    }
+    if (url.pathname.endsWith('/start')) return e05Response(url, e05Dto())
+    return e05Response(url, e05Dto({ status: 'claimed', workItemVersion: 5 }))
+  }
+  return { fetch, requests, result: () => committed }
+}
+
+test('E05 original executor after lease, sole checkpoint BEFORE commit, business confirmed BEFORE SUCCEEDED ACK', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const raw = e05Fixture(); const selected = e05Profile(); const order = []; let runtime; let runs = 0
+  const native = e05OfflineNative({ onCommit: body => {
+    order.push('result')
+    const record = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+    assert.equal(record.state, 'processing'); assert.equal(record.e05ResultDigest, e05Digest(record.e05ResultMaterial))
+    assert.equal(JSON.stringify(record).includes(e05BusinessToken), false)
+    const { leaseToken, ...material } = body
+    assert.deepEqual(record.e05ResultMaterial, material)
+  } })
+  runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint,
+    apiOrigin: 'https://api.example.test', nativeFetch: native.fetch, runCodexFn: async (_profile, _message, mode, opts) => {
+      runs++; order.push('executor'); assert.equal(mode, 'command'); assert.equal(opts.requireWorkspace, true)
+      assert.deepEqual(native.requests.map(r => r.body.expectedWorkItemVersion), [5, 5])
+      opts.sendLegacyFn('task.report', { status: 'completed' }); // explicitly intercepted; no uncommitted report
+      return { status: 'completed', output: 'E05 fixture result', exitCode: 0 }
+    } }), ack: async (_context, status, version) => { order.push(status); if (status === 'SUCCEEDED') assert.ok(native.result()); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  try {
+    await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.deepEqual(order, ['RECEIVED', 'STARTED', 'executor', 'result', 'SUCCEEDED']); assert.equal(runs, 1)
+    const record = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+    assert.equal(record.state, 'completed'); assert.ok(record.e05ResultMaterial)
+    assert.equal(JSON.stringify(record).includes(e05BusinessToken), false)
+    assert.equal(runtime.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+  } finally { runtime.processor.stop() }
+})
+
+test('E05 lost result response resolved only by matching GET, no executor replay or second POST', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  for (const readStatus of [200, 404, 409, 503]) {
+    const native = e05OfflineNative({ lostResult: true, readStatus }); let runs = 0; let material
+    const result = await runManagedCommand({ profile: e05Profile(), message: normalizeInboundMessage(e05Fixture()), nativeFetch: native.fetch, apiOrigin: 'https://api.example.test',
+      commandCheckpoint: { persistE05Result: body => { material = structuredClone(body) } },
+      runCodexFn: async () => { runs++; return { status: 'completed', output: 'original immutable output' } } })
+    assert.equal(result.status, readStatus === 200 ? 'completed' : 'recovery_required'); assert.equal(runs, 1)
+    assert.deepEqual(native.requests.filter(r => r.path.endsWith('/result-commit')).map(r => r.method), ['POST', 'GET'])
+    assert.equal(JSON.stringify(material).includes(e05BusinessToken), false)
+  }
+})
+
+test('E05 restart reads original result WITHOUT old token, closes checkpoint/ACK only after original material match', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const raw = e05Fixture(); const selected = e05Profile(); let runs = 0
+  const native = e05OfflineNative({ lostResult: true, readStatus: 503 })
+  const runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint,
+    nativeFetch: native.fetch, apiOrigin: 'https://api.example.test', runCodexFn: async () => { runs++; return { status: 'completed', output: 'durable original result' } } }) })
+  await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.equal(runtime.ledger.getEntry(raw.commandId).status, LEDGER_STATUS.RECOVERY_REQUIRED)
+  assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'STARTED')
+  assert.equal(runtime.inbox.count('recovery_required'), 1); assert.equal(runtime.processor.failClosedError, null)
+  const durable = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+  assert.equal(JSON.stringify(durable).includes(e05BusinessToken), false); runtime.processor.stop()
+  const statuses = []; const restarted = unifiedCheckpoint({ root: runtime.root, selectedProfile: selected,
+    run: () => assert.fail('restarting E05 must never re-execute'),
+    ack: async (_context, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  try {
+    assert.equal(restarted.processor.failClosedError, null)
+    for (const status of [404, 409]) {
+      await restarted.processor.reconcileE05Results({ apiOrigin: 'https://api.example.test', nativeFetch: async url => e05Response(url, {}, status) })
+      assert.equal(restarted.inbox.count('recovery_required'), 1)
+    }
+    await restarted.processor.reconcileE05Results({ apiOrigin: 'https://api.example.test', nativeFetch: async (url, opts) => {
+      assert.equal(opts.method, 'GET'); assert.equal(opts.body, undefined); assert.equal(url.search, '')
+      return e05Response(url, native.result())
+    } })
+    await restarted.processor.runtimeAckTail
+    assert.equal(runs, 1); assert.deepEqual(statuses, ['SUCCEEDED']); assert.equal(restarted.inbox.count('recovery_required'), 0)
+    assert.equal(restarted.inbox.commandStateIndex().get(raw.commandId)[0].record.state, 'completed')
+    assert.equal(restarted.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+  } finally { restarted.processor.stop() }
+})
+
+test('E05 original result mismatch is never success, includes forged producer/version/content/hash/metadata/material digest', async () => {
+  const { leaseToken, ...material } = e05Wire().postResult.request
+  for (const change of [v => { v.workItemVersion = 8 }, v => { v.taskId = 'foreign' }, v => { v.artifact.producerAgentId = 'frame' },
+    v => { v.artifact.contentHash = '0'.repeat(64) }, v => { v.artifact.content = 'changed' }, v => { v.artifact.metadata = { forged: true } },
+    v => { v.artifact.artifactId = 'different' }, v => { v.status = 'completed' }]) {
+    const view = e05Wire().postResult.response; change(view)
+    assert.throws(() => validateE05Result(e05Binding(), material, view), { code: 'E05_RESULT_PROOF_INVALID' })
+  }
+  let calls = 0
+  await assert.rejects(recoverE05Result({ profile: e05Profile(), message: normalizeInboundMessage(e05Fixture()), record: { e05ResultMaterial: material, e05ResultDigest: 'forged' },
+    nativeFetch: () => { calls++; }, apiOrigin: 'https://api.example.test' }), { code: 'E05_RESULT_RECOVERY_REQUIRED' })
+  assert.equal(calls, 0)
+})
+
+test('E05 lease/start failure and checkpoint write failure are side-effect fenced; no unleased executor or business success', async () => {
+  for (const failure of ['read', 'start', 'persist']) {
+    const native = e05OfflineNative(); let runs = 0; let persists = 0
+    const outcome = await runManagedCommand({ profile: e05Profile(), message: normalizeInboundMessage(e05Fixture()), now: () => 2000, apiOrigin: 'https://api.example.test',
+      nativeFetch: (url, options) => failure !== 'persist' && (failure === 'read' ? url.pathname.endsWith('/lease') : url.pathname.endsWith('/start'))
+        ? e05Response(url, {}, 409) : native.fetch(url, options),
+      commandCheckpoint: { persistE05Result: () => { persists++; throw new Error('disk full private content not logged') } },
+      runCodexFn: async () => { runs++; return { status: 'completed', output: 'original output' } } })
+    assert.equal(outcome.status, 'recovery_required')
+    assert.equal(runs, failure === 'persist' ? 1 : 0); assert.equal(persists, failure === 'persist' ? 1 : 0)
+    assert.equal(native.requests.some(r => r.path.endsWith('/result-commit')), false)
+    assert.equal(outcome.errorMessage, 'E05_RESULT_RECOVERY_REQUIRED')
+  }
+})
+
+test('E05 original runCodex workspace acquire/release reused; exact child cancellation on session loss, no report or result success', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const selected = { ...e05Profile(), codexTimeoutMs: 0, codexHome: temporaryDirectory() }
+  const native = e05OfflineNative(); const controller = new AbortController(); let acquisitions = 0; let releases = 0; let spawned = 0; let child
+  const kills = []; const reports = []
+  const workspaceManager = { acquireCommandWorkspace: () => {
+    acquisitions++; return { workspace: { workspacePath: selected.codexHome }, release: () => { releases++ } }
+  } }
+  const outcome = await runManagedCommand({ profile: selected, message: normalizeInboundMessage(e05Fixture()), workspaceManager,
+    nativeFetch: native.fetch, apiOrigin: 'https://api.example.test', signal: controller.signal,
+    commandCheckpoint: { persistE05Result: () => assert.fail('cancelled execution cannot publish success') },
+    runCodexFn: (p, message, mode, overrides) => runCodex(p, message, mode, { ...overrides,
+      sendStatusFn: () => {}, sendProtocolFn: (...args) => reports.push(args),
+      spawnFn: (_binary, _args, options) => {
+        spawned++; child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.killed = false; child.pid = 654321
+        assert.equal(options.env.HOME, selected.codexHome); assert.equal(JSON.stringify(options.env).includes(e05BusinessToken), false)
+        child.kill = signal => { kills.push([child.pid, signal]); child.killed = true; queueMicrotask(() => { child.exitCode = 143; child.emit('close', 143) }); return true }
+        queueMicrotask(() => controller.abort())
+        return child
+      } }) })
+  assert.equal(outcome.status, 'recovery_required'); assert.deepEqual(kills, [[654321, 'SIGTERM']])
+  assert.equal(acquisitions, 1); assert.equal(releases, 1); assert.equal(spawned, 1); assert.deepEqual(reports, [])
+  assert.equal(native.requests.some(r => r.path.endsWith('/result-commit')), false)
+})
+
+test('E05 business lease expiry while heartbeat response is lost cancels exact executor, no completion claim', async () => {
+  // Short synthetic business lease, not a change to production expiry policy.
+  const start = Date.now(); let cancelled = 0; let heartbeatCalled = false; let finish; let persisted = 0
+  const binding = e05Binding()
+  const outcome = await runManagedCommand({ profile: e05Profile(), message: normalizeInboundMessage(e05Fixture()), apiOrigin: 'https://api.example.test',
+    nativeFetch: async (url, options) => {
+      const running = url.pathname.endsWith('/start')
+      if (url.pathname.endsWith('/heartbeat')) {
+        heartbeatCalled = true
+        return new Promise(resolve => { finish = () => resolve(e05Response(url, {}, 409)) })
+      }
+      return e05Response(url, e05Dto({ changedAt: start, leaseUntil: start + 120, status: running ? 'running' : 'claimed', workItemVersion: running ? 6 : 5 }))
+    },
+    commandCheckpoint: { persistE05Result: () => { persisted++ } },
+    runCodexFn: async (_p, _m, _mode, overrides) => new Promise(resolve => overrides.controls.markRunning(() => {
+      cancelled++; finish?.(); resolve({ status: 'failed', output: 'cancelled' })
+    })) })
+  assert.equal(outcome.status, 'recovery_required'); assert.equal(cancelled, 1); assert.equal(persisted, 0)
+  assert.equal(heartbeatCalled, true); assert.equal(binding.expectedWorkItemVersion, 5)
+})
+
+test('E05 recovery does not convert duplicate dispatch to terminal REJECTED or ban ordinary TASK', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const selected = e05Profile(); const raw = e05Fixture(); let runs = 0; const statuses = []
+  const native = e05OfflineNative({ lostResult: true, readStatus: 409 })
+  const runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => {
+    if (!e05ReassignmentBinding(selected, message)) { runs++; return { status: 'completed' } }
+    return runManagedCommand({ profile: selected, message, commandCheckpoint, nativeFetch: native.fetch, apiOrigin: 'https://api.example.test',
+      runCodexFn: async () => { runs++; return { status: 'completed', output: 'original' } } })
+  }, ack: async (_c, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  try {
+    await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle()
+    const duplicate = await runtime.processor.handle(raw)
+    assert.equal(duplicate.kind, 'command-duplicate'); assert.equal(runs, 1); assert.deepEqual(statuses, ['RECEIVED', 'STARTED'])
+    const ordinary = { ...raw, commandId: 'ordinary-task-command', messageId: 'ordinary-task-message', correlationId: 'ordinary-task-correlation',
+      payload: { instruction: 'ordinary task', actionType: 'work_item_execute' } }
+    await runtime.processor.handle(ordinary); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.equal(runs, 2); assert.equal(runtime.ledger.getEntry(ordinary.commandId).status, 'SUCCEEDED')
+    assert.equal(runtime.inbox.count('recovery_required'), 1); assert.equal(runtime.processor.failClosedError, null)
+  } finally { runtime.processor.stop() }
+})
+
+test('E05 crash after confirmed GET completion marker before ledger update reconciles without model/token reuse', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const selected = e05Profile(); const raw = e05Fixture(); const native = e05OfflineNative({ lostResult: true, readStatus: 409 })
+  const runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint,
+    nativeFetch: native.fetch, apiOrigin: 'https://api.example.test', runCodexFn: async () => ({ status: 'completed', output: 'original' }) }) })
+  await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle()
+  runtime.processor.stop()
+  const item = runtime.inbox.commandStateIndex().get(raw.commandId)[0]
+  const outcome = validateE05Result(e05Binding(), item.record.e05ResultMaterial, native.result())
+  runtime.inbox.markCompleted(item, outcome) // exact real crash window in recovery directory
+  const restarted = unifiedCheckpoint({ root: runtime.root, selectedProfile: selected, run: () => assert.fail('no model rerun') })
+  try {
+    await restarted.processor.runtimeAckTail
+    assert.equal(restarted.processor.failClosedError, null); assert.equal(restarted.inbox.count('recovery_required'), 0)
+    assert.equal(restarted.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+  } finally { restarted.processor.stop() }
+})
+
+test('E05 actual Node fetch HTTP→session/lease/original executor/result lostresponse→HTTP ACK→unique checkpoint, JavaDB NOT_RUN', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const { RuntimeV1Client } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
+  const raw = e05Fixture(); const selected = e05Profile(); const root = temporaryDirectory()
+  const syntheticSession = 'rts1_' + 'a'.repeat(64); const syntheticAuthorization = 'rta1_' + 'b'.repeat(64)
+  const calls = []; const results = new Map(); let version = 5; let leaseStatus = 'claimed'; let lostOnce = false; let generation = 7; let runs = 0; let runtime
+  const server = createServer(async (request, response) => {
+    let bytes = ''; for await (const part of request) bytes += part
+    const url = new URL(request.url, 'http://127.0.0.1'); const body = bytes ? JSON.parse(bytes) : null
+    calls.push({ method: request.method, path: url.pathname, query: url.search, body })
+    const send = data => { response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' }); response.end(JSON.stringify(data)) }
+    try {
+      if (url.pathname === '/agent/runtime/v1/session') {
+        assert.equal(request.headers.authorization, `Bearer ${syntheticAuthorization}`)
+        return send({ data: { ...selected.runtimeIdentity, hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: generation,
+          scheme: 'AgentRuntime', sessionToken: syntheticSession, websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' } })
+      }
+      assert.equal(request.headers.authorization, `AgentRuntime ${syntheticSession}`)
+      assert.equal(request.headers['x-agent-id'], selected.runtimeIdentity.canonicalAgentId)
+      assert.equal(request.headers['x-agent-installation-id'], selected.runtimeIdentity.installationId)
+      assert.equal(request.headers['x-agent-host-id'], 'host-fixture'); assert.equal(request.headers['x-agent-runtime-id'], 'boot-fixture')
+      assert.equal(request.headers['x-agent-session-generation'], String(generation)); assert.equal(request.headers['x-api-key'], undefined)
+      if (url.pathname.endsWith('/acks')) {
+        if (body.status === 'SUCCEEDED') assert.ok(results.get(raw.commandId))
+        assert.equal(body.deliveryVersion, { RECEIVED: null, STARTED: 1, SUCCEEDED: 2 }[body.status])
+        return send({ data: { kind: 'ADVANCED', status: body.status, deliveryVersion: (body.deliveryVersion ?? 0) + 1 } })
+      }
+      if (url.pathname.endsWith('/result-commit')) {
+        assert.equal(url.search, '')
+        if (request.method === 'GET') { assert.equal(body, null); return send(results.get(raw.commandId)) }
+        assert.equal(body.expectedWorkItemVersion, version); assert.equal(body.leaseToken, e05BusinessToken)
+        const item = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+        const { leaseToken, ...material } = body
+        assert.deepEqual(item.e05ResultMaterial, material); assert.equal(JSON.stringify(item).includes(e05BusinessToken), false)
+        results.set(raw.commandId, e05ViewFor(body))
+        if (!lostOnce) { lostOnce = true; response.destroy(); return }
+        assert.fail('lost result must not be POST replayed')
+      }
+      assert.equal(request.method, 'POST'); assert.equal(url.searchParams.get('actorAgentId'), selected.runtimeIdentity.canonicalAgentId)
+      assert.equal(body.expectedWorkItemVersion, version)
+      if (url.pathname.endsWith('/start')) { leaseStatus = 'running'; version = 6 }
+      return send(e05Dto({ status: leaseStatus, workItemVersion: version }))
+    } catch (error) { response.writeHead(500, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ code: 'TEST_ORACLE_FAILED' })); t.diagnostic(error.stack); }
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
+  const apiOrigin = `http://127.0.0.1:${server.address().port}`
+  const client = new RuntimeV1Client({ manifest: { ...selected.runtimeIdentity, manifestVersion: '1', manifestSha256: 'sha256:' + 'd'.repeat(64) }, apiBaseUrl: apiOrigin, stateDir: root, hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture' })
+  writeFileSync(client.authorizationPath(), JSON.stringify({ installationId: selected.runtimeIdentity.installationId, runtimeAuthorization: syntheticAuthorization }), { mode: 0o600 })
+  await client.session()
+  runtime = unifiedCheckpoint({ root, selectedProfile: selected, ack: (...args) => client.acknowledge(...args),
+    run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint, apiOrigin,
+      nativeFetch: (url, options) => client.nativeFetch(url, options), runCodexFn: async () => { runs++; return { status: 'completed', output: 'E05 fixture result' } } }) })
+  try {
+    await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.equal(runs, 1); assert.equal(runtime.processor.failClosedError, null); assert.equal(runtime.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+    assert.deepEqual(calls.filter(c => c.path.endsWith('/result-commit')).map(c => c.method), ['POST', 'GET'])
+    assert.deepEqual(calls.filter(c => c.path.endsWith('/acks')).map(c => c.body.status), ['RECEIVED', 'STARTED', 'SUCCEEDED'])
+    const record = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+    assert.equal(record.state, 'completed'); assert.equal(JSON.stringify(record).includes(e05BusinessToken), false)
+    assert.equal(JSON.stringify(record).includes(syntheticSession), false)
+    assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).deliveryVersion, 3)
+    client.invalidateSession(); generation = 8; await client.session()
+    const recovered = await recoverE05Result({ profile: selected, message: normalizeInboundMessage(raw), record,
+      nativeFetch: (url, options) => client.nativeFetch(url, options), apiOrigin })
+    assert.equal(recovered.status, 'completed'); assert.equal(runs, 1)
+  } finally { runtime.processor.stop(); client.invalidateSession() }
+})
+
+test('E05 timer heartbeat final confirmed version feeds result using original runCodex output/workspace lifecycle', async () => {
+  const started = Date.now(); const native = e05OfflineNative(); let heartbeatRequests = 0; let body; let releases = 0; let originalRun = 0
+  const selected = { ...e05Profile(), codexHome: temporaryDirectory(), codexTimeoutMs: 0 }
+  const workspaceManager = { acquireCommandWorkspace: () => ({ workspace: { workspacePath: selected.codexHome }, release: () => { releases++ } }) }
+  let child
+  const result = await runManagedCommand({ profile: selected, message: normalizeInboundMessage(e05Fixture()), workspaceManager, apiOrigin: 'https://api.example.test',
+    commandCheckpoint: { persistE05Result: material => { body = material } },
+    nativeFetch: async (url, options) => {
+      if (url.pathname.endsWith('/heartbeat')) {
+        heartbeatRequests++; assert.equal(JSON.parse(options.body).expectedWorkItemVersion, 6)
+        queueMicrotask(() => { child.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Original Codex output' } }) + '\n'); child.exitCode = 0; child.emit('close', 0) })
+        return e05Response(url, e05Dto({ leaseUntil: started + 3000, changedAt: Date.now(), workItemVersion: 9 }))
+      }
+      if (url.pathname.endsWith('/result-commit')) { assert.equal(JSON.parse(options.body).expectedWorkItemVersion, 9); return native.fetch(url, options) }
+      return e05Response(url, e05Dto({ status: url.pathname.endsWith('/start') ? 'running' : 'claimed', workItemVersion: url.pathname.endsWith('/start') ? 6 : 5,
+        changedAt: started, leaseUntil: started + 180 }))
+    },
+    runCodexFn: (p, message, mode, overrides) => {
+      originalRun++
+      return runCodex(p, message, mode, { ...overrides, sendStatusFn: () => {}, spawnFn: () => {
+        child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.killed = false
+        child.kill = () => assert.fail('renewed lease must not cancel healthy original child'); return child
+      } })
+    } })
+  assert.equal(result.status, 'completed'); assert.equal(body.expectedWorkItemVersion, 9); assert.equal(body.artifact.content, 'Original Codex output')
+  assert.equal(originalRun, 1); assert.equal(releases, 1); assert.equal(heartbeatRequests, 1)
+})
+
+test('E05 immutable material cannot be replaced after original checkpoint persist', () => {
+  const selected = e05Profile(); const runtime = unifiedCheckpoint({ selectedProfile: selected })
+  try {
+    runtime.inbox.enqueue(normalizeInboundMessage(e05Fixture()))
+    const item = runtime.inbox.claimNext(); const { leaseToken, ...material } = e05Wire().postResult.request
+    runtime.inbox.persistE05Result(item, material)
+    const changed = { ...material, artifact: { ...material.artifact, content: 'replacement' } }
+    changed.artifact.contentHash = createHash('sha256').update(changed.artifact.content).digest('hex')
+    changed.artifact.contentByteLength = Buffer.byteLength(changed.artifact.content)
+    assert.throws(() => runtime.inbox.persistE05Result(item, changed), { code: 'E05_RESULT_MATERIAL_CONFLICT' })
+    assert.deepEqual(runtime.inbox.assertExecutable(item).record.e05ResultMaterial, material)
+    assert.equal(JSON.stringify(item.record).includes(leaseToken), false)
   } finally { runtime.processor.stop() }
 })

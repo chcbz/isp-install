@@ -1037,7 +1037,13 @@ export class PersistentCommandInbox {
     for (const fileName of this.listJsonFiles(this.recoveryDir)) {
       const filePath = resolve(this.recoveryDir, fileName)
       try {
-        const validated = this.readAndValidate(filePath, new Set(['recovery_required']))
+        const validated = this.readAndValidate(filePath, new Set(['recovery_required', 'completed']))
+        if (validated.record.state === 'completed') {
+          result.completedRecords.push(validated)
+          this.settleCompletedFile(filePath, fileName, validated.record)
+          result.completed += 1
+          continue
+        }
         result.recoveryRecords.push({ ...validated, fileName, path: filePath })
         result.recoveryRequired += 1
       } catch (error) {
@@ -1108,6 +1114,19 @@ export class PersistentCommandInbox {
       throw new AgentProtocolError('COMMAND_MESSAGE_TYPE_REQUIRED', 'Only command.dispatch may execute from the persistent inbox')
     }
     return validated
+  }
+
+  persistE05Result(item, material) {
+    const validated = this.assertExecutable(item)
+    const binding = e05ReassignmentBinding(this.profile, validated.normalized)
+    if (!binding) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+    validateE05Material(binding, material)
+    const digest = canonicalSha256(material)
+    if (validated.record.e05ResultDigest && validated.record.e05ResultDigest !== digest) throw e05Failure('E05_RESULT_MATERIAL_CONFLICT')
+    const record = { ...validated.record, e05ResultMaterial: JSON.parse(JSON.stringify(material)), e05ResultDigest: digest }
+    atomicWriteJson(this.fs, item.path, record)
+    item.record = record // markCompleted must not overwrite the only recovery material
+    return digest
   }
 
   markCompleted(item, outcome) {
@@ -2708,7 +2727,11 @@ export class AgentMessageProcessor {
     if (check.action === 'conflict') {
       throw new Error(`completed inbox record conflicts with ledger for ${message.commandId}`)
     }
-    const entry = this.ledger.markCompleted(message.commandId, completed.record.outcome)
+    const previous = this.ledger.getEntry(message.commandId)
+    const entry = previous?.status === LEDGER_STATUS.RECOVERY_REQUIRED && completed.record.e05ResultMaterial
+        && e05ReassignmentBinding(this.profile, message)
+      ? this.ledger.markReconciledOutcome(message.commandId, completed.record.outcome, 'E05_HTTP_ORIGINAL_RESULT')
+      : this.ledger.markCompleted(message.commandId, completed.record.outcome)
     this._emitAck(entry.status, {
       ...meta,
       commandId: message.commandId,
@@ -2840,7 +2863,8 @@ export class AgentMessageProcessor {
       }
 
       if (item.record.state === 'completed') {
-        if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(entry.status)) this._reconcileCompletedRecord(item)
+        if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(entry.status)
+            || entry.status === LEDGER_STATUS.RECOVERY_REQUIRED && item.record.e05ResultMaterial && e05ReassignmentBinding(this.profile, item.normalized)) this._reconcileCompletedRecord(item)
         else if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry.status)) {
           throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Completed inbox record conflicts with ledger status ${entry.status} for ${commandId}`)
         }
@@ -2882,6 +2906,31 @@ export class AgentMessageProcessor {
     }
   }
 
+  async reconcileE05Results({ nativeFetch, apiOrigin }) {
+    if (this.e05Reconciliation) return this.e05Reconciliation
+    this.e05Reconciliation = (async () => {
+      const index = this.inbox.commandStateIndex()
+      for (const records of index.values()) {
+        if (records.length !== 1) throw e05Failure('E05_RESULT_RECOVERY_REQUIRED')
+        const item = records[0]
+        if (item.record.state !== 'recovery_required' || !e05ReassignmentBinding(this.profile, item.normalized)) continue
+        if (!item.record.e05ResultMaterial) continue // no original output: never rerun
+        let outcome
+        try { outcome = await recoverE05Result({ profile: this.profile, message: item.normalized, record: item.record, nativeFetch, apiOrigin }) }
+        catch { continue } // 404/409/unavailable keep original material and nonterminal state
+        const entry = this.ledger?.getEntry(item.normalized.commandId)
+        if (!entry || entry.fingerprint !== CommandFingerprint.compute(item.normalized)
+            || ![ACK_STATUS.STARTED, LEDGER_STATUS.RECOVERY_REQUIRED].includes(entry.status)) throw e05Failure('E05_RESULT_RECOVERY_REQUIRED')
+        const completed = this.inbox.markCompleted(item, outcome)
+        const terminal = this.ledger.markReconciledOutcome(item.normalized.commandId, outcome, 'E05_HTTP_ORIGINAL_RESULT')
+        this.inbox.settleCompletedFile(item.path, item.fileName, completed)
+        const ack = this._emitAck(terminal.status, { ...this._commandMeta(item.normalized), commandId: item.normalized.commandId, outcome: terminal.outcome })
+        if (ack.confirmation) await ack.confirmation
+      }
+    })().finally(() => { this.e05Reconciliation = null })
+    return this.e05Reconciliation
+  }
+
   _recordRecoveryRequired(recovered) {
     const message = recovered.normalized
     const meta = this._commandMeta(message)
@@ -2894,6 +2943,7 @@ export class AgentMessageProcessor {
       if (result.conflict) marker = { kind: 'conflict', recordId: result.conflict.recordId }
       else marker = { kind: 'entry' }
     }
+    if (this.profile.runtimeIdentity && e05ReassignmentBinding(this.profile, message)) return
     this._emitAck(ACK_STATUS.REJECTED, {
       ...meta,
       commandId: message.commandId,
@@ -2945,6 +2995,10 @@ export class AgentMessageProcessor {
   }
 
   _replayLedgerEntry(entry, meta) {
+    if (entry.status === LEDGER_STATUS.RECOVERY_REQUIRED && this.profile.runtimeIdentity) {
+      const records = this.inbox.commandStateIndex().get(entry.commandId) || []
+      if (records.length === 1 && e05ReassignmentBinding(this.profile, records[0].normalized)) return { ackStatus: null, recoveryRequired: true }
+    }
     const replay = this._ackForLedgerEntry(entry)
     this._emitAck(replay.ackStatus, {
       ...meta,
@@ -3383,7 +3437,7 @@ export class AgentMessageProcessor {
       this.commandActive = true
       let outcome
       try {
-        outcome = await this.runCommand(validated.normalized, validated.record)
+        outcome = await this.runCommand(validated.normalized, validated.record, { persistE05Result: material => this.inbox.persistE05Result(item, material) })
       } catch (error) {
         outcome = { status: 'failed', errorMessage: error.message }
       }
@@ -3399,7 +3453,7 @@ export class AgentMessageProcessor {
             reason
           )
           if (marked?.conflict) throw new Error(`recovery fingerprint conflict for ${validated.normalized.commandId}`)
-          this._failClosed(new AgentProtocolError('COMMAND_COMMITTED_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
+          if (!e05ReassignmentBinding(this.profile, validated.normalized)) this._failClosed(new AgentProtocolError('COMMAND_COMMITTED_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
         } catch (error) {
           this._failClosed(new AgentProtocolError(
             'COMMAND_COMPLETION_PERSIST_ERROR',
@@ -3408,6 +3462,7 @@ export class AgentMessageProcessor {
         } finally {
           this.commandActive = false
         }
+        if (!this.failClosedError) continue
         return
       }
       const durableOutcome = {
@@ -5251,17 +5306,204 @@ export const e05ReassignmentBinding = (profile, message) => {
     actorAgentId: profile.runtimeIdentity.canonicalAgentId })
 }
 
+// Memory-only business lease authority. The wire is raw DTO, not JsonResult.data.
+const e05Failure = code => new AgentProtocolError(code, code)
+const e05Integer = value => Number.isSafeInteger(value) && value >= 0
+const e05Epoch = value => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime())
+const e05InternalPath = binding => `/internal/agent/tasks/${binding.taskId}/work-items/${binding.workItemId}/reassignments/${binding.reassignmentId}/commands/${binding.commandId}`
+const e05PathBinding = binding => {
+  if (!['taskId', 'workItemId', 'reassignmentId', 'commandId'].every(key => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(binding[key]))) throw e05Failure('E05_PATH_INVALID')
+}
+const e05Http = async (nativeFetch, apiOrigin, path, method = 'GET', body = null) => {
+  const endpoint = new URL(path, apiOrigin)
+  let response
+  try { response = await nativeFetch(endpoint, { method, redirect: 'error', cache: 'no-store',
+    headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}) }) }
+  catch { throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN') }
+  if (!response || !Number.isInteger(response.status)) throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN')
+  if (response.status !== 200) throw e05Failure(`E05_HTTP_${response.status}`)
+  // Existing lease POSTs legitimately include the exact manifest actor query.
+  // Compare the full requested URL; the new internal GETs remain query-free.
+  if (response.redirected === true || response.url !== endpoint.href || !/^application\/json(?:\s*;|$)/i.test(response.headers?.get?.('content-type') || '')) throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN')
+  try { return await response.json() } catch { throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN') }
+}
+
+export const createE05LeaseAdapter = ({ binding, nativeFetch, apiOrigin, now = Date.now }) => {
+  e05PathBinding(binding)
+  let confirmed = null
+  let busy = false
+  let unknown = false
+  const internal = e05InternalPath(binding)
+  const original = `/agent/tasks/${binding.taskId}/work-items/${binding.workItemId}/reassignments/${binding.reassignmentId}/lease`
+  const validate = dto => {
+    const keys = ['reassignmentId', 'commandId', 'taskId', 'workItemId', 'agentId', 'status', 'leaseToken', 'leaseUntil', 'workItemVersion', 'attemptCount', 'maxAttempts', 'changedAt']
+    if (!isObject(dto) || Object.keys(dto).sort().join() !== keys.sort().join()
+        || ['reassignmentId', 'commandId', 'taskId', 'workItemId'].some(key => dto[key] !== binding[key])
+        || dto.agentId !== binding.actorAgentId || !['claimed', 'running'].includes(dto.status)
+        || !exactRuntimeCommandField(dto.leaseToken) || /REDACTED/i.test(dto.leaseToken)
+        || !e05Epoch(dto.leaseUntil) || dto.leaseUntil <= now() || !e05Epoch(dto.changedAt) || dto.changedAt >= dto.leaseUntil
+        || !e05Integer(dto.workItemVersion) || dto.workItemVersion < binding.expectedWorkItemVersion
+        || !e05Integer(dto.attemptCount) || !e05Integer(dto.maxAttempts) || dto.attemptCount < 1 || dto.attemptCount > dto.maxAttempts
+        || confirmed && (dto.leaseToken !== confirmed.leaseToken || dto.attemptCount !== confirmed.attemptCount
+          || dto.maxAttempts !== confirmed.maxAttempts || dto.workItemVersion < confirmed.workItemVersion
+          || dto.leaseUntil < confirmed.leaseUntil || dto.changedAt < confirmed.changedAt
+          || confirmed.status === 'running' && dto.status !== 'running')) throw e05Failure('E05_LEASE_PROOF_INVALID')
+    return Object.freeze({ ...dto })
+  }
+  const exclusive = async operation => {
+    if (busy) throw e05Failure('E05_LEASE_OPERATION_IN_FLIGHT')
+    busy = true
+    try { return await operation() } finally { busy = false }
+  }
+  const readback = async () => {
+    unknown = true
+    const dto = validate(await e05Http(nativeFetch, apiOrigin, `${internal}/lease`))
+    confirmed = dto; unknown = false
+    return { status: dto.status, workItemVersion: dto.workItemVersion, leaseUntil: dto.leaseUntil }
+  }
+  const mutate = (suffix, leaseDurationMillis) => exclusive(async () => {
+    if (unknown || suffix && !confirmed) throw e05Failure('E05_LEASE_READBACK_REQUIRED')
+    if (suffix === '/heartbeat' && (!e05Integer(leaseDurationMillis) || leaseDurationMillis < 1 || leaseDurationMillis > 900000)) throw e05Failure('E05_LEASE_DURATION_INVALID')
+    const version = confirmed?.workItemVersion ?? binding.expectedWorkItemVersion
+    const body = { commandId: binding.commandId, expectedWorkItemVersion: version,
+      ...(suffix === '/heartbeat' ? { leaseDurationMillis } : {}) }
+    let dto
+    try {
+      dto = validate(await e05Http(nativeFetch, apiOrigin, `${original}${suffix}?actorAgentId=${encodeURIComponent(binding.actorAgentId)}`, 'POST', body))
+      if (!suffix && (dto.status !== 'claimed' || dto.workItemVersion !== version)
+          || suffix && dto.status !== 'running' || suffix === '/start' && dto.workItemVersion <= version) throw e05Failure('E05_LEASE_PROOF_INVALID')
+      confirmed = dto
+    } catch (error) {
+      unknown = true
+      // Never repeat a POST or predict CAS. Only the exact original live receipt
+      // GET may recover an ambiguous response; explicit ACL/version failures stay closed.
+      if (!['E05_HTTP_OUTCOME_UNKNOWN', 'E05_HTTP_503'].includes(error.code)) throw error
+      await readback()
+      if (!suffix && (confirmed.status !== 'claimed' || confirmed.workItemVersion !== version)
+          || suffix && confirmed.status !== 'running' || suffix === '/start' && confirmed.workItemVersion <= version) { unknown = true; throw e05Failure('E05_LEASE_READBACK_REQUIRED') }
+    }
+    return { status: confirmed.status, workItemVersion: confirmed.workItemVersion, leaseUntil: confirmed.leaseUntil }
+  })
+  return Object.freeze({
+    read: () => mutate(''), start: () => mutate('/start'), heartbeat: duration => mutate('/heartbeat', duration),
+    readback: () => exclusive(readback),
+    current: () => {
+      if (unknown || !confirmed || confirmed.leaseUntil <= now()) throw e05Failure('E05_LEASE_READBACK_REQUIRED')
+      return { status: confirmed.status, workItemVersion: confirmed.workItemVersion, leaseUntil: confirmed.leaseUntil }
+    },
+    commit: material => exclusive(async () => {
+      if (unknown || !confirmed || confirmed.status !== 'running' || confirmed.leaseUntil <= now()
+          || material.expectedWorkItemVersion !== confirmed.workItemVersion) throw e05Failure('E05_LEASE_READBACK_REQUIRED')
+      return e05Http(nativeFetch, apiOrigin, `${internal}/result-commit`, 'POST', { ...material, leaseToken: confirmed.leaseToken })
+    })
+  })
+}
+
+const e05Material = (binding, outcome) => {
+  const content = outcome.output
+  if (typeof content !== 'string' || !content.trim()) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+  return { workItemId: binding.workItemId, producerAgentId: binding.actorAgentId,
+    artifact: { artifactId: `artifact_e05_${canonicalSha256({ commandId: binding.commandId, reassignmentId: binding.reassignmentId })}`,
+      workItemId: binding.workItemId, producerAgentId: binding.actorAgentId, artifactType: 'summary', title: 'E05 Result', content,
+      storageUri: null, contentBytes: null, contentMimeType: null,
+      contentHash: createHash('sha256').update(content, 'utf8').digest('hex'), contentByteLength: Buffer.byteLength(content, 'utf8'),
+      artifactVersion: 1, expectedPreviousVersion: 0, visibility: 'task_members', metadata: {} } }
+}
+const validateE05Material = (binding, material) => {
+  if (!isObject(material) || Object.keys(material).sort().join() !== 'artifact,expectedWorkItemVersion,producerAgentId,workItemId'
+      || material.workItemId !== binding.workItemId || material.producerAgentId !== binding.actorAgentId
+      || !e05Integer(material.expectedWorkItemVersion) || material.expectedWorkItemVersion < binding.expectedWorkItemVersion
+      || !isObject(material.artifact)) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+  const expected = e05Material(binding, { output: material.artifact.content })
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(material.artifact.artifactId)) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+  expected.artifact.artifactId = material.artifact.artifactId
+  if (canonicalSha256(expected.artifact) !== canonicalSha256(material.artifact)) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+  return material
+}
+export const validateE05Result = (binding, material, view) => {
+  validateE05Material(binding, material)
+  if (!isObject(view) || Object.keys(view).sort().join() !== 'artifact,status,submittedAt,taskId,workItemId,workItemVersion'
+      || view.taskId !== binding.taskId || view.workItemId !== binding.workItemId || view.status !== 'submitted'
+      || !e05Integer(view.workItemVersion) || view.workItemVersion !== material.expectedWorkItemVersion + 1
+      || !e05Epoch(view.submittedAt) || !isObject(view.artifact)) throw e05Failure('E05_RESULT_PROOF_INVALID')
+  const artifact = view.artifact
+  for (const [key, value] of Object.entries(material.artifact)) {
+    if (['contentBytes', 'expectedPreviousVersion', 'contentMimeType'].includes(key)) continue
+    if (canonicalSha256(artifact[key] ?? null) !== canonicalSha256(value)) throw e05Failure('E05_RESULT_PROOF_INVALID')
+  }
+  if (artifact.taskId !== binding.taskId || artifact.managedStorage !== false || artifact.contentMimeType !== 'text/plain'
+      || !e05Epoch(artifact.createdAt)) throw e05Failure('E05_RESULT_PROOF_INVALID')
+  return { status: 'completed', exitCode: 0 }
+}
+export const recoverE05Result = async ({ profile, message, record, nativeFetch, apiOrigin }) => {
+  const binding = e05ReassignmentBinding(profile, message)
+  if (!binding || !record?.e05ResultMaterial || record.e05ResultDigest !== canonicalSha256(record.e05ResultMaterial)) throw e05Failure('E05_RESULT_RECOVERY_REQUIRED')
+  e05PathBinding(binding)
+  const material = validateE05Material(binding, record.e05ResultMaterial)
+  const view = await e05Http(nativeFetch, apiOrigin, `${e05InternalPath(binding)}/result-commit`)
+  return validateE05Result(binding, material, view)
+}
+
+const runE05Command = async ({ profile, message, binding, workspaceManager, runCodexFn,
+  nativeFetch, apiOrigin, commandCheckpoint, now = Date.now, signal, sessionCurrent = () => true }) => {
+  // Missing trusted integration keeps the former guard effective, not frame flags.
+  if (typeof nativeFetch !== 'function' || !apiOrigin || !commandCheckpoint?.persistE05Result) throw new AgentProtocolError('E05_LEASE_RESULT_ADAPTER_UNAVAILABLE', 'E05_LEASE_RESULT_ADAPTER_UNAVAILABLE: trusted lease/result/checkpoint adapter required')
+  let cancelled = false; let cancel = null; let timer = null; let expiryTimer = null; let executing = true; const httpAbort = new AbortController(); let heartbeatDuration = null; let heartbeat = Promise.resolve(); let leaseFailed = false
+  const abort = () => { if (cancelled) return; cancelled = true; httpAbort.abort(); try { cancel?.() } catch {} }
+  const assertSession = () => {
+    if (signal?.aborted || !sessionCurrent() || cancelled) throw e05Failure('E05_SESSION_CHANGED')
+  }
+  const lease = createE05LeaseAdapter({ binding, apiOrigin, now, nativeFetch: (url, options) => { assertSession(); return nativeFetch(url, { ...options, signal: httpAbort.signal }) } })
+  const schedule = () => {
+    if (!executing) return
+    const current = lease.current()
+    // Scheduling derives from the actual business lease, not a performance deadline.
+    clearTimeout(expiryTimer)
+    expiryTimer = setTimeout(() => { leaseFailed = true; abort() }, Math.max(1, current.leaseUntil - now()))
+    timer = setTimeout(() => {
+      heartbeat = (async () => {
+        try { assertSession(); await lease.heartbeat(heartbeatDuration); assertSession(); schedule() }
+        catch { leaseFailed = true; abort() }
+      })()
+    }, Math.max(1, Math.floor((current.leaseUntil - now()) / 3)))
+  }
+  signal?.addEventListener('abort', abort, { once: true })
+  try {
+    assertSession(); await lease.read(); assertSession(); await lease.start(); assertSession()
+    heartbeatDuration = Math.min(900000, lease.current().leaseUntil - now())
+    schedule()
+    const outcome = await runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true,
+      // E05 business completion is solely result-commit. Keep normal TASK reports untouched.
+      sendLegacyFn: () => {}, controls: { markRunning: fn => { cancel = fn; if (cancelled) fn() }, isCancelled: () => cancelled } })
+    executing = false; clearTimeout(timer); await heartbeat
+    assertSession(); if (leaseFailed) throw e05Failure('E05_LEASE_READBACK_REQUIRED')
+    if (outcome?.status !== 'completed') return { status: 'failed', exitCode: outcome?.exitCode ?? null, errorMessage: 'E05_EXECUTOR_FAILED' }
+    const material = { ...e05Material(binding, outcome), expectedWorkItemVersion: lease.current().workItemVersion }
+    validateE05Material(binding, material)
+    // Persist original body WITHOUT leaseToken before the sole business write.
+    await commandCheckpoint.persistE05Result(material)
+    assertSession()
+    let view
+    try { view = await lease.commit(material); return validateE05Result(binding, material, view) }
+    catch {
+      // Lost response, including a committed write whose body was malformed: GET
+      // only. Never repeat publication or regenerate model output/artifact keys.
+      assertSession()
+      return await recoverE05Result({ profile, message, record: { e05ResultMaterial: material, e05ResultDigest: canonicalSha256(material) }, nativeFetch, apiOrigin })
+    }
+  } catch { return { status: 'recovery_required', errorMessage: 'E05_RESULT_RECOVERY_REQUIRED' } }
+  finally { executing = false; clearTimeout(timer); clearTimeout(expiryTimer); signal?.removeEventListener('abort', abort); await heartbeat }
+}
+
 export const runManagedCommand = async ({
   profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
-  materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus
+  materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus,
+  nativeFetch, apiOrigin, commandCheckpoint, now = Date.now, signal, sessionCurrent
 }) => {
-  // The existing result service still has no frozen Runtime HTTP entrypoint. Until
-  // lease/start/heartbeat AND result commit are wired, E05 cannot use ordinary
-  // Codex/workspace/report completion as a substitute. This also fences replayed
-  // durable commands before any workspace-file, model, status or report effect.
-  if (e05ReassignmentBinding(profile, message)) {
-    throw new AgentProtocolError('E05_LEASE_RESULT_ADAPTER_UNAVAILABLE', 'E05_LEASE_RESULT_ADAPTER_UNAVAILABLE: Reassignment lease and result commit lifecycle is not connected; command was not executed')
-  }
+  const binding = e05ReassignmentBinding(profile, message)
+  if (binding) return runE05Command({ profile, message, binding, workspaceManager, runCodexFn,
+    nativeFetch, apiOrigin, commandCheckpoint, now, signal, sessionCurrent })
   const workspaceFileResult = await runWorkspaceFileCommand({
     profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader, runCodexFn, materializeImageFn, sendStatusFn
   })
@@ -6070,10 +6312,19 @@ const createProfileState = (profile, profileConfig = config) => {
   state.processor = new AgentMessageProcessor({
     profile,
     inbox,
-    runCommand: message => {
+    runCommand: (message, record, commandCheckpoint) => {
       if (profile.runtimeIdentity && !state.runtimeTransport?.ready?.()) throw new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Runtime execution requires its current installation session')
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
-      return legacyExecutionGate.run(() => runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader }))
+      const transport = state.runtimeTransport
+      const generation = profile.runtimeIdentity ? transport.headers()['X-Agent-Session-Generation'] : null
+      const controller = new AbortController()
+      state.e05CommandAbort = controller
+      return legacyExecutionGate.run(() => runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge,
+        workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader, commandCheckpoint, apiOrigin: profile.runtimeApiOrigin,
+        nativeFetch: transport?.nativeFetch, signal: controller.signal,
+        sessionCurrent: () => state.runtimeTransport === transport && transport?.ready?.()
+          && transport.headers()['X-Agent-Session-Generation'] === generation }))
+        .finally(() => { if (state.e05CommandAbort === controller) state.e05CommandAbort = null })
     },
     runChat: async (message, controls) => {
       if (profile.runtimeIdentity && !state.runtimeTransport?.ready?.()) throw new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Runtime execution requires its current installation session')
@@ -6214,6 +6465,7 @@ export const startBoundedSkillResultReplay = ({
 
 export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) => {
   if (!state || state.disposed) return
+  state.e05CommandAbort?.abort()
   state.disposed = true
   if (state.appServerRestartTimer) clearTimeout(state.appServerRestartTimer)
   state.appServerRestartTimer = null
@@ -6255,6 +6507,7 @@ export const disposeProfileState = (state, reason = 'profile removed') => {
 }
 const disposeProfileStateOnce = async (state, reason) => {
   const profile = state.profile
+  state.e05CommandAbort?.abort()
   state.processor.pause()
   state.processor.stop()
   // Disable ingress and auth before awaiting an engine shutdown.
@@ -6315,7 +6568,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
     const subjectKey = createHash('sha256').update(JSON.stringify({ canonicalAgentId: manifest.canonicalAgentId, clientId: manifest.clientId, tenantId: manifest.tenantId })).digest('hex')
     if (agent.subjectKey !== subjectKey) throw new AgentProtocolError('RUNTIME_SUBJECT_KEY_INVALID', 'Runtime subject storage key must match exact identity')
     const profile = { ...normalizeProfile(agent.profile, {}, 0, { isolated: true }), runtimeSubjectKey: subjectKey,
-      runtimeIdentity: Object.freeze({ ...manifest }), runtimeInstanceId, runtimeStateRoot: agent.stateRoot,
+      runtimeIdentity: Object.freeze({ ...manifest }), runtimeApiOrigin: origin.origin, runtimeInstanceId, runtimeStateRoot: agent.stateRoot,
       runtimeProviderEnvironment: Object.freeze({ ...(providerEnvironments.get(subjectKey) || {}) }) }
     if (profile.agentId !== manifest.canonicalAgentId || profile.apiKey || profile.workspaceFileRuntimeAuthHeader) throw new AgentProtocolError('RUNTIME_PROFILE_IDENTITY_INVALID', 'Runtime profile cannot substitute its installation identity')
     return [subjectKey, { agent, profile, state: null, closed: false }]
@@ -6381,6 +6634,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           const state = entry.state
           if (!state.runtimeTransport?.reportReady()) return
           state.workspaceFileRuntimeAuthHeader = state.runtimeTransport.headers().Authorization
+          await state.processor.reconcileE05Results({ nativeFetch: state.runtimeTransport.nativeFetch, apiOrigin: origin.origin })
           const confirmed = await state.processor.replayAcks()
           if (state.runtimeTransport.ready() && confirmed) state.processor.resume()
           state.executionReportOutbox.sendPending(envelope => sendRaw(envelope, entry.profile))
@@ -6392,9 +6646,9 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           }
         },
         suspendAdmission: () => { const state = entry.state; state.processor.pause(); stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state) },
-        disconnected: () => { const state = entry.state; state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
+        disconnected: () => { const state = entry.state; state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
         ready: () => Boolean(!entry.closed && entry.state && !entry.state.disposed && !entry.state.processor.failClosedError && entry.state.runtimeTransport?.ready?.()),
-        pause: async () => { entry.state?.processor.pause(); if (entry.state) { entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
+        pause: async () => { entry.state?.e05CommandAbort?.abort(); entry.state?.processor.pause(); if (entry.state) { entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
         close: () => closeEntry(entry),
         // This read-only structure exposes state only to the trusted adapter, not
         // to the UI, logs, profile file or engine environment.
