@@ -18,7 +18,7 @@ const fixtureBytes = readFileSync(new URL('./fixtures/command-dispatch-e05.canon
 const raw = JSON.parse(fixtureBytes);
 const wireBytes = readFileSync(new URL('./fixtures/unified-runtime-wire-v2.redacted.json', import.meta.url));
 const wire = JSON.parse(wireBytes);
-const wireSha = '7a1b0b41d3d57634557401b1a6e9fdf1ccd6f2ef09e14eea1ce42acef6616312';
+const wireSha = '0fcc887699bde04c016b8f986a77d656c0d6e2531ba00c5a46daf418be6372dc';
 const frozenClock = wire.canonicalDispatchProjectionR2.clockEpochMillis;
 const hostId = wire.session.request.hostId; const bootId = wire.session.request.runtimeInstanceId;
 const fixtureSha = '057a4626387846f4bf420cab046d7d0bb4d12cdae6569e90839af00161cbd5a3';
@@ -182,7 +182,7 @@ test('r2 matches raw complete subject before projection, rejecting nested identi
 });
 
 test('r2 safely normalizes epoch and actual nullable values, never invented references or empty-string work keys', () => {
-  for (const expiry of [undefined, null, '3601000', 3.5, NaN, Infinity, Number.MAX_SAFE_INTEGER, 8640000000000001]) {
+  for (const expiry of [undefined, null, '3601000', 3.5, NaN, Infinity, Number.MAX_SAFE_INTEGER, 8640000000000001, -8640000000000001]) {
     assert.throws(() => runtimeCommandContext(profile(), normalizeInboundMessage({ ...fixture(), expiresAt: expiry })), { code: 'RUNTIME_COMMAND_EXPIRY_INVALID' });
   }
   for (const patch of [{ workItemId: '' }, { workItemId: 1 }, { payloadReference: '' }, { payloadReference: ' ' }, { payloadReference: {} }]) {
@@ -196,6 +196,9 @@ test('r2 safely normalizes epoch and actual nullable values, never invented refe
   const explicit = { ...fixture(), payloadReference: 'actual-source-reference' };
   assert.equal(runtimeCommandContext(profile(), normalizeInboundMessage(explicit)).payloadReference, explicit.payloadReference);
   assert.equal(runtimeCommandContext(profile(), normalizeInboundMessage({ ...fixture(), expiresAt: 8640000000000000 })).expiresAt, '+275760-09-13T00:00:00.000Z');
+  for (const epoch of [0, -1, -8640000000000000]) {
+    assert.equal(runtimeCommandContext(profile(), normalizeInboundMessage({ ...fixture(), expiresAt: epoch })).expiresAt, new Date(epoch).toISOString());
+  }
 });
 
 test('raw r2 fingerprint binds epoch/product/source/context; same ID changed payload cannot change original D06 checkpoint', async t => {

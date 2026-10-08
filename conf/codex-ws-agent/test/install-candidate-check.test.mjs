@@ -16,7 +16,8 @@ import {
 
 const clientRoot = resolve(import.meta.dirname, '..')
 const repositoryRoot = resolve(clientRoot, '..', '..')
-const installerPath = resolve(repositoryRoot, 'shell/codex_ws_agent_install.sh')
+// Historical read-only policy/provenance regressions, NOT unified enrollment.
+const installerPath = resolve(import.meta.dirname, 'fixtures/retired-install-payload.baseline-0d80e58.txt')
 const profileTemplate = resolve(clientRoot, 'install-candidate/wuyong-dual-mode-profile.redacted.json')
 const policyTemplate = resolve(clientRoot, 'install-candidate/controlled-image-api-policy.redacted.json')
 const evidencePath = resolve(clientRoot, 'evidence/typed-inspection-local-image-gpt-5.6-terra-1f95df2.json')

@@ -172,3 +172,77 @@ recovery material is retained, never manually cleared or automatically reexecute
 Dynamic online identity/maintenance ownership, stopped-writer state migration,
 Flow version/commit/artifact proof and three-Agent real business acceptance remain
 release gates. Current task is incomplete: **do not publish or switch production**.
+
+## Legacy provisioning source retirement (UR-01, 2026-10-08)
+
+The unified artifact does **not** generate an API-key Agent execution entry.
+`codex-ws-agent` is an execution library, not a second service/provisioner:
+
+| Exact source path | Minimal convergence |
+| --- | --- |
+| `shell/codex_ws_agent_install.sh` | Retired diagnostic only; exit 2 before reading args/config, sourcing common helpers, copying credentials, staging a release or calling a service manager. Shared, instance, help and former test modes all fail closed. No automatic redirection/enrollment. |
+| `conf/codex-ws-agent/managed-host.mjs` | Deleted: no API-key broker, ensure/observe admission, credential restore/copy, generation creation or Unix provisioning socket remains. Historical association/journal/credential files are not touched. |
+| `conf/codex-ws-agent/agent-client.mjs` | Remove dead broker references; standalone CLI remains retired. Only the injected Runtime execution host is used. |
+| `conf/codex-ws-agent/package.json` | No `start` script; not an alternate executable package. Model/provider credentials remain distinct from Agent authentication. |
+| `conf/cyf-agent-runtime-v1/lib/execution-adapter.mjs` | Authoritative explicit execution-library catalog and import closure. Excludes/rejects the old broker, API-key env/profile templates, old engine execution README, old install-candidate/policy tools, offline ACK migration and diagnostic probes; also rejects reintroduced package start/prestart/poststart/bin entries and retired-path symlinks. |
+| `shell/cyf_agent_runtime_v1_install.sh`, `conf/cyf-agent-runtime-v1/install.sh` | Existing sole artifact staging path retained: fresh canonical target only, no old `.env` or profile adoption, no enrollment, service activation or state migration. |
+
+Existing scoped provider, CHAT, native/skill and checkpoint implementations are
+not replaced. Long historical profile identifiers remain explicit provider-scope
+regression inputs; they neither provision an identity nor authorize a Runtime.
+Historical install-candidate policy/provenance/readback tests use only a labelled
+baseline catalog fixture, never an executable old installer. That test fixture
+and all test directories are excluded from the unified artifact.
+
+**Inventory, not edits to other Owners' paths:** root `install.sh` still lists
+`codex-ws-agent`/`codex` and agent/full profile references; they now reach the
+retired installer, not a working old execution path. Its minimal future UI cleanup
+is remove the obsolete aliases and explicitly configure the Runtime component,
+not map existing profile names to installations. `bin/codex_ws_agent.sh` and
+`systemd/codex-ws-agent.service`/`systemd/codex-ws-agent@.service` remain historical
+maintenance sources outside this slice, are not copied into the unified artifact,
+and do not grant new execution authority. Their controlled removal follows actual
+installed-unit/PID/maintenance-Owner and stopped-writer inventory, not a source
+script that stops arbitrary processes. Historical `conf/codex-ws-agent/README.md`,
+`env.example`, `codex-profiles.conf`, `install-candidate/*`,
+`install-policy-check.mjs`, `migrate-ack-high-water.mjs` and `contracts/probes/*`
+remain repository audit/diagnostic inputs only, never the new installation guide
+or an active authentication fallback. No online binary, unit or history is altered.
+
+## Old/new state migration requirements — no migration performed
+
+1. Inventory **all** shared/dynamic profiles, exact tenant/client/canonical Agent,
+   verified Runtime installation mapping, work roots and maintenance Owners. The
+   three persona names are not exhaustive identities or authorization evidence.
+   Preserve private historical association, journal and credential evidence for
+   audit; never authorize a new installation using an old API key/hash or role.
+2. Require an explicit, independently verifiable, unique full-subject mapping into
+   each sealed manifest and protected installation enrollment. Ambiguous histories
+   remain blocked and untouched; do not silently restore the old broker or infer
+   ownership from directory/profile names. New session tokens and generations are
+   transport-only authority, not migration inputs or persistent queue contents.
+3. After an authorized stop of **all exact old writers**, back up code plus state
+   formats, identity maps and owned directory/inode evidence. Account for inbox,
+   original-wire fingerprints, ledger, ACK FIFO/head/last-confirmed-version and
+   receipts; CHAT inbox/outbox/request/turn/thread/session; skill result evidence
+   and outbox; execution reports; provider ledgers/fences and unknown outcomes;
+   worktrees, materials and cleanup authority. No queue clearing, paid/business
+   replay, re-delivery or inferred success from a historical WS send.
+4. Pre-r2 fingerprints and ACK formats are not silently convertible to r2. A
+   proved, explicit offline migration plan must preserve original work evidence
+   and unknown/recovery-required outcomes. The offline ACK tool is deliberately
+   **not** packaged as a Runtime startup step. Model-provider Codex home/auth is
+   separate from retired Agent credential files; no cross-Agent template copying.
+5. Cut over with one writer per full subject, never old/new simultaneous writers.
+   Recovery covers code **and** format/state/identity mapping; binary-only rollback
+   into new ACK state is unsafe. No production history migration, DDL, revocation,
+   credential rewrite, chmod, deletion or service operation is authorized here.
+
+Owned client source retirement and offline self-check can complete separately
+from these **remaining gates**: main/runner's real Java/D06/isolated-MySQL and
+native/skill cross-end acceptance (UR03 HTTP remains NOT_RUN), clean-target locked
+toolchain/Flow verification and exact source/artifact binding, full online identity
+and maintenance inventory, explicit stopped-writer migration/recovery plan,
+versioned release/cutover/old-authorization revocation, and three-Agent real business
+acceptance. Unverified WORK_ITEM_CANCEL stays unadvertised; exact CHAT cancellation
+remains supported. These are not replaced by local mocks or by a task-branch push.

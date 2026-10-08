@@ -7,7 +7,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { digestManifest, readRuntimeHostConfig, runtimeSubjectKey } from '../lib/manifest.mjs';
 import { acquireRuntimeOwnership, RuntimeHost } from '../lib/runtime-host.mjs';
-import { collateExecutionPayload, createExecutionAdapterFactory, EXECUTION_PAYLOAD_FILES, validateExecutionPayload } from '../lib/execution-adapter.mjs';
+import { collateExecutionPayload, createExecutionAdapterFactory, EXECUTION_PAYLOAD_FILES, RETIRED_EXECUTION_PAYLOAD_PATHS, validateExecutionPayload } from '../lib/execution-adapter.mjs';
 
 // Frozen offline acceptance coverage, before implementation: config -> identity,
 // installation/path collisions and credential allowlist; host -> readiness,
@@ -237,11 +237,11 @@ test('mature executor retains isolated subjects/session namespaces and allowlist
   for (const [i, state] of states.entries()) assert.equal(state.sessionStore.get(state.profile, { conversationId: 'conversation' }), `session-${config.agents[i].subjectKey}`);
 });
 
-test('execution artifact catalog equals mature installer; clean collation has complete imports, no host state', async t => {
+test('unified library catalog closes actual engine imports without retired provisioning or host state', async t => {
   const f = await fixture(t, { count: 1 });
-  const installer = await readFile(resolve(repo, 'shell/codex_ws_agent_install.sh'), 'utf8');
-  const list = installer.match(/RELEASE_PAYLOAD=\(\n([\s\S]*?)\n\)/)[1];
-  assert.deepEqual(EXECUTION_PAYLOAD_FILES, [...list.matchAll(/"([^"\n]+)"/g)].map(match => match[1]));
+  for (const path of RETIRED_EXECUTION_PAYLOAD_PATHS) {
+    assert.equal(EXECUTION_PAYLOAD_FILES.some(entry => entry === path || entry.startsWith(`${path}/`)), false, path);
+  }
   const target = resolve(f.root, 'codex-ws-agent');
   const result = await collateExecutionPayload(engineSource, target);
   assert.equal(result.payloadCount, EXECUTION_PAYLOAD_FILES.length); assert.equal(result.dependenciesValidated, false);
@@ -249,6 +249,30 @@ test('execution artifact catalog equals mature installer; clean collation has co
   const installed = await readdir(target); assert.equal(installed.includes('.env'), false); assert.equal(installed.includes('node_modules'), false);
   await writeFile(resolve(target, '.env'), 'foreign-secret');
   await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_PRIVATE_STATE_FORBIDDEN'));
+});
+
+test('unified library rejects reintroduced legacy auth/provisioning assets, symlinks and executable package entries', async t => {
+  const f = await fixture(t, { count: 1 });
+  const target = resolve(f.root, 'retirement-artifact'); await collateExecutionPayload(engineSource, target);
+  for (const path of RETIRED_EXECUTION_PAYLOAD_PATHS) {
+    const injected = resolve(target, path); await mkdir(dirname(injected), { recursive: true });
+    await writeFile(injected, 'retired fixture, never executed');
+    await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN'));
+    await rm(injected);
+  }
+  await symlink(resolve(f.root, 'missing-broker'), resolve(target, 'managed-host.mjs'));
+  await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN'));
+  await rm(resolve(target, 'managed-host.mjs'));
+  const path = resolve(target, 'package.json'); const original = JSON.parse(await readFile(path, 'utf8'));
+  for (const entry of ['start', 'prestart', 'poststart', 'bin']) {
+    const injected = structuredClone(original);
+    if (entry === 'bin') injected.bin = { 'old-agent': './agent-client.mjs' };
+    else injected.scripts[entry] = 'node agent-client.mjs';
+    await writeFile(path, JSON.stringify(injected));
+    await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN'));
+  }
+  await writeFile(path, JSON.stringify(original));
+  assert.equal((await validateExecutionPayload(target, { dependencies: false, toolchain: false })).payloadCount, EXECUTION_PAYLOAD_FILES.length);
 });
 
 test('packaged engine literal import tampering or linked source fails closed', async t => {

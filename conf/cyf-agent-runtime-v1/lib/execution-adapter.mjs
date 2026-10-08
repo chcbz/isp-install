@@ -148,18 +148,17 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
   };
 }
 
-// Explicit mature-engine payload catalog; no .env, private state or wildcard copy.
+// Authoritative unified execution-library catalog, not the retired installer list.
+// No legacy auth templates/broker/install tools, private state or wildcard copy.
+// Model/provider configuration is distinct from Agent transport credentials.
 export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   ".gitignore",
-  "README.md",
   "agent-client.mjs",
   "app-server-adapter.mjs",
   "chat-runtime.mjs",
   "codex-home.example.toml",
-  "codex-profiles.conf",
   "contracts/api-hosted-wire-v1.json",
   "contracts/api-hosted-wire-v1.provenance.json",
-  "contracts/probes/api-long-history-wire.mjs",
   "controlled-image-bounty-capability.mjs",
   "controlled-image-bounty-v3-capability.mjs",
   "controlled-image-delivery-retention-v3.mjs",
@@ -177,19 +176,10 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "conversation-native.mjs",
   "conversation-reference-inputs-v3.mjs",
   "conversation-reference-inputs.mjs",
-  "env.example",
   "evidence/typed-inspection-local-image-gpt-5.6-terra-1f95df2.json",
-  "install-candidate/INSTALL-CANDIDATE.md",
-  "install-candidate/controlled-image-api-policy.redacted.json",
-  "install-candidate/install-candidate-check.mjs",
-  "install-candidate/wuyong-dual-mode.env.redacted",
-  "install-candidate/wuyong-dual-mode-profile.redacted.json",
-  "install-policy-check.mjs",
   "juyiting-action-outcome.mjs",
   "juyiting-typed-outcome-stream.mjs",
   "juyiting-typed-outcome.mjs",
-  "managed-host.mjs",
-  "migrate-ack-high-water.mjs",
   "managed-chat-scope-config.mjs",
   "managed-image-scope-config.mjs",
   "managed-image-scopes.example.json",
@@ -208,6 +198,14 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "workspace-file-bridge.mjs",
   "workspace-manager.mjs",
   "workspace-policies.example.json"
+]);
+
+// Reject accidentally collated historical entrypoints/tools even when their files
+// are not imported. lstat also detects symlinks/dangling links without following.
+export const RETIRED_EXECUTION_PAYLOAD_PATHS = Object.freeze([
+  'README.md', 'codex-profiles.conf', 'env.example', '.env.example',
+  'managed-host.mjs', 'install-candidate', 'install-policy-check.mjs',
+  'migrate-ack-high-water.mjs', 'contracts/probes'
 ]);
 
 const payloadError = code => Object.assign(new Error(code), { code });
@@ -251,6 +249,12 @@ export async function validateExecutionPayload(root, { dependencies = true, tool
   const known = new Set(EXECUTION_PAYLOAD_FILES);
   const packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
   const requirements = JSON.parse(await readFile(resolve(root, 'package-lock.json'), 'utf8'));
+  if (['start', 'prestart', 'poststart'].some(key => Object.hasOwn(packageJson.scripts || {}, key))
+      || Object.hasOwn(packageJson, 'bin')) throw payloadError('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN');
+  for (const retiredPath of RETIRED_EXECUTION_PAYLOAD_PATHS) {
+    try { await lstat(resolve(root, retiredPath)); } catch (cause) { if (cause.code === 'ENOENT') continue; throw cause; }
+    throw payloadError('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN');
+  }
   for (const relativePath of EXECUTION_PAYLOAD_FILES) {
     const path = resolve(root, relativePath);
     if (await realpath(path) !== path || !(await lstat(path)).isFile()) throw payloadError('RUNTIME_PAYLOAD_FILE_UNSAFE');

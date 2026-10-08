@@ -74,48 +74,6 @@ const isolatedEnv = fixture => ({
   LC_ALL: 'C.UTF-8'
 })
 
-const runInstaller = (fixture, instance, { release = `release-${instance}`, failPhase = '', extraEnv = {} } = {}) =>
-  spawnSync('bash', [installer, '--instance', instance], {
-    cwd: repositoryRoot,
-    encoding: 'utf8',
-    env: {
-      ...isolatedEnv(fixture),
-      ISP_APPS: resolve(fixture.root, 'shared-apps'),
-      CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
-      CODEX_WS_AGENT_INSTALL_TEST_FULL: '1',
-      CODEX_WS_AGENT_TEST_FIXTURE_ROOT: fixture.root,
-      CODEX_WS_AGENT_TEST_APP_HOME: fixture.sharedRoot,
-      CODEX_WS_AGENT_TEST_INSTANCE_ROOT: fixture.instanceRoot,
-      CODEX_WS_AGENT_TEST_SYSTEMD_DIR: fixture.systemd,
-      CODEX_WS_AGENT_TEST_BIN_DIR: fixture.bin,
-      CODEX_WS_AGENT_TEST_SYSTEMCTL: fixture.systemctl,
-      CODEX_WS_AGENT_TEST_NODE_BIN: fixture.node,
-      CODEX_WS_AGENT_TEST_NPM_BIN: fixture.npm,
-      CODEX_WS_AGENT_TEST_PYTHON_BIN: fixture.python,
-      CODEX_WS_AGENT_TEST_RELEASE_ID: release,
-      CODEX_WS_AGENT_TEST_FAIL_PHASE: failPhase,
-      CODEX_WS_AGENT_SOURCE_COMMIT: 'a'.repeat(40),
-      CODEX_WS_AGENT_SOURCE_TREE: 'b'.repeat(40),
-      START_CODEX_WS_AGENT: 'n',
-      ...extraEnv
-    }
-  })
-
-
-const installerContractEnv = fixture => ({
-  ...isolatedEnv(fixture),
-  CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
-  CODEX_WS_AGENT_TEST_FIXTURE_ROOT: fixture.root,
-  CODEX_WS_AGENT_TEST_APP_HOME: fixture.sharedRoot,
-  CODEX_WS_AGENT_TEST_INSTANCE_ROOT: fixture.instanceRoot,
-  CODEX_WS_AGENT_TEST_SYSTEMD_DIR: fixture.systemd,
-  CODEX_WS_AGENT_TEST_BIN_DIR: fixture.bin,
-  CODEX_WS_AGENT_TEST_SYSTEMCTL: fixture.systemctl,
-  CODEX_WS_AGENT_TEST_NODE_BIN: fixture.node,
-  CODEX_WS_AGENT_TEST_NPM_BIN: fixture.npm,
-  CODEX_WS_AGENT_TEST_PYTHON_BIN: fixture.python
-})
-
 const launcherContractEnv = fixture => ({
   ...isolatedEnv(fixture),
   CODEX_WS_AGENT_LAUNCHER_TEST_MODE: '1',
@@ -131,38 +89,6 @@ const launcherContractEnv = fixture => ({
 test('test modes require one explicit private fixture boundary before any operational path', async t => {
   const fixture = prepareFixture()
   try {
-    const installerEnv = installerContractEnv(fixture)
-    const installerValid = spawnSync('bash', [installer, '--test-isolation-check'], { encoding: 'utf8', env: installerEnv })
-    assert.equal(installerValid.status, 0, `${installerValid.stdout}\n${installerValid.stderr}`)
-    for (const key of [
-      'CODEX_WS_AGENT_TEST_FIXTURE_ROOT', 'CODEX_WS_AGENT_TEST_APP_HOME',
-      'CODEX_WS_AGENT_TEST_INSTANCE_ROOT', 'CODEX_WS_AGENT_TEST_SYSTEMD_DIR',
-      'CODEX_WS_AGENT_TEST_BIN_DIR', 'CODEX_WS_AGENT_TEST_SYSTEMCTL',
-      'CODEX_WS_AGENT_TEST_NODE_BIN', 'CODEX_WS_AGENT_TEST_NPM_BIN',
-      'CODEX_WS_AGENT_TEST_PYTHON_BIN', 'HOME', 'TMPDIR', 'XDG_CACHE_HOME',
-      'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'NPM_CONFIG_CACHE'
-    ]) {
-      await t.test(`installer rejects missing ${key}`, () => {
-        const env = { ...installerEnv }
-        delete env[key]
-        const result = spawnSync('bash', [installer, '--test-isolation-check'], { encoding: 'utf8', env })
-        assert.notEqual(result.status, 0)
-        assert.match(`${result.stdout}\n${result.stderr}`, /TEST_ISOLATION_REQUIRED/)
-      })
-    }
-
-    const invalidRelease = spawnSync('bash', [installer, '--test-isolation-check'], {
-      encoding: 'utf8', env: { ...installerEnv, CODEX_WS_AGENT_TEST_RELEASE_ID: '../escape' }
-    })
-    assert.notEqual(invalidRelease.status, 0)
-    assert.match(`${invalidRelease.stdout}\n${invalidRelease.stderr}`, /TEST_ISOLATION_REQUIRED/)
-    const outsideMarker = resolve(fixture.root, '..', `outside-marker-${process.pid}`)
-    const invalidMarker = spawnSync('bash', [installer, '--test-isolation-check'], {
-      encoding: 'utf8', env: { ...installerEnv, CODEX_WS_AGENT_TEST_RESTART_MARKER: outsideMarker }
-    })
-    assert.notEqual(invalidMarker.status, 0)
-    assert.match(`${invalidMarker.stdout}\n${invalidMarker.stderr}`, /TEST_ISOLATION_REQUIRED/)
-
     const launcherEnv = launcherContractEnv(fixture)
     const launcherValid = spawnSync('bash', [launcher, '--test-isolation-check'], { encoding: 'utf8', env: launcherEnv })
     assert.equal(launcherValid.status, 0, `${launcherValid.stdout}\n${launcherValid.stderr}`)
@@ -185,11 +111,6 @@ test('test modes require one explicit private fixture boundary before any operat
     try {
       const escape = resolve(fixture.root, 'escape')
       symlinkSync(outside, escape)
-      const installerEscape = spawnSync('bash', [installer, '--test-isolation-check'], {
-        encoding: 'utf8', env: { ...installerEnv, CODEX_WS_AGENT_TEST_APP_HOME: escape }
-      })
-      assert.notEqual(installerEscape.status, 0)
-      assert.match(`${installerEscape.stdout}\n${installerEscape.stderr}`, /symlink|fixture root/)
       const launcherEscape = spawnSync('bash', [launcher, '--test-isolation-check'], {
         encoding: 'utf8', env: { ...launcherEnv, CODEX_WS_AGENT_PROC_ROOT: escape }
       })
@@ -200,139 +121,6 @@ test('test modes require one explicit private fixture boundary before any operat
 })
 
 const appHome = (fixture, instance) => resolve(fixture.instanceRoot, instance)
-
-const manifestMap = releaseRoot => new Map(readFileSync(resolve(releaseRoot, 'release-manifest.sha256'), 'utf8')
-  .trim().split('\n').map(line => [line.slice(66), line.slice(0, 64)]))
-
-test('two explicit instances install isolated roots and preserve the exact release payload proof', () => {
-  const fixture = prepareFixture()
-  try {
-    const alpha = runInstaller(fixture, 'local-a', { extraEnv: { START_CODEX_WS_AGENT: 'y' } })
-    assert.equal(alpha.status, 0, `${alpha.stdout}\n${alpha.stderr}`)
-    const alphaHome = appHome(fixture, 'local-a')
-    const alphaCurrent = resolve(alphaHome, 'current')
-    const templateBytes = readFileSync(resolve(fixture.systemd, 'codex-ws-agent@.service'))
-    const alphaEnvBefore = readFileSync(resolve(alphaHome, '.env'))
-    const alphaProfileBefore = readFileSync(resolve(alphaHome, 'codex-profiles.conf'))
-
-    const beta = runInstaller(fixture, 'server-b')
-    assert.equal(beta.status, 0, `${beta.stdout}\n${beta.stderr}`)
-    const betaHome = appHome(fixture, 'server-b')
-    assert.equal(readFileSync(resolve(fixture.sharedRoot, 'canary'), 'utf8'), 'default-untouched\n')
-    assert.deepEqual(readFileSync(resolve(fixture.systemd, 'codex-ws-agent@.service')), templateBytes)
-    assert.deepEqual(readFileSync(resolve(alphaHome, '.env')), alphaEnvBefore)
-    assert.deepEqual(readFileSync(resolve(alphaHome, 'codex-profiles.conf')), alphaProfileBefore)
-    assert.equal(readlinkSync(alphaCurrent), 'releases/release-local-a')
-    assert.equal(readlinkSync(resolve(betaHome, 'current')), 'releases/release-server-b')
-
-    for (const [instance, home] of [['local-a', alphaHome], ['server-b', betaHome]]) {
-      assert.equal(readFileSync(resolve(home, '.codex-ws-agent-instance'), 'utf8'), `instance=${instance}\n`)
-      const env = readFileSync(resolve(home, '.env'), 'utf8')
-      const profile = readFileSync(resolve(home, 'codex-profiles.conf'), 'utf8')
-      assert.match(env, new RegExp(`^CODEX_PROFILES_FILE=${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/codex-profiles\\.conf$`, 'm'))
-      assert.match(env, new RegExp(`^COMMAND_INBOX_DIR=${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/data/inbox$`, 'm'))
-      assert.match(env, new RegExp(`^CODEX_SESSION_MAP_FILE=${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/state/codex-session-map\\.json$`, 'm'))
-      assert.equal(env.includes('/home/isp/apps/codex-ws-agent/data/inbox'), false)
-      assert.match(env, new RegExp(`\"profileId\":\"instance-${instance}\"`))
-      assert.match(env, new RegExp(`\"agentId\":\"unconfigured-${instance}\"`))
-      assert.match(env, new RegExp(`\"codexWorkdir\":\"${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/workspace\"`))
-      assert.match(profile, new RegExp(`^codexHome=${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/\\.codex-default$`, 'm'))
-      assert.match(profile, new RegExp(`^codexWorkdir=${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/workspace$`, 'm'))
-      assert.match(profile, new RegExp(`^controlledImageHttpLedgerRoot=${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/data/provider-ledgers/`, 'm'))
-      assert.match(profile, new RegExp(`^agentId=unconfigured-${instance}$`, 'm'))
-      for (const relative of ['logs', 'data/inbox', 'data/outbox', 'data/provider-ledgers', 'data/private-runs', 'state', 'run', 'homes', 'workspace', 'workspaces']) {
-        assert.equal(lstatSync(resolve(home, relative)).isSymbolicLink(), false, `${instance}:${relative}`)
-      }
-      const releaseRoot = resolve(home, readlinkSync(resolve(home, 'current')))
-      const manifest = manifestMap(releaseRoot)
-      const payloadSource = readFileSync(installer, 'utf8').match(/RELEASE_PAYLOAD=\(\n([\s\S]*?)\n\)/)[1]
-      const expectedPayload = payloadSource.split('\n').map(line => line.match(/^\s+"([^"]+)"$/)[1])
-      assert.deepEqual([...manifest.keys()].sort(), expectedPayload.sort())
-      assert.equal(manifest.get('migrate-ack-high-water.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/migrate-ack-high-water.mjs')))
-      assert.equal(manifest.get('managed-chat-scope-config.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/managed-chat-scope-config.mjs')))
-      assert.equal(manifest.get('controlled-image-delivery-retention-v3.mjs'), sha256(resolve(repositoryRoot, 'conf/codex-ws-agent/controlled-image-delivery-retention-v3.mjs')))
-      for (const [relative, digest] of manifest) assert.equal(sha256(resolve(releaseRoot, relative)), digest, relative)
-      // Collation uses a stub validator; independently close every release-local import.
-      // A real installation failed when agent-client imported an unlisted action contract.
-      for (const relative of manifest.keys()) {
-        if (!relative.endsWith('.mjs')) continue
-        const modulePath = resolve(releaseRoot, relative)
-        const source = readFileSync(modulePath, 'utf8')
-        const relativeImports = /(?:from\s*|import\s*\(\s*|import\s*)['"](\.{1,2}\/[^'"]+)['"]/g
-        for (const match of source.matchAll(relativeImports)) {
-          const dependency = resolve(dirname(modulePath), match[1])
-          assert.equal(existsSync(dependency), true, `${relative} imports missing ${match[1]}`)
-          assert.equal([...manifest.keys()].some(path => resolve(releaseRoot, path) === dependency), true,
-            `${relative} imports unhashed ${match[1]}`)
-        }
-      }
-      const provenance = JSON.parse(readFileSync(resolve(releaseRoot, 'release-provenance.json'), 'utf8'))
-      assert.equal(provenance.payloadCount, expectedPayload.length)
-      assert.equal(provenance.sourceCommit, 'a'.repeat(40))
-      assert.equal(provenance.sourceTree, 'b'.repeat(40))
-      assert.equal(provenance.payloadManifestSha256, sha256(resolve(releaseRoot, 'release-manifest.sha256')))
-      const wrapper = readFileSync(resolve(home, 'bin/codex_ws_agent.sh'), 'utf8')
-      assert.match(wrapper, new RegExp(`--instance '${instance}'`))
-    }
-    const calls = readFileSync(fixture.systemctlLog, 'utf8')
-    assert.equal(/(^|\s)(enable|start|restart)(\s|$)/m.test(calls), false, calls)
-    assert.equal(calls.trim().split('\n').every(line => line === 'daemon-reload'), true)
-  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
-})
-
-test('instance installer rejects unsafe names and symlinked roots before target mutation', async t => {
-  for (const slug of ['../escape', 'a/b', 'a.service', 'a@b', '-leading', 'trailing-', 'UPPER', 'a;touch-x', '']) {
-    await t.test(slug || 'empty', () => {
-      const fixture = prepareFixture()
-      try {
-        const result = runInstaller(fixture, slug)
-        assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
-        assert.equal(readFileSync(resolve(fixture.sharedRoot, 'canary'), 'utf8'), 'default-untouched\n')
-        assert.equal(existsSync(resolve(fixture.systemd, 'codex-ws-agent@.service')), false)
-      } finally { rmSync(fixture.root, { recursive: true, force: true }) }
-    })
-  }
-
-  const fixture = prepareFixture()
-  try {
-    const outside = resolve(fixture.root, 'outside')
-    mkdirSync(outside)
-    rmSync(fixture.instanceRoot, { recursive: true, force: true })
-    mkdirSync(dirname(fixture.instanceRoot), { recursive: true })
-    symlinkSync(outside, fixture.instanceRoot)
-    const result = runInstaller(fixture, 'safe-name')
-    assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
-    assert.deepEqual(readFileSync(resolve(fixture.sharedRoot, 'canary')), Buffer.from('default-untouched\n'))
-    assert.deepEqual(readdirSync(outside), [])
-  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
-})
-
-test('reinstall preserves private config/state and activation failure restores the prior current release', () => {
-  const fixture = prepareFixture()
-  try {
-    const first = runInstaller(fixture, 'local-a', { release: 'release-one' })
-    assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`)
-    const home = appHome(fixture, 'local-a')
-    writeFileSync(resolve(home, '.env'), 'OPENCLAW_API_KEY=private-owner-key\nCOMMAND_INBOX_DIR=' + resolve(home, 'data/inbox') + '\n', { mode: 0o600 })
-    writeFileSync(resolve(home, 'codex-profiles.conf'), '[agent.owner]\nprofileId=owner\nagentId=real-owner\ncodexHome=' + resolve(home, 'homes/owner') + '\ncodexWorkdir=' + resolve(home, 'workspace') + '\nisDefault=true\n', { mode: 0o600 })
-    mkdirSync(resolve(home, 'data/inbox/real-owner'), { recursive: true })
-    writeFileSync(resolve(home, 'data/inbox/real-owner/state.json'), 'private-state\n')
-
-    const second = runInstaller(fixture, 'local-a', { release: 'release-two' })
-    assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`)
-    assert.equal(readFileSync(resolve(home, '.env'), 'utf8').startsWith('OPENCLAW_API_KEY=private-owner-key'), true)
-    assert.match(readFileSync(resolve(home, 'codex-profiles.conf'), 'utf8'), /agentId=real-owner/)
-    assert.equal(readFileSync(resolve(home, 'data/inbox/real-owner/state.json'), 'utf8'), 'private-state\n')
-    assert.equal(readlinkSync(resolve(home, 'current')), 'releases/release-two')
-
-    const failed = runInstaller(fixture, 'local-a', { release: 'release-three', failPhase: 'activation' })
-    assert.notEqual(failed.status, 0, `${failed.stdout}\n${failed.stderr}`)
-    assert.equal(readlinkSync(resolve(home, 'current')), 'releases/release-two')
-    assert.equal(readFileSync(resolve(home, 'agent-client.mjs')).equals(readFileSync(resolve(home, 'releases/release-two/agent-client.mjs'))), true)
-    assert.match(readFileSync(resolve(home, '.env'), 'utf8'), /private-owner-key/)
-    assert.equal(readFileSync(resolve(home, 'data/inbox/real-owner/state.json'), 'utf8'), 'private-state\n')
-  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
-})
 
 const writeProcIdentity = ({ procRoot, pid, cwd, entry, unit }) => {
   const dir = resolve(procRoot, String(pid))
@@ -364,9 +152,11 @@ exit 0
 test('instance launcher binds the selected unit/root and refuses a foreign MainPID without stop', () => {
   const fixture = prepareFixture()
   try {
-    const installed = runInstaller(fixture, 'local-a')
-    assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`)
     const home = appHome(fixture, 'local-a')
+    mkdirSync(home, { recursive: true })
+    writeFileSync(resolve(home, '.codex-ws-agent-instance'), 'instance=local-a\n')
+    writeFileSync(resolve(home, 'agent-client.mjs'), '// historical maintenance fixture; never executed\n')
+    writeFileSync(resolve(fixture.systemd, 'codex-ws-agent@.service'), readFileSync(serviceTemplate))
     const procRoot = fixture.proc
     const stubLog = resolve(fixture.root, 'launcher.log')
     const stub = launcherSystemctl(fixture)
@@ -417,4 +207,31 @@ test('systemd template and launcher source contain no instance shell interpolati
   assert.equal(unit.includes('/bin/sh -c'), false)
   assert.match(source, /instance controls require the installed systemd unit/)
   assert.match(source, /no tmux\/nohup fallback is allowed/)
+})
+
+test('retired shared/instance installer rejects every old mode without tool calls or new roots', async t => {
+  const fixture = prepareFixture()
+  try {
+    const before = readdirSync(fixture.instanceRoot)
+    for (const args of [[], ['--instance', 'local-a'], ['--instance', '../escape'], ['--help'], ['--test-isolation-check']]) {
+      await t.test(JSON.stringify(args), () => {
+        const result = spawnSync('/bin/bash', [installer, ...args], { encoding: 'utf8', cwd: fixture.root, env: {
+          ...isolatedEnv(fixture), PATH: fixture.bin,
+          ISP_APPS: resolve(fixture.root, 'shared-apps'), OPENCLAW_API_KEY: 'legacy-secret-do-not-echo',
+          START_CODEX_WS_AGENT: 'y', CODEX_WS_AGENT_INSTALL_TEST_MODE: '1', CODEX_WS_AGENT_INSTALL_TEST_FULL: '1',
+          CODEX_WS_AGENT_TEST_FIXTURE_ROOT: fixture.root, CODEX_WS_AGENT_TEST_INSTANCE_ROOT: fixture.instanceRoot,
+          CODEX_WS_AGENT_TEST_SYSTEMCTL: fixture.systemctl
+        } })
+        assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`)
+        assert.match(result.stderr, /UNIFIED_RUNTIME_ENTRY_REQUIRED/)
+        assert.equal(`${result.stdout}${result.stderr}`.includes('legacy-secret-do-not-echo'), false)
+        assert.deepEqual(readdirSync(fixture.instanceRoot), before)
+        assert.equal(existsSync(fixture.systemctlLog), false)
+        assert.equal(readFileSync(resolve(fixture.sharedRoot, 'canary'), 'utf8'), 'default-untouched\n')
+      })
+    }
+    const source = readFileSync(installer, 'utf8')
+    assert.equal(/^(?:source|exec|install|mkdir|cp|chmod|chown|systemctl|read)\s/m.test(source), false)
+    assert.equal(source.includes('RELEASE_PAYLOAD='), false)
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
 })

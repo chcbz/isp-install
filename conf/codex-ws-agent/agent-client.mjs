@@ -769,8 +769,6 @@ export const loadRuntimeConfig = (options = {}) => {
   }
 }
 
-let managedHostModule = null
-let managedHostChannel = null
 let config = null
 let defaultProfile = null
 let shuttingDown = false

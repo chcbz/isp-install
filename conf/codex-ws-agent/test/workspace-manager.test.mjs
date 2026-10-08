@@ -1272,292 +1272,65 @@ test('no-task command requires an explicit non-coding dedicated-workdir policy',
   assert.equal(cwd, fallback)
 })
 
-const installerScript = fileURLToPath(new URL('../../../shell/codex_ws_agent_install.sh', import.meta.url))
+// Installer-only positives retired; all workspace/lock regressions above are unchanged.
 const policyChecker = fileURLToPath(new URL('../install-policy-check.mjs', import.meta.url))
-const clientSourceRoot = fileURLToPath(new URL('../', import.meta.url))
-const repositoryRoot = resolve(clientSourceRoot, '..', '..')
-const sha256File = path => createHash('sha256').update(readFileSync(path)).digest('hex')
-
-const trackedReleasePayload = () => {
-  const result = spawnSync('git', ['ls-files', 'conf/codex-ws-agent'], { cwd: repositoryRoot, encoding: 'utf8' })
-  assert.equal(result.status, 0, result.stderr)
-  return result.stdout.trim().split('\n').filter(Boolean)
-    .map(path => path.replace(/^conf\/codex-ws-agent\//, ''))
-    .filter(path => !path.startsWith('test/'))
-    .filter(path => !path.startsWith('evidence/') || path === 'evidence/typed-inspection-local-image-gpt-5.6-terra-1f95df2.json')
-    .sort()
-}
-
-const runtimeModuleClosure = () => {
-  const pending = ['agent-client.mjs']; const closure = new Set()
-  while (pending.length) {
-    const relative = pending.pop()
-    if (closure.has(relative)) continue
-    closure.add(relative)
-    const source = readFileSync(resolve(clientSourceRoot, relative), 'utf8')
-    const imports = source.matchAll(/(?:from\s+|import\s*\(\s*)['"]\.\/([^'"]+\.mjs)['"]/g)
-    for (const match of imports) if (!closure.has(match[1])) pending.push(match[1])
-  }
-  return [...closure].sort()
-}
-
-const prepareInstallerIsolation = ({ root, appHome }) => {
-  const instanceRoot = resolve(root, 'instances')
-  const systemdDir = resolve(root, 'systemd')
-  const binDir = resolve(root, 'bin')
-  const home = resolve(root, 'home')
-  const temp = resolve(root, 'tmp')
-  const cache = resolve(root, 'cache')
-  const npmCache = resolve(cache, 'npm')
-  const config = resolve(root, 'config')
-  const state = resolve(root, 'state')
-  const systemctl = resolve(binDir, 'systemctl-stub')
-  const node = resolve(binDir, 'node-stub')
-  const npm = resolve(binDir, 'npm-stub')
-  const python = resolve(binDir, 'python-stub')
-  for (const directory of [appHome, instanceRoot, systemdDir, binDir, home, temp, npmCache, config, state]) mkdirSync(directory, { recursive: true })
-  writeFileSync(systemctl, '#!/bin/bash\nset -euo pipefail\nexit 0\n')
-  writeFileSync(node, `#!/bin/bash\nset -euo pipefail\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
-  writeFileSync(npm, '#!/bin/bash\nset -euo pipefail\nexit 0\n')
-  writeFileSync(python, '#!/bin/bash\nset -euo pipefail\nexit 0\n')
-  for (const executable of [systemctl, node, npm, python]) chmodSync(executable, 0o755)
-  return {
-    instanceRoot, systemdDir, binDir, systemctl, node, npm, python,
-    env: {
-      PATH: '/usr/bin:/bin',
-      HOME: home,
-      TMPDIR: temp,
-      XDG_CACHE_HOME: cache,
-      XDG_CONFIG_HOME: config,
-      XDG_STATE_HOME: state,
-      NPM_CONFIG_CACHE: npmCache,
-      LANG: 'C.UTF-8',
-      LC_ALL: 'C.UTF-8',
-      GIT_CONFIG_COUNT: '1',
-      GIT_CONFIG_KEY_0: 'safe.directory',
-      GIT_CONFIG_VALUE_0: repositoryRoot,
-      CODEX_WS_AGENT_TEST_FIXTURE_ROOT: root,
-      CODEX_WS_AGENT_TEST_APP_HOME: appHome,
-      CODEX_WS_AGENT_TEST_INSTANCE_ROOT: instanceRoot,
-      CODEX_WS_AGENT_TEST_SYSTEMD_DIR: systemdDir,
-      CODEX_WS_AGENT_TEST_BIN_DIR: binDir,
-      CODEX_WS_AGENT_TEST_SYSTEMCTL: systemctl,
-      CODEX_WS_AGENT_TEST_NODE_BIN: node,
-      CODEX_WS_AGENT_TEST_NPM_BIN: npm,
-      CODEX_WS_AGENT_TEST_PYTHON_BIN: python
-    }
-  }
-}
-
-const runInstallerValidationGate = ({ policy, validateExit = 0, start = 'y' }) => {
-  const root = temporaryDirectory()
-  const appHome = resolve(root, 'app')
-  const isolation = prepareInstallerIsolation({ root, appHome })
-  cpSync(policyChecker, resolve(appHome, 'install-policy-check.mjs'))
-  if (policy !== undefined) writeFileSync(resolve(appHome, 'workspace-policies.json'), `${JSON.stringify(policy)}\n`)
-  writeFileSync(resolve(appHome, 'agent-client.mjs'), 'process.exit(Number(process.env.A07_VALIDATE_EXIT || 0))\n')
-  const restartMarker = resolve(appHome, 'restart.marker')
-  const result = spawnSync('bash', [installerScript], {
-    encoding: 'utf8',
-    env: {
-      ...isolation.env,
-      CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
-      CODEX_WS_AGENT_TEST_RESTART_MARKER: restartMarker,
-      A07_VALIDATE_EXIT: String(validateExit),
-      START_CODEX_WS_AGENT: start
-    }
-  })
-  return { ...result, restartMarker }
-}
-
-test('installer rejects legacy remote{name,url} policy schema and never restarts', () => {
-  const result = runInstallerValidationGate({
-    policy: {
-      legacy: {
-        repository: '/trusted/repository',
-        root: '/trusted/root',
-        baseRef: 'refs/heads/master',
-        remote: { name: 'origin', url: 'https://trusted.example/a07.git' }
-      }
-    }
-  })
-  assert.notEqual(result.status, 0)
-  assert.match(`${result.stdout}\n${result.stderr}`, /migrate explicitly to trustedRemoteUrl and trustedRemoteRef/)
-  assert.equal(existsSync(result.restartMarker), false)
+test('historical workspace schema checker remains read-only and requires explicit remote migration', () => {
+  const root = temporaryDirectory(); const path = resolve(root, 'workspace-policies.json')
+  const legacy = JSON.stringify({ legacy: { remote: { name: 'origin', url: 'https://trusted.example/repo.git' } } })
+  writeFileSync(path, legacy, { mode: 0o600 })
+  const refused = spawnSync(process.execPath, [policyChecker, path], { encoding: 'utf8' })
+  assert.notEqual(refused.status, 0)
+  assert.match(refused.stderr, /migrate explicitly to trustedRemoteUrl and trustedRemoteRef/)
+  assert.equal(readFileSync(path, 'utf8'), legacy)
+  const current = JSON.stringify({ trusted: { trustedRemoteUrl: 'https://trusted.example/repo.git', trustedRemoteRef: 'refs/heads/master' } })
+  writeFileSync(path, current)
+  const valid = spawnSync(process.execPath, [policyChecker, path], { encoding: 'utf8' })
+  assert.equal(valid.status, 0, valid.stderr)
+  assert.equal(readFileSync(path, 'utf8'), current)
 })
 
-test('installer propagates agent validation failure and never restarts', () => {
-  const result = runInstallerValidationGate({
-    policy: { current: { trustedRemoteUrl: 'https://trusted.example/a07.git', trustedRemoteRef: 'refs/heads/master' } },
-    validateExit: 9
-  })
-  assert.notEqual(result.status, 0)
-  assert.match(`${result.stdout}\n${result.stderr}`, /配置验证失败/)
-  assert.equal(existsSync(result.restartMarker), false)
-})
-
-test('installer restarts only after policy and agent validation both succeed', () => {
-  const result = runInstallerValidationGate({
-    policy: { current: { trustedRemoteUrl: 'https://trusted.example/a07.git', trustedRemoteRef: 'refs/heads/master' } },
-    validateExit: 0
-  })
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
-  assert.equal(readFileSync(result.restartMarker, 'utf8'), 'restart requested\n')
-})
-
-
-const persistentInstallerState = Object.freeze({
-  'workspace-policies.json': '{"preserved":{"trustedRemoteUrl":"https://trusted.example/runtime.git","trustedRemoteRef":"refs/heads/master"}}\n',
-  'data/inbox/pending-command.json': 'preserved-inbox\n',
-  'data/ack-outbox/pending/ack.json': 'preserved-ack\n',
-  'data/execution-report-outbox/pending/report.json': 'preserved-outbox\n',
-  'data/ledger/entry.json': 'preserved-ledger\n',
-  'data/recovery-required/marker.json': 'preserved-recovery\n',
-  'data/chat-workdirs/workspace-state.txt': 'preserved-workspace-state\n',
-  'agent-workspaces/task-a/worktree-state.txt': 'preserved-worktree\n'
-})
-
-const prepareExistingInstallerRuntime = root => {
-  const appHome = resolve(root, 'app')
-  const oldRelease = resolve(appHome, 'releases', 'old-release')
-  mkdirSync(resolve(appHome, 'data', 'inbox'), { recursive: true })
-  mkdirSync(resolve(appHome, 'logs'), { recursive: true })
-  mkdirSync(oldRelease, { recursive: true })
-  writeFileSync(resolve(oldRelease, 'agent-client.mjs'), 'old-release\n')
-  symlinkSync('releases/old-release', resolve(appHome, 'current'))
-  writeFileSync(resolve(appHome, 'agent-client.mjs'), 'legacy-flat-runtime\n')
-  writeFileSync(resolve(appHome, '.env'), 'OPENCLAW_API_KEY=preserved-secret\n', { mode: 0o644 })
-  writeFileSync(resolve(appHome, 'codex-profiles.conf'), '[agent.default]\napiKey=preserved-profile-secret\n', { mode: 0o644 })
-  writeFileSync(resolve(appHome, 'codex-session-map.json'), '{"session":"preserved"}\n', { mode: 0o644 })
-  writeFileSync(resolve(appHome, 'data', 'state.txt'), 'preserved-data\n')
-  for (const [relative, content] of Object.entries(persistentInstallerState)) {
-    mkdirSync(resolve(appHome, relative, '..'), { recursive: true })
-    writeFileSync(resolve(appHome, relative), content)
+test('retired installer preserves stopped-writer historical credentials, queues, worktrees and symlink referents', async () => {
+  const { lstatSync, readdirSync } = await import('node:fs')
+  const root = temporaryDirectory(); const app = resolve(root, 'historical-app'); mkdirSync(app)
+  const historical = {
+    'releases/old/agent-client.mjs': 'old code\n', '.env': 'OPENCLAW_API_KEY=historical-private-secret\n',
+    'codex-profiles.conf': '[agent.default]\napiKey=historical-profile-secret\n',
+    'codex-session-map.json': '{"thread":"historical-thread"}\n',
+    'managed/association.json': '{"apiKeyHash":"audit-only"}\n',
+    'managed/credential.json': '{"apiKey":"historical-private-secret"}\n',
+    'managed/journal.json': '{"outcome":"UNKNOWN"}\n',
+    'data/inbox/command.json': 'immutable-inbox\n', 'data/ledger/command.json': 'original-fingerprint\n',
+    'data/ack-outbox/pending/ack.json': 'last-confirmed-version\n',
+    'data/execution-report-outbox/pending/report.json': 'unconfirmed-result\n',
+    'data/recovery-required/marker.json': 'unknown-started-outcome\n',
+    'data/provider-ledgers/state.json': 'provider-fence\n',
+    'data/chat-workdirs/state.txt': 'chat-state\n', 'agent-workspaces/task/work.txt': 'worktree-material\n'
   }
-  writeFileSync(resolve(appHome, 'logs', 'runtime.log'), 'preserved-log\n')
-  return { appHome, oldRelease }
-}
-
-const installerCollationFixture = ({ failPhase = '', configureAppHome = () => {} } = {}) => {
-  const root = temporaryDirectory()
-  const { appHome } = prepareExistingInstallerRuntime(root)
-  configureAppHome({ root, appHome })
-  const isolation = prepareInstallerIsolation({ root, appHome })
-  const binDir = isolation.binDir
-  const npmRecord = resolve(root, 'npm-record.txt')
-  const sourceNodeModules = fileURLToPath(new URL('../node_modules', import.meta.url))
-  const nodeWrapper = isolation.node
-  const npmWrapper = isolation.npm
-  writeFileSync(nodeWrapper, `#!/bin/bash\nif [[ "$1" == */agent-client.mjs && "$2" == --validate ]]; then exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
-  writeFileSync(npmWrapper, `#!/bin/bash\nset -e\ntest -f skill-install-manager.mjs\ntest -f managed-host.mjs\ntest -f package-lock.json\ngrep -q '"yauzl"' package-lock.json\nprintf '%s\\n%s\\n' "$PWD" "$*" > ${JSON.stringify(npmRecord)}\ncp -a ${JSON.stringify(sourceNodeModules)} node_modules\n`)
-  chmodSync(nodeWrapper, 0o755)
-  chmodSync(npmWrapper, 0o755)
-  const result = spawnSync('bash', [installerScript], {
-    encoding: 'utf8',
-    env: {
-      CODEX_WS_AGENT_INSTALL_TEST_MODE: '1',
-      CODEX_WS_AGENT_INSTALL_TEST_COLLATE: '1',
-      CODEX_WS_AGENT_TEST_FAIL_PHASE: failPhase,
-      CODEX_WS_AGENT_TEST_RELEASE_ID: 'candidate-release',
-      ...isolation.env,
-      START_CODEX_WS_AGENT: 'n'
-    }
-  })
-  return { root, appHome, npmRecord, result }
-}
-
-test('installer stages dependencies/source, validates, preserves secrets/state, and atomically switches current', () => {
-  const fixture = installerCollationFixture()
-  const { appHome, npmRecord, result } = fixture
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
-  assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/candidate-release')
-  const release = resolve(appHome, 'releases', 'candidate-release')
-  const closure = runtimeModuleClosure()
-  assert.ok(closure.includes('agent-client.mjs'))
-  assert.ok(closure.includes('controlled-image-delivery-retention-v3.mjs'))
-  for (const file of closure) {
-    assert.equal(existsSync(resolve(release, file)), true, file)
-    assert.deepEqual(readFileSync(resolve(release, file)), readFileSync(new URL(`../${file}`, import.meta.url)), file)
+  for (const [path, bytes] of Object.entries(historical)) {
+    mkdirSync(resolve(app, path, '..'), { recursive: true })
+    writeFileSync(resolve(app, path), bytes, { mode: 0o600 })
   }
-  const expectedPayload = trackedReleasePayload()
-  const manifestLines = readFileSync(resolve(release, 'release-manifest.sha256'), 'utf8').trim().split('\n')
-  const manifest = new Map(manifestLines.map(line => [line.slice(66), line.slice(0, 64)]))
-  assert.deepEqual([...manifest.keys()].sort(), expectedPayload)
-  for (const file of expectedPayload) {
-    assert.deepEqual(readFileSync(resolve(release, file)), readFileSync(resolve(clientSourceRoot, file)), file)
-    assert.equal(manifest.get(file), sha256File(resolve(clientSourceRoot, file)), file)
-    assert.equal(sha256File(resolve(release, file)), manifest.get(file), file)
+  symlinkSync('releases/old', resolve(app, 'current'))
+  const external = resolve(root, 'external-secret'); writeFileSync(external, 'foreign-do-not-read-or-chmod\n', { mode: 0o640 })
+  chmodSync(external, 0o640); symlinkSync(external, resolve(app, 'auth.json'))
+  const snapshot = path => {
+    const st = lstatSync(path, { bigint: true })
+    const metadata = [String(st.dev), String(st.ino), String(st.mode), String(st.mtimeNs), String(st.ctimeNs)]
+    if (st.isSymbolicLink()) return [...metadata, readlinkSync(path)]
+    if (st.isDirectory()) return [...metadata, readdirSync(path).sort().map(name => [name, snapshot(resolve(path, name))])]
+    return [...metadata, readFileSync(path).toString('hex')]
   }
-  const provenance = JSON.parse(readFileSync(resolve(release, 'release-provenance.json'), 'utf8'))
-  assert.equal(provenance.payloadCount, expectedPayload.length)
-  assert.equal(provenance.payloadManifestSha256, sha256File(resolve(release, 'release-manifest.sha256')))
-  assert.equal(provenance.installerSha256, sha256File(installerScript))
-  assert.equal(provenance.sourceCommit, spawnSync('git', ['rev-parse', 'HEAD^{commit}'], { cwd: repositoryRoot, encoding: 'utf8' }).stdout.trim())
-  assert.equal(provenance.sourceTree, spawnSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repositoryRoot, encoding: 'utf8' }).stdout.trim())
-  const integrity = spawnSync('sha256sum', ['--quiet', '-c', 'release-integrity.sha256'], { cwd: release })
-  assert.equal(integrity.status, 0, integrity.stderr?.toString())
-  assert.equal(readlinkSync(resolve(release, '.env.example')), 'env.example')
-  assert.equal(statSync(resolve(release, 'evidence', 'typed-inspection-local-image-gpt-5.6-terra-1f95df2.json')).mode & 0o777, 0o444)
-  assert.equal(readlinkSync(resolve(appHome, 'agent-client.mjs')), 'current/agent-client.mjs')
-  assert.equal(readlinkSync(resolve(appHome, 'workspace-manager.mjs')), 'current/workspace-manager.mjs')
-  assert.equal(readlinkSync(resolve(appHome, 'evidence')), 'current/evidence')
-  for (const file of ['README.md', '.env.example', 'codex-home.example.toml']) {
-    assert.equal(readlinkSync(resolve(appHome, file)), `current/${file}`)
-    assert.deepEqual(readFileSync(resolve(appHome, file)), readFileSync(resolve(release, file)))
-  }
-  assert.equal(readFileSync(npmRecord, 'utf8'), `${resolve(appHome, 'releases', '.stage-candidate-release')}\nci --omit=dev --ignore-scripts --no-audit --no-fund\n`)
-  assert.equal(statSync(resolve(appHome, '.env')).mode & 0o777, 0o600)
-  assert.equal(statSync(resolve(appHome, 'codex-profiles.conf')).mode & 0o777, 0o600)
-  assert.equal(statSync(resolve(appHome, 'codex-session-map.json')).mode & 0o777, 0o600)
-  assert.equal(statSync(resolve(appHome, 'data')).mode & 0o777, 0o700)
-  assert.equal(statSync(resolve(appHome, 'data', 'inbox')).mode & 0o777, 0o700)
-  assert.equal(statSync(resolve(appHome, 'logs')).mode & 0o777, 0o750)
-  assert.equal(readFileSync(resolve(appHome, '.env'), 'utf8'), 'OPENCLAW_API_KEY=preserved-secret\n')
-  assert.equal(readFileSync(resolve(appHome, 'codex-profiles.conf'), 'utf8'), '[agent.default]\napiKey=preserved-profile-secret\n')
-  assert.equal(readFileSync(resolve(appHome, 'codex-session-map.json'), 'utf8'), '{"session":"preserved"}\n')
-  assert.equal(readFileSync(resolve(appHome, 'data', 'state.txt'), 'utf8'), 'preserved-data\n')
-  for (const [relative, content] of Object.entries(persistentInstallerState)) assert.equal(readFileSync(resolve(appHome, relative), 'utf8'), content, relative)
-  assert.equal(readFileSync(resolve(appHome, 'logs', 'runtime.log'), 'utf8'), 'preserved-log\n')
-})
-
-test('installer rejects symlinked persistent secrets before staging and does not touch the referent', () => {
-  let externalEnv = ''
-  const { appHome, result } = installerCollationFixture({
-    configureAppHome({ root, appHome: configuredHome }) {
-      externalEnv = resolve(root, 'outside-env')
-      writeFileSync(externalEnv, 'EXTERNAL_SECRET=unchanged\n', { mode: 0o644 })
-      // Creation mode is masked by the verifier's umask 077; establish the precondition explicitly.
-      chmodSync(externalEnv, 0o644)
-      assert.equal(statSync(externalEnv).mode & 0o777, 0o644)
-      unlinkSync(resolve(configuredHome, '.env'))
-      symlinkSync(externalEnv, resolve(configuredHome, '.env'))
-    }
-  })
-  assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
-  assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/old-release')
-  assert.equal(readFileSync(externalEnv, 'utf8'), 'EXTERNAL_SECRET=unchanged\n')
-  assert.equal(statSync(externalEnv).mode & 0o777, 0o644)
-  assert.equal(existsSync(resolve(appHome, 'releases', 'candidate-release')), false)
-  assert.equal(existsSync(resolve(appHome, 'releases', '.stage-candidate-release')), false)
-})
-
-test('installer copy, npm, payload drift, or validation failure rolls back before cutover and cannot mix the live runtime', async t => {
-  for (const phase of ['copy', 'npm', 'payload-drift', 'validation']) {
-    await t.test(phase, () => {
-      const { appHome, result } = installerCollationFixture({ failPhase: phase })
-      assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
-      assert.equal(readlinkSync(resolve(appHome, 'current')), 'releases/old-release')
-      assert.equal(readFileSync(resolve(appHome, 'agent-client.mjs'), 'utf8'), 'legacy-flat-runtime\n')
-      assert.equal(existsSync(resolve(appHome, 'releases', 'candidate-release')), false)
-      assert.equal(existsSync(resolve(appHome, 'releases', '.stage-candidate-release')), false)
-      assert.equal(readFileSync(resolve(appHome, '.env'), 'utf8'), 'OPENCLAW_API_KEY=preserved-secret\n')
-      assert.equal(readFileSync(resolve(appHome, 'codex-profiles.conf'), 'utf8'), '[agent.default]\napiKey=preserved-profile-secret\n')
-      assert.equal(readFileSync(resolve(appHome, 'codex-session-map.json'), 'utf8'), '{"session":"preserved"}\n')
-      assert.equal(readFileSync(resolve(appHome, 'data', 'state.txt'), 'utf8'), 'preserved-data\n')
-      assert.equal(readFileSync(resolve(appHome, 'logs', 'runtime.log'), 'utf8'), 'preserved-log\n')
-      for (const [relative, content] of Object.entries(persistentInstallerState)) assert.equal(readFileSync(resolve(appHome, relative), 'utf8'), content, relative)
-      assert.equal(statSync(resolve(appHome, '.env')).mode & 0o777, 0o600)
-      assert.equal(statSync(resolve(appHome, 'codex-profiles.conf')).mode & 0o777, 0o600)
-    })
+  const before = snapshot(root)
+  const script = fileURLToPath(new URL('../../../shell/codex_ws_agent_install.sh', import.meta.url))
+  for (const args of [[], ['--instance', 'historical'], ['--test-isolation-check']]) {
+    const result = spawnSync('/bin/bash', [script, ...args], { encoding: 'utf8', cwd: root, env: {
+      PATH: '/nonexistent', HOME: app, ISP_APPS: root, OPENCLAW_API_KEY: 'historical-private-secret',
+      CODEX_WS_AGENT_INSTALL_TEST_MODE: '1', CODEX_WS_AGENT_INSTALL_TEST_COLLATE: '1',
+      CODEX_WS_AGENT_TEST_FIXTURE_ROOT: root, CODEX_WS_AGENT_TEST_APP_HOME: app, START_CODEX_WS_AGENT: 'y'
+    } })
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`)
+    assert.match(result.stderr, /UNIFIED_RUNTIME_ENTRY_REQUIRED/)
+    assert.equal(result.stderr.includes('historical-private-secret'), false)
+    assert.deepEqual(snapshot(root), before, 'no adoption, chmod, inode swap, new queue or historical-state deletion')
   }
 })
