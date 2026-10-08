@@ -11,8 +11,8 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { arch, release, type } from 'node:os';
 
-export const SOURCE = Object.freeze({ commit: '3746043947888a6b727be88527695d1edf3587c3',
-  tree: 'ddc3c0b3355eb77cd0be080f8fc4b734c901cab7', files: 285 });
+export const SOURCE = Object.freeze({ commit: '7594fd72251d38b6e1d23a1a3cca184ae0d085e7',
+  tree: '0827ce904179862ab55648fe99b780cea94faf98', files: 285 });
 const SELF = fileURLToPath(import.meta.url);
 const REQUIRED = ['CLOUD_RUN', 'SOURCE_ARCHIVE', 'SOURCE_SHA256', 'NODE', 'NPM_CLI', 'PYTHON',
   'BASH', 'PATH', 'TOOLCHAIN_PROVENANCE', 'PARENT', 'RECEIPT'];
