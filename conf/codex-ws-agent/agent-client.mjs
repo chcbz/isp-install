@@ -28,7 +28,7 @@ import {
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
+import { GitWorkspaceManager, WorkspaceManagerError } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
@@ -507,59 +507,12 @@ const resolveExecutable = command => {
   return ''
 }
 
-const parseScalarValue = rawValue => {
-  const value = String(rawValue || '').trim()
-  if (!value) return ''
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1)
-  }
-  if (value === 'true') return true
-  if (value === 'false') return false
-  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value)
-  return value
-}
-
 const configError = (message, exitOnError = true) => {
   if (exitOnError) {
     console.error(message)
     process.exit(1)
   }
   throw new Error(message)
-}
-
-const parseSectionProfiles = (raw, fallbackProfile, options = {}) => {
-  const exitOnError = options.exitOnError !== false
-  const profiles = []
-  let current = null
-  let defaults = {}
-  for (const originalLine of String(raw).split(/\r?\n/)) {
-    const line = originalLine.trim()
-    if (!line || line.startsWith('#')) continue
-    if (/^\[(default|profile\.default|agent\.default)\]$/.test(line)) {
-      if (current) profiles.push(current)
-      current = { __section: 'default' }
-      continue
-    }
-    const sectionMatch = line.match(/^\[(agent|profile)\.([^\]]+)\]$/)
-    if (sectionMatch) {
-      if (current) profiles.push(current)
-      current = { profileId: sectionMatch[2] }
-      continue
-    }
-    if (!current) continue
-    const index = line.indexOf('=')
-    if (index < 0) continue
-    current[line.slice(0, index).trim()] = parseScalarValue(line.slice(index + 1).trim())
-  }
-  if (current) profiles.push(current)
-  const defaultIndex = profiles.findIndex(profile => profile.__section === 'default')
-  if (defaultIndex >= 0) {
-    defaults = { ...profiles[defaultIndex] }
-    delete defaults.__section
-    profiles.splice(defaultIndex, 1)
-  }
-  if (!profiles.length) configError('CODEX_PROFILES_FILE section format is empty or invalid', exitOnError)
-  return profiles.map((profile, index) => normalizeProfile({ ...defaults, ...profile }, fallbackProfile, index))
 }
 
 const parseStringList = value => (Array.isArray(value) ? value : String(value || '').split(','))
@@ -664,108 +617,6 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     enabled: profile.enabled !== false && profile.active !== false && !DISABLED_PROFILE_STATUSES.has(status),
     status,
     isDefault: profile.isDefault === true
-  }
-}
-
-const legacyProfile = () => normalizeProfile({
-  profileId: process.env.CODEX_PROFILE_ID || process.env.AGENT_ID || 'default',
-  agentId: process.env.AGENT_ID || 'local-codex',
-  agentName: process.env.AGENT_NAME || '本地 Codex',
-  personaName: process.env.AGENT_PERSONA || '吴用',
-  codexBin: process.env.CODEX_BIN || 'codex',
-  codexHome: process.env.CODEX_HOME || '',
-  codexWorkdir: process.env.CODEX_WORKDIR || process.cwd(),
-  codexSandbox: process.env.CODEX_SANDBOX || 'workspace-write',
-  codexApproval: process.env.CODEX_APPROVAL || 'never',
-  codexSessionMode: process.env.CODEX_SESSION_MODE || 'new',
-  codexTimeoutMs: parseCodexTimeoutMs(process.env.CODEX_TIMEOUT_MS),
-  codexModel: process.env.CODEX_MODEL || '',
-  chatEngine: process.env.CODEX_CHAT_ENGINE || 'legacy-codex',
-  fastChatEnabled: process.env.CODEX_FAST_CHAT_ENABLED || false,
-  appServerEnabled: process.env.CODEX_APP_SERVER_ENABLED || false,
-  trueDeltaEnabled: process.env.CODEX_TRUE_DELTA_ENABLED || false,
-  typedDeliberationEnabled: process.env.CODEX_TYPED_DELIBERATION_ENABLED || false,
-  typedInspectionEnabled: process.env.CODEX_TYPED_INSPECTION_ENABLED || false,
-  typedInspectionRootDir: process.env.CODEX_TYPED_INSPECTION_ROOT_DIR || '',
-  typedInspectionStateRoot: process.env.CODEX_TYPED_INSPECTION_STATE_ROOT || '',
-  typedInspectionProfileId: process.env.CODEX_TYPED_INSPECTION_PROFILE_ID || '',
-  typedInspectionEngineContractId: process.env.CODEX_TYPED_INSPECTION_ENGINE_CONTRACT_ID || '',
-  typedInspectionProviderId: process.env.CODEX_TYPED_INSPECTION_PROVIDER_ID || '',
-  typedInspectionProviderBaseUrl: process.env.CODEX_TYPED_INSPECTION_PROVIDER_BASE_URL || '',
-  typedInspectionProviderWireApi: process.env.CODEX_TYPED_INSPECTION_PROVIDER_WIRE_API || 'responses',
-  typedInspectionProviderNetwork: process.env.CODEX_TYPED_INSPECTION_PROVIDER_NETWORK || 'isolated',
-  typedInspectionNetworkConnectTimeoutMs: process.env.CODEX_TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_MS || '',
-  typedInspectionCaBundlePath: process.env.CODEX_TYPED_INSPECTION_CA_BUNDLE_PATH || '',
-  typedInspectionCarrierEvidencePath: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_PATH || '',
-  typedInspectionCarrierEvidenceDigest: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_DIGEST || '',
-  typedInspectionBwrapBin: process.env.CODEX_TYPED_INSPECTION_BWRAP_BIN || '/usr/bin/bwrap',
-  typedInspectionSupportedInputs: process.env.CODEX_TYPED_INSPECTION_SUPPORTED_INPUTS || '',
-  chatInboxMaxFiles: process.env.CODEX_CHAT_INBOX_MAX_FILES || 1024,
-  chatInboxMaxBytes: process.env.CODEX_CHAT_INBOX_MAX_BYTES || 67108864,
-  chatArchiveMaxFiles: process.env.CODEX_CHAT_ARCHIVE_MAX_FILES || 256,
-  chatArchiveMaxBytes: process.env.CODEX_CHAT_ARCHIVE_MAX_BYTES || 16777216,
-  chatArchiveRetentionMs: process.env.CODEX_CHAT_ARCHIVE_RETENTION_MS || 604800000,
-  chatDedupeMaxEntries: process.env.CODEX_CHAT_DEDUPE_MAX_ENTRIES || 100000,
-  chatDedupeMaxBytes: process.env.CODEX_CHAT_DEDUPE_MAX_BYTES || 134217728,
-  chatDedupeRetentionMs: process.env.CODEX_CHAT_DEDUPE_RETENTION_MS || 2592000000,
-  workspacePolicyId: process.env.CODEX_WORKSPACE_POLICY_ID || '',
-  workspaceRole: process.env.CODEX_WORKSPACE_ROLE || 'coder',
-  workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
-  workspaceNonCodingCommandTypes: process.env.CODEX_WORKSPACE_NON_CODING_COMMAND_TYPES || '',
-  executionReportCommandTypes: process.env.CODEX_EXECUTION_REPORT_COMMAND_TYPES || '',
-  workspaceFallbackWorkdir: process.env.CODEX_WORKSPACE_FALLBACK_WORKDIR || '',
-  workspaceFileApiOrigin: process.env.CODEX_WORKSPACE_FILE_API_ORIGIN || '',
-  workspaceFileRootDir: process.env.CODEX_WORKSPACE_FILE_ROOT_DIR || '',
-  workspaceFileRuntimeAuthHeader: process.env.CODEX_WORKSPACE_FILE_RUNTIME_AUTH_HEADER || '',
-  nativeConversationHttpPollEnabled: ['1', 'true'].includes(
-    String(process.env.CYF_CONVERSATION_HTTP_POLL_ENABLED || '').trim().toLowerCase()
-  ),
-  nativeConversationImageGenerationEnabled: ['1', 'true'].includes(
-    String(process.env.CYF_CONVERSATION_IMAGEGEN_ENABLED || '').trim().toLowerCase()
-  ),
-  isDefault: true
-})
-
-const loadProfilesRaw = (options = {}) => {
-  const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-  if (profilesFile) {
-    try {
-      return readFileSync(resolve(profilesFile), 'utf8')
-    } catch (error) {
-      configError(`failed to read CODEX_PROFILES_FILE ${profilesFile}: ${error.message}`, options.exitOnError !== false)
-    }
-  }
-  return process.env.CODEX_PROFILES || ''
-}
-
-const parseProfiles = (raw, fallbackProfile, options = {}) => {
-  const exitOnError = options.exitOnError !== false
-  if (!raw || !String(raw).trim()) return [fallbackProfile]
-  const text = String(raw).trim()
-  if (/^\[(agent|profile)\./m.test(text)) return parseSectionProfiles(text, fallbackProfile, { exitOnError })
-  let parsed
-  try {
-    parsed = JSON.parse(text)
-  } catch (error) {
-    configError(`CODEX_PROFILES must be valid JSON: ${error.message}`, exitOnError)
-  }
-  if (!Array.isArray(parsed) || parsed.length === 0) configError('CODEX_PROFILES must be a non-empty JSON array', exitOnError)
-  return parsed.map((profile, index) => normalizeProfile(profile || {}, fallbackProfile, index))
-}
-
-// Read-only legacy input inspection for stopped-writer migration diagnostics.
-// Never used by the unified execution entry or as an authentication fallback.
-export const loadRuntimeConfig = (options = {}) => {
-  const loadedProfiles = parseProfiles(loadProfilesRaw(options), legacyProfile(), options).filter(profile => profile.enabled)
-  if (!loadedProfiles.length) configError('CODEX_PROFILES has no enabled profiles', options.exitOnError !== false)
-  const configuredDefaultProfile = process.env.DEFAULT_CODEX_PROFILE
-  const selected = configuredDefaultProfile && loadedProfiles.find(
-    profile => profile.profileId === configuredDefaultProfile || profile.agentId === configuredDefaultProfile
-  )
-  return {
-    profiles: loadedProfiles,
-    defaultProfileId: selected?.profileId || loadedProfiles.find(profile => profile.isDefault)?.profileId || loadedProfiles[0].profileId,
-    workspacePolicies: loadWorkspacePolicies()
   }
 }
 
@@ -6434,32 +6285,6 @@ const isProfileBusy = profile => getProfileState(profile)?.processor?.isBusy() |
 
 export const canPublishProfileOnline = (profile, state) => !profile.managedGeneration ||
   Boolean(state?.managedRegistered && state?.managedEngine?.ready)
-
-// Diagnostic only: one read-only queue GET, no dispatch, retries, or receipt body logging.
-// Run only for an explicitly enabled managed CHAT profile and its exact native receipt.
-export const observeTypedRuntimeAuthentication = async ({ profile, receipt, authHeader, apiOrigin,
-  runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID, fetchFn = globalThis.fetch } = {}) => {
-  if (!profile?.typedDeliberationEnabled || !profile.managedGeneration ||
-      receipt?.typedDeliberation?.state !== 'READY') return { state: 'NOT_APPLICABLE' }
-  const binding = receipt.runtimeAuth
-  if (!binding || binding.scheme !== 'native-runtime-v1' || binding.agentId !== profile.agentId ||
-      binding.runtimeInstanceId !== runtimeInstanceId || binding.tenantId !== profile.managedTenantId ||
-      binding.clientId !== profile.managedClientId || binding.ownerJiacn !== profile.managedOwnerJiacn ||
-      !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(authHeader || '')) return { state: 'RECEIPT_BINDING_MISMATCH' }
-  try {
-    const origin = new URL(apiOrigin)
-    if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password) {
-      return { state: 'INVALID_API_ORIGIN' }
-    }
-    const response = await fetchFn(new URL('/internal/agent/tasks/workspace-executions/commands', origin), {
-      method: 'GET', redirect: 'error', headers: { Authorization: authHeader, Accept: 'application/json',
-        'X-Agent-Id': profile.agentId, 'X-Agent-Runtime-Id': runtimeInstanceId }
-    })
-    // A queue read never claims or executes a command. Do not retain any returned work data.
-    await response.body?.cancel()
-    return { state: response.status === 401 ? 'CURRENT_BINDING_DENIED' : 'HTTP_OBSERVED', httpStatus: response.status }
-  } catch { return { state: 'TRANSPORT_ERROR' } }
-}
 
 export const startBoundedExecutionReportReplay = ({ outbox, sendFn, isStable = () => true, schedule = callback => setImmediate(callback) }) => {
   let cancelled = false

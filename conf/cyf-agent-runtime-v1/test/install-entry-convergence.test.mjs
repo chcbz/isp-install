@@ -114,7 +114,14 @@ test('no legacy unit source remains; current single-artifact units and installat
   assert.match(grouped, /shell\/cyf_agent_runtime_v1_install\.sh/);
   assert.equal(grouped.includes('node codex-ws-agent'), false); assert.equal(grouped.includes('OPENCLAW_API_KEY'), false);
   assert.match(grouped, /MYSQL_ROOT_PASSWORD/); assert.match(grouped, /nginx php mysql redis/);
-  const historical = text('conf/codex-ws-agent/install-candidate/INSTALL-CANDIDATE.md'); assert.match(historical, /NOT an installer/);
-  assert.equal(historical.includes('--installer shell/codex_ws_agent_install.sh'), false);
-  assert.equal(historical.includes('node current/agent-client.mjs'), false);
+  for (const removed of [
+    'shell/codex_ws_agent_install.sh', 'bin/codex_ws_agent.sh',
+    'conf/codex-ws-agent/env.example', 'conf/codex-ws-agent/codex-profiles.conf',
+    'conf/codex-ws-agent/install-policy-check.mjs', 'conf/codex-ws-agent/install-candidate',
+    'conf/codex-ws-agent/contracts/probes'
+  ]) assert.equal(existsSync(resolve(repo, removed)), false, removed);
+  const engine = text('conf/codex-ws-agent/agent-client.mjs');
+  for (const removed of ['loadRuntimeConfig', 'legacyProfile', 'parseSectionProfiles', 'loadProfilesRaw', 'observeTypedRuntimeAuthentication'])
+    assert.equal(engine.includes(removed), false, removed);
+
 });

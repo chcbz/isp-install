@@ -194,7 +194,7 @@ The unified artifact does **not** generate an API-key Agent execution entry.
 
 | Exact source path | Minimal convergence |
 | --- | --- |
-| `shell/codex_ws_agent_install.sh` | Retired diagnostic only; exit 2 before reading args/config, sourcing common helpers, copying credentials, staging a release or calling a service manager. Shared, instance, help and former test modes all fail closed. No automatic redirection/enrollment. |
+| `shell/codex_ws_agent_install.sh`, `bin/codex_ws_agent.sh` | Deleted on 2026-10-09; no diagnostic wrapper or old launcher remains. The main dispatcher still rejects removed component names. |
 | `conf/codex-ws-agent/managed-host.mjs` | Deleted: no API-key broker, ensure/observe admission, credential restore/copy, generation creation or Unix provisioning socket remains. Historical association/journal/credential files are not touched. |
 | `conf/codex-ws-agent/agent-client.mjs` | Remove dead broker references; standalone CLI remains retired. Only the injected Runtime execution host is used. |
 | `conf/codex-ws-agent/package.json` | No `start` script; not an alternate executable package. Model/provider credentials remain distinct from Agent authentication. |
@@ -204,9 +204,9 @@ The unified artifact does **not** generate an API-key Agent execution entry.
 Existing scoped provider, CHAT, native/skill and checkpoint implementations are
 not replaced. Long historical profile identifiers remain explicit provider-scope
 regression inputs; they neither provision an identity nor authorize a Runtime.
-Historical install-candidate policy/provenance/readback tests use only a labelled
-baseline catalog fixture, never an executable old installer. That test fixture
-and all test directories are excluded from the unified artifact.
+The retired candidate/provenance checker, its templates and its dedicated tests
+were deleted on 2026-10-09. Current configuration validation, manifest/session
+contracts and execution tests remain; no old installer fixture is shipped.
 
 ### Registry, launcher and unit source convergence
 
@@ -218,22 +218,17 @@ any component installation, even in a mixed argument list. `shell/sh_list.txt`
 lists only the current Runtime installer. Explicit instance, prepared canonical
 parent and Node 20.20.2 prerequisites still apply; no identity is inferred.
 
-`bin/codex_ws_agent.sh` is a no-effects retired diagnostic for **all** arguments,
-not a redirect that can start, stop, kill, archive or repair historical services.
-The two old `systemd/codex-ws-agent*.service` source templates are deleted. Only the
-existing unified Runtime template is shipped, using artifact-local pinned Node,
-external host configuration and separately authorized activation. These are source
-changes, **not** removal/stop/restart of any installed service or historical PID.
-`skills/codex-ws-agent-install/SKILL.md` now documents the same sole Runtime entry;
-`install-candidate/INSTALL-CANDIDATE.md` is labelled historical policy/provenance
-audit, not a runnable API-key installation/readback guide.
+The old launcher/installer stubs and API-key env/INI templates are deleted,
+along with the dual-mode candidate checker, workspace migration pre-check and
+historical API probe. The execution library no longer exports `loadRuntimeConfig`
+or `observeTypedRuntimeAuthentication`; explicit JSON profiles are normalized
+under the existing Runtime host. Current tests verify removed paths remain absent.
 
-Historical engine `README.md`, `env.example`, `codex-profiles.conf`, candidate
-fixtures/checker, policy checker, offline ACK migration and diagnostic probes remain
-repository audit/diagnostic inputs, never an active auth fallback or installation
-payload. Existing workspace locks and exact Runtime child ownership/shutdown tests
-remain; old launcher-only tests are replaced with stronger no-operation retirement
-negatives, not skipped as if its removed implementation were still supported.
+The old unit templates remain absent. Only the existing unified Runtime unit is
+shipped. These are source changes, not removal or restart of installed services.
+The separate active ACK workstream still references its offline migration tool;
+that tool remains repository-only and excluded from the execution artifact.
+
 
 ## Old/new state migration requirements — no migration performed
 

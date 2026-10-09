@@ -60,7 +60,7 @@ sudo ./shell/jdk_install.sh
 sudo ./shell/mysql_install.sh
 sudo ./shell/nginx_install.sh
 sudo ./shell/redis_install.sh
-sudo ./shell/codex_ws_agent_install.sh
+# Agent: prepare instance/toolchain inputs, then use shell/cyf_agent_runtime_v1_install.sh
 
 # 3. 使环境变量生效
 source /etc/profile
@@ -176,9 +176,10 @@ conf/
 │   └── etc/openldap/slapd.conf
 ├── maven/
 │   └── settings.xml
+├── cyf-agent-runtime-v1/
+│   ├── runtime.env.example
+│   └── manifest.example.json
 ├── codex-ws-agent/
-│   ├── env.example
-│   ├── codex-profiles.conf
 │   └── codex-home.example.toml
 ├── xray/
 │   └── config.json.template
