@@ -852,3 +852,20 @@ test('persisted CHAT ACK drain uses fresh socket identity on replay and preserve
     assert.equal(bindChatDispatchAckToSession(command, agent, 'live-process'), command)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('measured deployed CLI 0.161.0 schema preserves app-server fields used by Runtime', () => {
+  const fixture = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures/codex-app-server-schema-0.161.0-contract.json')))
+  assert.deepEqual(resolveCodexAppServerSchemaContract({ appServerSchemaContractId: fixture.contractId }), {
+    contractId: fixture.contractId, cliVersion: fixture.cliVersion, bundleSha256: fixture.bundleSha256
+  })
+  const schemas = {}
+  for (const [name, digest] of Object.entries(fixture.schemas)) {
+    const bytes = readFileSync(resolve(import.meta.dirname, 'fixtures/codex-app-server-0.161.0-schemas', name))
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), digest)
+    schemas[name] = JSON.parse(bytes)
+  }
+  const turn = schemas['v2/TurnStartParams.json']; const thread = schemas['v2/ThreadStartParams.json']
+  assert.deepEqual(turn.required, ['input', 'threadId']); assert.equal(turn.properties.input.type, 'array'); assert.ok(turn.properties.outputSchema)
+  assert.ok(thread.properties.developerInstructions); assert.ok(thread.properties.baseInstructions)
+  assert.deepEqual(schemas['v2/TurnCompletedNotification.json'].definitions.TurnStatus.enum, ['completed', 'interrupted', 'failed', 'inProgress'])
+})
