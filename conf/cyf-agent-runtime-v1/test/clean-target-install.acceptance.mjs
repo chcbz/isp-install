@@ -304,7 +304,7 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 const root = process.argv[1]; const engine = resolve(root, 'codex-ws-agent/agent-client.mjs');
 assert.equal(realpathSync(process.execPath), resolve(root, 'node/bin/node'));
-assert.equal(process.versions.node, '20.20.2');
+assert.equal(readFileSync(resolve(root, 'runtime/node-version.txt'), 'utf8').trim(), process.versions.node);
 const module = await import(pathToFileURL(engine));
 assert.equal(typeof module.createRuntimeExecutionHost, 'function');
 const require = createRequire(engine); const dependencies = {};
@@ -355,7 +355,8 @@ async function toolFacts(input, receipt) {
     if (sha256 !== supplied.sha256) throw fail('INPUT_TOOL_DIGEST_MISMATCH');
     receipt.toolchain[key] = { path: supplied.path, realPath: path, sha256, origin: origin(supplied.origin) };
   }
-  if (await realpath(process.execPath) !== receipt.toolchain.node.realPath || process.versions.node !== '20.20.2') throw fail('HARNESS_MUST_USE_SUPPLIED_NODE_20_20_2');
+  if (await realpath(process.execPath) !== receipt.toolchain.node.realPath) throw fail('HARNESS_MUST_USE_SUPPLIED_NODE');
+  receipt.toolchain.node.version = process.versions.node;
   if (basename(receipt.toolchain.npm.realPath) !== 'npm-cli.js') throw fail('INPUT_MUST_BE_REAL_NPM_CLI');
   const npmPackage = join(dirname(dirname(receipt.toolchain.npm.realPath)), 'package.json');
   const npm = JSON.parse(await readFile(npmPackage, 'utf8'));

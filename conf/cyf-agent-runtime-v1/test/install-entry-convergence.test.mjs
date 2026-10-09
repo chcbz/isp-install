@@ -1,7 +1,7 @@
 // Offline source-entry acceptance; no installed services, package install or Provider calls.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -20,12 +20,12 @@ function fixture(t) {
   // No actual common.sh or package/service helper can be invoked by these tests.
   copyFileSync(resolve(repo, 'install.sh'), resolve(root, 'install.sh'));
   copyFileSync(resolve(repo, 'shell/cyf_agent_runtime_v1_install.sh'), resolve(root, 'shell/cyf_agent_runtime_v1_install.sh'));
-  copyFileSync(resolve(repo, 'conf/cyf-agent-runtime-v1/install.sh'), resolve(root, 'conf/cyf-agent-runtime-v1/install.sh'));
+  cpSync(resolve(repo, 'conf/cyf-agent-runtime-v1'), resolve(root, 'conf/cyf-agent-runtime-v1'), { recursive: true });
   chmodSync(resolve(root, 'conf/cyf-agent-runtime-v1/install.sh'), 0o755);
   writeFileSync(resolve(root, 'shell/common.sh'), 'check_root() { :; }\ndetect_os() { :; }\nshow_os_info() { :; }\n');
   writeFileSync(resolve(root, 'shell/nginx_install.sh'), `#!/bin/bash\nprintf 'called\\n' > '${calls}'\nexit 0\n`);
   const node = resolve(root, 'bin/node'); const npm = resolve(root, 'bin/npm'); const python = resolve(root, 'bin/python');
-  writeFileSync(node, '#!/bin/bash\nprintf "99.0.0\\n"\n');
+  writeFileSync(node, '#!/bin/bash\nif [ "$1" = "-p" ]; then printf "99.0.0\\n"; else echo "fixture Node execution failure" >&2; exit 37; fi\n');
   for (const path of [npm, python]) writeFileSync(path, '#!/bin/bash\nexit 37\n');
   for (const path of [node, npm, python]) chmodSync(path, 0o755);
   const env = { PATH: '/usr/bin:/bin', HOME: resolve(root, 'home'), LANG: 'C.UTF-8',
@@ -62,12 +62,13 @@ test('legacy dispatcher names fail before any component call even in a mixed req
   }
 });
 
-test('agent profile/canonical component/current alias reach the real pinned Runtime installer and propagate its rejection', t => {
+test('agent profile/canonical component/current alias reach the real Runtime installer without a version gate and propagate its rejection', t => {
   const f = fixture(t);
   for (const args of [['--profile', 'agent'], ['cyf-agent-runtime-v1'], ['runtime-v1']]) {
     const result = f.run(args);
     assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stderr, /Runtime requires pinned Node 20\.20\.2/);
+    assert.match(result.stderr, /fixture Node execution failure/);
+    assert.match(result.stdout, /Runtime Node version: 99\.0\.0/);
     assert.equal(existsSync(f.calls), false); assert.deepEqual(readdirSync(resolve(f.appRoot, 'cyf-agent-runtime-v1')), []);
     assert.equal(`${result.stdout}${result.stderr}`.includes('obsolete-secret-must-not-be-used'), false);
   }
@@ -84,7 +85,7 @@ test('interactive Runtime rejection and unrelated component failure propagate wi
   assert.equal(menu.stdout.includes('codex-ws-agent'), false);
   const failed = f.run(['--select'], {}, `${selection[1]}\ny\n`);
   assert.equal(failed.status, 1, `${failed.stdout}\n${failed.stderr}`);
-  assert.match(failed.stderr, /Runtime requires pinned Node 20\.20\.2/);
+  assert.match(failed.stderr, /fixture Node execution failure/);
   assert.equal(existsSync(f.calls), false);
   assert.deepEqual(readdirSync(resolve(f.appRoot, 'cyf-agent-runtime-v1')), []);
   writeFileSync(resolve(f.root, 'shell/nginx_install.sh'), '#!/bin/bash\nexit 17\n');
@@ -124,4 +125,10 @@ test('no legacy unit source remains; current single-artifact units and installat
   for (const removed of ['loadRuntimeConfig', 'legacyProfile', 'parseSectionProfiles', 'loadProfilesRaw', 'observeTypedRuntimeAuthentication'])
     assert.equal(engine.includes(removed), false, removed);
 
+});
+
+test('Runtime and execution-package metadata impose no project Node version gate', () => {
+  for (const path of ['conf/cyf-agent-runtime-v1/package.json', 'conf/codex-ws-agent/package.json'])
+    assert.equal(JSON.parse(text(path)).engines?.node, undefined, path);
+  assert.equal(JSON.parse(text('conf/codex-ws-agent/package-lock.json')).packages[''].engines?.node, undefined);
 });

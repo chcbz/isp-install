@@ -16,7 +16,8 @@ done
 [ -d "$PACKAGE_ROOT" ] && [ "$(readlink -f "$PACKAGE_ROOT")" = "$PACKAGE_ROOT" ] || { echo 'Runtime artifact root must be canonical' >&2; exit 1; }
 NODE_BIN="$PACKAGE_ROOT/node/bin/node"
 [ -x "$NODE_BIN" ] && [ ! -L "$NODE_BIN" ] || { echo 'Artifact-local Node is missing or unsafe' >&2; exit 1; }
-[ "$("$NODE_BIN" -p 'process.versions.node')" = '20.20.2' ] || { echo 'Runtime requires pinned Node 20.20.2' >&2; exit 1; }
+NODE_VERSION="$("$NODE_BIN" -p 'process.versions.node')"
+printf 'Runtime Node version: %s\n' "$NODE_VERSION"
 for file in agent-runtime.mjs install.sh validate.sh package.json runtime.env.example manifest.example.json \
     lib/manifest.mjs lib/runtime-client.mjs lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs \
     systemd/cyf-agent-runtime-v1@.service; do

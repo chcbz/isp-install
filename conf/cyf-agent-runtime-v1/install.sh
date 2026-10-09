@@ -1,9 +1,9 @@
 #!/bin/bash
-# Single artifact: pinned Node, Runtime, mature engine, locked JS deps and Python tools.
+# Single artifact: supplied Node, Runtime, mature engine, locked JS deps and Python tools.
 # No activation, state adoption, enrollment, service control or legacy .env copy.
 set -euo pipefail
 usage() {
-    echo 'usage: install.sh --target ABSOLUTE_NEW_DIRECTORY [--node NODE20] [--npm NPM_CLI] [--python PYTHON3] [--engine-root ENGINE_SOURCE]' >&2
+    echo 'usage: install.sh --target ABSOLUTE_NEW_DIRECTORY [--node NODE] [--npm NPM_CLI] [--python PYTHON3] [--engine-root ENGINE_SOURCE]' >&2
     exit 2
 }
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -34,13 +34,16 @@ NODE_BIN="$(resolve_bin "$NODE_BIN")"
 NPM_CLI="$(resolve_bin "$NPM_CLI")"
 PYTHON_BIN="$(resolve_bin "$PYTHON_BIN")"
 [ -x "$NODE_BIN" ] && [ -f "$NPM_CLI" ] && [ -x "$PYTHON_BIN" ] || { echo 'Node/npm/Python toolchain unavailable' >&2; exit 1; }
-[ "$("$NODE_BIN" -p 'process.versions.node')" = '20.20.2' ] || { echo 'Runtime requires pinned Node 20.20.2' >&2; exit 1; }
+NODE_VERSION="$("$NODE_BIN" -p 'process.versions.node')"
+printf 'Runtime Node version: %s\n' "$NODE_VERSION"
 STAGE="$(mktemp -d "$PARENT/.cyf-agent-runtime.stage.XXXXXX")"
 # STAGE is exclusively created above. Never delete a pre-existing target.
 cleanup() { rm -rf -- "$STAGE"; }
 trap cleanup EXIT
 install -d -m 0755 "$STAGE/runtime/lib" "$STAGE/runtime/systemd" "$STAGE/node/bin"
 install -m 0755 "$(readlink -f "$NODE_BIN")" "$STAGE/node/bin/node"
+# Record the actual packaged interpreter; no version allowlist or minimum gate.
+"$STAGE/node/bin/node" -p 'process.versions.node' > "$STAGE/runtime/node-version.txt"
 for file in agent-runtime.mjs install.sh validate.sh; do
     install -m 0755 "$SOURCE_DIR/$file" "$STAGE/runtime/$file"
 done

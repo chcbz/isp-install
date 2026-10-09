@@ -4,7 +4,6 @@
   "private": true,
   "description": "Unified multi-Agent Runtime reusing codex-ws-agent",
   "type": "module",
-  "engines": { "node": "=20.20.2" },
   "scripts": {
     "test": "node --test",
     "validate": "node agent-runtime.mjs validate"

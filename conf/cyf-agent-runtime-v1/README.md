@@ -8,7 +8,7 @@ retired; do not run the old service with the new ACK format.
 ## Artifact and configuration
 
 `install.sh --target ABSOLUTE_NEW_DIRECTORY` prepares a new artifact containing
-`runtime/`, `codex-ws-agent/` and pinned `node/bin/node` (20.20.2), npm lock graph
+`runtime/`, `codex-ws-agent/` and supplied `node/bin/node`, npm lock graph
 and release-local Python delivery tools. It neither enables services nor adopts,
 rewrites, enrolls or deletes existing Agent state. Python still needs a compatible
 target ABI/stdlib; mocked installer tests do not prove clean-target installation.
@@ -24,8 +24,15 @@ unchanged; these six pins are not a full transitive dependency lock.
 `python-docx==0.8.11` remains a permitted pure-Python source distribution; do
 not add blanket binary-only installation, borrow host packages or install host
 JPEG/compiler dependencies to bypass the private artifact checks. The existing
-private `pip<22` bootstrap, Node pin and installer are unchanged. No compatibility
+private `pip<22` bootstrap and Python dependency selection are unchanged. No compatibility
 PASS, interpreter upgrade or production activation is implied by this source fix.
+
+As of 2026-10-09, Node has no project version allowlist or minimum-version gate.
+The installer records the packaged interpreter version in `runtime/node-version.txt`
+and install/validation logs; the existing acceptance receipt also records actual
+Node version and binary SHA-256. Release records use these measured values.
+Real execution/import/dependency failures still fail the build; this does not
+claim arbitrary Node versions work or change third-party dependency requirements.
 
 Configuration lives **outside** the artifact. A host config has exactly:
 
@@ -216,7 +223,7 @@ upgrade. Other component mappings and full-profile order are preserved, with onl
 the retired Agent component replaced. `codex-ws-agent`/`codex` are rejected before
 any component installation, even in a mixed argument list. `shell/sh_list.txt`
 lists only the current Runtime installer. Explicit instance, prepared canonical
-parent and Node 20.20.2 prerequisites still apply; no identity is inferred.
+parent and executable Node prerequisites still apply; no identity is inferred.
 
 The old launcher/installer stubs and API-key env/INI templates are deleted,
 along with the dual-mode candidate checker, workspace migration pre-check and

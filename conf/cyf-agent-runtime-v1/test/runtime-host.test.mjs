@@ -311,7 +311,7 @@ test('multi-Agent validate CLI reads config without engine effects; run fails cl
   assert.deepEqual(await Promise.all(f.entries.map(entry => readdir(entry.stateRoot))), [[], [], []]);
 });
 
-test('installer refuses existing targets, wrong Node and unprepared parents before dependencies', async t => {
+test('installer refuses existing targets, unavailable Node and unprepared parents before dependencies', async t => {
   const f = await fixture(t, { count: 1 });
   const installer = resolve(repo, 'conf/cyf-agent-runtime-v1/install.sh');
   const target = resolve(f.root, 'artifact'); await mkdir(target, { mode: 0o700 });
@@ -319,21 +319,26 @@ test('installer refuses existing targets, wrong Node and unprepared parents befo
   assert.throws(() => execFileSync('bash', [installer, '--target', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /target exists/.test(cause.stderr));
   assert.equal(await readFile(resolve(target, 'foreign-marker'), 'utf8'), 'untouched');
   assert.throws(() => execFileSync('bash', [installer, '--target', resolve(f.root, 'unprepared/artifact')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /parent must exist/.test(cause.stderr));
-  const wrongNode = resolve(f.root, 'wrong-node'); await writeFile(wrongNode, '#!/bin/sh\necho 22.0.0\n', { mode: 0o700 });
-  assert.throws(() => execFileSync('bash', [installer, '--target', resolve(f.root, 'new-artifact'), '--node', wrongNode], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /pinned Node 20.20.2/.test(cause.stderr));
+  const wrongNode = resolve(f.root, 'missing-node');
+  assert.throws(() => execFileSync('bash', [installer, '--target', resolve(f.root, 'new-artifact'), '--node', wrongNode], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /Node\/npm\/Python toolchain unavailable/.test(cause.stderr));
   assert.equal((await readdir(f.root)).some(name => name.startsWith('.cyf-agent-runtime.stage')), false);
 });
 
 test('dependency preparation failure never publishes or leaves its stage; does not invoke Python', async t => {
   const f = await fixture(t, { count: 1 });
   const installer = resolve(repo, 'conf/cyf-agent-runtime-v1/install.sh');
-  const npm = resolve(f.root, 'fixture-npm.cjs'); await writeFile(npm, 'process.exit(31)\n', { mode: 0o700 });
+  const versionReadback = resolve(f.root, 'packaged-node-version.txt');
+  const npm = resolve(f.root, 'fixture-npm.cjs');
+  await writeFile(npm, `const fs = require('node:fs'); const path = require('node:path');
+    fs.copyFileSync(path.resolve(process.cwd(), '../runtime/node-version.txt'), ${JSON.stringify(versionReadback)});
+    process.exit(31);\n`, { mode: 0o700 });
   const python = resolve(f.root, 'fixture-python'); const marker = resolve(f.root, 'python-was-called');
   await writeFile(python, `#!/bin/sh\ntouch '${marker}'\nexit 32\n`, { mode: 0o700 });
   const target = resolve(f.root, 'artifact');
   assert.throws(() => execFileSync('bash', [installer, '--target', target, '--node', process.execPath, '--npm', npm, '--python', python], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
-  }), cause => cause.status === 31);
+  }), cause => cause.status === 31 && cause.stdout.includes(`Runtime Node version: ${process.versions.node}`));
+  assert.equal((await readFile(versionReadback, 'utf8')).trim(), process.versions.node);
   await assert.rejects(lstat(target), cause => cause.code === 'ENOENT');
   await assert.rejects(lstat(marker), cause => cause.code === 'ENOENT');
   assert.equal((await readdir(f.root)).some(name => name.startsWith('.cyf-agent-runtime.stage')), false);

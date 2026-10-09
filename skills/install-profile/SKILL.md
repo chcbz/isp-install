@@ -20,7 +20,7 @@ Use this skill when the user wants a grouped install instead of a single tool sc
 - `dev-env`: `jdk maven git node python`
 - `db-server`: `mysql redis rabbitmq`
 - `ci-cd`: `jdk maven git jenkins nexus`
-- `agent`: `cyf-agent-runtime-v1` (single unified Runtime artifact; explicit instance and Node 20.20.2, no generic Node upgrade)
+- `agent`: `cyf-agent-runtime-v1` (single unified Runtime artifact; explicit instance and executable Node; record actual version, no generic Node upgrade)
 - `full`: installs the full supported stack
 
 ## Workflow
@@ -35,12 +35,12 @@ Use this skill when the user wants a grouped install instead of a single tool sc
 Use `./install.sh cyf-agent-runtime-v1` (alias `runtime-v1`),
 `./install.sh --profile agent`, or `./shell/cyf_agent_runtime_v1_install.sh`.
 Prepare a new canonical artifact target parent, set `CYF_RUNTIME_V1_INSTANCE`,
-and supply pinned Node **20.20.2**, npm and compatible Python via the Runtime
+and supply an executable Node without a project version restriction, npm and compatible Python via the Runtime
 installer variables. No existing target, old env/profile or credential is adopted.
 
 See `conf/cyf-agent-runtime-v1/README.md` and
 `skills/codex-ws-agent-install/SKILL.md` for explicit sealed multi-Agent config and
-per-subject private roots. Execution is the artifact-local pinned Node plus
+per-subject private roots. Execution is the artifact-local Node (actual version in `runtime/node-version.txt`) plus
 `runtime/agent-runtime.mjs run --config HOST_JSON`, not an old launcher alias.
 Installation credentials remain private; derived execution sessions stay in memory
 and never appear in URL/log/checkpoint. Enrollment, state migration, activation,

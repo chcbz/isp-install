@@ -15,14 +15,14 @@ contract. Do not install or launch the retired engine CLI/service.
 
 - Fix the authorized source commit and source/artifact evidence. This candidate is
   not release approval; formal verification and versioned release belong to Main.
-- Supply Node **20.20.2**, an npm CLI and compatible Python/stdlib/ABI. Do not upgrade
+- Supply an executable Node (no project version restriction), an npm CLI and compatible Python/stdlib/ABI. Do not upgrade
   the host's generic Node as an implicit Agent installation step.
 - Prepare a canonical artifact parent and choose a new explicit instance; existing
   targets are rejected, never adopted. Set `CYF_RUNTIME_V1_INSTANCE`,
   `CYF_RUNTIME_V1_NODE_BIN`, `CYF_RUNTIME_V1_NPM_CLI`, `CYF_RUNTIME_V1_PYTHON_BIN`
   and `ISP_APPS` deliberately for the intended offline/disposable target.
 - The direct entry stages one artifact: `runtime/`, execution library,
-  pinned local Node, locked npm graph and Python delivery tools. It neither enrolls
+  supplied local Node (actual version recorded in `runtime/node-version.txt`), locked npm graph and Python delivery tools. It neither enrolls
   identities nor copies old env/profiles, enables units, restarts services or
   migrates state. Dispatcher profile `agent` selects this same artifact entry.
 

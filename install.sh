@@ -79,7 +79,7 @@ list_profiles() {
     echo ""
     
     echo -e "${BLUE}agent${NC} - 统一多Agent Runtime 制品 (不启用服务/不迁移状态)"
-    echo "  包含: cyf-agent-runtime-v1; 需显式 CYF_RUNTIME_V1_INSTANCE 和 Node 20.20.2"
+    echo "  包含: cyf-agent-runtime-v1; 需显式 CYF_RUNTIME_V1_INSTANCE 和可执行 Node（发布记录实际版本）"
     echo ""
 
     echo -e "${BLUE}full${NC} - 完整安装"
