@@ -3551,6 +3551,28 @@ test('non-opt-in command types do not create execution reports', async () => {
   assert.equal(outbox.pendingReports().length, 0)
 })
 
+test('missing execution report command types does not disrupt command completion', async () => {
+  const rootDir = temporaryDirectory()
+  const reportProfile = { ...profile }
+  const outbox = new ExecutionReportOutbox({ profile: reportProfile, rootDir: resolve(rootDir, 'execution-report-outbox') })
+  outbox.initialize()
+  let completedRuns = 0
+  const processor = new AgentMessageProcessor({
+    profile: reportProfile,
+    inbox: new PersistentCommandInbox({ rootDir, profile: reportProfile }),
+    runCommand: async () => { completedRuns += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    executionReportOutbox: outbox,
+    sendFn: () => true
+  })
+  processor.start()
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+  assert.equal(completedRuns, 1)
+  assert.equal(processor.inbox.count('pending'), 0)
+  assert.equal(outbox.pendingReports().length, 0)
+})
+
 test('ACK checkpoint verification is bounded at startup and during runtime', () => {
   const rootDir = temporaryDirectory()
   const storageRoot = profileStorageRoot(rootDir)
