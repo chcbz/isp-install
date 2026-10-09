@@ -1123,3 +1123,121 @@ test('artifact consumer return schema is exact plain data with only the declared
     assert.throws(() => consumerResult(invalid), code('CONSUMER_RESULT_INVALID'));
   }
 });
+
+
+// S01: execute the exact CLI main/argument-parser source with the real config
+// reader and workspace loader. Only the Runtime execution boundary and process
+// listeners are inert captures, as in the existing final-tail source units.
+// This is NOT a running Runtime, WS/session, workspace build or installation.
+async function workspaceCliUnit(t) {
+  const f = await fixture(t, { count: 1 });
+  const source = await readFile(resolve(repo, 'conf/cyf-agent-runtime-v1/agent-runtime.mjs'), 'utf8');
+  const argsStart = source.indexOf('const failure =');
+  const argsEnd = source.indexOf('const wait =', argsStart);
+  const mainStart = source.indexOf('export async function main(');
+  const mainEnd = source.indexOf('\nconst isMain =', mainStart);
+  assert.ok(argsStart >= 0 && argsEnd > argsStart && mainStart > argsEnd && mainEnd > mainStart);
+  const { pathToFileURL } = await import('node:url');
+  const { createLogger } = await import('../lib/security.mjs');
+  const loaderUrl = pathToFileURL(resolve(engineSource, 'workspace-manager.mjs')).href;
+  let mainSource = source.slice(mainStart, mainEnd).replace('export async function main(', 'async function main(');
+  const loaderImport = "import('../codex-ws-agent/workspace-manager.mjs')";
+  assert.equal(mainSource.split(loaderImport).length, 2, 'one original workspace loader import');
+  // Only resolve the original loader URL in the source slice, never replace its
+  // call/validation or the CLI selection/precedence/control flow under test.
+  mainSource = mainSource.replace(loaderImport, `import(${JSON.stringify(loaderUrl)})`);
+  const calls = []; const listeners = new Map();
+  const processCapture = {
+    once(event, fn) { assert.ok(['SIGTERM', 'SIGINT'].includes(event)); assert.equal(listeners.has(event), false); listeners.set(event, fn); },
+    removeListener(event, fn) { assert.equal(listeners.get(event), fn); listeners.delete(event); }
+  };
+  const never = () => assert.fail('S01 source unit must not enroll/create a session');
+  const main = new Function('resolve', 'readRuntimeHostConfig', 'createLogger', 'runUnifiedRuntime',
+    'RuntimeV1Client', 'readEnrollmentSecret', 'process', `${source.slice(argsStart, argsEnd)}\n${mainSource}\nreturn main;`)(
+    resolve, readRuntimeHostConfig, createLogger, async settings => { calls.push(settings); }, never, never, processCapture);
+  const invoke = async ({ argv = [], env = {} } = {}) => {
+    try {
+      return await main(['run', '--config', f.path, ...argv], { CYF_RUNTIME_V1_API_BASE_URL: 'https://no-network.invalid', ...env });
+    } finally {
+      assert.equal(listeners.size, 0, 'all original CLI signal listeners released');
+      assert.deepEqual(await readdir(f.raw.stateRoot), [], 'no host writer/adoption');
+      assert.deepEqual(await readdir(f.entries[0].stateRoot), [], 'no queue/session/checkpoint IO');
+    }
+  };
+  const policyFile = async (id, change = {}) => {
+    const policy = { policyId: id, root: resolve(f.root, `${id}-workspaces`), repository: resolve(f.root, `${id}-repository`),
+      baseRef: 'develop', trustedRemoteUrl: 'https://repository.invalid/synthetic.git', trustedRemoteRef: 'refs/heads/develop', ...change };
+    const file = resolve(f.root, `${id}.json`); await f.json(file, [policy]);
+    return { policy, file };
+  };
+  return { ...f, invoke, calls, policyFile };
+}
+
+test('S01 workspace CLI: explicit file reproduces old string empty Map and passes real loaded policy to Runtime boundary', async t => {
+  const f = await workspaceCliUnit(t); const { file, policy } = await f.policyFile('s01-cli');
+  const { loadWorkspacePolicies } = await import(resolve(engineSource, 'workspace-manager.mjs'));
+  assert.deepEqual([...loadWorkspacePolicies(file)], [], 'historical string argument misses the current env-shaped signature');
+  assert.equal(await f.invoke({ argv: ['--workspace-policies', file] }), 0);
+  assert.equal(f.calls.length, 1); assert.deepEqual([...f.calls[0].workspacePolicies], [[policy.policyId, policy]]);
+  assert.equal(f.calls[0].config.agents[0].manifest.canonicalAgentId, f.manifests[0].canonicalAgentId);
+  await assert.rejects(lstat(policy.root), code('ENOENT')); await assert.rejects(lstat(policy.repository), code('ENOENT'));
+});
+
+test('S01 workspace CLI: CYF file input reaches original loader without inheriting legacy inline/file keys', async t => {
+  const f = await workspaceCliUnit(t); const { file, policy } = await f.policyFile('s01-cyf');
+  assert.equal(await f.invoke({ env: { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: file,
+    CODEX_WORKSPACE_POLICIES_FILE: 'must-not-open-legacy-file', CODEX_WORKSPACE_POLICIES: 'must-not-parse-legacy-inline' } }), 0);
+  assert.equal(f.calls.length, 1); assert.deepEqual([...f.calls[0].workspacePolicies], [[policy.policyId, policy]]);
+});
+
+test('S01 workspace CLI: CLI file has priority over CYF file rather than merging either scope', async t => {
+  const f = await workspaceCliUnit(t); const cli = await f.policyFile('s01-priority-cli'); const cyf = await f.policyFile('s01-priority-cyf');
+  assert.equal(await f.invoke({ argv: ['--workspace-policies', cli.file], env: { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: cyf.file } }), 0);
+  assert.equal(f.calls.length, 1); assert.deepEqual([...f.calls[0].workspacePolicies], [[cli.policy.policyId, cli.policy]]);
+  assert.equal(f.calls[0].workspacePolicies.has(cyf.policy.policyId), false);
+});
+
+test('S01 workspace CLI: invalid selected CLI file never falls back to a valid CYF file', async t => {
+  const f = await workspaceCliUnit(t); const cyf = await f.policyFile('s01-valid-fallback');
+  await assert.rejects(f.invoke({ argv: ['--workspace-policies', 'relative-policy.json'], env: { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: cyf.file } }), code('WORKSPACE_POLICY_INVALID'));
+  assert.equal(f.calls.length, 0);
+});
+
+test('S01 workspace CLI: absent or empty CYF file defaults to an empty Map and ignores old-only policy inputs', async t => {
+  const f = await workspaceCliUnit(t); const legacy = await f.policyFile('s01-legacy');
+  for (const env of [{}, { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: '' }, {
+    CODEX_WORKSPACE_POLICIES_FILE: legacy.file, CODEX_WORKSPACE_POLICIES: JSON.stringify([legacy.policy])
+  }]) {
+    assert.equal(await f.invoke({ env }), 0); assert.deepEqual([...f.calls.at(-1).workspacePolicies], []);
+  }
+  assert.equal(f.calls.length, 3);
+});
+
+for (const kind of ['relative', 'missing', 'file-symlink', 'ancestor-symlink', 'invalid-json', 'invalid-shape', 'relative-resource', 'overlapping-resources', 'remote-credentials']) {
+  test(`S01 workspace CLI: original loader rejects ${kind} before any Runtime execution`, async t => {
+    const f = await workspaceCliUnit(t); const valid = await f.policyFile('s01-invalid'); let file = valid.file;
+    let expected = 'WORKSPACE_POLICY_INVALID';
+    if (kind === 'relative') file = 'relative-policy.json';
+    if (kind === 'missing') { file = resolve(f.root, 'absent.json'); expected = 'WORKSPACE_PATH_MISSING'; }
+    if (kind === 'file-symlink') { file = resolve(f.root, 'linked.json'); await symlink(valid.file, file); expected = 'WORKSPACE_SYMLINK_ESCAPE'; }
+    if (kind === 'ancestor-symlink') { const link = resolve(f.root, 'linked-parent'); await symlink(f.root, link); file = resolve(link, 's01-invalid.json'); expected = 'WORKSPACE_SYMLINK_ESCAPE'; }
+    if (kind === 'invalid-json') await writeFile(file, 'not-json\n');
+    if (kind === 'invalid-shape') await f.json(file, [null]);
+    if (kind === 'relative-resource') await f.json(file, [{ ...valid.policy, repository: 'relative-repository' }]);
+    if (kind === 'overlapping-resources') await f.json(file, [{ ...valid.policy, root: resolve(valid.policy.repository, 'nested-workspace') }]);
+    if (kind === 'remote-credentials') await f.json(file, [{ ...valid.policy, trustedRemoteUrl: 'https://synthetic:NOT-A-SECRET@repository.invalid/repo' }]);
+    // Cover both public selection inputs while preserving CLI priority when set.
+    for (const input of [{ argv: ['--workspace-policies', file] }, { env: { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: file } }]) {
+      await assert.rejects(f.invoke(input), code(expected)); assert.equal(f.calls.length, 0);
+      const { main } = await import('../agent-runtime.mjs');
+      // Also execute the actual exported CLI. The pre-existing invalid interval
+      // prevents executor/network effects even if the old empty-Map bug returns.
+      await assert.rejects(main(['run', '--config', f.path, ...(input.argv || [])], {
+        CYF_RUNTIME_V1_API_BASE_URL: 'https://no-network.invalid',
+        CYF_RUNTIME_V1_HEARTBEAT_INTERVAL_MS: '0', ...(input.env || {})
+      }), code(expected));
+      assert.deepEqual(await readdir(f.raw.stateRoot), []);
+      assert.deepEqual(await readdir(f.entries[0].stateRoot), []);
+    }
+  });
+}

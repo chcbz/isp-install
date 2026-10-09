@@ -76,7 +76,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     logger('runtime-enrolled', { subjectKey: agent.subjectKey }); return 0;
   }
   const policyFile = options['workspace-policies'] || env.CYF_RUNTIME_WORKSPACE_POLICIES_FILE;
-  const workspacePolicies = policyFile ? (await import('../codex-ws-agent/workspace-manager.mjs')).loadWorkspacePolicies(policyFile) : new Map();
+  const workspacePolicies = policyFile ? (await import('../codex-ws-agent/workspace-manager.mjs')).loadWorkspacePolicies({ CODEX_WORKSPACE_POLICIES_FILE: policyFile }) : new Map();
   const interval = Number(env.CYF_RUNTIME_V1_HEARTBEAT_INTERVAL_MS || 30000);
   if (!Number.isSafeInteger(interval) || interval < 1) throw failure('RUNTIME_HEARTBEAT_INTERVAL_INVALID');
   const controller = new AbortController(); const stop = () => controller.abort();
