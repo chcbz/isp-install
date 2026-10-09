@@ -4367,6 +4367,15 @@ const terminateAllRuns = () => {
   }
 }
 
+export const inheritManagedRuntimeCapabilities = (profile, source = {}) => ({
+  ...profile,
+  workspaceFileApiOrigin: source.workspaceFileApiOrigin || '',
+  workspaceFileRootDir: source.workspaceFileRootDir || '',
+  executionReportCommandTypes: Array.isArray(source.executionReportCommandTypes)
+    ? [...source.executionReportCommandTypes]
+    : []
+})
+
 const createProfileState = profile => {
   const workspacePolicy = profile.workspacePolicyId
     ? config.workspacePolicies.get(profile.workspacePolicyId)
@@ -4875,6 +4884,7 @@ export const main = async () => {
             generation: state.profile.managedGeneration, runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
         },
         attachProfile: async (profile, engine) => {
+          profile = inheritManagedRuntimeCapabilities(profile, defaultProfile)
           let state = profileStates.get(profile.agentId)
           if (state && state.profile.managedGeneration !== profile.managedGeneration) throw new Error('Managed profile collision')
           if (!state) {
