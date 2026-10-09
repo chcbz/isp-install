@@ -1558,6 +1558,78 @@ test('same commandId triggers dedupe and does not re-enqueue', async () => {
   assert.deepEqual(completedAcks, ['command-1', 'command-1'])
 })
 
+test('automatic reissue duplicate replays new transport metadata without replacing queued execution', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: profileStorageRoot(rootDir), profile })
+  ledger.initialize()
+  const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile })
+  ackOutbox.initialize()
+
+  let runs = 0
+  const acks = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => { acks.push(envelope); return true }
+  })
+  processor.start({ drain: false })
+
+  const attempt1 = command(91)
+  const attempt2 = {
+    ...attempt1,
+    messageId: 'message-91-reissue-2',
+    requestId: 'message-91-reissue-2',
+    attempt: 2
+  }
+  const attempt3 = {
+    ...attempt1,
+    messageId: 'message-91-reissue-3',
+    requestId: 'message-91-reissue-3',
+    attempt: 3
+  }
+
+  assert.equal((await processor.handle(attempt1)).kind, 'command')
+  assert.equal(runs, 0)
+  assert.equal(inbox.count('pending'), 1)
+  assert.equal(inbox.list('pending')[0].messageId, attempt1.messageId)
+
+  assert.equal((await processor.handle(attempt2)).kind, 'command-duplicate')
+  assert.equal(runs, 0)
+  assert.equal(inbox.count('pending'), 1)
+  assert.equal(inbox.list('pending')[0].messageId, attempt1.messageId)
+  assert.deepEqual(
+    acks.map(envelope => [envelope.ackStatus, envelope.correlationId]),
+    [
+      [ACK_STATUS.RECEIVED, attempt1.messageId],
+      [ACK_STATUS.RECEIVED, attempt2.messageId]
+    ]
+  )
+
+  processor.resume()
+  await processor.waitForIdle()
+  assert.equal(runs, 1)
+  assert.deepEqual(
+    acks.slice(-2).map(envelope => [envelope.ackStatus, envelope.correlationId]),
+    [
+      [ACK_STATUS.STARTED, attempt1.messageId],
+      [ACK_STATUS.SUCCEEDED, attempt1.messageId]
+    ]
+  )
+
+  assert.equal((await processor.handle(attempt3)).kind, 'command-duplicate')
+  await processor.waitForIdle()
+  assert.equal(runs, 1)
+  assert.deepEqual(
+    [acks.at(-1).ackStatus, acks.at(-1).correlationId],
+    [ACK_STATUS.SUCCEEDED, attempt3.messageId]
+  )
+})
+
 test('same commandId with different payload causes fingerprint conflict and REJECTED', async () => {
   const rootDir = temporaryDirectory()
   const inbox = createInbox(rootDir)
