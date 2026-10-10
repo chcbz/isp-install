@@ -20,7 +20,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const engineSource = resolve(repo, 'conf/codex-ws-agent');
 const code = expected => cause => cause?.code === expected;
 
-async function fixture(t, { count = 3, sameAgentId = false } = {}) {
+async function fixture(t, { count = 3, sameAgentId = false, firstIdentity = {} } = {}) {
   const root = await mkdtemp(resolve(tmpdir(), 'ur01-owned-fixture-'));
   const cleanups = [];
   t.after(async () => {
@@ -35,7 +35,7 @@ async function fixture(t, { count = 3, sameAgentId = false } = {}) {
     const base = resolve(root, `agent-${i}`); await mkdir(base, { mode: 0o700 });
     for (const name of ['state', 'home', 'work']) await mkdir(resolve(base, name), { mode: 0o700 });
     const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: `installation-${i}`,
-      tenantId: `tenant-${i}`, clientId: 'client', canonicalAgentId: sameAgentId ? 'agent' : `agent-${i}` };
+      tenantId: `tenant-${i}`, clientId: 'client', canonicalAgentId: sameAgentId ? 'agent' : `agent-${i}`, ...(i === 0 ? firstIdentity : {}) };
     const manifest = { ...unsigned, manifestSha256: digestManifest(unsigned) };
     const profile = { profileId: `profile-${i}`, agentId: manifest.canonicalAgentId, codexBin: '/bin/true',
       codexHome: resolve(base, 'home'), codexWorkdir: resolve(base, 'work'), appServerEnabled: false,
@@ -432,11 +432,12 @@ test('toolchain validation refuses a host-global interpreter alias instead of fa
 
 // M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
 // lifecycle. Synthetic socket/HTTP only; no server/production claim.
-async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true } = {}) {
+async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {} } = {}) {
   const { EventEmitter } = await import('node:events');
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
-  const f = await fixture(t, { count: 2 }); const config = await f.config();
-  const requests = []; const sockets = []; const engines = new Map();
+  const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
+  const requests = []; const sockets = []; const engines = new Map(); const logs = [];
+  const normalize = validateBusiness ? (await import('../../codex-ws-agent/agent-client.mjs')).normalizeInboundMessage : null;
   const socketEvents = new EventEmitter();
   class Socket extends EventEmitter {
     constructor(url, options) {
@@ -459,13 +460,13 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
     createRuntimeExecutionHost: () => ({
       createExecutor: ({ subjectKey, agent }) => {
         const state = { profile: agent.profile, processor: { pause: () => { state.paused = true; } }, healthy,
-          accepted: [], closed: false, resumed: 0, types: [...types], paused: true, transport: null };
+          accepted: [], normalized: [], closed: false, resumed: 0, types: [...types], paused: true, transport: null };
         engines.set(subjectKey, state);
         return {
           initialize: async () => {}, bindTransport: transport => { state.transport = transport; }, attachSocket: socket => { state.socket = socket; },
           durableStateHealthy: () => state.healthy, readyCommandTypes: () => state.types, chatReady: () => chatReady,
           registrationPayload: () => ({ runtimeCapabilities: { profiles: { EXECUTE: { available: false } } } }),
-          acceptFrame: async frame => { state.accepted.push(frame); }, resume: async () => { state.resumed++; },
+          acceptFrame: async frame => { state.accepted.push(frame); if (normalize && !(frame.type === 'agent_message_saved' && !Object.hasOwn(frame, 'messageType'))) state.normalized.push(normalize(frame)); }, resume: async () => { state.resumed++; },
           disconnected: () => { state.paused = true; }, suspendAdmission: () => { state.paused = true; },
           close: async () => { state.closed = true; }, state: () => state
         };
@@ -474,7 +475,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
   };
   for (const agent of config.agents) await f.json(resolve(agent.stateRoot, 'runtime-authorization.json'), { installationId: agent.manifest.installationId, runtimeAuthorization: 'synthetic-' + agent.manifest.installationId });
   const generation = new Map();
-  const adapters = await createExecutionAdapterFactory({ config, instanceId: 'boot-fixture', apiOrigin: 'https://api.example.test', socketFactory: Socket,
+  const adapters = await createExecutionAdapterFactory({ config, instanceId: 'boot-fixture', apiOrigin: 'https://api.example.test', socketFactory: Socket, logger: (event, details) => logs.push({ event, ...details }),
     loadEngine: async () => module, clientFactory: settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
       const body = JSON.parse(options.body); requests.push({ url, options, body });
       if (url.endsWith('/session')) {
@@ -487,8 +488,134 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
   f.cleanup(() => adapters.close());
   const executors = config.agents.map(agent => adapters.createExecutor({ subjectKey: agent.subjectKey, agent }));
   for (const executor of executors) await executor.initialize();
-  return { f, config, adapters, sockets, requests, executors, engines, states: () => [...engines.values()], nextOpened: () => new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), opened: () => sockets.some(socket => socket.readyState === 1) ? Promise.resolve() : new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), tick: () => new Promise(resolveTick => setImmediate(resolveTick)) };
+  return { f, config, adapters, sockets, requests, executors, engines, logs, states: () => [...engines.values()], nextOpened: () => new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), opened: () => sockets.some(socket => socket.readyState === 1) ? Promise.resolve() : new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), tick: () => new Promise(resolveTick => setImmediate(resolveTick)) };
 }
+
+// API updateAgentStatus(copyTrace(agent.presence)) deliberately has no
+// messageType. Exercise the actual adapter/observer/client, not a copied router.
+const presenceReceipt = presence => ({ schemaVersion: 1, type: 'agent_status_updated',
+  messageId: presence.messageId, agentId: presence.agentId,
+  runtimeInstanceId: presence.runtimeInstanceId, status: presence.status });
+const registrationReceipt = registration => ({ type: 'agent_registered',
+  messageId: registration.messageId, agentId: registration.agentId, runtimeInstanceId: registration.runtimeInstanceId,
+  installationId: registration.installationId, hostId: registration.hostId, sessionGeneration: registration.sessionGeneration,
+  status: 'online', durableStateHealthy: registration.durableStateHealthy, readyCommandTypes: registration.readyCommandTypes });
+
+test('presence receipt control stays out of business, never re-registers or mutates readiness', async t => {
+  const c = await channelFixture(t, { validateBusiness: true });
+  await Promise.all(c.executors.map(executor => executor.activate())); await c.adapters.heartbeat(); await c.tick();
+  const socket = c.sockets[0]; const state = c.states()[0];
+  const before = c.executors[0].evidence(); const resumed = state.resumed;
+  const sent = socket.sent.length; const receipt = presenceReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.presence'));
+  for (const status of ['online', 'busy', 'offline', 'error']) socket.receive({ ...receipt, status, arbitrary: 'synthetic-secret-never-log' });
+  socket.receive({ type: 'agent_status_updated', data: receipt }); // supported server data wrapper
+  socket.receive(receipt); // same/delayed receipt is harmless, no registry required
+  await c.tick();
+  assert.deepEqual(state.accepted, []); assert.equal(socket.sent.length, sent); assert.equal(state.resumed, resumed);
+  assert.deepEqual(c.executors[0].evidence(), before); assert.equal(c.executors[0].ready(), true);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-control-receipt').length, 6);
+  assert.equal(c.logs.some(row => row.code === 'MESSAGE_TYPE_REQUIRED'), false);
+  assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
+  assert.ok(c.logs.filter(row => row.event === 'runtime-control-receipt').every(row => Object.keys(row).join(',') === 'event,type'));
+});
+
+test('presence receipt control cannot grant registration; explicit business types cannot spoof ACK', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  let activated = false; const activating = c.executors[0].activate().then(() => { activated = true; }); await c.opened();
+  const socket = c.sockets[0]; const receipt = registrationReceipt(socket.sent[0]);
+  socket.receive(presenceReceipt({ ...socket.sent[0], status: 'online' }));
+  for (const type of ['chat.message', 'protocol.error', null]) socket.receive({ ...receipt, messageType: type });
+  socket.receive({ ...receipt, payload: { messageType: 'chat.message' } });
+  socket.receive({ type: 'agent_registered', data: { ...receipt, messageType: 'chat.message' } });
+  socket.receive({ ...receipt, sessionGeneration: 6 });
+  await c.tick(); assert.equal(activated, false); assert.equal(c.executors[0].ready(), false);
+  assert.equal(c.executors[0].evidence(), null); assert.equal(socket.readyState, 1);
+  socket.receive(receipt); await activating; assert.equal(c.executors[0].ready(), true);
+  assert.equal(socket.sent.filter(frame => frame.messageType === 'agent.register').length, 1);
+});
+
+test('presence receipt control rejects wrong subject/session and malformed trace without logging secrets', async t => {
+  const c = await channelFixture(t, { validateBusiness: true }); await c.executors[0].activate(); await c.adapters.heartbeat();
+  const socket = c.sockets[0]; const receipt = presenceReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.presence'));
+  const before = c.executors[0].evidence();
+  const invalid = [
+    { ...receipt, sessionGeneration: 6 }, { type: receipt.type, data: { ...receipt, sessionGeneration: 6 } },
+    { ...receipt, payload: { sessionGeneration: 6 } }, { ...receipt, agentId: 'foreign' },
+    { ...receipt, runtimeInstanceId: 'foreign' }, { ...receipt, schemaVersion: '1' },
+    { ...receipt, messageId: '' }, { ...receipt, messageId: ' bad ' }, { ...receipt, messageId: 'x'.repeat(129) },
+    { ...receipt, status: 'ready' }, { ...receipt, agentId: undefined }
+  ];
+  for (const frame of invalid) socket.receive({ ...frame, error: 'synthetic-secret-never-log' });
+  await c.tick(); assert.deepEqual(c.states()[0].accepted, []); assert.deepEqual(c.executors[0].evidence(), before);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-frame-rejected').length, invalid.length);
+  assert.ok(c.logs.every(row => ['RUNTIME_FRAME_GENERATION_MISMATCH', 'RUNTIME_CONTROL_RECEIPT_INVALID'].includes(row.code)));
+  assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
+});
+
+test('presence receipt control does not swallow explicit business declarations or normal ping', async t => {
+  const c = await channelFixture(t, { validateBusiness: true }); await c.executors[0].activate();
+  const socket = c.sockets[0]; const before = c.executors[0].evidence();
+  socket.receive({ type: 'connected' }); socket.receive({ type: 'ping' }); await c.tick();
+  const sent = socket.sent.length;
+  assert.equal(socket.sent.at(-1).messageType, 'pong'); assert.deepEqual(c.states()[0].accepted, []);
+  const frames = [];
+  for (const type of ['agent_status_updated', 'connected', 'ping', 'agent_registered', 'error', 'protocol_error']) {
+    for (const messageType of ['chat.message', null]) {
+      frames.push({ schemaVersion: 1, type, messageType });
+      frames.push({ schemaVersion: 1, type, data: { messageType } });
+      frames.push({ schemaVersion: 1, type, payload: { messageType } });
+      frames.push({ schemaVersion: 1, type, data: { payload: { messageType } } });
+    }
+  }
+  for (const frame of frames) socket.receive(frame);
+  await c.tick(); assert.deepEqual(c.states()[0].accepted, frames); assert.equal(socket.sent.length, sent);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-frame-rejected').length, frames.length);
+  assert.equal(c.logs.some(row => row.event === 'runtime-control-receipt'), false);
+  assert.deepEqual(c.executors[0].evidence(), before);
+});
+
+test('presence receipt control keeps genuine correlated registration errors and session fencing', async t => {
+  for (const kind of ['error', 'protocol_error', 'protocol.error', 'typed-error']) await t.test(kind, async t => {
+    const c = await channelFixture(t, { ackRegistration: false });
+    const activating = assert.rejects(c.executors[0].activate(), code('RUNTIME_REGISTRATION_REJECTED')); await c.opened();
+    const socket = c.sockets[0]; const registration = socket.sent[0];
+    const frame = { messageId: registration.messageId, runtimeInstanceId: registration.runtimeInstanceId,
+      ...(kind === 'protocol.error' ? { schemaVersion: 1, messageType: kind }
+        : kind === 'typed-error' ? { schemaVersion: 1, type: 'error', messageType: 'protocol.error' } : { type: kind }),
+      error: 'synthetic-secret-never-log' };
+    socket.receive({ ...frame, messageId: 'wrong-request' });
+    socket.receive({ ...frame, sessionGeneration: 6 });
+    socket.receive({ type: 'error', data: { ...frame, sessionGeneration: 6 } });
+    await c.tick(); assert.equal(socket.readyState, 1); assert.equal(c.executors[0].ready(), false);
+    socket.receive(frame); await activating; await c.tick(); assert.equal(c.executors[0].evidence(), null);
+    assert.equal(socket.readyState, 3); assert.equal(c.states()[0].accepted.length, 0);
+    assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
+  });
+});
+
+test('presence receipt control preserves unknown/error rejection and canonical CHAT/command/persistence ingress', async t => {
+  const chat = JSON.parse(await readFile(resolve(engineSource, 'contracts/api-hosted-wire-v1.json'), 'utf8'));
+  const c = await channelFixture(t, { validateBusiness: true, types: ['SKILL_INSTALL'],
+    firstIdentity: { tenantId: chat.tenantId, clientId: chat.clientId, canonicalAgentId: chat.agentId } });
+  await c.executors[0].activate();
+  const socket = c.sockets[0]; const identity = c.config.agents[0].manifest;
+  const unknown = [{ schemaVersion: 1, type: 'unknown' }, { schemaVersion: 1, type: 'error', error: 'synthetic-secret-never-log' },
+    { schemaVersion: 1, type: 'protocol_error' }];
+  for (const frame of unknown) socket.receive(frame);
+  await c.tick(); assert.equal(c.logs.filter(row => row.code === 'MESSAGE_TYPE_REQUIRED').length, unknown.length);
+  const command = { schemaVersion: 1, messageType: 'command.dispatch', commandType: 'SKILL_INSTALL',
+    tenantId: identity.tenantId, clientId: identity.clientId, targetAgentId: identity.canonicalAgentId,
+    installationId: 'synthetic-product-installation', commandId: 'command', messageId: 'command-message', payload: { instruction: 'synthetic' } };
+  // Unmodified API-generated durable CHAT, on the exact synthetic subject.
+  const business = [command, chat, { schemaVersion: 1, messageType: 'protocol.error', messageId: 'unrelated-error' },
+    { type: 'agent_message_saved', turnId: 'own-turn' }, { schemaVersion: 1, messageType: 'work.result.receipt', messageId: 'result', commandId: 'command' }];
+  for (const frame of business) socket.receive(frame);
+  await c.tick(); assert.deepEqual(c.states()[0].accepted, [...unknown, ...business]);
+  assert.deepEqual(c.states()[0].normalized.map(frame => frame.messageType), ['command.dispatch', 'chat.message', 'protocol.error', 'work.result.receipt']);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-frame-rejected').length, unknown.length);
+  assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
+  assert.equal(c.executors[0].ready(), true);
+});
 
 test('two independent session channels activate only exact receipt; health revocation keeps terminal reporting', async t => {
   const c = await channelFixture(t);

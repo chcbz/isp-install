@@ -92,9 +92,18 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               return ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
                 .some(key => !(productInstall && key === 'installationId') && Object.hasOwn(layer, key) && layer[key] !== session[key]);
             };
-            if (proofMismatch(frame)) return;
-            if (proofMismatch(payload)) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH' }); return; }
-            const observed = observer.observe(frame);
+            if (proofMismatch(frame) || proofMismatch(payload)) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH' }); return; }
+            // A type-only control event is not a business envelope. Check both
+            // supported wrapper shapes: even null/invalid explicit messageType
+            // must reach the original strict business validator, never be eaten
+            // by a cosmetic control type (including registration/error replies).
+            const layers = [frame, payload, frame.payload, payload.payload].filter(layer => layer && typeof layer === 'object' && !Array.isArray(layer));
+            const declared = layers.filter(layer => Object.hasOwn(layer, 'messageType'));
+            const typeOnlyControl = declared.length === 0;
+            const registrationError = (frame.type === 'error' || frame.type === 'protocol_error'
+              || !Object.hasOwn(frame, 'type') && frame.messageType === 'protocol.error')
+              && declared.every(layer => layer.messageType === 'protocol.error');
+            const observed = typeOnlyControl || registrationError ? observer.observe(frame) : null;
             if (observed === 'registered') {
               if (payload.readyCommandTypes.length !== requestTypes.length || payload.readyCommandTypes.some(type => !requestTypes.includes(type)) || payload.durableStateHealthy !== declaredHealthy) {
                 channelConfirmed = false; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
@@ -102,9 +111,25 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               channelConfirmed = true; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null; resolveActivated?.(); resume(); return;
             }
             if (observed === 'rejected') { rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 })); current.close(1008); return; }
-            if (frame.type === 'connected' || frame.type === 'agent_registered') return;
-            if (frame.type === 'ping') { send({ schemaVersion: 1, messageType: 'pong', type: 'pong', messageId: randomUUID() }); return; }
+            if (typeOnlyControl && (frame.type === 'connected' || frame.type === 'agent_registered')) return;
+            if (typeOnlyControl && frame.type === 'ping') { send({ schemaVersion: 1, messageType: 'pong', type: 'pong', messageId: randomUUID() }); return; }
             if (!channelConfirmed) return;
+            // AgentWebSocketHandler.updateAgentStatus sends copyTrace(presence)
+            // plus agentId/status as agent_status_updated, without messageType.
+            // Consume ONLY this receipt, after session gates, without granting
+            // readiness, changing lifecycle state or re-registering. Unknown and
+            // error frames still take the existing registration/business paths.
+            if (typeOnlyControl && frame.type === 'agent_status_updated') {
+              if (layers.some(proofMismatch) || payload.schemaVersion !== 1
+                  || payload.agentId !== session.canonicalAgentId || payload.runtimeInstanceId !== session.runtimeInstanceId
+                  || typeof payload.messageId !== 'string' || !payload.messageId.trim() || payload.messageId.trim() !== payload.messageId
+                  || Buffer.byteLength(payload.messageId) > 128 || /[\x00-\x1f\x7f]/u.test(payload.messageId)
+                  || !['online', 'busy', 'offline', 'error'].includes(payload.status)) {
+                logger('runtime-frame-rejected', { code: 'RUNTIME_CONTROL_RECEIPT_INVALID' }); return;
+              }
+              // Do not log the frame, arbitrary trace fields, error text or tokens.
+              logger('runtime-control-receipt', { type: 'agent_status_updated' }); return;
+            }
             // Results/CHAT persistence receipts remain WS business confirmations.
             // Commands go through the existing durable processor, never a new queue.
             if (frame.messageType === 'command.ack') return;
