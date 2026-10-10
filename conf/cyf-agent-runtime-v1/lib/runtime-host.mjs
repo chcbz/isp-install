@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { constants, open, lstat, realpath, mkdir, unlink, rmdir } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
-import { readRuntimeHostConfig, runtimeSubjectKey } from './manifest.mjs';
+import { readRuntimeHostConfig, runtimeSubjectKey, validateManifest, stableJson } from './manifest.mjs';
 
 const error = code => Object.assign(new Error(code), { code });
 async function syncDirectory(path) {
@@ -91,9 +91,16 @@ export class RuntimeHost {
     // it a channel, but does not tear down the other initialized Agents.
     await Promise.all([...this.agents.keys()].map(key => this.withAgent(key, async state => {
       if (this.stopping) return;
+      await this.initializeAgent(key, state);
+    })));
+    return this.snapshot();
+  }
+
+
+  async initializeAgent(key, state) {
       state.phase = 'STARTING';
       try {
-        state.release = await acquireRuntimeOwnership(state.agent.stateRoot, {
+        state.release ||= await acquireRuntimeOwnership(state.agent.stateRoot, {
           hostId: this.config.hostId, instanceId: this.instanceId, subjectKey: key
         });
         state.executor = await this.createExecutor({ agent: state.agent, instanceId: this.instanceId, subjectKey: key });
@@ -108,8 +115,54 @@ export class RuntimeHost {
         catch { state.reasonCode = 'RUNTIME_AGENT_STOP_UNCONFIRMED'; }
         this.logger('runtime-agent-isolated', { subjectKey: key, reasonCode: state.reasonCode });
       }
-    })));
-    return this.snapshot();
+  }
+
+  // Full subject identity and canonical roots are validated locally before admission.
+  // Control callers supply only generated, trusted-template entries, never wire config.
+  ensureAgent(agent, { recreate = false } = {}) {
+    try {
+      if (this.stopping || !this.releaseHost) throw error('RUNTIME_HOST_NOT_RUNNING');
+      validateManifest(agent.manifest);
+      const key = runtimeSubjectKey(agent.manifest);
+      if (agent.subjectKey !== key || agent.profile.agentId !== agent.manifest.canonicalAgentId) throw error('RUNTIME_AGENT_IDENTITY_INVALID');
+      const prior = this.agents.get(key);
+      if (prior && (stableJson(prior.agent.manifest) !== stableJson(agent.manifest)
+          || prior.agent.stateRoot !== agent.stateRoot || stableJson(prior.agent.profile) !== stableJson(agent.profile))) throw error('RUNTIME_AGENT_IDENTITY_CONFLICT');
+      const roots = candidate => [candidate.stateRoot, ...['codexHome', 'codexWorkdir', 'chatWorkdir', 'workspaceFallbackWorkdir',
+        'workspaceFileRootDir', 'typedInspectionRootDir', 'typedInspectionStateRoot', 'controlledImageHttpLedgerRoot'].map(field => candidate.profile[field]).filter(Boolean)];
+      const overlaps = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+      for (const path of roots(agent)) {
+        if (!isAbsolute(path) || resolve(path) !== path || overlaps(path, this.config.stateRoot)) throw error('RUNTIME_PATH_INVALID');
+        for (const [otherKey, other] of this.agents) {
+          if (otherKey !== key && (other.agent.manifest.installationId === agent.manifest.installationId
+              || roots(other.agent).some(root => overlaps(path, root)))) throw error('RUNTIME_AGENT_ROOTS_OVERLAP');
+        }
+      }
+      if (!prior) this.agents.set(key, { agent, phase: 'STOPPED', executor: null, release: null, gate: Promise.resolve(), reasonCode: null });
+      // Interrupt only the subject's registration wait, before queuing shutdown.
+      // No ownership/engine state is released outside the lifecycle gate.
+      if (recreate) prior?.executor?.cancelActivation?.();
+      return this.withAgent(key, async state => {
+        if (this.stopping) throw error('RUNTIME_HOST_STOPPED');
+        for (const path of roots(state.agent)) await requireOwnedPrivateRoot(path);
+        if (recreate) {
+          await state.executor?.pause?.(); await state.executor?.close?.();
+          state.executor = null; state.phase = 'STOPPED'; state.reasonCode = null;
+          // Retain Agent writer ownership throughout replacement.
+        }
+        if (state.phase === 'STOPPED') await this.initializeAgent(key, state);
+        if (!['INITIALIZED', 'READY'].includes(state.phase)) throw error(state.reasonCode || 'RUNTIME_AGENT_NOT_INITIALIZED');
+        return state;
+      });
+    } catch (cause) { return Promise.reject(cause); }
+  }
+
+  reprovisionAgent(agent) { return this.ensureAgent(agent, { recreate: true }); }
+
+  agentEvidence(key) {
+    const state = this.agents.get(key);
+    return !this.stopping && ['READY', 'INITIALIZED'].includes(state?.phase) && state.executor?.ready?.() === true
+      ? state.executor.evidence?.() || null : null;
   }
 
   // This is an internal executor boundary. Session DTO validation is supplied by

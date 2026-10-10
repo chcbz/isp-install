@@ -4767,7 +4767,7 @@ export const runReadOnlyInspection = async (profile, message, options = {}) => {
 }
 export const runConfirmedCommand = (profile, message, options = {}) => runCodex(profile, message, 'command', options)
 
-const profileConfigurationErrors = profile => {
+export const profileConfigurationErrors = profile => {
   const errors = []
   if (!['read-only', 'workspace-write', 'danger-full-access'].includes(profile.codexSandbox)) {
     errors.push('codexSandbox must be read-only, workspace-write, or danger-full-access')
@@ -6405,7 +6405,8 @@ export const buildRuntimeExecutionEnvironment = (profile, overrides = {}) => {
     'CYF_WORKSPACE_FILE_TOOLCHAIN_PYTHON', 'CYF_WORKSPACE_FILE_DELIVERY_TOOL'])
   for (const key of Object.keys(overrides || {})) if (!allowed.has(key)) throw new AgentProtocolError('RUNTIME_EXECUTION_ENV_FORBIDDEN', 'Execution environment key is not allowlisted')
   const inherited = Object.fromEntries(['PATH', 'LANG', 'LC_ALL', 'TZ'].filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))
-  return { ...inherited, ...overrides, HOME: profile.codexHome, CODEX_HOME: profile.codexHome }
+  const managedProvider = Object.fromEntries(Object.entries(profile.runtimeProviderEnvironment || {}).filter(([key]) => /^CYF_MANAGED_PROVIDER_[A-Z][A-Z0-9_]*$/.test(key)))
+  return { ...inherited, ...managedProvider, ...overrides, HOME: profile.codexHome, CODEX_HOME: profile.codexHome }
 }
 
 export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigin, workspacePolicies = new Map(), providerEnvironments = new Map(), webSocketClient = null }) => {
@@ -6415,16 +6416,17 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
   if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== '/') throw new AgentProtocolError('RUNTIME_API_ORIGIN_INVALID', 'Runtime API origin must not contain credentials or routing data')
   if (webSocketClient) WebSocketClient = webSocketClient
   const owner = Symbol('runtime execution host')
-  const entries = new Map(agents.map(agent => {
+  const makeEntry = agent => {
     const manifest = agent.manifest
     const subjectKey = createHash('sha256').update(JSON.stringify({ canonicalAgentId: manifest.canonicalAgentId, clientId: manifest.clientId, tenantId: manifest.tenantId })).digest('hex')
     if (agent.subjectKey !== subjectKey) throw new AgentProtocolError('RUNTIME_SUBJECT_KEY_INVALID', 'Runtime subject storage key must match exact identity')
     const profile = { ...normalizeProfile(agent.profile, {}, 0, { isolated: true }), runtimeSubjectKey: subjectKey,
       runtimeIdentity: Object.freeze({ ...manifest }), runtimeApiOrigin: origin.origin, runtimeInstanceId, runtimeStateRoot: agent.stateRoot,
-      runtimeProviderEnvironment: Object.freeze({ ...(providerEnvironments.get(subjectKey) || {}) }) }
+      runtimeProviderEnvironment: Object.freeze({ ...(providerEnvironments.get(subjectKey) || agent.providerEnvironment || {}) }) }
     if (profile.agentId !== manifest.canonicalAgentId || profile.apiKey || profile.workspaceFileRuntimeAuthHeader) throw new AgentProtocolError('RUNTIME_PROFILE_IDENTITY_INVALID', 'Runtime profile cannot substitute its installation identity')
     return [subjectKey, { agent, profile, state: null, closed: false }]
-  }))
+  }
+  const entries = new Map(agents.map(makeEntry))
   if (entries.size !== agents.length) throw new AgentProtocolError('RUNTIME_SUBJECT_DUPLICATE', 'Duplicate runtime subject')
   const profiles = [...entries.values()].map(entry => entry.profile)
   // Validation is per subject; an agentId is not globally unique across tenants.
@@ -6443,8 +6445,31 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
     if (entry.closed) return
     if (entry.state) await disposeProfileState(entry.state, 'Runtime executor stopped')
     entry.closed = true
+    entry.state = null
   }
   return {
+    // Trusted local lifecycle only: never accepts wire-selected profile/path data.
+    addAgent: agent => {
+      if (closing || runtimeExecutionOwner !== owner) throw new AgentProtocolError('RUNTIME_EXECUTOR_OWNERSHIP_LOST', 'Execution host is stopping')
+      const [key, fresh] = makeEntry(agent)
+      const prior = entries.get(key)
+      if (prior && (!prior.closed || prior.agent.manifest.installationId !== agent.manifest.installationId
+          || prior.agent.manifest.manifestSha256 !== agent.manifest.manifestSha256 || prior.agent.stateRoot !== agent.stateRoot))
+        throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Existing subject must be closed with identical installation')
+      const replacement = [...entries.values()].filter(entry => entry !== prior).map(entry => entry.profile).concat(fresh.profile)
+      // Dynamic entries must retain cross-subject HOME/workdir isolation.
+      for (const profile of replacement) for (const other of replacement) {
+        if (profile === other) continue
+        for (const field of ['codexHome', 'codexWorkdir']) {
+          const left = resolve(profile[field]); const right = resolve(other[field])
+          if (left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`))
+            throw new AgentProtocolError('RUNTIME_AGENT_ROOTS_OVERLAP', 'Dynamic executor roots overlap')
+        }
+      }
+      ensureProfiles([fresh.profile], fresh.profile.profileId, workspacePolicies, false)
+      entries.set(key, fresh)
+      profiles.splice(0, profiles.length, ...replacement)
+    },
     createExecutor: ({ subjectKey }) => {
       const entry = entries.get(subjectKey)
       if (!entry || entry.closed || entry.state) throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Executor subject is unknown or already attached')

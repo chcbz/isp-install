@@ -1,6 +1,6 @@
 [Unit]
 Description=CYF Unified Agent Runtime (%i)
-After=network-online.target
+After=network-online.target systemd-tmpfiles-setup.service
 Wants=network-online.target
 
 [Service]

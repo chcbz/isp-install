@@ -1,3 +1,4 @@
+import { readHostingConfig } from './hosting-config.mjs';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
@@ -98,7 +99,7 @@ export async function readRuntimeHostConfig(configPath) {
   }
   const path = resolve(configPath);
   const config = await jsonFile(path);
-  if (!object(config) || Object.keys(config).sort().join(',') !== 'agents,configVersion,hostId,stateRoot'
+  if (!object(config) || !['agents,configVersion,hostId,stateRoot', 'agents,configVersion,hostId,hostingControlPath,stateRoot'].includes(Object.keys(config).sort().join(','))
       || config.configVersion !== 1 || !exact(config.hostId) || !Array.isArray(config.agents) || !config.agents.length) throw configError('RUNTIME_HOST_CONFIG_INVALID');
   await canonicalPath(config.stateRoot);
   const subjects = new Set(); const installations = new Set(); const roots = [];
@@ -128,5 +129,7 @@ export async function readRuntimeHostConfig(configPath) {
     // API key or host-environment fallback is used to synthesize an identity.
     agents.push({ manifestPath: entry.manifestPath, profilePath: entry.profilePath, manifest, profile, stateRoot, subjectKey });
   }
-  return deepFreeze({ configVersion: 1, hostId: config.hostId, stateRoot: config.stateRoot, agents });
+  const result = { configVersion: 1, hostId: config.hostId, stateRoot: config.stateRoot, agents };
+  if (Object.hasOwn(config, 'hostingControlPath')) result.hostingControl = await readHostingConfig(await canonicalPath(config.hostingControlPath), result);
+  return deepFreeze(result);
 }

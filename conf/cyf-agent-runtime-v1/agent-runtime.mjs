@@ -7,6 +7,7 @@ import { createLogger, readEnrollmentSecret } from './lib/security.mjs';
 import { classifyRuntimeError, RuntimeV1Client } from './lib/runtime-client.mjs';
 import { RuntimeHost } from './lib/runtime-host.mjs';
 import { createExecutionAdapterFactory } from './lib/execution-adapter.mjs';
+import { createHostingControlServer } from './lib/hosting-server.mjs';
 export const PERMANENT_RUNTIME_EXIT_STATUS = 78;
 
 export function runtimeExitStatus(error) {
@@ -37,25 +38,32 @@ const wait = (ms, signal) => new Promise(resolveWait => {
 // No sidecar heartbeat-only run mode, legacy API-key entry or second ACK queue.
 export async function runUnifiedRuntime({ config, apiOrigin, instanceId = randomUUID(), signal,
   createAdapters = createExecutionAdapterFactory, workspacePolicies, providerEnvironments, logger = () => {},
-  heartbeatIntervalMs = 30000, waitFn = wait } = {}) {
+  heartbeatIntervalMs = 30000, waitFn = wait, createControl = createHostingControlServer } = {}) {
   const adapters = await createAdapters({ config, instanceId, apiOrigin, workspacePolicies, providerEnvironments, logger });
   const host = new RuntimeHost({ config, instanceId, createExecutor: adapters.createExecutor, logger });
+  let controlServer = null;
   try {
     await host.start();
+    if (config.hostingControl) controlServer = await createControl({ host, config: config.hostingControl, apiOrigin, workspacePolicies, logger });
     const activate = config.agents.map(agent => {
       if (host.agents.get(agent.subjectKey).phase !== 'INITIALIZED') return Promise.resolve();
       return host.activate(agent.subjectKey).catch(error => logger('runtime-agent-isolated', { subjectKey: agent.subjectKey, category: classifyRuntimeError(error).kind }));
     });
     // Activation may wait for a directed registration, but SIGTERM must still
     // reach each transport/owned engine, not queue behind the lifecycle gate.
-    const stop = () => { void adapters.close().catch(() => {}); };
+    const stop = () => { void controlServer?.close().catch(() => {}); void adapters.close().catch(() => {}); };
     signal.addEventListener('abort', stop, { once: true });
     try {
       if (signal.aborted) stop();
-      await Promise.all(activate);
+      // Per-Agent registration is independent from the host heartbeat loop.
+      // Every activation has its own rejection handler above.
+      void Promise.allSettled(activate);
       while (!signal.aborted) { await adapters.heartbeat(); if (!signal.aborted) await waitFn(heartbeatIntervalMs, signal); }
     } finally { signal.removeEventListener('abort', stop); }
-  } finally { await host.stop(); await adapters.close(); }
+  } finally {
+    try { await controlServer?.close(); await host.stop(); await adapters.close(); }
+    finally { if (!host.releaseHost) await controlServer?.control.releaseOwnership(); }
+  }
   return host.snapshot();
 }
 

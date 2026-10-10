@@ -1,0 +1,8 @@
+# Operator release input only. Artifact installer copies but DOES NOT apply this.
+# Default root Runtime and cyf-api:isp API; verify numeric isp GID is socketGid.
+# /run is ephemeral: systemd-tmpfiles-setup recreates these each boot.
+d /run/cyf-agent-runtime-v1 0755 root root - -
+d /run/cyf-agent-runtime-v1/unified 0750 root isp - -
+# Persistent managed journal, secret and independent per-subject HOME/work/state.
+d /var/lib/cyf-agent-runtime-v1-managed 0700 root root - -
+d /var/lib/cyf-agent-runtime-v1-managed/unified 0700 root root - -

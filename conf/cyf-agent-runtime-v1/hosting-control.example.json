@@ -1,0 +1,30 @@
+{
+  "configVersion": 1,
+  "socketPath": "/run/cyf-agent-runtime-v1/unified/control.sock",
+  "socketGid": 1000,
+  "managedRoot": "/var/lib/cyf-agent-runtime-v1-managed/unified",
+  "scopes": [
+    { "tenantId": "TENANT_ID_REQUIRED", "clientId": "CLIENT_ID_REQUIRED", "ownerJiacn": "OWNER_JIACN_REQUIRED" }
+  ],
+  "enrollmentTtlMs": 3600000,
+  "template": {
+    "profile": {
+      "codexBin": "/home/isp/apps/codex/bin/codex",
+      "codexModel": "OPERATOR_MANAGED_MODEL_REQUIRED",
+      "codexSandbox": "workspace-write",
+      "codexApproval": "never",
+      "chatEngine": "app-server",
+      "chatModel": "OPERATOR_MANAGED_MODEL_REQUIRED",
+      "chatSandbox": "read-only",
+      "chatToolPolicy": "read-only-constrained",
+      "fastChatEnabled": true,
+      "appServerEnabled": true,
+      "appServerSchemaContractId": "codex-cli-0.161.0",
+      "trueDeltaEnabled": true,
+      "nativeConversationHttpPollEnabled": false,
+      "workspaceNoTaskPolicy": "reject"
+    },
+    "codexConfig": "model = \"OPERATOR_MANAGED_MODEL_REQUIRED\"\nmodel_provider = \"managed\"\n[model_providers.managed]\nname = \"Operator-managed hosting provider\"\nbase_url = \"https://provider.example.invalid/v1\"\nwire_api = \"responses\"\nenv_key = \"CYF_MANAGED_PROVIDER_API_KEY\"\nrequires_openai_auth = false\n",
+    "providerEnvironment": { "CYF_MANAGED_PROVIDER_API_KEY": "OPERATOR_MANAGED_SECRET_REQUIRED" }
+  }
+}

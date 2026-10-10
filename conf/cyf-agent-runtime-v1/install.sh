@@ -48,7 +48,9 @@ for file in agent-runtime.mjs install.sh validate.sh; do
     install -m 0755 "$SOURCE_DIR/$file" "$STAGE/runtime/$file"
 done
 for file in README.md package.json runtime.env.example manifest.example.json lib/manifest.mjs lib/runtime-client.mjs \
-    lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs systemd/cyf-agent-runtime-v1@.service; do
+    lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs \
+    lib/hosting-config.mjs lib/hosting-wire.mjs lib/hosting-control.mjs lib/hosting-server.mjs \
+    hosting-control.example.json HOSTING-CONTROL.md systemd/cyf-agent-runtime-v1-hosting.tmpfiles.conf.example systemd/cyf-agent-runtime-v1@.service; do
     install -m 0644 "$SOURCE_DIR/$file" "$STAGE/runtime/$file"
 done
 "$STAGE/node/bin/node" --input-type=module -e '

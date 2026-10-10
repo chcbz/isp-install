@@ -34,7 +34,8 @@ Node version and binary SHA-256. Release records use these measured values.
 Real execution/import/dependency failures still fail the build; this does not
 claim arbitrary Node versions work or change third-party dependency requirements.
 
-Configuration lives **outside** the artifact. A host config has exactly:
+Configuration lives **outside** the artifact. Static host config has these fields
+plus optional `hostingControlPath` for the private managed-subject control channel:
 
 ```json
 {
@@ -274,3 +275,21 @@ and maintenance inventory, explicit stopped-writer migration/recovery plan,
 versioned release/cutover/old-authorization revocation, and three-Agent real business
 acceptance. Unverified WORK_ITEM_CANCEL stays unadvertised; exact CHAT cancellation
 remains supported. These are not replaced by local mocks or by a task-branch push.
+
+
+## Managed subject control (GSS-HOSTING-RUNTIME-20261010, 2026-10-10)
+
+Development source adds private `runtime-hosting-v1` control inside this SAME
+RuntimeHost: `capabilities/prepare/ensure/observe`, persistent candidates and dynamic
+subject add/recreate. Static agents remain unchanged. New subjects use an explicit
+operator-managed provider template and independent HOME/work/state. Registration
+waits no longer block peer heartbeat. See [HOSTING-CONTROL.md](HOSTING-CONTROL.md)
+for exact `hostingControlPath` schema, API/socket GID pairing, tmpfiles boot setup,
+installation handoff, uncertainty guards and acceptance-to-test coverage.
+
+The artifact installer only stages templates/modules; no production setup or
+service restart occurs. Historical clean-target harness SOURCE5666fd remains its
+frozen historical catalog, **not** current hosting payload/release evidence. Current
+installer/validator catalog and local hosting tests cover the new source; Main must
+fix a new artifact and perform authorized integration/release evidence separately.
+No actual provider/production GSS readiness or rent settlement is claimed.
