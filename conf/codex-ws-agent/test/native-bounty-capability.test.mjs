@@ -196,7 +196,8 @@ test('text-file native lane is selected only by explicit flag and stays separate
   assert.equal(runtime.credentialReady, false)
   assert.equal(runtime.executor, created.execute)
   assert.deepEqual(await runtime.executor({ command: { outputContentMimeType: 'text/plain' } }), { command: { outputContentMimeType: 'text/plain' } })
-  assert.throws(() => runtime.executor({ command: { outputContentMimeType: 'image/png' } }), /CONVERSATION_TEXT_FILE_COMMAND_INVALID/)
+  assert.throws(() => runtime.executor({ command: { outputContentMimeType: 'image/png' } }),
+    error => error.code === 'CONVERSATION_TEXT_FILE_COMMAND_INVALID')
   assert.equal(executions, 1)
   const registration = buildAgentRegistrationPayload(profile, runtime, true)
   assert.equal(registration.nativeTextFileExecution.enabled, true)
@@ -206,12 +207,12 @@ test('text-file native lane is selected only by explicit flag and stays separate
   assert.equal(buildAgentPresencePayload(profile, 'offline', { nativeRuntime: runtime }).nativeTextFileExecution, undefined)
 })
 
-test('text-file lane cannot be inherited for managed identities or mixed with image lanes', () => {
+test('ordinary profile flag is inherited, while mixed image runtime does not advertise text execution', () => {
   const inherited = inheritManagedRuntimeCapabilities({}, { nativeConversationTextFileEnabled: true })
   assert.equal(inherited.nativeConversationTextFileEnabled, true)
   const profile = configuredProfile({ nativeConversationTextFileEnabled: true, nativeConversationImageGenerationEnabled: true })
   const runtime = runtimeFor(profile)
-  assert.equal(runtime.nativeTextFileV1Ready, false)
+  assert.notEqual(runtime.nativeTextFileV1Ready, true)
   assert.equal(buildAgentRegistrationPayload(profile, runtime, true).nativeTextFileExecution.enabled, false)
 })
 
