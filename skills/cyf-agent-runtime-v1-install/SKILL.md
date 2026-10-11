@@ -22,7 +22,7 @@ sudo ./shell/cyf_agent_runtime_v1_install.sh
 
 This only copies a parallel package below `/home/isp/apps/cyf-agent-runtime-v1/<instance>` and installs the `cyf-agent-runtime-v1@.service` template. It does **not** enable or start the service.
 
-Create `/etc/cyf-agent-runtime-v1/<instance>.conf` with mode `0600`; it contains `CYF_RUNTIME_V1_API_BASE_URL` and only a path to a separately supplied `0600` enrollment-secret file. Do not store the secret value in the environment file. Remove the enrollment secret after successful enrollment.
+Create `/home/isp/conf/cyf-agent-runtime-v1/<instance>.conf` with mode `0600`; it contains `CYF_RUNTIME_V1_API_BASE_URL` and only a path to a separately supplied `0600` enrollment-secret file. Do not store the secret value in the environment file. Remove the enrollment secret after successful enrollment.
 
 ## Validate and start
 

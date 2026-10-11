@@ -8,9 +8,9 @@ Type=simple
 User=root
 WorkingDirectory=/home/isp/apps/cyf-agent-runtime-v1/%i
 Environment=PATH=/home/isp/apps/nodejs/bin:/home/isp/apps/node/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=/etc/cyf-agent-runtime-v1/%i.conf
-ExecStartPre=/home/isp/apps/cyf-agent-runtime-v1/%i/runtime/validate.sh --root /home/isp/apps/cyf-agent-runtime-v1/%i --config /etc/cyf-agent-runtime-v1/%i.host.json
-ExecStart=/home/isp/apps/cyf-agent-runtime-v1/%i/node/bin/node /home/isp/apps/cyf-agent-runtime-v1/%i/runtime/agent-runtime.mjs run --config /etc/cyf-agent-runtime-v1/%i.host.json
+EnvironmentFile=/home/isp/conf/cyf-agent-runtime-v1/%i.conf
+ExecStartPre=/home/isp/apps/cyf-agent-runtime-v1/%i/runtime/validate.sh --root /home/isp/apps/cyf-agent-runtime-v1/%i --config /home/isp/conf/cyf-agent-runtime-v1/%i.host.json
+ExecStart=/home/isp/apps/cyf-agent-runtime-v1/%i/node/bin/node /home/isp/apps/cyf-agent-runtime-v1/%i/runtime/agent-runtime.mjs run --config /home/isp/conf/cyf-agent-runtime-v1/%i.host.json
 Restart=on-failure
 RestartPreventExitStatus=78
 RestartSec=5s

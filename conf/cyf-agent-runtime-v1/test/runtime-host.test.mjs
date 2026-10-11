@@ -1280,7 +1280,7 @@ async function workspaceCliUnit(t) {
   const mainEnd = source.indexOf('\nconst isMain =', mainStart);
   assert.ok(argsStart >= 0 && argsEnd > argsStart && mainStart > argsEnd && mainEnd > mainStart);
   const { pathToFileURL } = await import('node:url');
-  const { createLogger } = await import('../lib/security.mjs');
+  const { createLogger, readRuntimeProviderEnvironments } = await import('../lib/security.mjs');
   const loaderUrl = pathToFileURL(resolve(engineSource, 'workspace-manager.mjs')).href;
   let mainSource = source.slice(mainStart, mainEnd).replace('export async function main(', 'async function main(');
   const loaderImport = "import('../codex-ws-agent/workspace-manager.mjs')";
@@ -1295,8 +1295,8 @@ async function workspaceCliUnit(t) {
   };
   const never = () => assert.fail('S01 source unit must not enroll/create a session');
   const main = new Function('resolve', 'readRuntimeHostConfig', 'createLogger', 'runUnifiedRuntime',
-    'RuntimeV1Client', 'readEnrollmentSecret', 'process', `${source.slice(argsStart, argsEnd)}\n${mainSource}\nreturn main;`)(
-    resolve, readRuntimeHostConfig, createLogger, async settings => { calls.push(settings); }, never, never, processCapture);
+    'RuntimeV1Client', 'readEnrollmentSecret', 'process', 'readRuntimeProviderEnvironments', `${source.slice(argsStart, argsEnd)}\n${mainSource}\nreturn main;`)(
+    resolve, readRuntimeHostConfig, createLogger, async settings => { calls.push(settings); }, never, never, processCapture, readRuntimeProviderEnvironments);
   const invoke = async ({ argv = [], env = {} } = {}) => {
     try {
       return await main(['run', '--config', f.path, ...argv], { CYF_RUNTIME_V1_API_BASE_URL: 'https://no-network.invalid', ...env });

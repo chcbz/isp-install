@@ -95,3 +95,32 @@ export async function writePrivateJson(path, value, { exclusive = false } = {}) 
     try { await directory.sync(); } finally { await directory.close(); }
   } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
 }
+
+// Explicit operator-owned Provider credentials, keyed by full tenant/client/Agent
+// subject. Never inherit process.env, another subject, or an arbitrary HOME file.
+export async function readRuntimeProviderEnvironments(path, agents) {
+  const fail = () => { throw Object.assign(new Error('RUNTIME_PROVIDER_CONFIG_INVALID'), { code: 'RUNTIME_PROVIDER_CONFIG_INVALID' }); };
+  const required = agents.filter(agent => String(agent.profile.controlledImageHttpEnabled).toLowerCase() === 'true');
+  if (!path) { if (required.length) fail(); return new Map(); }
+  let document;
+  try {
+    if (typeof path !== 'string' || resolve(path) !== path) fail();
+    document = await readPrivateJson(path, null);
+  } catch { fail(); }
+  const object = value => value && typeof value === 'object' && !Array.isArray(value);
+  if (!object(document) || Object.keys(document).sort().join(',') !== 'configVersion,subjects'
+      || document.configVersion !== 1 || !object(document.subjects)) fail();
+  const known = new Map(agents.map(agent => [agent.subjectKey, agent]));
+  const result = new Map();
+  for (const [subject, values] of Object.entries(document.subjects)) {
+    const agent = known.get(subject);
+    const key = agent?.profile.controlledImageHttpApiKeyEnv;
+    if (!agent || !required.includes(agent) || !/^CYF_PROVIDER_[A-Z][A-Z0-9_]*$/.test(key || '')
+        || !object(values) || Object.keys(values).length !== 1 || !Object.hasOwn(values, key)) fail();
+    const value = values[key];
+    if (typeof value !== 'string' || !value || value !== value.trim() || /[\x00-\x1f\x7f]/u.test(value)) fail();
+    result.set(subject, Object.freeze({ [key]: value }));
+  }
+  if (required.some(agent => !result.has(agent.subjectKey))) fail();
+  return result;
+}

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readRuntimeHostConfig } from './lib/manifest.mjs';
-import { createLogger, readEnrollmentSecret } from './lib/security.mjs';
+import { createLogger, readEnrollmentSecret, readRuntimeProviderEnvironments } from './lib/security.mjs';
 import { classifyRuntimeError, RuntimeV1Client } from './lib/runtime-client.mjs';
 import { RuntimeHost } from './lib/runtime-host.mjs';
 import { createExecutionAdapterFactory } from './lib/execution-adapter.mjs';
@@ -70,7 +70,13 @@ export async function runUnifiedRuntime({ config, apiOrigin, instanceId = random
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const { command, options } = parseArgs(argv);
   const config = await readRuntimeHostConfig(resolve(options.config));
-  const logger = createLogger();
+  const providerEnvironments = await readRuntimeProviderEnvironments(env.CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE, config.agents);
+  if (providerEnvironments.size) {
+    const { resolveControlledImageHttpConfig } = await import('../codex-ws-agent/controlled-image-http-config.mjs');
+    for (const agent of config.agents) if (providerEnvironments.has(agent.subjectKey))
+      resolveControlledImageHttpConfig(agent.profile, { env: providerEnvironments.get(agent.subjectKey) });
+  }
+  const logger = createLogger({ knownSecrets: [...providerEnvironments.values()].flatMap(value => Object.values(value)) });
   if (command === 'validate') {
     process.stdout.write(`${JSON.stringify({ valid: true, hostId: config.hostId, agentCount: config.agents.length })}\n`); return 0;
   }
@@ -89,7 +95,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   if (!Number.isSafeInteger(interval) || interval < 1) throw failure('RUNTIME_HEARTBEAT_INTERVAL_INVALID');
   const controller = new AbortController(); const stop = () => controller.abort();
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
-  try { await runUnifiedRuntime({ config, apiOrigin, signal: controller.signal, logger, workspacePolicies, heartbeatIntervalMs: interval }); return 0; }
+  try { await runUnifiedRuntime({ config, apiOrigin, signal: controller.signal, logger, workspacePolicies, providerEnvironments, heartbeatIntervalMs: interval }); return 0; }
   finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
 }
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;

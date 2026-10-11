@@ -293,3 +293,27 @@ frozen historical catalog, **not** current hosting payload/release evidence. Cur
 installer/validator catalog and local hosting tests cover the new source; Main must
 fix a new artifact and perform authorized integration/release evidence separately.
 No actual provider/production GSS readiness or rent settlement is claimed.
+
+
+### Host configuration and static-subject image credentials (2026-10-11)
+
+The canonical host configuration directory is `/home/isp/conf/cyf-agent-runtime-v1`.
+Systemd units remain in `/etc/systemd/system`; program releases and persistent
+state retain their existing paths. Update host `profilePath` / `hostingControlPath`
+and operator-managed service drop-ins when migrating. Do not leave a second
+configuration tree or symlink fallback. The artifact installer only packages the
+unit template: it does not migrate private files or restart services.
+
+Static subjects enabling `controlledImageHttpEnabled` require an explicit
+`CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE` in the service environment file. Its
+JSON schema is `{ "configVersion": 1, "subjects": { "<full-subjectKey>": {
+"CYF_PROVIDER_IMAGE_API_KEY": "<operator-supplied-secret>" } } }`.
+Each subject must match a configured manifest identity, and the sole environment
+key must exactly match that subject profile's `controlledImageHttpApiKeyEnv`
+(`CYF_PROVIDER_*`). The file must be canonical, non-symlink, owned by the current
+UID with no group/other permissions. Unknown subjects, missing enabled subjects,
+arbitrary environment keys and malformed credentials fail validation without
+logging file contents. `validate` and `run` use the same loader. Runtime injects
+only the matching subject's values through the existing providerEnvironments
+seam; no inherited process Provider environment or other Agent HOME fallback.
+Managed-host templates retain their existing independent credential mechanism.

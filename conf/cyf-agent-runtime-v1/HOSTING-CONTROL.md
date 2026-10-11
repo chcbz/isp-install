@@ -20,11 +20,11 @@ connect a provider, or change the API. Existing static config remains valid.
 
 1. Explicitly authorize the release and fix its source/artifact. Copy the example
    to an operator-owned **0600**, non-symlink external configuration, e.g.
-   `/etc/cyf-agent-runtime-v1/unified.hosting.json`. Replace all placeholders with
+   `/home/isp/conf/cyf-agent-runtime-v1/unified.hosting.json`. Replace all placeholders with
    the authorized tenant/client/owner and independent managed provider/model/binary.
    The example is not proof the production host is already configured. Select an
    app-server schema contract supported by the configured binary (no Node gate).
-2. Add **only** `"hostingControlPath": "/etc/cyf-agent-runtime-v1/unified.hosting.json"`
+2. Add **only** `"hostingControlPath": "/home/isp/conf/cyf-agent-runtime-v1/unified.hosting.json"`
    to the existing `unified.host.json`; retain `agents/configVersion/hostId/stateRoot`.
    Static Agents stay outside the managed journal and remain installation-authorized.
 3. Install the reviewed tmpfiles example as
