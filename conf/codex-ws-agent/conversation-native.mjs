@@ -84,15 +84,15 @@ const checkDirect = (reply, endpoint, status) => {
     deny('CONVERSATION_RESPONSE_UNAVAILABLE')
 }
 export class NativeConversationLane {
-  #origin; #root; #fetch; #agentId; #instanceId; #auth; #run; #execute; #active = false
+  #origin; #root; #fetch; #agentId; #instanceId; #auth; #run; #execute; #requireNoInputs; #active = false
   constructor({ apiOrigin, rootDir, fetchFn = globalThis.fetch, agentId, runtimeInstanceId,
-    getRuntimeHeaders, execute = null }) {
+    getRuntimeHeaders, execute = null, requireNoInputs = false }) {
     this.#origin = originOf(apiOrigin)
     if (!rootDir || !isAbsolute(rootDir) || typeof fetchFn !== 'function' ||
         !id(agentId) || !id(runtimeInstanceId) || typeof getRuntimeHeaders !== 'function') deny('CONVERSATION_CONFIG_INVALID')
     this.#root = resolve(rootDir, 'conversation-runs', agentId)
     this.#fetch = fetchFn; this.#agentId = agentId; this.#instanceId = runtimeInstanceId
-    this.#auth = getRuntimeHeaders; this.#execute = execute
+    this.#auth = getRuntimeHeaders; this.#execute = execute; this.#requireNoInputs = requireNoInputs === true
   }
   #headers() {
     return nativeSessionHeaders(this.#auth(), this.#agentId, this.#instanceId)
@@ -185,6 +185,7 @@ export class NativeConversationLane {
       // unknown/foreign manifests; never fall back to the old unfenced /inputs.
       const inputSnapshot = await this.#request(`${path}/inputs`, 'POST', fence)
       const grantedInputs = parseNativeConversationInputs(inputSnapshot, lease.executionId, fence.version)
+      if (this.#requireNoInputs && grantedInputs.length !== 0) deny('CONVERSATION_INPUTS_UNAVAILABLE')
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       // Separate run tree; never use CHAT workdir or existing file-command roots.
       mkdirSync(this.#root, { recursive: true, mode: 0o700 })

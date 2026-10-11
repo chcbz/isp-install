@@ -21,7 +21,7 @@ const json = (url, body, status = 200) => ({ status, url: url.href, redirected: 
   headers: { get: () => 'application/json' }, json: async () => body })
 const reference = Object.freeze({ inputRef: 'input_1', fileId: 'ref-1', version: 2,
   originalFilename: '../do-not-use.png', contentMimeType: 'image/png', byteLength: bytes.length, sha256: digest })
-const setup = ({ execute, response, inputSnapshot, renewResponse, referenceBytes = bytes,
+const setup = ({ execute, response, inputSnapshot, renewResponse, referenceBytes = bytes, requireNoInputs = false,
   auth = `AgentRuntime rts1_${'a'.repeat(64)}` } = {}) => {
   const root = mkdtempSync(resolve(tmpdir(), 'mmd-native-test-'))
   const calls = []
@@ -65,7 +65,7 @@ const setup = ({ execute, response, inputSnapshot, renewResponse, referenceBytes
     throw new Error('Unexpected API endpoint')
   }
   const lane = new NativeConversationLane({ apiOrigin: 'http://127.0.0.1:10018', rootDir: root,
-    fetchFn, agentId: 'agent-1', runtimeInstanceId: 'instance-1', getRuntimeHeaders: () => sessionProof(auth), execute })
+    fetchFn, agentId: 'agent-1', runtimeInstanceId: 'instance-1', getRuntimeHeaders: () => sessionProof(auth), execute, requireNoInputs })
   return { lane, root, calls, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 test('rejects malformed or reference-bearing queue commands before any claim', async () => {
@@ -315,4 +315,15 @@ test('native terminal poll joins owned in-flight renewal before cleanup and writ
     assert.equal(settled, true)
     assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
   } finally { finishExecute(); finishRenew?.(); await polling; s.cleanup() }
+})
+
+
+test('text-only native lane rejects granted references before downloading inputs or issuing Provider START', async () => {
+  const s = setup({ requireNoInputs: true, inputSnapshot: { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: false, inputs: [reference] } })
+  try {
+    assert.deepEqual(await s.lane.poll(), { processed: 1 })
+    assert.equal(s.calls.some(call => call.path.endsWith('/inputs/input_1/content')), false)
+    assert.equal(s.calls.some(call => call.path.endsWith('/provider-start')), false)
+    assert.equal(s.calls.some(call => call.path.endsWith('/failure')), true)
+  } finally { s.cleanup() }
 })

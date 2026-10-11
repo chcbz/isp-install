@@ -219,6 +219,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "conversation-controlled-image-v3.mjs",
   "conversation-controlled-image.mjs",
   "conversation-native.mjs",
+  "conversation-text-file.mjs",
   "conversation-reference-inputs-v3.mjs",
   "conversation-reference-inputs.mjs",
   "evidence/typed-inspection-local-image-gpt-5.6-terra-1f95df2.json",

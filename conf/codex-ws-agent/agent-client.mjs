@@ -34,6 +34,7 @@ import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 import { NativeConversationLane } from './conversation-native.mjs'
+import { runNativeConversationTextFile, textFileExecutionDeclaration } from './conversation-text-file.mjs'
 import { ControlledImageConversationLane } from './conversation-controlled-image.mjs'
 import { ControlledImageConversationLaneV3 } from './conversation-controlled-image-v3.mjs'
 import { buildNativeBountyExecutionDeclaration } from './native-bounty-capability.mjs'
@@ -609,6 +610,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     nativeConversationHttpPollEnabled: parseEnabledFlag(
       profile.nativeConversationHttpPollEnabled ?? fallback.nativeConversationHttpPollEnabled
     ),
+    nativeConversationTextFileEnabled: parseEnabledFlag(profile.nativeConversationTextFileEnabled ?? fallback.nativeConversationTextFileEnabled),
     nativeConversationImageGenerationEnabled: parseEnabledFlag(
       profile.nativeConversationImageGenerationEnabled ?? fallback.nativeConversationImageGenerationEnabled
     ),
@@ -4176,6 +4178,7 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
     endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
     abilities: resolveProfileAbilities(profile),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
+    nativeTextFileExecution: textFileExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
     nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
     controlledImageBountyExecution: buildControlledImageBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
     controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration({
@@ -4828,6 +4831,9 @@ export const profileConfigurationErrors = profile => {
   }
   if (workspaceFileControls.every(value => Boolean(value)) && !workspaceFileToolchain().ready) {
     errors.push('release-local workspace delivery toolchain is missing or incomplete')
+  }
+  if (profile.nativeConversationTextFileEnabled && (!profile.nativeConversationHttpPollEnabled || profile.controlledImageHttpEnabled || profile.nativeConversationImageGenerationEnabled)) {
+    errors.push('Text file execution requires native HTTP polling and a non-controlled-image profile')
   }
   if (profile.nativeConversationImageGenerationEnabled && !profile.nativeConversationHttpPollEnabled) {
     errors.push('nativeConversationImageGenerationEnabled requires nativeConversationHttpPollEnabled=true')
@@ -5699,6 +5705,7 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}, managedI
     workspaceFileRootDir: source.workspaceFileRootDir || '',
     nativeConversationHttpPollEnabled: controlled?.nativeConversationHttpPollEnabled === true ||
       source.nativeConversationHttpPollEnabled === true,
+    nativeConversationTextFileEnabled: !controlled && source.nativeConversationTextFileEnabled === true,
     nativeConversationImageGenerationEnabled: controlled ? false : source.nativeConversationImageGenerationEnabled === true,
     controlledImageHttpEnabled: controlled?.controlledImageHttpEnabled === true,
     controlledImageHttpEndpoint: controlled?.controlledImageHttpEndpoint || '',
@@ -5809,6 +5816,7 @@ export const createNativeBountyExecutionRuntime = ({
   createPollProtocol = options => new NativeConversationLane(options),
   createControlledPollProtocol = options => new ControlledImageConversationLane(options),
   executeImage = args => runNativeConversationImage({ profile, ...args }),
+  executeTextFile = args => runNativeConversationTextFile({ profile, ...args, runCodexFn: runCodex }),
   controlledEnv = process.env,
   providerFetchFn = globalThis.fetch,
   nativeFetchFn = globalThis.fetch,
@@ -5905,6 +5913,22 @@ export const createNativeBountyExecutionRuntime = ({
     })
   }
 
+  const textFileEnabled = profile?.nativeConversationTextFileEnabled === true
+  if (baseReady && textFileEnabled && !profile?.nativeConversationImageGenerationEnabled
+      && typeof executeTextFile === 'function' && typeof createPollProtocol === 'function') {
+    const executor = args => {
+      if (args.command?.outputContentMimeType !== 'text/plain') throw new AgentProtocolError('CONVERSATION_TEXT_FILE_COMMAND_INVALID', 'Only text/plain is enabled')
+      return executeTextFile(args)
+    }
+    const pollProtocol = createPollProtocol({ apiOrigin: profile.workspaceFileApiOrigin,
+      rootDir: profile.workspaceFileRootDir, agentId: profile.agentId,
+      runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID,
+      getRuntimeHeaders, fetchFn: nativeFetchFn, execute: executor, requireNoInputs: true })
+    if (typeof pollProtocol?.poll !== 'function') return unavailable({ adapterKind: 'CODEX_TEXT_FILE_NATIVE_V1' })
+    return Object.freeze({ configReady: true, httpPollEnabled: true, executor, pollProtocol,
+      adapterKind: 'CODEX_TEXT_FILE_NATIVE_V1', nativeTextFileV1Ready: true,
+      nativeBountyV1Ready: false, controlledImageV2Ready: false, credentialReady: false, controlledConfig: null })
+  }
   const executorEnabled = profile?.nativeConversationImageGenerationEnabled === true
   const configReady = Boolean(
     baseReady

@@ -150,6 +150,29 @@ replacement token or session secrets in logs/checkpoints.
   only that subject. SIGTERM aborts owned transport work and waits for confirmed
   engine shutdown before releasing writer locks. No permanent legacy auth path.
 
+### Opt-in native text-file execution (核对日 2026-10-12; source baseline `5b902c1b`)
+
+An operator-managed ordinary Runtime profile may set
+`nativeConversationTextFileEnabled: true` only when the existing native HTTP poll
+lane is enabled. The managed hosting-control template remains unchanged and does
+not enable this lane; its profile boundary intentionally lacks native file roots.
+Managed-image authorization does not inherit this flag. Registration advertises text
+execution only on the initial/current online registration
+when the actual native runtime reports `nativeTextFileV1Ready`; missing/old Runtime
+state remains not-ready. Presence is status-only here and does not create a separate
+readiness revocation path; API authorization remains bound to its live Runtime session.
+The original installer execution-payload catalog explicitly includes
+`conversation-text-file.mjs` and its existing native dependencies.
+
+The executor accepts no references and only `text/plain`/`output_1`. It invokes the
+existing Codex CLI once with a fresh session, the private native run directory,
+`workspace-write`, and approval `never`; it then reads actual `outputs/result.txt`
+bytes (uploaded with the existing fixed `output.txt` filename) and rejects missing/empty output, invalid UTF-8, NUL, symlink and hardlink
+outputs. Chat remains read-only. The existing native lane retains the lease and
+one-shot START fence, upload and commit protocol. This source capability defaults
+off and does not imply installation, API authorization, image readiness, deployment,
+or business acceptance. Runtime package version advances from 1.0.2 to 1.0.3.
+
 ## Owner test coverage and remaining gates
 
 Targeted tests: `test/runtime-v1.test.mjs` (r1 request/proof/result/expiry/security),

@@ -118,6 +118,22 @@ Targeted regression command (disposable fixtures only):
 node --test /absolute/path/to/source/conf/codex-ws-agent/test/ack-checkpoint.test.mjs \
   /absolute/path/to/source/conf/codex-ws-agent/test/agent-client.test.mjs
 ```
+## Native text-file executor (核对日 2026-10-12; source baseline `5b902c1b`)
+
+`nativeConversationTextFileEnabled` is an opt-in Runtime profile flag and is
+independent of image permissions. The native text lane is ready only when the
+profile flag, native HTTP polling configuration, and actual text executor/poller
+are all ready; it does not enable or advertise image generation. Capability is
+carried by the online registration and bound to the live Runtime session; ordinary
+presence status is not treated as an independent readiness revocation. Execution uses a
+separate native run directory and the existing one-shot lease/START, upload and
+commit path. Codex receives `exec --cd <private-run> --sandbox workspace-write`
+with `--ask-for-approval never` and a fresh session; the main CHAT executor remains
+read-only. Only actual non-empty UTF-8 `outputs/result.txt` bytes without NUL,
+symlink or hardlink output are returned as `text/plain`; the existing MIME mapping
+uses the fixed upload filename `output.txt`. This capability is off by
+default and source readiness alone is not authorization or deployment evidence.
+
 ## Managed native CHAT activation
 
 `AGENT_MANAGED_CHAT_SCOPES_FILE` points to a canonical private operator-owned JSON
