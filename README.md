@@ -10,7 +10,7 @@
 | Rocky Linux | 8, 9 | ✅ 完全支持 |
 | AlmaLinux | 8, 9 | ✅ 完全支持 |
 | RHEL | 7, 8, 9 | ✅ 完全支持 |
-| Alibaba Cloud Linux | 3 | ✅ codex-ws-agent 已验证 |
+| Alibaba Cloud Linux | 3 | ✅ 统一 Runtime 主机已验证（2026-10-12） |
 | Ubuntu | 18.04, 20.04, 22.04, 24.04 | ✅ 完全支持 |
 | Debian | 10, 11, 12 | ✅ 完全支持 |
 
@@ -46,7 +46,8 @@ sudo ./install.sh --select
 
 # 指定组件安装
 sudo ./install.sh nginx mysql redis
-sudo ./install.sh codex-ws-agent
+# Agent 必须先配置显式 instance/toolchain，完整命令见下方自家接应指南
+sudo ./install.sh cyf-agent-runtime-v1
 ```
 
 ### 方式二：单独安装
@@ -102,7 +103,7 @@ sudo systemctl start mysql nginx
 | **数据库** | MySQL 8.0.45 | 关系型数据库 |
 | **缓存/消息** | Redis 7.4.8, RabbitMQ 3.12.13 | 缓存、消息队列 |
 | **开发环境** | JDK 21.0.10, Maven 3.9.6, Node.js LTS, Python 3.12.13, PHP 8.2.26 | 编程语言和构建工具 |
-| **Agent** | Codex WebSocket Agent | Codex CLI WebSocket 执行代理 |
+| **Agent** | CYF Agent Runtime v1 | 唯一运行服务；内嵌 Codex 执行库，不另起旧 Agent |
 | **版本控制** | Git 2.53.0, Gitblit, SVN | 代码仓库管理 |
 | **CI/CD** | Jenkins 2.440.1, Nexus 3.66.0-02 | 持续集成、制品库 |
 | **文件服务** | Pure-FTPd 1.0.53 | FTP 服务器 |
@@ -141,8 +142,8 @@ export NEXUS_PASSWORD="your_nexus_password"
 export FTP_USERNAME="ftp_username"
 export FTP_PASSWORD="ftp_password"
 
-# Codex WebSocket Agent
-export START_CODEX_WS_AGENT="y"  # 可选，安装后立即启动
+# CYF Agent Runtime v1：显式 instance/toolchain 见自家接应指南
+# 安装仅准备制品，不自动启动、登记或迁移现有身份。
 ```
 
 ## 安装位置
@@ -157,7 +158,7 @@ export START_CODEX_WS_AGENT="y"  # 可选，安装后立即启动
 ├── openldap/
 ├── java/
 ├── maven/
-├── codex-ws-agent/
+├── cyf-agent-runtime-v1/
 ├── xray/
 └── ...
 ```
@@ -179,7 +180,7 @@ conf/
 ├── cyf-agent-runtime-v1/
 │   ├── runtime.env.example
 │   └── manifest.example.json
-├── codex-ws-agent/
+├── codex-ws-agent/  # Runtime 内嵌执行库模板，不是独立安装/服务
 │   └── codex-home.example.toml
 ├── xray/
 │   └── config.json.template
@@ -259,7 +260,7 @@ php
 openldap
 node
 python
-codex-ws-agent
+cyf-agent-runtime-v1
 nexus
 vpn
 ```
@@ -272,13 +273,12 @@ vpn
 
 本项目仅供学习和参考使用。
 
-## Codex Agent 配置诊断与优化
+## 统一 Runtime 配置诊断
 
-新版 Agent 支持只读、脱敏的 `--inspect-config`，展示 profile 执行参数、实际调度能力和命令工作区缺失提示。
-它不读取模型认证文件、不初始化工作区，也不证明模型 API 已可用。
-`codex-home.example.toml` 中的模型和服务地址必须替换；认证通过各 Home 的登录流程单独配置，勿提交密钥。
-具体配置分工、权限修复风险、工作区迁移、验证与回滚见
-[配置优化方案](docs/codex-ws-agent-config-optimization.md)。
+只使用统一 Runtime 制品中的 `runtime/agent-runtime.mjs validate`，完整参数及所需真实环境见下方指南。
+校验不会登记或启动服务；image-enabled 实例必须带实际 provider environments 文件，
+不能用遗漏环境的失败判断线上配置损坏。Codex HOME 的模型认证单独配置，勿提交密钥。
+仓内 `conf/codex-ws-agent/` 是内嵌执行库，历史优化文档不再作为第二套安装入口。
 
 ## 聚义厅自家接应 / Runtime 升级（2026-10-12）
 
@@ -287,6 +287,8 @@ vpn
 `shell/cyf_runtime_enrollment_prepare.mjs` 生成私有manifest/secret和非秘密handoff，
 所属用户在新版聚义厅登记摘要后由目标端enroll；已有Runtime升级保留原身份，不重复注册。
 配置/状态与制品分离；旧API Key不是新安装授权；服务切换和实际业务验收分别记录。
+静态 Agent HOME 统一为 `/home/isp/state/cyf-agent-runtime-v1/<instance>/agents/<subject>/codex-home`。
+已有部署目录收口按指南第9节保留完整 HOME、SQLite 路径索引与身份，不重新 enroll；安装器不会隐式迁移或升级其他机器。
 
 
 ### 主机目录与 binlog 默认策略（2026-10-12）

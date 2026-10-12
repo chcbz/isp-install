@@ -83,12 +83,12 @@ test('guide profile/host snippet and prepared secret are accepted by actual Runt
   const { mkdir, writeFile } = await import('node:fs/promises');
   const cfg = join(parent, 'config'); const state = join(parent, 'state');
   await mkdir(cfg, { mode: 0o700 });
-  for (const leaf of ['host', 'subject/runtime', 'subject/workspace', 'subject/private-runs']) await mkdir(join(state,leaf),{recursive:true,mode:0o700});
+  for (const leaf of ['host', 'agents/subject/runtime', 'agents/subject/workspace', 'agents/subject/private-runs', 'agents/subject/codex-home']) await mkdir(join(state,leaf),{recursive:true,mode:0o700});
   const guide = await readFile(new URL('../docs/cyf-agent-runtime-v1-self-host.md',import.meta.url),'utf8');
   const snippet = guide.split("--input-type=module <<'JS'\n")[1]?.split('\nJS')[0];
   assert.ok(snippet,'guide profile generator exists');
   const env={...process.env,CFG:cfg,SUBJECT:'subject',CANDIDATE:input.output,STATE:state,CODEX_BIN:'/usr/bin/false',
-    CODEX_HOME_PATH:join(parent,'private-codex-home'),CODEX_MODEL:'fixture-model',API_ORIGIN:'https://fixture.invalid',
+    CODEX_HOME_PATH:join(state,'agents/subject/codex-home'),CODEX_MODEL:'fixture-model',API_ORIGIN:'https://fixture.invalid',
     INSTANCE:'fixture',HOST_ID:'fixture-host',AGENT_ID:input.canonicalAgentId};
   const proc=spawnSync(process.execPath,['--input-type=module'],{input:snippet,env,encoding:'utf8'});
   assert.equal(proc.status,0,proc.stderr);
@@ -97,8 +97,22 @@ test('guide profile/host snippet and prepared secret are accepted by actual Runt
   const host=await readRuntimeHostConfig(join(cfg,'fixture.host.json'));
   assert.equal(host.agents[0].manifest.tenantId,input.tenantId);
   assert.equal(host.agents[0].profile.nativeConversationTextFileEnabled,true);
+  assert.equal(host.agents[0].profile.codexHome,join(state,'agents/subject/codex-home'));
+  assert.equal(host.agents[0].stateRoot,join(state,'agents/subject/runtime'));
+  assert.equal(host.agents[0].profile.workspaceFileRootDir,join(state,'agents/subject/private-runs'));
+  const badEnv={...env,SUBJECT:'../other'};
+  const bad=spawnSync(process.execPath,['--input-type=module'],{input:snippet,env:badEnv,encoding:'utf8'});
+  assert.notEqual(bad.status,0);
+  assert.match(bad.stderr,/Unsafe SUBJECT/);
   assert.equal(host.agents[0].subjectKey,(await readFile(join(input.output,'subject-key.txt'),'utf8')).trim());
   const secret=await readEnrollmentSecret({CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE:join(input.output,'enrollment-secret')});
   const request=JSON.parse(await readFile(join(input.output,'installation-request.json'),'utf8'));
   assert.equal(createHash('sha256').update(secret.value).digest('hex'),request.enrollmentSecretSha256);
+});
+
+
+test('existing Runtime relocation guide preserves identity, indexes and activation boundaries', async () => {
+  const guide=await readFile(new URL('../docs/cyf-agent-runtime-v1-self-host.md',import.meta.url),'utf8');
+  for(const expected of ['## 9.', '不重新登记', 'rollout_path', 'cwd', 'PRAGMA integrity_check', 'WAL/SHM', '不手工删锁', 'CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE', '禁止用旧DB快照覆盖当前状态', 'codex-ws-agent/']) assert.ok(guide.includes(expected),expected);
+  assert.ok(guide.includes('state/cyf-agent-runtime-v1/<instance>/agents/<subject>/codex-home'));
 });

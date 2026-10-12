@@ -18,6 +18,8 @@
 - 旧 `codex-ws-agent` 首次转入统一 Runtime：先查是否已有新 installation；没有才按下文登记/enroll，保留角色绑定，不除名再入伙。
 - 已有统一 Runtime 升级：沿用原 manifest、installation、hostId、状态及授权，跳过第3～4、6节的首次注册，不重复生成身份。
 
+已有统一Runtime仅做目录收口时，按第9节完整迁移本角色HOME与路径索引，仍不重新登记。
+
 本次不迁移历史协议队列，不做旧版本双轨兼容。备份旧状态；执行中、结果未知的业务须逐项说明处置，不能清队列、重放扣费请求或虚报完成。共用 Runtime 的其他 Agent 也受进程切换影响，先确认影响范围。
 
 ## 2. 固定源码并准备新制品
@@ -44,7 +46,7 @@ git -C "$REPO" rev-parse HEAD
 
 从本人「自家接应」文书取得 `tenantId/clientId/canonicalAgentId`。当前后端 local bind 复用的 Scope 仍限制 tenant `0`；以下工具不猜租户、也不解除服务端该限制。多区域绑定尚需单独实现。
 
-以下变量均为**非秘密值**，由操作人替换；命令以最终 Runtime 运行用户执行。配置、状态与制品分离。
+以下变量均为**非秘密值**，由操作人替换；命令以最终 Runtime 运行用户执行。配置、状态与制品分离。新安装使用第5节的统一目录，不将HOME留在旧客户端部署目录。
 
 ```bash
 export REPO=/absolute/path/to/isp-install
@@ -102,28 +104,30 @@ POST /agent/runtime/v1/enroll               # 由目标端CLI调用，不手工�
 ```bash
 export STATE=/home/isp/state/cyf-agent-runtime-v1/your-instance
 export CODEX_BIN=/absolute/path/to/codex
-export CODEX_HOME_PATH=/absolute/path/to/this-agents-private-codex-home
+export CODEX_HOME_PATH="$STATE/agents/$SUBJECT/codex-home"
 export CODEX_MODEL='该账号实际可用模型'
 export API_ORIGIN=https://api.chaoyoufan.cn
 export INSTANCE=your-instance
 export HOST_ID='本机持久唯一的host标识'
 # STATE父目录应先由管理员授权。运行用户创建，勿覆盖已有目录/配置。
-mkdir -m 700 -p "$STATE/host" "$STATE/$SUBJECT/runtime" "$STATE/$SUBJECT/workspace" "$STATE/$SUBJECT/private-runs"
+mkdir -m 700 -p "$STATE/host" "$STATE/agents/$SUBJECT/runtime" "$STATE/agents/$SUBJECT/workspace" "$STATE/agents/$SUBJECT/private-runs" "$CODEX_HOME_PATH"
 # CODEX_HOME_PATH使用本角色独立的合法Codex凭据/配置，CLI先完成正常登录检查。
 "$ARTIFACT/node/bin/node" --input-type=module <<'JS'
 import {writeFile} from 'node:fs/promises';
 const e=process.env;
 for(const k of ['CFG','SUBJECT','CANDIDATE','STATE','CODEX_BIN','CODEX_HOME_PATH','CODEX_MODEL','API_ORIGIN','INSTANCE','HOST_ID','AGENT_ID'])
   if(!e[k]) throw Error('Missing '+k);
+for(const k of ['SUBJECT','INSTANCE']) if(!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(e[k])) throw Error('Unsafe '+k);
+if(e.CODEX_HOME_PATH !== `${e.STATE}/agents/${e.SUBJECT}/codex-home`) throw Error('New setup requires the canonical subject HOME');
 const profile={profileId:e.SUBJECT,agentId:e.AGENT_ID,codexBin:e.CODEX_BIN,
-  codexHome:e.CODEX_HOME_PATH,codexWorkdir:`${e.STATE}/${e.SUBJECT}/workspace`,
+  codexHome:e.CODEX_HOME_PATH,codexWorkdir:`${e.STATE}/agents/${e.SUBJECT}/workspace`,
   codexModel:e.CODEX_MODEL,codexSandbox:'workspace-write',codexApproval:'never',codexSessionMode:'new',codexTimeoutMs:0,
   chatEngine:'app-server',appServerEnabled:true,fastChatEnabled:true,trueDeltaEnabled:true,typedDeliberationEnabled:true,
   chatModel:e.CODEX_MODEL,chatSandbox:'read-only',chatToolPolicy:'read-only-constrained',
-  workspaceFileApiOrigin:e.API_ORIGIN,workspaceFileRootDir:`${e.STATE}/${e.SUBJECT}/private-runs`,
+  workspaceFileApiOrigin:e.API_ORIGIN,workspaceFileRootDir:`${e.STATE}/agents/${e.SUBJECT}/private-runs`,
   nativeConversationHttpPollEnabled:true,nativeConversationTextFileEnabled:true};
 const host={configVersion:1,hostId:e.HOST_ID,stateRoot:`${e.STATE}/host`,agents:[{
-  manifestPath:`${e.CANDIDATE}/manifest.json`,profilePath:`${e.CFG}/${e.SUBJECT}.profile.json`,stateRoot:`${e.STATE}/${e.SUBJECT}/runtime`}]};
+  manifestPath:`${e.CANDIDATE}/manifest.json`,profilePath:`${e.CFG}/${e.SUBJECT}.profile.json`,stateRoot:`${e.STATE}/agents/${e.SUBJECT}/runtime`}]};
 for(const [name,value] of [[`${e.SUBJECT}.profile.json`,profile],[`${e.INSTANCE}.host.json`,host]])
   await writeFile(`${e.CFG}/${name}`,JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});
 JS
@@ -195,3 +199,35 @@ KillSignal=SIGTERM
 网关需放行现有 `/agent/runtime/v1/`、`/ws/agent/channel` 与任务使用的原生 `/internal/agent/` 精确路由，同时保留installation/session/owner鉴权；444/403应定位路由或授权，不放开全部internal或回退API Key。只对新事项验证新grant，不回填历史权限。
 
 交付记录：源码SHA、Runtime版本、实际平台与工具链、制品摘要、服务名/运行用户、配置/状态路径、installationId（非秘密）、逐步验收证据及未完成项。**本指南不是目标机器已升级或网站已发布的证明。**
+
+
+## 9. 已有统一 Runtime 的目录收口（不是再次登记）
+
+2026-10-12核对：CYF主机已按此原则把旧独立目录的现用数据迁走，三静态角色在线、59个会话索引路径完整、原读图证据无付费重测READY。该实例证据不替代其他机器的迁移验证，也不等于Runtime源码1.0.3已在每台主机安装。
+
+**统一布局**（示例基目录`/home/isp`，其他账号用其真实授权根；`INSTANCE/SUBJECT`为安全本地标识，不代表tenant）：
+
+| 内容 | 新安装/目录收口目标 |
+|---|---|
+| 不可变程序制品 | `apps/cyf-agent-runtime-v1/<release>` |
+| host/profile/manifest与独立Provider配置、policy/model-catalog | `conf/cyf-agent-runtime-v1/` |
+| host锁和状态 | `state/cyf-agent-runtime-v1/<instance>/host` |
+| 每个角色完整Codex HOME | `state/cyf-agent-runtime-v1/<instance>/agents/<subject>/codex-home` |
+| 每个角色runtime授权、workspace、private-runs | 同一`agents/<subject>/`下彼此独立子目录 |
+| 尚需引用的历史工作数据 | `state/cyf-agent-runtime-v1/<instance>/history/`，保持原角色权限/归属 |
+| 退役程序和恢复证据 | `baks/<本次批次>/`，不是第二套活动服务 |
+
+制品中的`codex-ws-agent/`是内嵌执行库，不能全局改名或删掉。安装器仍**只准备制品**；不自动搬HOME、接管锁、改身份、停服务或启用旧服务，也不把目录更新当作升级完成。
+
+管理员在明确授权的目标机上逐项执行，不把CYF主机路径/角色直接套到其他账号：
+
+1. 固定实际制品、运行用户、unit/drop-in、配置摘要、manifest/installation/hostId及授权文件摘要；记录每个旧→新路径。确认其他任务的服务使用窗口、所有在途状态和可恢复备份。目标必须不存在、权限与原UID一致；同文件系统可原子rename，跨文件系统先完整复制和逐文件校验，不能半复制后删除原目录。
+2. 盘点profile中的`codexHome`、HOME内`config.toml`的model catalog/受信任工作目录、workspace policy与工作区根、外部工具路径、符号链接、SQLite会话索引和进程FD/cwd/exe。检查旧目录无他人进程，不因为旧独立service停用就判定可删。
+3. 对准确归属的统一服务请求温和退出，并等待原主进程及写者退出、所属writer锁正常释放；**不因耗时强杀、不手工删锁**。维护时禁止并行启动第二writer。快照SQLite及WAL/SHM须在写者全部停止后一起保存，不能仅复制正在写入的主DB。Python3.6没有`Connection.backup`，不得假定该API存在；离线字节备份须覆盖全部相应文件。
+4. 完整移动各角色自己的HOME（含认证、会话、DB、索引），保留属主/权限；同时移动仍被引用的model-catalog、policy/workspace及历史数据，再定向更新profile/环境文件/配置和已确认的符号链接目标。不跨角色复制凭据，不改Provider/模型/权限/图片开关，不采用兼容软链接或双写。原runtime授权/ACK/installation state不在路径计划内就保持不动。
+5. 对**当前实际数据库schema**逐项确认路径索引后，在事务内只替换明确旧→新路径。例如现行Codex的`state_5.sqlite`表`threads`中`rollout_path`和`cwd`；保留线程ID、行数和原会话原文，不全库文本替换。迁移前后`PRAGMA integrity_check`必须为`ok`，确认每个rollout实际存在。版本schema不符时先分析，不能盲执行示例SQL。此步骤是本角色会话路径保留，不是旧协议队列导入/重放。
+6. 使用原精确制品validate，携带**与服务一致**的Provider/policy文件路径环境；启用图片的host缺少`CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE`时会拒绝，不能关闭能力绕过校验。核对认证/manifest/installation授权摘要未变。启动后检查每个subject实际在线、能力ready、锁归属、新路径进程与会话读取；图片识别原证据保留，做无模型调用的隔离/承载重测，不能伪造新摘要。
+7. 确认旧根无活动配置、FD/cwd/exe引用且每个会话索引可读后，把剩余旧部署目录、旧启动脚本移到本批备份；禁用/屏蔽精确旧服务，健康监控指向统一服务。**先核验再退役**，不误删当前内嵌执行库。旧文档/会话原文和证据可保留历史路径，不重写历史。
+8. 失败保留阶段记录、先归因再恢复：原制品和当前业务状态保持对应，逆向移动原数据并恢复配置/路径映射。若新服务已产生写入，禁止用旧DB快照覆盖当前状态；只逆向修正当前索引。恢复也只能启动统一服务，不重新enroll、清队列或重放未知请求。
+
+现用目录、退役备份、源码可用、目标服务在线和真实业务验收分别记录。目标机升级不意味着网站已发布；网站新文书发布也不会远程自动更新已有安装。
