@@ -39,7 +39,7 @@ sudo ./install.sh --profile web-server    # Web 服务器
 sudo ./install.sh --profile dev-env       # 开发环境
 sudo ./install.sh --profile db-server     # 数据库服务器
 sudo ./install.sh --profile ci-cd         # CI/CD 服务器
-sudo ./install.sh --profile agent         # Codex WebSocket Agent
+sudo ./install.sh --profile agent         # Unified Agent Runtime artifact (explicit instance/tools required)
 
 # 交互式选择安装
 sudo ./install.sh --select
@@ -279,3 +279,11 @@ vpn
 `codex-home.example.toml` 中的模型和服务地址必须替换；认证通过各 Home 的登录流程单独配置，勿提交密钥。
 具体配置分工、权限修复风险、工作区迁移、验证与回滚见
 [配置优化方案](docs/codex-ws-agent-config-optimization.md)。
+
+## 聚义厅自家接应 / Runtime 升级（2026-10-12）
+
+完整操作入口：[统一 Runtime 自家接应指南](docs/cyf-agent-runtime-v1-self-host.md)。
+安装制品不等于登记或上线。首次接入使用目标端
+`shell/cyf_runtime_enrollment_prepare.mjs` 生成私有manifest/secret和非秘密handoff，
+所属用户在新版聚义厅登记摘要后由目标端enroll；已有Runtime升级保留原身份，不重复注册。
+配置/状态与制品分离；旧API Key不是新安装授权；服务切换和实际业务验收分别记录。

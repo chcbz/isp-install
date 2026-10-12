@@ -1,9 +1,17 @@
 # Unified Agent Runtime (UR-01, 2026-10-08)
 
 One Runtime host reuses `codex-ws-agent`; it is not a heartbeat sidecar or a new
-model executor. The current source is an **offline M3 canonical-r2 candidate**, not an accepted
-migration or authorized release. The old engine CLI/API-key execution entry is
+model executor. Current package source is **Runtime 1.0.3** (2026-10-12, baseline
+`807b86d`); source availability does not prove a particular host is installed,
+activated or business-accepted. The old engine CLI/API-key execution entry is
 retired; do not run the old service with the new ACK format.
+
+**Start here:** [Self-host install, enrollment and upgrade guide](../../docs/cyf-agent-runtime-v1-self-host.md).
+It covers target-side manifest/secret preparation, owner-JWT installation
+registration, protected enrollment, host/profile configuration, service ownership
+and a new-item acceptance. The installer alone does not perform these operations.
+The earlier M3/UR03 acceptance lists later in this document are historical scoped
+evidence/gates, not a current declaration that all deployed hosts are unaccepted.
 
 ## Artifact and configuration
 

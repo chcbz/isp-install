@@ -1,40 +1,49 @@
 ---
 name: cyf-agent-runtime-v1-install
-description: Use when preparing or validating the separate CYF Agent Runtime v1 Node 20 package. It is parallel to, and intentionally incompatible with, codex-ws-agent.
+description: Prepare and validate the unified CYF multi-Agent Runtime artifact, hand off self-host installation enrollment, and perform explicitly authorized upgrades using existing identity and service ownership.
 ---
 
-# CYF Agent Runtime v1 Install
+# CYF Unified Runtime Install / Upgrade
+
+核对2026-10-12；Runtime1.0.3基线807b86d。**先完整阅读仓内 `docs/cyf-agent-runtime-v1-self-host.md`**，它是首次接入/已有Runtime升级的操作入口，不再使用旧 API Key 文书。
 
 ## Boundaries
 
-- Install only the new `cyf-agent-runtime-v1` package. Do not alter, stop, copy state from, or copy `.env`/API keys from `codex-ws-agent`.
-- Do not put enrollment secrets, runtime authorization, Provider credentials, or URL `api_key` values in a manifest, shell command, chat, browser, or ordinary log.
-- The package does not support legacy WebSocket registration, legacy IDs, or URL API-key configuration.
+- Installer prepares a fresh canonical artifact only. It does not install a systemd unit, enable/start services, enroll, adopt old `.env`, migrate state, or create an API installation.
+- Node has no project version allowlist. Record actual Node/npm/Python/platform and verify complete private dependencies; do not substitute globally installed Python packages.
+- Determine the exact subject, host, service user, unit/drop-ins and existing installation first. A persona name or old API key is not authority. Existing Runtime upgrades preserve manifest, installation, credentials and state; do not re-enroll.
+- First migration from the old client may need installation registration: target generates manifest/one-time secret, owner JWT registers only public digest request, then target enrolls. Do not wait for a nonexistent backend manifest-signing operation.
+- Never log/copy enrollment secrets, installation/session credentials, provider credentials, or user JWT into chat/browser/source. Only `handoff.json` (scope + digest request) goes to the user's self-host onboarding page.
+- Shared Runtime changes affect all subjects. Require actual service-change authorization and address active/unknown tasks; preserve backups, identity/ACL and single-writer locks. Do not import/replay legacy queues or build compatibility paths.
 
-## Prepare
-
-The controlled deployment channel supplies a real read-only `manifest.json` and a single-use enrollment secret. The manifest has exact `tenantId`, `clientId`, `canonicalAgentId`, `installationId`, `manifestVersion`, and `manifestSha256`; validate it before a service is enabled.
-
-```bash
-export CYF_RUNTIME_V1_INSTANCE=<safe-installation-name>
-sudo ./shell/cyf_agent_runtime_v1_install.sh
-```
-
-This only copies a parallel package below `/home/isp/apps/cyf-agent-runtime-v1/<instance>` and installs the `cyf-agent-runtime-v1@.service` template. It does **not** enable or start the service.
-
-Create `/home/isp/conf/cyf-agent-runtime-v1/<instance>.conf` with mode `0600`; it contains `CYF_RUNTIME_V1_API_BASE_URL` and only a path to a separately supplied `0600` enrollment-secret file. Do not store the secret value in the environment file. Remove the enrollment secret after successful enrollment.
-
-## Validate and start
+## Existing executable entrypoints
 
 ```bash
-cd /home/isp/apps/cyf-agent-runtime-v1/<instance>
-node agent-runtime.mjs validate --manifest manifest.json
-sudo systemctl enable --now cyf-agent-runtime-v1@<instance>
-systemctl status cyf-agent-runtime-v1@<instance>
+# Operator creates and owns the canonical artifact parent first.
+# Set explicit tool paths when defaults do not match the target platform.
+CYF_RUNTIME_V1_INSTANCE=<new-safe-instance> \
+CYF_RUNTIME_V1_NODE_BIN=<node> CYF_RUNTIME_V1_NPM_CLI=<npm> \
+CYF_RUNTIME_V1_PYTHON_BIN=<python3.11> \
+bash ./shell/cyf_agent_runtime_v1_install.sh
+
+# Offline first-install enrollment preparation, never service activation:
+node ./shell/cyf_runtime_enrollment_prepare.mjs \
+  --tenant-id <trusted-tenant> --client-id <trusted-client> --agent-id <canonical-agent> \
+  --output <new-absolute-private-directory> --expires-at <future-epoch-milliseconds>
+
+# Use artifact-local Node and an actual host.json, not --manifest.
+"$ARTIFACT/node/bin/node" "$ARTIFACT/runtime/agent-runtime.mjs" validate --config "$HOST_CONFIG"
+"$ARTIFACT/runtime/validate.sh" --root "$ARTIFACT" --config "$HOST_CONFIG"
+# Only after authorized registration, and only for first enrollment:
+CYF_RUNTIME_V1_API_BASE_URL="$API_ORIGIN" \
+CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE="$SECRET_FILE" \
+"$ARTIFACT/node/bin/node" "$ARTIFACT/runtime/agent-runtime.mjs" enroll --config "$HOST_CONFIG" --subject "$SUBJECT_KEY"
 ```
 
-The service receives `SIGTERM` and exits its heartbeat loop cleanly. Do not use `kill -9` as a normal stop operation.
+Preparation creates manifest, private secret, six-field API request, public handoff and subject key. Existing output is rejected. The manifest digest has a `sha256:` prefix; the API request digests do not. Register via existing owner-JWT `POST /agent/runtime/v1/installations`, query the same ID after an ambiguous response; do not retry creation blindly. ACTIVE does not mean online or business-accepted.
 
-## API contract gap
+Configuration belongs outside artifacts under `/home/isp/conf/cyf-agent-runtime-v1`, persistent state under `/home/isp/state/cyf-agent-runtime-v1`; use real authorized paths on other hosts. Runtime files must belong to the runtime UID. Shipped systemd template uses root and canonical `/home/isp/apps` paths; nonroot/alternate paths require a deliberate unit/drop-in, not blind enable.
 
-The client has only the frozen endpoint paths and identity/ACK invariants. Before connecting to any API, confirm API-owned request/response field names for enrollment authorization, ACK status/result, `REBINDS_REQUIRED`, and the command-channel transport. `run` does not invent polling or execute received command payloads; it only establishes a session, heartbeats, and replays durable ACKs.
+Runtime is a real execution host (sessions, transports, per-Agent queues and execution adapter), not a heartbeat-only sidecar. Text/image readiness is separately configured and verified. Managed hosting profiles are not the same as ordinary self-host native-file profiles. After activation verify online identity, conversation and a new item's actual downloadable deliverable/acceptance; image costs require separate permission.
+
+Follow the guide's explicit preparation → owner registration → configuration → validate → enroll → authorized service switch → business acceptance sequence. If the page still instructs API Key/codex-ws-agent, report that its release is pending; never silently follow the obsolete flow.

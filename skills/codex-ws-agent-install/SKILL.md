@@ -8,8 +8,10 @@ description: Install the latest unified multi-Agent Runtime artifact from this r
 The skill name is a repository discovery label, not a legacy execution alias.
 The only current installer is `shell/cyf_agent_runtime_v1_install.sh` (dispatcher
 component `cyf-agent-runtime-v1`, alias `runtime-v1`, profile `agent`).
-See `conf/cyf-agent-runtime-v1/README.md` for the actual configuration and recovery
-contract. Do not install or launch the retired engine CLI/service.
+Start with `docs/cyf-agent-runtime-v1-self-host.md` for the complete current
+self-host handoff (target-generated manifest/secret, owner registration, enrollment,
+configuration, service switch and acceptance). Technical details remain in
+`conf/cyf-agent-runtime-v1/README.md`. Do not install or launch the retired engine CLI/service.
 
 ## Preconditions and staging
 
