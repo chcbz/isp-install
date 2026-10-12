@@ -31,7 +31,7 @@ connect a provider, or change the API. Existing static config remains valid.
    `/etc/tmpfiles.d/cyf-agent-runtime-v1-hosting.conf`. The example uses `root:isp`;
    verify the actual trusted group before applying it. Normal boot tmpfiles setup
    recreates `/run/cyf-agent-runtime-v1/unified` as **root:isp 0750**. Persistent
-   `/var/lib/cyf-agent-runtime-v1-managed/unified` is **root:root 0700**. Applying
+   `/home/isp/state/cyf-agent-runtime-v1-managed/unified` is **root:root 0700**. Applying
    tmpfiles for initial installation requires separate explicit release authority;
    the installer never invokes `systemd-tmpfiles` or changes those directories.
    Service sources order after `systemd-tmpfiles-setup.service`. Existing unknown

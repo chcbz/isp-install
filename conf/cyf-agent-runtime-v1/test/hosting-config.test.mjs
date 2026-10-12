@@ -106,5 +106,5 @@ test('single source installer/validator explicitly collate control payload and t
   const rootService = await readFile(resolve(sourceRoot, '../../systemd/cyf-agent-runtime-v1@.service'), 'utf8'); assert.equal(service, rootService);
   assert.match(service, /After=.*systemd-tmpfiles-setup\.service/);
   const tmpfiles = await readFile(resolve(sourceRoot, 'systemd/cyf-agent-runtime-v1-hosting.tmpfiles.conf.example'), 'utf8');
-  assert.match(tmpfiles, /d \/run\/cyf-agent-runtime-v1\/unified 0750 root isp/); assert.match(tmpfiles, /d \/var\/lib\/cyf-agent-runtime-v1-managed\/unified 0700 root root/);
+  assert.match(tmpfiles, /d \/run\/cyf-agent-runtime-v1\/unified 0750 root isp/); assert.match(tmpfiles, /d \/home\/isp\/state\/cyf-agent-runtime-v1-managed\/unified 0700 root root/);
 });

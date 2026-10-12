@@ -44,3 +44,10 @@ Pull requests should include the affected component, tested OS, commands run, an
 ## Security & Configuration Tips
 
 Do not commit real passwords, API keys, host-specific `.env` files, or private Codex homes. Use placeholders in `conf/` templates and document required variables in `README.md`.
+
+## Host Storage Defaults (2026-10-12)
+
+- Runtime artifacts use `/home/isp/apps/cyf-agent-runtime-v1`; external host configuration uses `/home/isp/conf/cyf-agent-runtime-v1`.
+- The managed hosting example and tmpfiles template use `/home/isp/state/cyf-agent-runtime-v1-managed/unified` (root:root 0700). Do not restore `/var/lib/cyf*` defaults, compatibility symlinks or bind mounts. The artifact installer must not implicitly migrate existing private state or activate services.
+- Both the MySQL installer-generated `my.cnf` and `conf/mysql/my.cnf` retain binlog for three days with `binlog_expire_logs_seconds=259200`; keep these separate config sources synchronized. Existing persisted server settings require separate operational verification.
+- Verify these defaults with `node --test tests/host-storage-policy.test.mjs`, plus Bash syntax and affected Runtime hosting tests. This is read-only source validation, not installation or production release evidence.

@@ -326,6 +326,20 @@ fix a new artifact and perform authorized integration/release evidence separatel
 No actual provider/production GSS readiness or rent settlement is claimed.
 
 
+### Managed-state directory policy (2026-10-12)
+
+New hosting configurations use `/home/isp/state/cyf-agent-runtime-v1-managed/unified`.
+The operator example and tmpfiles template agree on this root (root:root 0700).
+Program artifacts stay under `/home/isp/apps/cyf-agent-runtime-v1`, and external
+configuration stays under `/home/isp/conf/cyf-agent-runtime-v1`.
+Do not recreate `/var/lib/` CYF state entries, bind mounts or symlink fallbacks.
+For an existing managed installation, move its complete state under controlled
+service shutdown and update `managedRoot` and persisted per-subject profile paths
+as one operation. Preserve journal, manifest, authorization, ACK and enrollment
+state; do not generate replacement identities or enroll again. The installer
+stages artifacts only and does not perform this migration. Static Agent state
+is not implicitly moved by changing the managed-root example.
+
 ### Host configuration and static-subject image credentials (2026-10-11)
 
 The canonical host configuration directory is `/home/isp/conf/cyf-agent-runtime-v1`.

@@ -25,7 +25,7 @@ const FORMATS = [
   ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
   ['pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']
 ];
-const PROTECTED_ROOTS = ['/home/isp/hosts', '/home/isp/apps', '/home/isp/baks', '/opt/cyf', '/var/lib/cyf-api-flow', '/root/.codex'];
+const PROTECTED_ROOTS = ['/home/isp/hosts', '/home/isp/apps', '/home/isp/baks', '/opt/cyf', '/home/isp/state/cyf-api-flow', '/root/.codex'];
 const fail = code => Object.assign(new Error(code), { code });
 const digest = (bytes, algorithm = 'sha256') => createHash(algorithm).update(bytes).digest('hex');
 const gitObject = (kind, bytes) => digest(Buffer.concat([Buffer.from(`${kind} ${bytes.length}\0`), bytes]), 'sha1');
@@ -800,7 +800,7 @@ export function selfcheck() {
   for (const path of ['relative', '/tmp/../bad', '/tmp/x\n', '/tmp//bad']) yes(() => assert.throws(() => absolute(path)));
   for (const path of ['../x', 'x/../y', '/x', '.git/config', 'x//y', 'x\\y', 'x\n']) yes(() => assert.throws(() => memberPath(path)));
   for (const url of ['https://user:secret@example.com/', 'https://example.com/?token=private', 'https://example.com/#private', 'file:///tmp/x']) yes(() => assert.throws(() => publicUrl(url)));
-  for (const parent of ['/home/isp/hosts/cyf', '/root/.codex', '/var/lib/cyf-api-flow']) yes(() => assert.throws(() => parseInputs({ ...env, CYF_CLEAN_INSTALL_PARENT: parent }), { code: 'INPUT_PRODUCTION_OR_PRIVATE_ROOT_FORBIDDEN' }));
+  for (const parent of ['/home/isp/hosts/cyf', '/root/.codex', '/home/isp/state/cyf-api-flow']) yes(() => assert.throws(() => parseInputs({ ...env, CYF_CLEAN_INSTALL_PARENT: parent }), { code: 'INPUT_PRODUCTION_OR_PRIVATE_ROOT_FORBIDDEN' }));
   yes(() => assert.equal(treeDigest([]), '4b825dc642cb6eb9a060e54bf8d69288fbee4904'));
   yes(() => assert.equal(gitObject('blob', Buffer.from('test content\n')), 'd670460b4b4aece5915caf5c68d12f560a9fe3e4'));
   yes(() => assert.equal(inside('/tmp/a', '/tmp/another'), false));

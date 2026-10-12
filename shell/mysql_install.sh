@@ -139,6 +139,9 @@ user=$MYSQL_USER
 character-set-server=utf8mb4
 collation-server=utf8mb4_unicode_ci
 
+# Binlog 保留3天，与主机运维策略保持一致
+binlog_expire_logs_seconds=259200
+
 # 日志
 log-error=$INSTALL_PREFIX/logs/mysql.log
 pid-file=$INSTALL_PREFIX/mysql.pid

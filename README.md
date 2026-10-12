@@ -287,3 +287,11 @@ vpn
 `shell/cyf_runtime_enrollment_prepare.mjs` 生成私有manifest/secret和非秘密handoff，
 所属用户在新版聚义厅登记摘要后由目标端enroll；已有Runtime升级保留原身份，不重复注册。
 配置/状态与制品分离；旧API Key不是新安装授权；服务切换和实际业务验收分别记录。
+
+
+### 主机目录与 binlog 默认策略（2026-10-12）
+
+- Runtime 制品：`/home/isp/apps/cyf-agent-runtime-v1`；配置：`/home/isp/conf/cyf-agent-runtime-v1`。
+- 托管 Agent 持久根：`/home/isp/state/cyf-agent-runtime-v1-managed/unified`，root:root 0700；不创建旧目录的软链接或绑定挂载。具体步骤见 `conf/cyf-agent-runtime-v1/HOSTING-CONTROL.md`。
+- MySQL 安装脚本生成的配置及 `conf/mysql/my.cnf` 模板均设置 `binlog_expire_logs_seconds=259200`（3天）。本次源码修改不会改动已有实例；已有 `SET PERSIST` 配置需另行核验，不能只用普通配置文件推断运行值。
+- 只读回归：`node --test tests/host-storage-policy.test.mjs`；不执行安装、数据库操作或生产构建。
