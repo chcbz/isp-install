@@ -243,10 +243,19 @@ test('unified library catalog closes actual engine imports without retired provi
   for (const path of RETIRED_EXECUTION_PAYLOAD_PATHS) {
     assert.equal(EXECUTION_PAYLOAD_FILES.some(entry => entry === path || entry.startsWith(`${path}/`)), false, path);
   }
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('skill-manifest.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('schemas/skill-manifest-v1.schema.json'), true);
   const target = resolve(f.root, 'codex-ws-agent');
   const result = await collateExecutionPayload(engineSource, target);
   assert.equal(result.payloadCount, EXECUTION_PAYLOAD_FILES.length); assert.equal(result.dependenciesValidated, false);
   await assert.rejects(collateExecutionPayload(engineSource, target), cause => cause.code === 'EEXIST');
+  assert.deepEqual(await readFile(resolve(target, 'schemas/skill-manifest-v1.schema.json')),
+    await readFile(resolve(engineSource, 'schemas/skill-manifest-v1.schema.json')));
+  const manifestModule = resolve(target, 'skill-manifest.mjs');
+  const originalManifestModule = await readFile(manifestModule);
+  await writeFile(manifestModule, "import 'undeclared-validation-package/subpath.js';\n" + originalManifestModule);
+  await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_DEPENDENCY_UNDECLARED'));
+  await writeFile(manifestModule, originalManifestModule);
   const installed = await readdir(target); assert.equal(installed.includes('.env'), false); assert.equal(installed.includes('node_modules'), false);
   await writeFile(resolve(target, '.env'), 'foreign-secret');
   await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_PRIVATE_STATE_FORBIDDEN'));
@@ -989,7 +998,11 @@ async function consumerFixture(t) {
   // Derive the exact frozen runtime list rather than another installer catalog.
   const harnessSource = await readFile(resolve(repo, 'conf/cyf-agent-runtime-v1/test/clean-target-install.acceptance.mjs'), 'utf8');
   const runtimeList = [...harnessSource.match(/const RUNTIME_FILES = \[([\s\S]*?)\];/)[1].matchAll(/'([^']+)'/g)].map(match => match[1]);
-  const installInputs = [...runtimeList.map(path => `conf/cyf-agent-runtime-v1/${path}`), ...EXECUTION_PAYLOAD_FILES.map(path => `conf/codex-ws-agent/${path}`)];
+  // This fixture deliberately uses the historical fixed archive, not today's
+  // catalog. Bind both source and payload to the same frozen revision.
+  const frozenAdapter = await readFile(resolve(sourceRoot, 'conf/cyf-agent-runtime-v1/lib/execution-adapter.mjs'), 'utf8');
+  const frozenCatalog = JSON.parse(frozenAdapter.match(/export const EXECUTION_PAYLOAD_FILES = Object\.freeze\((\[[\s\S]*?\])\);/)[1]);
+  const installInputs = [...runtimeList.map(path => `conf/cyf-agent-runtime-v1/${path}`), ...frozenCatalog.map(path => `conf/codex-ws-agent/${path}`)];
   for (const input of installInputs) {
     const relative = input.startsWith('conf/cyf-agent-runtime-v1/') ? input.replace('conf/cyf-agent-runtime-v1/', 'runtime/') : input.slice('conf/'.length);
     const path = resolve(target, relative); await mkdir(dirname(path), { recursive: true });
