@@ -85,7 +85,7 @@ test('typed declaration is default-off, unavailable until exact measured live ad
   assert.equal(buildTypedDeliberationDeclaration(profile, { ...readyAdapter(), closed: true }).state, 'UNAVAILABLE')
   assert.equal(buildTypedDeliberationDeclaration(profile, { ...readyAdapter(), readback: { initialize: {}, schema: { measured: false } } }).state, 'UNAVAILABLE')
   assert.deepEqual(buildTypedDeliberationDeclaration(profile, readyAdapter()), {
-    schemaVersion: 3, state: 'READY', carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V3', referenceModes: ['NONE', 'AVAILABLE'],
+    schemaVersion: 4, state: 'READY', carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V4', referenceModes: ['NONE', 'AVAILABLE'],
     outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST'], engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA', strictNoToolsVerified: false, toolPolicy: 'read-only-constrained'
   })
 })

@@ -156,10 +156,10 @@ test('composed v3 runtime advertises exact source-aware GENERATE and EDIT then e
   assert.equal(fixture.runtime.adapterKind, 'CONTROLLED_IMAGE_HTTP_V1')
   const registration = buildAgentRegistrationPayload(fixture.profile, null, true, null, null, fixture.runtime)
   const presence = buildAgentPresencePayload(fixture.profile, 'online', { controlledImageV3Runtime: fixture.runtime })
-  assert.deepEqual(registration.controlledImageBountyExecutionV3, enabledDeclaration)
-  assert.deepEqual(presence.controlledImageBountyExecutionV3, enabledDeclaration)
+  assert.equal(registration.controlledImageBountyExecutionV3, undefined)
+  assert.equal(presence.controlledImageBountyExecutionV3, undefined)
   assert.deepEqual(presence.nativeProviderCredentialBinding, registration.nativeProviderCredentialBinding)
-  assert.equal(registration.nativeProviderCredentialBinding.enabled, true)
+  assert.equal(registration.nativeProviderCredentialBinding, undefined)
 
   assert.deepEqual(await fixture.runtime.pollProtocol.poll(), { processed: 1 })
   assert.equal(fixture.startCalls(), 1)

@@ -117,3 +117,14 @@ test('frozen §6 source kinds/identities and safe Java lengths preserve MIME/has
     assert.throws(() => parseSkillInputSnapshot({ ...envelope, inputs: [{ ...input, ...patch }] }, c, { version: 1 }), /SNAPSHOT_INVALID/)
   assert.throws(() => parseSkillInputSnapshot({ ...envelope, noReferencedMaterials: true }, c, { version: 1 }), /SNAPSHOT_INVALID/)
 })
+
+test('only the real committed receipt permits execution-owned carrier adapter release', async t => {
+  const f = fixture(t); const released = []
+  f.options.onCommitted = (command, receipt) => { released.push([command.executionId, receipt.state]) }
+  f.loseCommit(); await new SkillConversationLane(f.options).poll()
+  assert.deepEqual(released, [['pwe_1', 'RESULT_COMMITTED']])
+  const missing = fixture(t); let unsafeRelease = 0
+  missing.options.onCommitted = () => { unsafeRelease++ }; missing.corruptDigest()
+  await assert.rejects(new SkillConversationLane(missing.options).poll(), /SKILL_COMMIT_UNCONFIRMED/)
+  assert.equal(unsafeRelease, 0)
+})

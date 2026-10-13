@@ -10,7 +10,8 @@ export function createNativeModelRunner({ probeModel, runModel }) {
   return {
     probe: async context => {
       if (!entries.has(context.entrypoint) || typeof runModel !== 'function' || typeof probeModel !== 'function') return { ready: false, reasonCode: 'SKILL_NATIVE_ADAPTER_MISSING' }
-      const measured = await probeModel()
+      const measured = await probeModel(context)
+      if ((context.inputMimeTypes || []).some(mime => !['text/plain', 'text/markdown', 'application/json'].includes(mime) && !measured?.supportedMimeTypes?.includes(mime))) return { ready: false, reasonCode: 'MATERIALS_CARRIER_UNAVAILABLE' }
       return measured?.ready === true ? { ready: true, digest: skillDigest({ adapter: context.entrypoint, measurement: measured.digest }) }
         : { ready: false, reasonCode: 'SKILL_NATIVE_MODEL_UNAVAILABLE' }
     },

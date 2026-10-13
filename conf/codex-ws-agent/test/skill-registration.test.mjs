@@ -50,7 +50,8 @@ test('cached registration is IO free, unavailable before measurement and omitted
   }
   assert.equal(buildAgentRegistrationPayload(current.profile, null, false, null, null, null, current.skillRegistry).skillExecution, undefined)
   assert.equal(loads, 1)
-  assert.equal(buildAgentPresencePayload(current.profile, 'online', { skillRegistry: current.skillRegistry }).skillExecution, undefined)
+  assert.equal(buildAgentPresencePayload(current.profile, 'online', { skillRegistry: current.skillRegistry }).skillExecution, current.skillRegistry.declaration())
+  assert.equal(buildAgentPresencePayload(current.profile, 'offline', { skillRegistry: current.skillRegistry }).skillExecution, undefined)
 })
 test('owner/session replacement invalidates old snapshot; missing receipt cannot retain directory', async () => {
   const current = state(); bindMeasuredSkillSession(current, skillSessionBinding(receipt(), session)); await tick()

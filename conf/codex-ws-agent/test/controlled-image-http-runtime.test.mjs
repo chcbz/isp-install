@@ -141,25 +141,9 @@ test('real controlled runtime registers only its sibling and fetches once after 
   assert.equal(fixture.runtime.adapterKind, 'CONTROLLED_IMAGE_HTTP_V1')
   assert.equal(fixture.runtime.nativeBountyV1Ready, false)
   const registration = buildAgentRegistrationPayload(fixture.profile, fixture.runtime, true)
-  assert.deepEqual(registration.nativeProviderCredentialBinding, {
-    schemaVersion: 1,
-    enabled: true,
-    providerLane: 'CONTROLLED_IMAGE_HTTP_V1',
-    bindingId: 'binding-1',
-    bindingEpoch: '7',
-    modelId: 'operator-model',
-    maxInputItems: 16,
-    maxOutboundRequestAttempts: 1,
-    precallFenceVersion: 1
-  })
-  assert.equal(registration.nativeBountyExecution.enabled, false)
-  assert.deepEqual(registration.nativeBountyExecution.operations, [])
-  assert.deepEqual(registration.controlledImageBountyExecution, {
-    schemaVersion: 1, enabled: true, transport: 'PERSONAL_WORKSPACE_CONTROLLED_IMAGE_HTTP_V2',
-    commandSchemaVersions: [2], leaseProtocolVersions: [1], providerStartFenceVersions: [2], resultCommitProtocolVersions: [1],
-    operations: [{ operation: 'GENERATE_IMAGE', inputManifest: { schemaVersion: 1, minItems: 0, maxItems: 16, mimeTypes: ['image/jpeg', 'image/png'] },
-      resultManifest: { schemaVersion: 1, minItems: 1, maxItems: 1, outputId: 'output_1', mimeTypes: ['image/png'] } }]
-  })
+  assert.equal(registration.nativeProviderCredentialBinding, undefined)
+  assert.equal(registration.nativeBountyExecution, undefined)
+  assert.equal(registration.controlledImageBountyExecution, undefined)
 
   assert.deepEqual(await fixture.runtime.pollProtocol.poll(), { processed: 1 })
   assert.equal(fixture.providerCalls(), 1)

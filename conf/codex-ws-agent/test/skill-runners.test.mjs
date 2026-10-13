@@ -61,3 +61,12 @@ test('missing native carrier is unavailable, never imaginary image understanding
   assert.throws(() => buildMaterialsInputs({ inputs: [material('not an image', 'image/png')] }), /CARRIER_UNAVAILABLE/)
   const bad = material('text'); bad.sha256 = '0'.repeat(64); assert.throws(() => buildMaterialsInputs({ inputs: [bad] }), /BYTES_INVALID/)
 })
+
+test('native skill admitting media is unavailable until that exact MIME has a measured real carrier', async () => {
+  const runner = createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64) }), runModel: async () => assert.fail('probe must never run a model') })
+  assert.equal((await runner.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['text/plain'] })).ready, true)
+  assert.deepEqual(await runner.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['text/plain', 'image/png'] }), { ready: false, reasonCode: 'MATERIALS_CARRIER_UNAVAILABLE' })
+  const measured = createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png'] }), runModel() {} })
+  assert.equal((await measured.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['image/png'] })).ready, true)
+  assert.equal((await measured.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['audio/wav'] })).ready, false)
+})

@@ -63,12 +63,12 @@ export function validateCommittedSkillResult(manifest, command, descriptor, phas
 }
 
 export class SkillConversationLane {
-  constructor({ apiOrigin, rootDir, agentId, runtimeInstanceId, scope, getRuntimeHeaders, fetchFn = globalThis.fetch, registry, runners }) {
+  constructor({ apiOrigin, rootDir, agentId, runtimeInstanceId, scope, getRuntimeHeaders, fetchFn = globalThis.fetch, registry, runners, onCommitted = async () => {} }) {
     this.origin = originOf(apiOrigin)
     if (!isAbsolute(rootDir || '') || !skillId(agentId) || !skillId(runtimeInstanceId) || typeof getRuntimeHeaders !== 'function'
         || typeof fetchFn !== 'function' || !scope || scope.agentId !== agentId || !registry || !(runners instanceof Map)) fail('SKILL_LANE_CONFIG_INVALID')
     this.root = resolve(rootDir, 'skill-runs'); this.agentId = agentId; this.instanceId = runtimeInstanceId
-    this.scope = scope; this.auth = getRuntimeHeaders; this.fetch = fetchFn; this.registry = registry; this.runners = runners; this.active = false
+    this.scope = scope; this.auth = getRuntimeHeaders; this.fetch = fetchFn; this.registry = registry; this.runners = runners; this.active = false; this.onCommitted = onCommitted
   }
   headers() { return nativeSessionHeaders(this.auth(), this.agentId, this.instanceId) }
   async request(path, method, body, statuses = [200]) {
@@ -258,6 +258,7 @@ export class SkillConversationLane {
         store.write('receipt', { schemaVersion: 1, executionId: command.executionId, snapshotDigest: command.snapshotDigest,
           localResultDigest: skillDigest(manifest), manifestId: receipt.manifestId, resultDigest: receipt.resultDigest,
           state: receipt.state, phase: receipt.phase })
+        try { await this.onCommitted(command, receipt) } catch { store.write('cleanup-pending', { schemaVersion: 1, code: 'SKILL_CLEANUP_PENDING' }) }
         // Leave checkpoint retention explicit. A receipt never clears another execution's tree.
       }
     }

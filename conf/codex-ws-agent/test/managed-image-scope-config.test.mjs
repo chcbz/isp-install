@@ -166,19 +166,8 @@ test('exact managed authorization reaches real registration and poll runtime com
   })
   assert.equal(runtime.controlledImageV3Ready, true)
   const registration = buildAgentRegistrationPayload(managed, null, true, null, null, runtime)
-  assert.equal(registration.controlledImageBountyExecutionV3.enabled, true)
-  assert.deepEqual(registration.controlledImageBountyExecutionV3.operations.map(item => item.operation), ['GENERATE_IMAGE', 'EDIT_IMAGE'])
-  assert.deepEqual(registration.nativeProviderCredentialBinding, {
-    schemaVersion: 1,
-    enabled: true,
-    providerLane: 'CONTROLLED_IMAGE_HTTP_V1',
-    bindingId: 'binding-15',
-    bindingEpoch: '7',
-    modelId: 'operator-model',
-    maxInputItems: 16,
-    maxOutboundRequestAttempts: 1,
-    precallFenceVersion: 1
-  })
+  assert.equal(registration.controlledImageBountyExecutionV3, undefined)
+  assert.equal(registration.nativeProviderCredentialBinding, undefined)
   assert.deepEqual(ledgerOptions, [{ rootDir: '/private/managed-image/tenant-a/owner-a/generation-1',
     profileId: PROFILE, agentId: AGENT }])
   assert.equal(executorOptions[0].credential, 'fixture-secret')
@@ -241,7 +230,7 @@ test('schema v2 exact managed scope selects the frozen GPT CLI adapter without i
   assert.equal(cliOptions[0].providerConfig.modelId, 'gpt-image-2.5')
   assert.equal(cliOptions[0].cliConfig.runnerSha256, digest(runner))
   assert.deepEqual(ledgerOptions, [{ rootDir: resolve(root, 'ledger'), profileId: PROFILE, agentId: AGENT }])
-  assert.equal(buildAgentRegistrationPayload(managed, null, true, null, null, runtime).nativeProviderCredentialBinding.enabled, true)
+  assert.equal(buildAgentRegistrationPayload(managed, null, true, null, null, runtime).nativeProviderCredentialBinding, undefined)
   const wrongGeneration = resolveManagedRuntimeProfile(profile({
     managedGeneration: 'hri_00000000-0000-0000-0000-000000000002'
   }), source(), authorizations)
@@ -290,7 +279,7 @@ test('explicit 130-character scoped profile composes loader ledger executors and
   assert.equal(cliRuntime.controlledImageV3Ready, true)
   assert.equal(cliRuntime.adapterKind, 'GPT_IMAGE_CLI_V1')
   assert.equal(buildAgentRegistrationPayload(cliProfile, null, true, null, null, cliRuntime)
-    .nativeProviderCredentialBinding.enabled, true)
+    .nativeProviderCredentialBinding, undefined)
 
   const httpAuthorization = scope({ ownerJiacn, profileId: generated.profileId,
     controlledImageHttpLedgerRoot: resolve(root, 'http-ledger') })
@@ -302,6 +291,6 @@ test('explicit 130-character scoped profile composes loader ledger executors and
   assert.equal(httpRuntime.controlledImageV3Ready, true)
   assert.equal(httpRuntime.adapterKind, 'CONTROLLED_IMAGE_HTTP_V1')
   const registration = buildAgentRegistrationPayload(httpProfile, null, true, null, null, httpRuntime)
-  assert.equal(registration.controlledImageBountyExecutionV3.enabled, true)
-  assert.equal(registration.nativeProviderCredentialBinding.enabled, true)
+  assert.equal(registration.controlledImageBountyExecutionV3, undefined)
+  assert.equal(registration.nativeProviderCredentialBinding, undefined)
 })

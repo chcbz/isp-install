@@ -692,7 +692,7 @@ test('completed typed inspection measurement republishes exact readiness only on
   assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: () => assert.fail('must not publish unready declaration'), busyFn: () => false }), false)
 })
 
-test('typed inspection declaration is absent without measured contract readback and exact when ready', () => {
+test('public input carriers declaration is absent without measured contract readback and exact when ready', () => {
   const declaration = {
     schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', enabled: true, profileId: 'inspection-profile',
     engineContractId: 'engine-contract-v1', enginePolicyDigest: 'sha256:' + '1'.repeat(64), toolPolicyDigest: 'sha256:' + '2'.repeat(64),
@@ -702,8 +702,8 @@ test('typed inspection declaration is absent without measured contract readback 
   const unavailable = { declaration: () => null }; const ready = { declaration: () => declaration }
   assert.equal(Object.hasOwn(buildAgentRegistrationPayload(profile, null, false, null, unavailable), 'typedInspection'), false)
   assert.equal(Object.hasOwn(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: unavailable }), 'typedInspection'), false)
-  assert.deepEqual(buildAgentRegistrationPayload(profile, null, true, null, ready).typedInspection, declaration)
-  assert.deepEqual(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: ready }).typedInspection, declaration)
+  assert.deepEqual(buildAgentRegistrationPayload(profile, null, true, null, ready).inputCarriers, { ...declaration, contract: 'juyiting-materials-v1' })
+  assert.deepEqual(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: ready }).inputCarriers, { ...declaration, contract: 'juyiting-materials-v1' })
 })
 
 test('typed inspection CA bundle path survives exact profile and fallback normalization', () => {
@@ -735,7 +735,7 @@ test('typed deliberation declaration binds the exact locally selected schema con
   })
   const liveNative = adapter(native)
   const declaration = {
-    schemaVersion: 3, state: 'READY', carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V3', referenceModes: ['NONE', 'AVAILABLE'],
+    schemaVersion: 4, state: 'READY', carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V4', referenceModes: ['NONE', 'AVAILABLE'],
     outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST'], engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA',
     strictNoToolsVerified: false, toolPolicy: 'read-only-constrained'
   }

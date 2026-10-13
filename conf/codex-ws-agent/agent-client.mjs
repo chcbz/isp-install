@@ -4152,16 +4152,10 @@ export const buildRuntimeCapabilities = profile => {
   })
 }
 
-const controlledImageProviderRuntime = (nativeRuntime, controlledImageV3Runtime) => (
-  controlledImageV3Runtime?.controlledImageV3Ready === true ? controlledImageV3Runtime : nativeRuntime
-)
-
 export const buildAgentPresencePayload = (profile, status, extra = {}) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, extra.appServerAdapter || null)
   const typedInspection = extra.typedInspectionProfileRuntime?.declaration?.() || null
   const online = ['online', 'busy'].includes(status)
-  const controlledImageV3Runtime = extra.controlledImageV3Runtime || null
-  const providerRuntime = controlledImageProviderRuntime(extra.nativeRuntime || null, controlledImageV3Runtime)
   return {
     status,
     currentTaskId: extra.taskId || '',
@@ -4169,14 +4163,9 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => {
     errorMessage: extra.errorMessage || '',
     abilities: resolveProfileAbilities(profile),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
-    controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration({
-      profile, runtime: controlledImageV3Runtime, online
-    }),
-    nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({
-      profile, runtime: providerRuntime, online
-    }),
     ...(typedDeliberation ? { typedDeliberation } : {}),
-    ...(typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {})
+    ...(online && typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {}),
+    ...(online && extra.skillRegistry?.declaration?.() ? { skillExecution: extra.skillRegistry.declaration() } : {})
   }
 }
 
@@ -4184,7 +4173,6 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
   typedInspectionProfileRuntime = null, controlledImageV3Runtime = null, skillRegistry = null) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, appServerAdapter)
   const typedInspection = typedInspectionProfileRuntime?.declaration?.() || null
-  const providerRuntime = controlledImageProviderRuntime(nativeRuntime, controlledImageV3Runtime)
   return {
     name: profile.agentName,
     personaName: profile.personaName,
@@ -4192,7 +4180,7 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
     abilities: resolveProfileAbilities(profile),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
     ...(typedDeliberation ? { typedDeliberation } : {}),
-    ...(typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {}),
+    ...(online && typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {}),
     ...(online && skillRegistry?.declaration?.() ? { skillExecution: skillRegistry.declaration() } : {})
   }
 }
@@ -4203,8 +4191,7 @@ const sendStatus = (profile, status, extra = {}) => {
     ...extra,
     appServerAdapter: state?.appServerAdapter || null,
     typedInspectionProfileRuntime: state?.typedInspectionProfileRuntime || null,
-    nativeRuntime: state?.nativeBountyExecutionRuntime || null,
-    controlledImageV3Runtime: state?.controlledImageV3SourceRuntime || null
+    skillRegistry: state?.skillRegistry || null
   }), profile)
 }
 
@@ -4278,10 +4265,14 @@ export const bindMeasuredSkillSession = (state, binding) => {
     const bindings = new SkillBindings({ file: state.profile.skillBindingsFile,
       credentialEnvironment: state.profile.runtimeProviderEnvironment })
     const nativeRunner = createNativeModelRunner({
-      probeModel: async () => {
+      probeModel: async context => {
+        const media = (context.inputMimeTypes || []).some(mime => !['text/plain', 'text/markdown', 'application/json'].includes(mime))
+        const carriers = media ? await state.ensureTypedInspectionProfile?.() : null
+        if (media && !carriers?.contractReadback) return { ready: false }
         const adapter = await state.ensureAppServer?.()
         return typedDeliberationAdapterReady(state.profile, adapter)
-          ? { ready: true, digest: skillDigest(adapter.readback?.schema || {}) } : { ready: false }
+          ? { ready: true, digest: skillDigest({ model: adapter.readback?.schema || {}, carriers: carriers?.contractReadback || null }),
+              supportedMimeTypes: ['text/plain', 'text/markdown', 'application/json', ...(carriers?.contractReadback?.supportedInputs || []).map(input => input.mimeType)] } : { ready: false }
       },
       runModel: request => runSkillNativeModel(state, request)
     })
@@ -4295,7 +4286,8 @@ export const bindMeasuredSkillSession = (state, binding) => {
       state.conversationNativeLane = new SkillConversationLane({ apiOrigin: state.profile.workspaceFileApiOrigin,
         rootDir: state.profile.workspaceFileRootDir, agentId: state.profile.agentId, runtimeInstanceId: state.profile.runtimeInstanceId,
         scope: binding.scope, registry: state.skillRegistry, runners: state.skillRunners,
-        getRuntimeHeaders: () => state.runtimeTransport?.headers(), fetchFn: (url, opts) => state.runtimeTransport.nativeFetch(url, opts) })
+        getRuntimeHeaders: () => state.runtimeTransport?.headers(), fetchFn: (url, opts) => state.runtimeTransport.nativeFetch(url, opts),
+        onCommitted: command => state.typedInspectionProfileRuntime?.releaseAdapter(`skill:${command.executionId}:${command.snapshotDigest}`) })
     }
   }
   if (!state.skillRegistry.setSession(binding.fence)) return false
@@ -4727,12 +4719,13 @@ export const runFastChat = async (profile, message, {
   if (message.legacy || !modern) return legacy('LEGACY_CHAT_PROTOCOL', false)
   const requestedRoute = message.route === undefined ? (message.routing?.interactionMode || 'CHAT') : message.route
   if (requestedRoute !== 'CHAT') throw new AgentProtocolError('FAST_CHAT_ROUTE_INVALID', 'Modern Fast CHAT accepts only route=CHAT')
-  if (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedInspection')) throw new AgentProtocolError('TYPED_INSPECTION_WRONG_RUNTIME', 'Typed inspection must use the isolated INSPECT runtime')
+  if (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedInspection')) throw new AgentProtocolError('TYPED_INSPECTION_WRONG_RUNTIME', 'Independent INSPECT is retired; authorized materials belong to the original CHAT turn')
   if (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedDeliberation')) {
     try { validateChatDispatch(message) } catch (error) { throw new AgentProtocolError(error.code || 'TYPED_DELIBERATION_BINDING_INVALID', error.message || 'Invalid typed deliberation dispatch binding') }
   }
   const actionRequest = resolveActionChatRequest(profile, message)
-  const typedRequest = actionRequest || resolveTypedDeliberationRequest(profile, message)
+  if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'typedDeliberation') && !actionRequest) throw new AgentProtocolError('ACTION_PROTOCOL_VERSION_INVALID', 'New durable planning accepts only action-v4')
+  const typedRequest = actionRequest
   const outputSchema = actionRequest ? ACTION_OUTCOME_SCHEMA : TYPED_DELIBERATION_OUTPUT_SCHEMA
   const outcomeInstructions = actionRequest ? ACTION_OUTCOME_INSTRUCTIONS : TYPED_DELIBERATION_INSTRUCTIONS
   const outcomeContractDigest = actionRequest ? ACTION_OUTCOME_CONTRACT_DIGEST : TYPED_DELIBERATION_CONTRACT_DIGEST

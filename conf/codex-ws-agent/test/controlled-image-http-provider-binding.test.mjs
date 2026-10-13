@@ -30,15 +30,14 @@ const enabled = {
   precallFenceVersion: 1
 }
 
-test('registration sibling is exact nine-field enabled shape only for live controlled runtime', () => {
+test('historical codec keeps exact binding proof but new registration never advertises the retired lane', () => {
   const declaration = buildNativeProviderCredentialBinding({ profile, runtime, online: true })
   assert.deepEqual(declaration, enabled)
   assert.equal(Object.keys(declaration).length, 9)
   assert.equal(Object.isFrozen(declaration), true)
   const payload = buildAgentRegistrationPayload(profile, runtime, true)
-  assert.deepEqual(payload.nativeProviderCredentialBinding, enabled)
-  assert.equal(payload.nativeBountyExecution.enabled, false)
-  assert.equal(payload.nativeBountyExecution.operations.length, 0)
+  assert.equal(payload.nativeProviderCredentialBinding, undefined)
+  assert.equal(payload.nativeBountyExecution, undefined)
 })
 
 test('disabled declaration is exactly two fields for offline, missing credential, poll, config, or controlled adapter', () => {
@@ -53,15 +52,15 @@ test('disabled declaration is exactly two fields for offline, missing credential
   ]) assert.deepEqual(buildNativeProviderCredentialBinding(readiness), { schemaVersion: 1, enabled: false })
 })
 
-test('generic Codex executor can advertise native-v1 but never controlled credential binding', () => {
+test('generic Codex ability or old profile flags cannot advertise an executable capability', () => {
   const generic = { configReady: true, credentialReady: false, httpPollEnabled: true,
     adapterKind: 'CODEX_IMAGEGEN_NATIVE_V1', nativeBountyV1Ready: true,
     executor: () => {}, pollProtocol: { poll() {} }, controlledConfig: null }
   const genericProfile = { ...profile, controlledImageHttpEnabled: false,
     nativeConversationImageGenerationEnabled: true }
   const payload = buildAgentRegistrationPayload(genericProfile, generic, true)
-  assert.equal(payload.nativeBountyExecution.enabled, true)
-  assert.deepEqual(payload.nativeProviderCredentialBinding, { schemaVersion: 1, enabled: false })
+  assert.equal(payload.nativeBountyExecution, undefined)
+  assert.equal(payload.nativeProviderCredentialBinding, undefined)
 })
 
 
@@ -69,5 +68,5 @@ test('exact CLI adapter maps to the existing server controlled provider lane wit
   const cliRuntime = { ...runtime, adapterKind: 'GPT_IMAGE_CLI_V1', controlledImageV3Ready: true }
   assert.deepEqual(buildNativeProviderCredentialBinding({ profile, runtime: cliRuntime, online: true }), enabled)
   assert.equal(buildAgentRegistrationPayload(profile, null, true, null, null, cliRuntime)
-    .nativeProviderCredentialBinding.providerLane, 'CONTROLLED_IMAGE_HTTP_V1')
+    .nativeProviderCredentialBinding, undefined)
 })

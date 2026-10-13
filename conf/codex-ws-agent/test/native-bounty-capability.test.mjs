@@ -65,54 +65,15 @@ const expectedEnabledDeclaration = {
   }]
 }
 
-const assertDisabled = declaration => {
-  assert.equal(declaration.enabled, false)
-  assert.deepEqual(declaration.operations, [])
-  assert.equal(declaration.transport, 'PERSONAL_WORKSPACE_CONVERSATION_HTTP_V1')
-}
-
-test('agent.register declares only the exact enabled GENERATE_IMAGE HTTP-poll contract', () => {
-  const profile = configuredProfile()
-  const runtime = runtimeFor(profile)
-  const payload = buildAgentRegistrationPayload(profile, runtime, true)
-
-  assert.deepEqual(payload.nativeBountyExecution, expectedEnabledDeclaration)
-  assert.deepEqual(payload.runtimeCapabilities.profiles.EXECUTE, { supported: false, enabled: false })
-  assert.equal(Object.isFrozen(payload.nativeBountyExecution), true)
-  assert.equal(Object.isFrozen(payload.nativeBountyExecution.operations), true)
-  assert.equal(Object.isFrozen(payload.nativeBountyExecution.operations[0].inputManifest), true)
-})
-
-test('missing config, disabled executor, offline state, or skill/profile hints stay disabled', () => {
-  const profile = configuredProfile()
-  const ready = runtimeFor(profile)
-
-  assertDisabled(buildAgentRegistrationPayload(
-    configuredProfile({ workspaceFileRootDir: '' }),
-    runtimeFor(configuredProfile({ workspaceFileRootDir: '' })),
-    true
-  ).nativeBountyExecution)
-  assertDisabled(buildAgentRegistrationPayload(
-    configuredProfile({ nativeConversationImageGenerationEnabled: false }),
-    ready,
-    true
-  ).nativeBountyExecution)
-  assertDisabled(buildAgentRegistrationPayload(profile, ready, false).nativeBountyExecution)
-  assertDisabled(buildAgentRegistrationPayload(
-    configuredProfile({ status: 'offline', skills: ['imagegen'], abilities: ['GENERATE_IMAGE'] }),
-    ready,
-    true
-  ).nativeBountyExecution)
-  assertDisabled(buildAgentRegistrationPayload(
-    configuredProfile({
-      nativeConversationHttpPollEnabled: false,
-      nativeConversationImageGenerationEnabled: false,
-      skills: ['imagegen'],
-      abilities: ['GENERATE_IMAGE']
-    }),
-    { configReady: true, httpPollEnabled: true, executor: () => {}, pollProtocol: { poll() {} } },
-    true
-  ).nativeBountyExecution)
+test('new registration never trusts image capability prose or legacy profile toggles; only measured skills advertise execution', () => {
+  const profile = configuredProfile(), runtime = runtimeFor(profile)
+  for (const current of [profile, { ...profile, skills: ['imagegen'], abilities: ['GENERATE_IMAGE'] }, { ...profile, status: 'offline' }]) {
+    const payload = buildAgentRegistrationPayload(current, runtime, true)
+    assert.equal(payload.nativeBountyExecution, undefined)
+    assert.equal(payload.nativeTextFileExecution, undefined)
+    assert.equal(payload.skillExecution, undefined)
+    assert.deepEqual(payload.runtimeCapabilities.profiles.EXECUTE, { supported: false, enabled: false })
+  }
 })
 
 test('runtime readiness requires an actual executor, usable local config, and poll implementation without probing them', () => {
@@ -160,7 +121,7 @@ test('server and managed-local profiles use the same frozen declaration protocol
   const serverDeclaration = buildAgentRegistrationPayload(server, runtimeFor(server), true).nativeBountyExecution
   const localDeclaration = buildAgentRegistrationPayload(local, runtimeFor(local), true).nativeBountyExecution
   assert.deepEqual(localDeclaration, serverDeclaration)
-  assert.deepEqual(localDeclaration, expectedEnabledDeclaration)
+  assert.equal(localDeclaration, undefined)
 })
 
 test('native executor flags are strict config and never mutate fast-v1 presence capabilities', () => {
@@ -200,10 +161,8 @@ test('text-file native lane is selected only by explicit flag and stays separate
     error => error.code === 'CONVERSATION_TEXT_FILE_COMMAND_INVALID')
   assert.equal(executions, 1)
   const registration = buildAgentRegistrationPayload(profile, runtime, true)
-  assert.equal(registration.nativeTextFileExecution.enabled, true)
-  assert.deepEqual(registration.nativeTextFileExecution.mimeTypes, ['text/plain'])
-  assert.equal(registration.nativeTextFileExecution.maxSources, 0)
-  assert.equal(buildAgentRegistrationPayload(profile, runtime, false).nativeTextFileExecution.enabled, false)
+  assert.equal(registration.nativeTextFileExecution, undefined)
+  assert.equal(buildAgentRegistrationPayload(profile, runtime, false).nativeTextFileExecution, undefined)
   assert.equal(buildAgentPresencePayload(profile, 'offline', { nativeRuntime: runtime }).nativeTextFileExecution, undefined)
 })
 
@@ -213,7 +172,7 @@ test('ordinary profile flag is inherited, while mixed image runtime does not adv
   const profile = configuredProfile({ nativeConversationTextFileEnabled: true, nativeConversationImageGenerationEnabled: true })
   const runtime = runtimeFor(profile)
   assert.notEqual(runtime.nativeTextFileV1Ready, true)
-  assert.equal(buildAgentRegistrationPayload(profile, runtime, true).nativeTextFileExecution.enabled, false)
+  assert.equal(buildAgentRegistrationPayload(profile, runtime, true).nativeTextFileExecution, undefined)
 })
 
 test('Codex text run args pin private run directory, workspace-write, never approval, exec mode, and fresh session', () => {
