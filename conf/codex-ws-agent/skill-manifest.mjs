@@ -24,7 +24,7 @@ const listSchemas = new Set('allOf anyOf oneOf prefixItems'.split(' '))
 const mapSchemas = new Set('$defs properties patternProperties dependentSchemas'.split(' '))
 
 export function parseSkillJson(raw) {
-  try { return parseStrictTypedOutcomeJson(Buffer.isBuffer(raw) ? new TextDecoder('utf-8', { fatal: true }).decode(raw) : raw) }
+  try { return structuredClone(parseStrictTypedOutcomeJson(Buffer.isBuffer(raw) ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw) : raw)) }
   catch { fail('SKILL_INVALID_JSON') }
 }
 function requirePortableJson(value) {
