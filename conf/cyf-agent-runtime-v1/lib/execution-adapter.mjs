@@ -246,6 +246,8 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "registration-ack.mjs",
   "report-outbox.mjs",
   "skill-install-manager.mjs",
+  "skill-manifest.mjs",
+  "schemas/skill-manifest-v1.schema.json",
   "toolchain/delivery_tool.py",
   "toolchain/requirements.txt",
   "typed-inspection-input-carriers.mjs",
@@ -328,7 +330,13 @@ export async function validateExecutionPayload(root, { dependencies = true, tool
       if (specifier.startsWith('.')) {
         const imported = relative(root, resolve(dirname(path), specifier)).split(sep).join('/');
         if (!known.has(imported)) throw payloadError('RUNTIME_PAYLOAD_IMPORT_MISSING');
-      } else if (!Object.hasOwn(packageJson.dependencies || {}, specifier)) throw payloadError('RUNTIME_PAYLOAD_DEPENDENCY_UNDECLARED');
+      } else {
+        // Node package subpaths (including scoped packages) are authorized by
+        // their declared root dependency; Node still proves the actual export.
+        const parts = specifier.split('/');
+        const packageName = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+        if (!Object.hasOwn(packageJson.dependencies || {}, packageName)) throw payloadError('RUNTIME_PAYLOAD_DEPENDENCY_UNDECLARED');
+      }
     }
   }
   for (const privatePath of ['.env', 'runtime.env', 'data', 'codex-session-map.json']) {

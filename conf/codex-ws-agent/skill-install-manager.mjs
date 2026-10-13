@@ -19,6 +19,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
 import yauzl from 'yauzl'
+import { parseSkillManifest, resolveSkillEntrypoint } from './skill-manifest.mjs'
 
 export const SKILL_INSTALL_FAILURE = Object.freeze({
   DISABLED: 'SKILL_INSTALL_DISABLED',
@@ -840,7 +841,18 @@ export const extractSkillArchive = async (buffer, stagingPath, command, limits) 
   if (!identity || identity.name !== command.skillKey || identity.version !== command.skillVersion) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.IDENTITY_MISMATCH, 'SKILL.md name/version does not match the command identity')
   }
+  let manifest = null
+  const manifestPath = resolve(stagingPath, 'manifest.json')
+  if (existsSync(manifestPath)) {
+    try {
+      manifest = parseSkillManifest(readFileSync(manifestPath), command)
+      if (manifest.runner === 'local-script') resolveSkillEntrypoint(stagingPath, manifest.entrypoint)
+    } catch {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'executable manifest or local entrypoint is invalid')
+    }
+  }
   fsyncDirectory(stagingPath)
+  return manifest
 }
 
 const verifyControlledCodexHome = codexHome => {
@@ -869,11 +881,21 @@ const verifyControlledCodexHome = codexHome => {
   return skills
 }
 
-const validateMarker = (targetPath, command, fingerprint) => {
+const validateMarker = (targetPath, command, fingerprint, expectedManifestSha256 = null) => {
   const markerPath = resolve(targetPath, MARKER_NAME)
   if (!existsSync(markerPath) || lstatSync(markerPath).isSymbolicLink() || !statSync(markerPath).isFile()) return false
   let marker
   try { marker = readJson(markerPath) } catch { return false }
+  const manifestPath = resolve(targetPath, 'manifest.json')
+  if (expectedManifestSha256 !== (marker.manifestSha256 ?? null)) return false
+  if (existsSync(manifestPath)) {
+    if (!expectedManifestSha256 || lstatSync(manifestPath).isSymbolicLink() || !statSync(manifestPath).isFile()) return false
+    try {
+      const manifest = parseSkillManifest(readFileSync(manifestPath), command)
+      if (manifest.manifestSha256 !== expectedManifestSha256) return false
+      if (manifest.runner === 'local-script') resolveSkillEntrypoint(targetPath, manifest.entrypoint)
+    } catch { return false }
+  } else if (expectedManifestSha256) return false
   return marker?.schemaVersion === 1
     && marker.installationId === command.installationId
     && marker.commandId === command.commandId
@@ -888,7 +910,7 @@ const validateMarker = (targetPath, command, fingerprint) => {
     && marker.scopeDigest === command.scopeDigest
 }
 
-export const buildSkillInstallResultEnvelope = ({ profile, command, status, failureCode = null, installedAt = null, messageId = randomUUID(), runtimeInstanceId }) => ({
+export const buildSkillInstallResultEnvelope = ({ profile, command, status, failureCode = null, installedAt = null, messageId = randomUUID(), runtimeInstanceId, manifestSha256 = null }) => ({
   schemaVersion: 1,
   messageType: 'work.result',
   messageId,
@@ -909,7 +931,8 @@ export const buildSkillInstallResultEnvelope = ({ profile, command, status, fail
   skillKey: command?.skillKey || '',
   skillVersion: command?.skillVersion || '',
   installedAt,
-  failureCode
+  failureCode,
+  ...(manifestSha256 ? { manifestSha256 } : {})
 })
 
 export class SkillInstallManager {
@@ -1242,7 +1265,7 @@ export class SkillInstallManager {
       sourceIdentity: record.stagingIdentity
     })
     if (!result.ok) throw this._atomicFailure(result, 'skill activation no-replace publication')
-    if (!validateMarker(record.targetPath, record.command, record.commandFingerprint)) {
+    if (!validateMarker(record.targetPath, record.command, record.commandFingerprint, record.resultEnvelope.manifestSha256)) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'published skill marker failed immediate commit validation')
     }
   }
@@ -1267,18 +1290,18 @@ export class SkillInstallManager {
     if (current.state === 'ACTIVE') {
       if (!targetExists || stagingExists
           || !samePathIdentity(pathIdentity(dirname(current.targetPath)), current.skillsRootIdentity)
-          || !validateMarker(current.targetPath, current.command, current.commandFingerprint)) {
+          || !validateMarker(current.targetPath, current.command, current.commandFingerprint, current.resultEnvelope.manifestSha256)) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'active installed-skill registry does not match CODEX_HOME')
       }
     } else if (targetExists) {
       if (stagingExists || !samePathIdentity(pathIdentity(dirname(current.targetPath)), current.skillsRootIdentity)
-          || !validateMarker(current.targetPath, current.command, current.commandFingerprint)) {
+          || !validateMarker(current.targetPath, current.command, current.commandFingerprint, current.resultEnvelope.manifestSha256)) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared installation has conflicting activation state')
       }
     } else if (stagingExists) {
       const stagingStatus = lstatSync(current.stagingPath)
       if (!stagingStatus.isDirectory() || stagingStatus.isSymbolicLink()
-          || !validateMarker(current.stagingPath, current.command, current.commandFingerprint)) {
+          || !validateMarker(current.stagingPath, current.command, current.commandFingerprint, current.resultEnvelope.manifestSha256)) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared staging does not match its durable registry')
       }
       this._publishPreparedRecord(current)
@@ -1320,6 +1343,7 @@ export class SkillInstallManager {
       && envelope.packageDigest === command.packageDigest
       && envelope.skillKey === command.skillKey
       && envelope.skillVersion === command.skillVersion
+      && (envelope.manifestSha256 ?? null) === (registryRecord.resultEnvelope.manifestSha256 ?? null)
   }
 
   _listResultFiles(directory, acknowledged = false) {
@@ -1680,13 +1704,13 @@ export class SkillInstallManager {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installationId was reused with a different command fingerprint')
       }
       if (existing.state === 'ACTIVE') {
-        if (!validateMarker(existing.targetPath, command, command.fingerprint)) {
+        if (!validateMarker(existing.targetPath, command, command.fingerprint, existing.resultEnvelope.manifestSha256)) {
           throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installed target no longer matches its durable registry')
         }
         this._ensureResultRecord(existing.resultRecordId, existing.resultEnvelope)
         return existing
       }
-      if (existsSync(existing.targetPath) && validateMarker(existing.targetPath, command, command.fingerprint)) {
+      if (existsSync(existing.targetPath) && validateMarker(existing.targetPath, command, command.fingerprint, existing.resultEnvelope.manifestSha256)) {
         const active = { ...existing, state: 'ACTIVE', activatedAt: existing.activatedAt || this.now() }
         this._writeRegistry(active)
         this._ensureResultRecord(active.resultRecordId, active.resultEnvelope)
@@ -1759,7 +1783,7 @@ export class SkillInstallManager {
         chmodSync(stagingPath, 0o700)
         fsyncDirectory(this.stagingDir)
         try {
-          await extractSkillArchive(packageBytes, stagingPath, command, {
+          const manifest = await extractSkillArchive(packageBytes, stagingPath, command, {
             maxEntries: this.maxEntries,
             maxEntryBytes: this.maxEntryBytes,
             maxExtractedBytes: this.maxExtractedBytes
@@ -1771,6 +1795,7 @@ export class SkillInstallManager {
             status: 'SUCCEEDED',
             failureCode: null,
             installedAt,
+            manifestSha256: manifest?.manifestSha256,
             runtimeInstanceId: this.runtimeInstanceId
           })
           const resultRecordId = this.createId()
@@ -1787,7 +1812,8 @@ export class SkillInstallManager {
             skillVersion: command.skillVersion,
             commandFingerprint: command.fingerprint,
             scopeDigest: this.scope.digest,
-            installedAt
+            installedAt,
+            ...(manifest ? { manifestSha256: manifest.manifestSha256 } : {})
           }
           atomicWriteJson(resolve(stagingPath, MARKER_NAME), marker, 0o644)
           fsyncDirectory(stagingPath)
@@ -1872,7 +1898,7 @@ export class SkillInstallManager {
       const record = this._readRegistry(command.installationId)
       if (!record || record.commandFingerprint !== command.fingerprint) return null
       if (record.state === 'QUARANTINED') return this._reconcilePreparedRecord(record)
-      if (record.state !== 'ACTIVE' || !validateMarker(record.targetPath, command, command.fingerprint)) return null
+      if (record.state !== 'ACTIVE' || !validateMarker(record.targetPath, command, command.fingerprint, record.resultEnvelope.manifestSha256)) return null
       this._ensureResultRecord(record.resultRecordId, record.resultEnvelope)
       return { status: 'completed', exitCode: 0, errorMessage: '', activationCommitted: true, authoritative: true }
     })

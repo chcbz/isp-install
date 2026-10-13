@@ -1182,3 +1182,58 @@ test('legacy API key cannot authorize a skill download; incomplete session proof
   manager.initialize(); const result = await manager.execute(dispatch(validPackage()))
   assert.equal(result.status, 'failed'); assert.equal(downloads, 0)
 })
+
+// SE-2: executable declarations bind exact bytes; ordinary SKILL.md remains valid.
+const executableFixture = () => {
+  const fixtures = JSON.parse(readFileSync(new URL('./fixtures/skill-manifest-contract-v1.json', import.meta.url)))
+  const manifest = JSON.parse(fixtures.cases.find(c => c.id === 'image-edit').json)
+  manifest.skillKey = 'repo-test'
+  return manifest
+}
+const executablePackage = (manifest = executableFixture(), script = null) => zip([
+  { name: 'SKILL.md', data: skillDocument() },
+  { name: 'manifest.json', data: JSON.stringify(manifest) },
+  ...(script ? [{ name: 'scripts/run.py', data: script }] : [])
+])
+test('SE2 executable installation binds manifest bytes to marker, durable receipt and replay', async () => {
+  const manifest = executableFixture(); manifest.costInfo = { mode: 'invalid' }
+  const bytes = executablePackage(manifest), runtime = managerRuntime({ packageBytes: bytes })
+  const result = await runtime.manager.execute(dispatch(bytes))
+  assert.equal(result.status, 'completed')
+  const expectedHash = createHash('sha256').update(JSON.stringify(manifest)).digest('hex')
+  assert.equal(result.resultEnvelope.manifestSha256, expectedHash)
+  const marker = JSON.parse(readFileSync(resolve(runtime.codexHome, 'skills/repo-test/.cyf-installation.json')))
+  assert.equal(marker.manifestSha256, expectedHash)
+  const replay = await runtime.manager.execute(dispatch(bytes))
+  assert.equal(replay.idempotent, true)
+  assert.equal(replay.resultEnvelope.manifestSha256, expectedHash)
+})
+test('SE2 ordinary package has no fabricated executable receipt', async () => {
+  const runtime = managerRuntime(), result = await runtime.manager.execute(dispatch(runtime.packageBytes))
+  assert.equal(result.status, 'completed'); assert.equal(result.resultEnvelope.manifestSha256, undefined)
+})
+test('SE2 malformed executable package does not activate', async () => {
+  const manifest = executableFixture(); manifest.parametersSchema.$ref = 'file:///etc/passwd'
+  const bytes = executablePackage(manifest), runtime = managerRuntime({ packageBytes: bytes })
+  const result = await runtime.manager.execute(dispatch(bytes))
+  assert.equal(result.status, 'failed'); assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.ARCHIVE_INVALID)
+  assert.equal(existsSync(resolve(runtime.codexHome, 'skills/repo-test')), false)
+})
+test('SE2 local-script package requires an actual package-local entrypoint', async () => {
+  const manifest = executableFixture(); manifest.runner = 'local-script'; manifest.entrypoint = 'scripts/run.py'; manifest.requirements = { tools: ['python3'] }
+  const bad = executablePackage(manifest), badRuntime = managerRuntime({ packageBytes: bad })
+  assert.equal((await badRuntime.manager.execute(dispatch(bad))).failureCode, SKILL_INSTALL_FAILURE.ARCHIVE_INVALID)
+  const good = executablePackage(manifest, 'print("fixture")'), goodRuntime = managerRuntime({ packageBytes: good })
+  assert.equal((await goodRuntime.manager.execute(dispatch(good))).status, 'completed')
+})
+test('SE2 changed manifest and forged marker cannot bypass the original registry digest', async () => {
+  const bytes = executablePackage(), runtime = managerRuntime({ packageBytes: bytes })
+  assert.equal((await runtime.manager.execute(dispatch(bytes))).status, 'completed')
+  const root = resolve(runtime.codexHome, 'skills/repo-test'), manifest = executableFixture(); manifest.title = 'tampered'
+  writeFileSync(resolve(root, 'manifest.json'), JSON.stringify(manifest))
+  const marker = JSON.parse(readFileSync(resolve(root, '.cyf-installation.json')))
+  marker.manifestSha256 = createHash('sha256').update(JSON.stringify(manifest)).digest('hex')
+  writeFileSync(resolve(root, '.cyf-installation.json'), JSON.stringify(marker))
+  const result = await runtime.manager.execute(dispatch(bytes))
+  assert.notEqual(result.status, 'completed'); assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.CONFLICT)
+})
