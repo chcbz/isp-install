@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { SkillConversationLane, parseSkillInputSnapshot } from '../skill-conversation.mjs'
+import { SkillConversationLane, parseSkillInputSnapshot, validateCommittedSkillResult } from '../skill-conversation.mjs'
 import { skillDigest, skillHash } from '../skill-executor.mjs'
 import { skillConversationHttpScope } from '../../cyf-agent-runtime-v1/lib/runtime-client.mjs'
 const scope = { tenantId: 'tenant', clientId: 'client', ownerJiacn: 'owner', agentId: 'agent' }
@@ -170,4 +170,15 @@ test('isolated poll failures preserve first original transport cause without lea
     assert.deepEqual(error.executionErrors, [{ executionId: f.c.executionId, code: 'SKILL_TRANSPORT_UNKNOWN' }])
     return true
   })
+})
+
+
+test('server committed local-file result replays only under its frozen local-script descriptor', () => {
+  const c = command(); c.inputRefs = ['input_1']
+  const descriptor = { manifest: { runner: 'local-script', outputs: c.outputs } }
+  const preimage = { schemaVersion: 1, data: { summary: '实际持久脚本结果' }, artifacts: [], inputReceipts: [{ inputRef: 'input_1', sha256: 'd'.repeat(64), carrier: 'local-file', delivery: 'DELIVERED' }] }
+  const digest = skillDigest(preimage), manifest = { ...preimage, resultDigest: digest, manifestId: `manifest_${digest}` }
+  assert.equal(validateCommittedSkillResult(manifest, c, descriptor, 'ARCHIVING').state, 'RESULT_COMMITTED')
+  for (const runner of ['native-model', 'provider-operation', undefined])
+    assert.throws(() => validateCommittedSkillResult(manifest, c, { manifest: { ...descriptor.manifest, runner } }, 'ARCHIVING'), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
 })

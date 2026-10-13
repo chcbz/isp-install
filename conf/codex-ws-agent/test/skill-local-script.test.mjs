@@ -139,3 +139,18 @@ test('declared local input capability cannot be READY until the shared receipt c
     assert.equal((await runner.probe({ ...f.context, inputMimeTypes: ['text/plain'] })).ready, true)
   }
 })
+
+
+test('local-file receipt and genuine bytes close durable result persistence/reconstruction and cannot masquerade as native input', async t => {
+  const f = fixture(t, `import fs from 'node:fs';${readRequest}console.log(JSON.stringify({data:{source:fs.readFileSync(request.inputs[0].path,'utf8')},artifacts:[]}));`), runner = createLocalScriptRunner()
+  if (!await measured(t, runner, { ...f.context, inputMimeTypes: ['text/plain'] })) return
+  f.request.descriptor.manifest.runner = 'local-script'
+  const result = await runner.run(f.request)
+  const options = { rootDirectory: resolve(f.root, 'store'), scope: { agentId: 'agent' }, command: f.request.command }, store = new SkillExecutionStore(options)
+  store.write('inputs-snapshot', { inputs: [{ inputRef: f.input.inputRef, sha256: f.input.sha256, byteLength: f.input.byteLength }] })
+  const persisted = store.persistResult(f.request.descriptor, result)
+  assert.equal(persisted.result.inputReceipts[0].carrier, 'local-file'); assert.deepEqual(new SkillExecutionStore(options).loadResult(), persisted)
+  for (const runner of ['native-model', 'provider-operation', undefined])
+    assert.throws(() => store.persistResult({ ...f.request.descriptor, manifest: { ...f.request.descriptor.manifest, runner } }, result), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
+  assert.throws(() => store.persistResult(f.request.descriptor, { ...result, inputReceipts: [{ ...result.inputReceipts[0], sha256: '0'.repeat(64) }] }), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
+})

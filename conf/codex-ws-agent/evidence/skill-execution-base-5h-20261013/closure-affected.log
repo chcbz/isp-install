@@ -1,0 +1,688 @@
+TAP version 13
+# Subtest: public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+ok 1 - public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+  ---
+  duration_ms: 224.370761
+  ...
+# Subtest: material digest/identity/exact download path are rejected before any fetch or model
+ok 2 - material digest/identity/exact download path are rejected before any fetch or model
+  ---
+  duration_ms: 86.169675
+  ...
+# Subtest: missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+ok 3 - missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+  ---
+  duration_ms: 13.592411
+  ...
+# Subtest: completed material CHAT terminal readback is recovered without model execution or refetch
+ok 4 - completed material CHAT terminal readback is recovered without model execution or refetch
+  ---
+  duration_ms: 157.162199
+  ...
+# Subtest: unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+ok 5 - unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+  ---
+  duration_ms: 146.846511
+  ...
+# Subtest: materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+ok 6 - materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+  ---
+  duration_ms: 402.287304
+  ...
+# Subtest: v4 registration and presence expose exact nested materials declaration only after measurement
+ok 7 - v4 registration and presence expose exact nested materials declaration only after measurement
+  ---
+  duration_ms: 5.338809
+  ...
+# Subtest: public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+ok 8 - public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+  ---
+  duration_ms: 0.862372
+  ...
+# Subtest: one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+ok 9 - one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+  ---
+  duration_ms: 128.687951
+  ...
+# Subtest: lost final response reads back the identical committed result without a second write or model call
+ok 10 - lost final response reads back the identical committed result without a second write or model call
+  ---
+  duration_ms: 65.234426
+  ...
+# Subtest: stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+ok 11 - stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+  ---
+  duration_ms: 75.967768
+  ...
+# Subtest: a recorded/unknown effect can never be issued by a successor claimant
+ok 12 - a recorded/unknown effect can never be issued by a successor claimant
+  ---
+  duration_ms: 35.287156
+  ...
+# Subtest: exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+ok 13 - exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+  ---
+  duration_ms: 1.648038
+  ...
+# Subtest: committed server envelope resumes without local blob/staging or a runnable dependency
+ok 14 - committed server envelope resumes without local blob/staging or a runnable dependency
+  ---
+  duration_ms: 67.689007
+  ...
+# Subtest: reconstruction resumes saved command even when server inbox only lists QUEUED work
+ok 15 - reconstruction resumes saved command even when server inbox only lists QUEUED work
+  ---
+  duration_ms: 62.483506
+  ...
+# Subtest: syntactically valid but incorrect result digest is not a commit receipt
+ok 16 - syntactically valid but incorrect result digest is not a commit receipt
+  ---
+  duration_ms: 47.396696
+  ...
+# Subtest: frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+ok 17 - frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+  ---
+  duration_ms: 2.064562
+  ...
+# Subtest: only the real committed receipt permits execution-owned carrier adapter release
+ok 18 - only the real committed receipt permits execution-owned carrier adapter release
+  ---
+  duration_ms: 107.352693
+  ...
+# Subtest: a pending UNKNOWN retains its error but does not starve unrelated next inbox execution
+ok 19 - a pending UNKNOWN retains its error but does not starve unrelated next inbox execution
+  ---
+  duration_ms: 85.869244
+  ...
+# Subtest: shared store or session failures immediately halt poll instead of crossing the security boundary
+ok 20 - shared store or session failures immediately halt poll instead of crossing the security boundary
+  ---
+  duration_ms: 4.656138
+  ...
+# Subtest: isolated poll failures preserve first original transport cause without leaking provider response data
+ok 21 - isolated poll failures preserve first original transport cause without leaking provider response data
+  ---
+  duration_ms: 1.607797
+  ...
+# Subtest: server committed local-file result replays only under its frozen local-script descriptor
+ok 22 - server committed local-file result replays only under its frozen local-script descriptor
+  ---
+  duration_ms: 2.047701
+  ...
+# Subtest: SKILL_INSTALL is default-off and performs no download or activation
+ok 23 - SKILL_INSTALL is default-off and performs no download or activation
+  ---
+  duration_ms: 74.380062
+  ...
+# Subtest: failure-result persistence loss stays non-terminal for startup reconciliation
+ok 24 - failure-result persistence loss stays non-terminal for startup reconciliation
+  ---
+  duration_ms: 45.326952
+  ...
+# Subtest: strict command, target, path, and declared-size validation perform no download
+    # Subtest: command type
+    ok 1 - command type
+      ---
+      duration_ms: 55.972021
+      ...
+    # Subtest: target Agent
+    ok 2 - target Agent
+      ---
+      duration_ms: 53.472379
+      ...
+    # Subtest: download path
+    ok 3 - download path
+      ---
+      duration_ms: 52.823864
+      ...
+    # Subtest: declared size
+    ok 4 - declared size
+      ---
+      duration_ms: 51.013894
+      ...
+    1..4
+ok 25 - strict command, target, path, and declared-size validation perform no download
+  ---
+  duration_ms: 215.322212
+  ...
+# Subtest: same-origin download uses only installation-derived session proof and digest mismatch fails before extraction
+ok 26 - same-origin download uses only installation-derived session proof and digest mismatch fails before extraction
+  ---
+  duration_ms: 75.266448
+  ...
+# Subtest: malicious ZIP entries and skill identity mismatches fail closed
+    # Subtest: traversal
+    ok 1 - traversal
+      ---
+      duration_ms: 99.097207
+      ...
+    # Subtest: absolute
+    ok 2 - absolute
+      ---
+      duration_ms: 149.112829
+      ...
+    # Subtest: backslash
+    ok 3 - backslash
+      ---
+      duration_ms: 66.623407
+      ...
+    # Subtest: control character
+    ok 4 - control character
+      ---
+      duration_ms: 69.578317
+      ...
+    # Subtest: trailing dot alias
+    ok 5 - trailing dot alias
+      ---
+      duration_ms: 68.385534
+      ...
+    # Subtest: trailing space alias
+    ok 6 - trailing space alias
+      ---
+      duration_ms: 67.436466
+      ...
+    # Subtest: reserved marker
+    ok 7 - reserved marker
+      ---
+      duration_ms: 81.565624
+      ...
+    # Subtest: duplicate
+    ok 8 - duplicate
+      ---
+      duration_ms: 81.940158
+      ...
+    # Subtest: symlink
+    ok 9 - symlink
+      ---
+      duration_ms: 82.248852
+      ...
+    # Subtest: missing manifest
+    ok 10 - missing manifest
+      ---
+      duration_ms: 87.830522
+      ...
+    # Subtest: identity mismatch
+    ok 11 - identity mismatch
+      ---
+      duration_ms: 80.948045
+      ...
+    1..11
+ok 27 - malicious ZIP entries and skill identity mismatches fail closed
+  ---
+  duration_ms: 939.25734
+  ...
+# Subtest: metadata.version frontmatter accepts the bounded string mapping format
+    # Subtest: plain version
+    ok 1 - plain version
+      ---
+      duration_ms: 84.651359
+      ...
+    # Subtest: quoted strings and comments
+    ok 2 - quoted strings and comments
+      ---
+      duration_ms: 78.712554
+      ...
+    # Subtest: additional supported fields
+    ok 3 - additional supported fields
+      ---
+      duration_ms: 83.125253
+      ...
+    # Subtest: metadata first with CRLF
+    ok 4 - metadata first with CRLF
+      ---
+      duration_ms: 87.637957
+      ...
+    1..4
+ok 28 - metadata.version frontmatter accepts the bounded string mapping format
+  ---
+  duration_ms: 335.604147
+  ...
+# Subtest: metadata.version frontmatter rejects missing, duplicate, conflicting, or unsupported identities
+    # Subtest: missing description
+    ok 1 - missing description
+      ---
+      duration_ms: 74.78119
+      ...
+    # Subtest: empty description
+    ok 2 - empty description
+      ---
+      duration_ms: 85.715225
+      ...
+    # Subtest: whitespace description
+    ok 3 - whitespace description
+      ---
+      duration_ms: 95.153686
+      ...
+    # Subtest: non-string description
+    ok 4 - non-string description
+      ---
+      duration_ms: 77.393448
+      ...
+    # Subtest: missing name
+    ok 5 - missing name
+      ---
+      duration_ms: 91.453733
+      ...
+    # Subtest: missing metadata version
+    ok 6 - missing metadata version
+      ---
+      duration_ms: 72.005046
+      ...
+    # Subtest: legacy top-level version
+    ok 7 - legacy top-level version
+      ---
+      duration_ms: 73.524685
+      ...
+    # Subtest: top-level version even when matching
+    ok 8 - top-level version even when matching
+      ---
+      duration_ms: 71.106617
+      ...
+    # Subtest: conflicting top-level version
+    ok 9 - conflicting top-level version
+      ---
+      duration_ms: 79.832127
+      ...
+    # Subtest: same duplicate name
+    ok 10 - same duplicate name
+      ---
+      duration_ms: 78.339341
+      ...
+    # Subtest: conflicting duplicate name
+    ok 11 - conflicting duplicate name
+      ---
+      duration_ms: 75.727096
+      ...
+    # Subtest: duplicate description
+    ok 12 - duplicate description
+      ---
+      duration_ms: 70.681949
+      ...
+    # Subtest: same duplicate metadata version
+    ok 13 - same duplicate metadata version
+      ---
+      duration_ms: 74.75798
+      ...
+    # Subtest: conflicting duplicate metadata version
+    ok 14 - conflicting duplicate metadata version
+      ---
+      duration_ms: 78.345588
+      ...
+    # Subtest: duplicate metadata mapping
+    ok 15 - duplicate metadata mapping
+      ---
+      duration_ms: 73.656494
+      ...
+    # Subtest: version identity mismatch
+    ok 16 - version identity mismatch
+      ---
+      duration_ms: 75.313355
+      ...
+    # Subtest: name identity mismatch
+    ok 17 - name identity mismatch
+      ---
+      duration_ms: 76.940186
+      ...
+    # Subtest: numeric metadata version
+    ok 18 - numeric metadata version
+      ---
+      duration_ms: 78.140049
+      ...
+    # Subtest: nested version is not metadata.version
+    ok 19 - nested version is not metadata.version
+      ---
+      duration_ms: 79.283531
+      ...
+    # Subtest: wrong version indentation
+    ok 20 - wrong version indentation
+      ---
+      duration_ms: 71.352497
+      ...
+    # Subtest: version after unrelated top-level field
+    ok 21 - version after unrelated top-level field
+      ---
+      duration_ms: 69.527378
+      ...
+    # Subtest: tagged name
+    ok 22 - tagged name
+      ---
+      duration_ms: 75.259658
+      ...
+    # Subtest: alias version
+    ok 23 - alias version
+      ---
+      duration_ms: 76.680561
+      ...
+    # Subtest: anchor metadata
+    ok 24 - anchor metadata
+      ---
+      duration_ms: 70.295502
+      ...
+    # Subtest: merge key
+    ok 25 - merge key
+      ---
+      duration_ms: 69.620268
+      ...
+    # Subtest: flow mapping is outside preview subset
+    ok 26 - flow mapping is outside preview subset
+      ---
+      duration_ms: 73.448166
+      ...
+    # Subtest: quoted duplicate key cannot bypass detection
+    ok 27 - quoted duplicate key cannot bypass detection
+      ---
+      duration_ms: 74.238645
+      ...
+    # Subtest: folded scalar is outside preview subset
+    ok 28 - folded scalar is outside preview subset
+      ---
+      duration_ms: 83.703795
+      ...
+    # Subtest: control character
+    ok 29 - control character
+      ---
+      duration_ms: 76.734439
+      ...
+    # Subtest: unknown top-level property
+    ok 30 - unknown top-level property
+      ---
+      duration_ms: 86.029287
+      ...
+    # Subtest: unterminated quote
+    ok 31 - unterminated quote
+      ---
+      duration_ms: 88.143308
+      ...
+    # Subtest: trailing scalar content
+    ok 32 - trailing scalar content
+      ---
+      duration_ms: 81.043932
+      ...
+    1..32
+ok 29 - metadata.version frontmatter rejects missing, duplicate, conflicting, or unsupported identities
+  ---
+  duration_ms: 2488.210855
+  ...
+# Subtest: six exact W08 metadata.version ZIP packages install with digest and marker identity preserved
+    # Subtest: code-editor
+    ok 1 - code-editor
+      ---
+      duration_ms: 122.378056
+      ...
+    # Subtest: code-reviewer
+    ok 2 - code-reviewer
+      ---
+      duration_ms: 122.360953
+      ...
+    # Subtest: deploy-runner
+    ok 3 - deploy-runner
+      ---
+      duration_ms: 124.626184
+      ...
+    # Subtest: repo-inspector
+    ok 4 - repo-inspector
+      ---
+      duration_ms: 129.623952
+      ...
+    # Subtest: repo-test
+    ok 5 - repo-test
+      ---
+      duration_ms: 123.003451
+      ...
+    # Subtest: web-builder
+    ok 6 - web-builder
+      ---
+      duration_ms: 145.467269
+      ...
+    1..6
+ok 30 - six exact W08 metadata.version ZIP packages install with digest and marker identity preserved
+  ---
+  duration_ms: 773.309916
+  ...
+# Subtest: verified package activates atomically, records identity, and routes outside Codex/worktrees
+ok 31 - verified package activates atomically, records identity, and routes outside Codex/worktrees
+  ---
+  duration_ms: 115.926301
+  ...
+# Subtest: processor preserves ACK order and persists work.result before terminal success
+ok 32 - processor preserves ACK order and persists work.result before terminal success
+  ---
+  duration_ms: 875.399623
+  ...
+# Subtest: restart reuses an exact installation and conflicting installationId/fence fails without download
+ok 33 - restart reuses an exact installation and conflicting installationId/fence fails without download
+  ---
+  duration_ms: 896.632494
+  ...
+# Subtest: durable work.result survives restart and replays the identical envelope
+ok 34 - durable work.result survives restart and replays the identical envelope
+  ---
+  duration_ms: 957.543906
+  ...
+# Subtest: receipt retirement crash duplicates reconcile, while tampered acknowledged evidence fails closed
+ok 35 - receipt retirement crash duplicates reconcile, while tampered acknowledged evidence fails closed
+  ---
+  duration_ms: 189.567061
+  ...
+# Subtest: credentialed package URLs require TLS except exact loopback development origins
+ok 36 - credentialed package URLs require TLS except exact loopback development origins
+  ---
+  duration_ms: 2.115562
+  ...
+# Subtest: archive rejects Unicode normalization and case-folded path collisions
+    # Subtest: ASCII case
+    ok 1 - ASCII case
+      ---
+      duration_ms: 81.001831
+      ...
+    # Subtest: Unicode normalization
+    ok 2 - Unicode normalization
+      ---
+      duration_ms: 82.334606
+      ...
+    # Subtest: Unicode case folding
+    ok 3 - Unicode case folding
+      ---
+      duration_ms: 78.967191
+      ...
+    # Subtest: case-folded ancestor
+    ok 4 - case-folded ancestor
+      ---
+      duration_ms: 77.94319
+      ...
+    # Subtest: case-folded prefix
+    ok 5 - case-folded prefix
+      ---
+      duration_ms: 75.566727
+      ...
+    1..5
+ok 37 - archive rejects Unicode normalization and case-folded path collisions
+  ---
+  duration_ms: 398.022661
+  ...
+# Subtest: installer lock rejects live owners and durably reclaims dead or stale incomplete owners
+ok 38 - installer lock rejects live owners and durably reclaims dead or stale incomplete owners
+  ---
+  duration_ms: 437.928019
+  ...
+# Subtest: lock release binds the exact owner bytes and never removes a mutated generation
+ok 39 - lock release binds the exact owner bytes and never removes a mutated generation
+  ---
+  duration_ms: 42.192752
+  ...
+# Subtest: concurrent stale reclaimers bind exchange to inspected owner generation and never move the winner
+ok 40 - concurrent stale reclaimers bind exchange to inspected owner generation and never move the winner
+  ---
+  duration_ms: 271.138524
+  ...
+# Subtest: target and parent races fail closed without replacing foreign or replacement-parent content
+    # Subtest: target appears at commit
+    ok 1 - target appears at commit
+      ---
+      duration_ms: 80.688243
+      ...
+    # Subtest: skills parent inode changes immediately before commit
+    ok 2 - skills parent inode changes immediately before commit
+      ---
+      duration_ms: 75.454607
+      ...
+    1..2
+ok 41 - target and parent races fail closed without replacing foreign or replacement-parent content
+  ---
+  duration_ms: 157.270622
+  ...
+# Subtest: durable installer state is bound to canonical API origin and profile scope
+ok 42 - durable installer state is bound to canonical API origin and profile scope
+  ---
+  duration_ms: 126.065939
+  ...
+# Subtest: ACTIVE plus durable FAILED reconciles to quarantined failure and inbox terminal FAILED only
+ok 43 - ACTIVE plus durable FAILED reconciles to quarantined failure and inbox terminal FAILED only
+  ---
+  duration_ms: 330.297591
+  ...
+# Subtest: stable connection drains 33+ results in bounded batches and receipts retire only exact records
+ok 44 - stable connection drains 33+ results in bounded batches and receipts retire only exact records
+  ---
+  duration_ms: 513.171701
+  ...
+# Subtest: durable PREPARED and activation-boundary persistence faults reconcile forward without false failure
+    # Subtest: PREPARED
+    ok 1 - PREPARED
+      ---
+      duration_ms: 97.091857
+      ...
+    # Subtest: ACTIVE
+    ok 2 - ACTIVE
+      ---
+      duration_ms: 92.420881
+      ...
+    1..2
+ok 45 - durable PREPARED and activation-boundary persistence faults reconcile forward without false failure
+  ---
+  duration_ms: 190.567813
+  ...
+# Subtest: PREPARED recovery completes both pre-publication and post-publication crash states
+ok 46 - PREPARED recovery completes both pre-publication and post-publication crash states
+  ---
+  duration_ms: 156.039318
+  ...
+# Subtest: startup reconciles committed installer evidence with a recovery-required inbox without re-execution
+ok 47 - startup reconciles committed installer evidence with a recovery-required inbox without re-execution
+  ---
+  duration_ms: 690.872248
+  ...
+# Subtest: profile validation rejects equal, nested, and symlink-aliased CODEX_HOME paths
+ok 48 - profile validation rejects equal, nested, and symlink-aliased CODEX_HOME paths
+  ---
+  duration_ms: 6.11414
+  ...
+# Subtest: legacy API key cannot authorize a skill download; incomplete session proof fails before fetch
+ok 49 - legacy API key cannot authorize a skill download; incomplete session proof fails before fetch
+  ---
+  duration_ms: 366.975431
+  ...
+# Subtest: SE2 executable installation binds manifest bytes to marker, durable receipt and replay
+ok 50 - SE2 executable installation binds manifest bytes to marker, durable receipt and replay
+  ---
+  duration_ms: 119.756212
+  ...
+# Subtest: SE2 ordinary package has no fabricated executable receipt
+ok 51 - SE2 ordinary package has no fabricated executable receipt
+  ---
+  duration_ms: 101.568873
+  ...
+# Subtest: SE2 malformed executable package does not activate
+ok 52 - SE2 malformed executable package does not activate
+  ---
+  duration_ms: 77.771489
+  ...
+# Subtest: SE2 local-script package requires an actual package-local entrypoint
+ok 53 - SE2 local-script package requires an actual package-local entrypoint
+  ---
+  duration_ms: 191.815891
+  ...
+# Subtest: SE2 changed manifest and forged marker cannot bypass the original registry digest
+ok 54 - SE2 changed manifest and forged marker cannot bypass the original registry digest
+  ---
+  duration_ms: 127.07215
+  ...
+# Subtest: SE2 installed descriptor source reads only scoped ACTIVE registry and exact published marker
+ok 55 - SE2 installed descriptor source reads only scoped ACTIVE registry and exact published marker
+  ---
+  duration_ms: 130.286602
+  ...
+# Subtest: SE2 ordinary installed descriptor remains non-executable and arbitrary HOME skills are ignored
+ok 56 - SE2 ordinary installed descriptor remains non-executable and arbitrary HOME skills are ignored
+  ---
+  duration_ms: 94.319931
+  ...
+# Subtest: SE2 prepared image-generate installs actual ZIP and readiness requires measured runner/binding
+ok 57 - SE2 prepared image-generate installs actual ZIP and readiness requires measured runner/binding
+  ---
+  duration_ms: 107.019433
+  ...
+# Subtest: SE2 prepared image-edit installs actual ZIP and readiness requires measured runner/binding
+ok 58 - SE2 prepared image-edit installs actual ZIP and readiness requires measured runner/binding
+  ---
+  duration_ms: 106.675455
+  ...
+# Subtest: SE2 prepared analysis installs actual ZIP and readiness requires measured runner/binding
+ok 59 - SE2 prepared analysis installs actual ZIP and readiness requires measured runner/binding
+  ---
+  duration_ms: 136.501724
+  ...
+# Subtest: SE2 prepared text-file installs actual ZIP and readiness requires measured runner/binding
+ok 60 - SE2 prepared text-file installs actual ZIP and readiness requires measured runner/binding
+  ---
+  duration_ms: 119.984596
+  ...
+# Subtest: authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+ok 61 - authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+  ---
+  duration_ms: 2.549106
+  ...
+# Subtest: every scope/fence field must match current validated session; owner cannot come from profile
+ok 62 - every scope/fence field must match current validated session; owner cannot come from profile
+  ---
+  duration_ms: 0.473672
+  ...
+# Subtest: ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+ok 63 - ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+  ---
+  duration_ms: 13.021616
+  ...
+# Subtest: cached registration is IO free, unavailable before measurement and omitted offline
+ok 64 - cached registration is IO free, unavailable before measurement and omitted offline
+  ---
+  duration_ms: 9.295428
+  ...
+# Subtest: owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+ok 65 - owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+  ---
+  duration_ms: 2.487695
+  ...
+# Subtest: old asynchronous measurement never re-registers after disconnect or a new generation
+ok 66 - old asynchronous measurement never re-registers after disconnect or a new generation
+  ---
+  duration_ms: 1.403253
+  ...
+# Subtest: install lifecycle preserves durable success and failure even when catalog callbacks fail
+ok 67 - install lifecycle preserves durable success and failure even when catalog callbacks fail
+  ---
+  duration_ms: 2.104097
+  ...
+# Subtest: refresh errors remove catalog and publication failure does not change measurement
+ok 68 - refresh errors remove catalog and publication failure does not change measurement
+  ---
+  duration_ms: 1.598191
+  ...
+1..68
+# tests 134
+# suites 0
+# pass 134
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 16318.035456

@@ -1,0 +1,205 @@
+TAP version 13
+# Subtest: executes in the private run directory and returns bytes from the actual result file
+ok 1 - executes in the private run directory and returns bytes from the actual result file
+  ---
+  duration_ms: 10.181494
+  ...
+# Subtest: rejects completed runs without a nonempty output and rejects malformed UTF-8 and NUL bytes
+ok 2 - rejects completed runs without a nonempty output and rejects malformed UTF-8 and NUL bytes
+  ---
+  duration_ms: 3.85593
+  ...
+# Subtest: rejects output symlinks and hardlinks
+ok 3 - rejects output symlinks and hardlinks
+  ---
+  duration_ms: 2.915962
+  ...
+# Subtest: rejects inputs and non-text MIME before invoking Codex
+ok 4 - rejects inputs and non-text MIME before invoking Codex
+  ---
+  duration_ms: 1.731168
+  ...
+# Subtest: declaration requires online profile flag and actual text-ready native runtime
+ok 5 - declaration requires online profile flag and actual text-ready native runtime
+  ---
+  duration_ms: 0.476959
+  ...
+# Subtest: native text lane performs one irreversible START and commits the exact output bytes
+ok 6 - native text lane performs one irreversible START and commits the exact output bytes
+  ---
+  duration_ms: 56.360107
+  ...
+# Subtest: Runtime installer payload closure ships the text executor and advances the Runtime package version
+ok 7 - Runtime installer payload closure ships the text executor and advances the Runtime package version
+  ---
+  duration_ms: 1.967846
+  ...
+# Subtest: one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+ok 8 - one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+  ---
+  duration_ms: 99.508834
+  ...
+# Subtest: lost final response reads back the identical committed result without a second write or model call
+ok 9 - lost final response reads back the identical committed result without a second write or model call
+  ---
+  duration_ms: 65.10174
+  ...
+# Subtest: stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+ok 10 - stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+  ---
+  duration_ms: 86.428116
+  ...
+# Subtest: a recorded/unknown effect can never be issued by a successor claimant
+ok 11 - a recorded/unknown effect can never be issued by a successor claimant
+  ---
+  duration_ms: 40.053586
+  ...
+# Subtest: exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+ok 12 - exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+  ---
+  duration_ms: 1.731066
+  ...
+# Subtest: committed server envelope resumes without local blob/staging or a runnable dependency
+ok 13 - committed server envelope resumes without local blob/staging or a runnable dependency
+  ---
+  duration_ms: 73.893117
+  ...
+# Subtest: reconstruction resumes saved command even when server inbox only lists QUEUED work
+ok 14 - reconstruction resumes saved command even when server inbox only lists QUEUED work
+  ---
+  duration_ms: 69.641269
+  ...
+# Subtest: syntactically valid but incorrect result digest is not a commit receipt
+ok 15 - syntactically valid but incorrect result digest is not a commit receipt
+  ---
+  duration_ms: 53.873405
+  ...
+# Subtest: frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+ok 16 - frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+  ---
+  duration_ms: 1.707669
+  ...
+# Subtest: only the real committed receipt permits execution-owned carrier adapter release
+ok 17 - only the real committed receipt permits execution-owned carrier adapter release
+  ---
+  duration_ms: 139.0371
+  ...
+# Subtest: a pending UNKNOWN retains its error but does not starve unrelated next inbox execution
+ok 18 - a pending UNKNOWN retains its error but does not starve unrelated next inbox execution
+  ---
+  duration_ms: 106.57526
+  ...
+# Subtest: shared store or session failures immediately halt poll instead of crossing the security boundary
+ok 19 - shared store or session failures immediately halt poll instead of crossing the security boundary
+  ---
+  duration_ms: 5.461427
+  ...
+# Subtest: isolated poll failures preserve first original transport cause without leaking provider response data
+ok 20 - isolated poll failures preserve first original transport cause without leaking provider response data
+  ---
+  duration_ms: 1.649244
+  ...
+# Subtest: result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+ok 21 - result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+  ---
+  duration_ms: 32.286345
+  ...
+# Subtest: effect START is on disk before request; real result bytes saved before remote report
+ok 22 - effect START is on disk before request; real result bytes saved before remote report
+  ---
+  duration_ms: 24.953208
+  ...
+# Subtest: report response loss recovers existing result; never repeats provider invocation
+ok 23 - report response loss recovers existing result; never repeats provider invocation
+  ---
+  duration_ms: 25.425349
+  ...
+# Subtest: uncertain network effect is UNKNOWN forever until real query, never resent
+ok 24 - uncertain network effect is UNKNOWN forever until real query, never resent
+  ---
+  duration_ms: 24.077867
+  ...
+# Subtest: lost START reply and competing claimant cannot emit side effects
+ok 25 - lost START reply and competing claimant cannot emit side effects
+  ---
+  duration_ms: 13.662607
+  ...
+# Subtest: effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+ok 26 - effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+  ---
+  duration_ms: 24.329748
+  ...
+# Subtest: effect result ACK must exactly confirm actual local digest/request id; no second invocation
+ok 27 - effect result ACK must exactly confirm actual local digest/request id; no second invocation
+  ---
+  duration_ms: 34.633896
+  ...
+# Subtest: resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+ok 28 - resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+  ---
+  duration_ms: 12.3773
+  ...
+# Subtest: all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions
+ok 29 - all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions
+  ---
+  duration_ms: 40.637402
+  ...
+# Subtest: result data is schema-validated JSON, including scalar/array/null without reparsing a string
+ok 30 - result data is schema-validated JSON, including scalar/array/null without reparsing a string
+  ---
+  duration_ms: 61.990483
+  ...
+# Subtest: missing isolation/interpreter or invalid package entry never advertises READY
+ok 31 - missing isolation/interpreter or invalid package entry never advertises READY
+  ---
+  duration_ms: 238.750674
+  ...
+# Subtest: real local script receives actual readonly bytes, no shell/token/HOME or routable network, and emits UTF8 artifact
+ok 32 - real local script receives actual readonly bytes, no shell/token/HOME or routable network, and emits UTF8 artifact
+  ---
+  duration_ms: 850.333558
+  ...
+# Subtest: invalid hash, nonprivate input or symlink fails before package process launch
+ok 33 - invalid hash, nonprivate input or symlink fails before package process launch
+  ---
+  duration_ms: 1054.711948
+  ...
+# Subtest: script cannot forge input receipts, declare escaping/symlink outputs or report invalid data
+ok 34 - script cannot forge input receipts, declare escaping/symlink outputs or report invalid data
+  ---
+  duration_ms: 3356.02163
+  ...
+# Subtest: local effect result/data/actual artifact bytes recover durably without reexecuting the script
+ok 35 - local effect result/data/actual artifact bytes recover durably without reexecuting the script
+  ---
+  duration_ms: 1094.089181
+  ...
+# Subtest: nonzero process error is retained as UNKNOWN; a second attempt does not start the script again
+ok 36 - nonzero process error is retained as UNKNOWN; a second attempt does not start the script again
+  ---
+  duration_ms: 1036.673063
+  ...
+# Subtest: zero-material local script persists a real result envelope without invented input receipts
+ok 37 - zero-material local script persists a real result envelope without invented input receipts
+  ---
+  duration_ms: 809.459243
+  ...
+# Subtest: declared local input capability cannot be READY until the shared receipt contract permits local-file
+ok 38 - declared local input capability cannot be READY until the shared receipt contract permits local-file
+  ---
+  duration_ms: 544.048717
+  ...
+# Subtest: local-file receipt and genuine bytes close durable result persistence/reconstruction and cannot masquerade as native input
+ok 39 - local-file receipt and genuine bytes close durable result persistence/reconstruction and cannot masquerade as native input
+  ---
+  duration_ms: 811.318765
+  ...
+1..39
+# tests 39
+# suites 0
+# pass 39
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 12101.570107

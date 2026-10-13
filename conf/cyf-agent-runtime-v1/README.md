@@ -391,7 +391,10 @@ storage. The trusted launcher sets umask 077 before importing the entrypoint.
 Stdout must contain exactly one JSON value `{data,artifacts}`; each artifact is
 `{outputId,contentMimeType,path}` with a nonempty relative path under `/outputs`.
 The host rejects traversal, symlinks, hardlinks, nonprivate files, undeclared MIME
-and invalid declared output data/bytes. Scripts cannot supply input receipts.
+and invalid declared output data/bytes. Scripts cannot supply input receipts. The host's `local-file` receipt is accepted
+only for `local-script` and means raw bytes were delivered through the read-only
+input manifest, not a native/parsed contribution or understanding claim. It does
+not extend the public CHAT carrier enumeration.
 Actual data/artifact bytes are persisted through the existing NEW-only effect
 mechanism before stage/commit. A lost/unknown process result is never relaunched.
 No PDF/XLSX/video package is added by this adapter; new tool names still require

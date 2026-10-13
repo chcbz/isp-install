@@ -56,7 +56,7 @@ export function validateCommittedSkillResult(manifest, command, descriptor, phas
   if ((outputs.artifactsRequired && !manifest.artifacts.length) || (!outputs.multiple && manifest.artifacts.length > 1)
       || (!outputs.dataSchema && manifest.data !== null)) fail('SKILL_COMMIT_UNCONFIRMED')
   if (outputs.dataSchema) validateSkillData(outputs.dataSchema, manifest.data)
-  validateSkillInputReceipts(manifest.inputReceipts, command.inputRefs)
+  validateSkillInputReceipts(manifest.inputReceipts, command.inputRefs, null, descriptor.manifest.runner)
   const preimage = { schemaVersion: 1, data: manifest.data, artifacts: manifest.artifacts, inputReceipts: manifest.inputReceipts }
   if (skillDigest(preimage) !== manifest.resultDigest || (local && skillDigest(skillResultPayload(local)) !== manifest.resultDigest)) fail('SKILL_COMMIT_UNCONFIRMED')
   return { manifestId: manifest.manifestId, state: 'RESULT_COMMITTED', phase, resultDigest: manifest.resultDigest }

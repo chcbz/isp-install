@@ -31,13 +31,14 @@ const writePrivate = (path, bytes) => {
   try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
 }
 
-export const SKILL_INPUT_CARRIERS = Object.freeze(['native-text', 'native-image', 'native-audio', 'parsed-text', 'provider-image'])
-export function validateSkillInputReceipts(receipts, inputRefs, frozenInputs = null) {
+export const SKILL_INPUT_CARRIERS = Object.freeze(['native-text', 'native-image', 'native-audio', 'parsed-text', 'provider-image', 'local-file'])
+export function validateSkillInputReceipts(receipts, inputRefs, frozenInputs = null, runner = null) {
   if (!Array.isArray(receipts) || receipts.length !== inputRefs.length) fail('SKILL_RESULT_INPUT_RECEIPT_INVALID')
   const seen = new Set()
   for (const receipt of receipts) {
     if (!receipt || Object.keys(receipt).sort().join(',') !== 'carrier,delivery,inputRef,sha256' || !inputRefs.includes(receipt.inputRef)
         || seen.has(receipt.inputRef) || !skillSha(receipt.sha256) || !SKILL_INPUT_CARRIERS.includes(receipt.carrier) || receipt.delivery !== 'DELIVERED'
+        || (receipt.carrier === 'local-file' && runner !== 'local-script')
         || (frozenInputs && frozenInputs.find(input => input.inputRef === receipt.inputRef)?.sha256 !== receipt.sha256)) fail('SKILL_RESULT_INPUT_RECEIPT_INVALID')
     seen.add(receipt.inputRef)
   }
@@ -106,7 +107,7 @@ export class SkillExecutionStore {
       this.writeBlob(artifact.outputId, artifact.bytes)
       return { outputId: artifact.outputId, contentMimeType: artifact.contentMimeType, sha256: skillHash(artifact.bytes), byteLength: String(artifact.bytes.length) }
     })
-    validateSkillInputReceipts(result.inputReceipts, this.command.inputRefs, this.read('inputs-snapshot')?.inputs || null)
+    validateSkillInputReceipts(result.inputReceipts, this.command.inputRefs, this.read('inputs-snapshot')?.inputs || null, descriptor.manifest.runner)
     const manifest = { schemaVersion: 1, executionId: this.command.executionId, snapshotDigest: this.command.snapshotDigest,
       result: { data, artifacts, inputReceipts: result.inputReceipts } }
     const previous = this.loadResult()
