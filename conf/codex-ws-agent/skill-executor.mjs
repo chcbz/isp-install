@@ -4,9 +4,13 @@ import { parseSkillJson, validateSkillParameters } from './skill-manifest.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 export const skillHash = bytes => createHash('sha256').update(bytes).digest('hex')
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-const canonical = value => Array.isArray(value) ? value.map(canonical) : object(value)
-  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value
-export const skillCanonicalJson = value => JSON.stringify(canonical(value))
+// Emit members directly: rebuilding an object would re-order integer-shaped keys.
+export const skillCanonicalJson = value => {
+  if (Array.isArray(value)) return `[${value.map(skillCanonicalJson).join(',')}]`
+  if (object(value)) return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${skillCanonicalJson(value[key])}`).join(',')}}`
+  if (value !== null && !['string', 'boolean', 'number'].includes(typeof value) || typeof value === 'number' && !Number.isFinite(value)) fail('SKILL_CANONICAL_JSON_INVALID')
+  return JSON.stringify(value)
+}
 export const skillDigest = value => skillHash(skillCanonicalJson(value))
 export const skillId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value)
 export const skillSha = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)

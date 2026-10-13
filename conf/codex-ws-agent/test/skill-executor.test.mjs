@@ -36,3 +36,21 @@ test('invalid parameters, missing runner, wrong result identity and required emp
   c.parameters.title = 'x'; ctx.runners.clear(); await assert.rejects(executeSkill(c, ctx), /SKILL_RUNNER_MISSING/)
   ctx.runners.set('native-model', { run() {} }); ctx.loadResult = async () => ({ ...manifest, executionId: 'foreign' }); await assert.rejects(executeSkill(c, ctx), /SKILL_RESULT_BINDING_INVALID/)
 })
+
+import { readFileSync } from 'node:fs'
+import { skillCanonicalJson, skillDigest, skillHash } from '../skill-executor.mjs'
+import { canonicalSha256 } from '../chat-runtime.mjs'
+const canonicalNumbers = JSON.parse(readFileSync(new URL('./fixtures/canonical-numbers-v4.json', import.meta.url)))
+test('portable IEEE754 shortest canonical JSON matches shared Java fixture, including subnormal and negative zero', () => {
+  for (const vector of canonicalNumbers.cases) {
+    const value = vector.value
+    assert.equal(skillCanonicalJson(value), vector.canonical, vector.name)
+    assert.equal(skillDigest(value), vector.sha256); assert.equal(`sha256:${skillDigest(value)}`, canonicalSha256(value))
+  }
+})
+test('canonical object keys are UTF16 lexical, never JS integer-property enumeration order', () => {
+  const value = { 2: -0, 10: 5e-324, z: { 2: 1e21, 10: 0.000001 }, a: [1.5, 1e-7] }
+  const expected = '{"10":5e-324,"2":0,"a":[1.5,1e-7],"z":{"10":0.000001,"2":1e+21}}'
+  assert.equal(skillCanonicalJson(value), expected); assert.equal(skillDigest(value), skillHash(expected))
+  for (const value of [NaN, Infinity, undefined, 1n]) assert.throws(() => skillCanonicalJson(value), /SKILL_CANONICAL_JSON_INVALID/)
+})

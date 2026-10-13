@@ -1,13 +1,11 @@
-import { createHash } from 'node:crypto'
+import { skillDigest } from './skill-executor.mjs'
 
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const hash = value => typeof value === 'string' && value.length === 64 && /^[0-9a-f]{64}$/.test(value)
 const exact = value => typeof value === 'string' && value.length > 0 && value === value.trim() && !/[\x00-\x1f\x7f]/u.test(value)
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const freeze = value => { if (object(value) || Array.isArray(value)) { Object.values(value).forEach(freeze); Object.freeze(value) } return value }
-const canonical = value => Array.isArray(value) ? value.map(canonical) : object(value)
-  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value
-const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex')
+const digest = skillDigest
 const identity = manifest => JSON.stringify([manifest.skillKey, manifest.skillVersion])
 const fenceFields = ['installationId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
 const runners = new Set(['provider-operation', 'local-script', 'native-model'])

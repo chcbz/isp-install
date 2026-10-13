@@ -1,0 +1,210 @@
+TAP version 13
+# Subtest: one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+ok 1 - one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+  ---
+  duration_ms: 111.513703
+  ...
+# Subtest: lost final response reads back the identical committed result without a second write or model call
+ok 2 - lost final response reads back the identical committed result without a second write or model call
+  ---
+  duration_ms: 53.163021
+  ...
+# Subtest: stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+ok 3 - stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+  ---
+  duration_ms: 57.014032
+  ...
+# Subtest: a recorded/unknown effect can never be issued by a successor claimant
+ok 4 - a recorded/unknown effect can never be issued by a successor claimant
+  ---
+  duration_ms: 25.234591
+  ...
+# Subtest: exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+ok 5 - exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+  ---
+  duration_ms: 1.432829
+  ...
+# Subtest: committed server envelope resumes without local blob/staging or a runnable dependency
+ok 6 - committed server envelope resumes without local blob/staging or a runnable dependency
+  ---
+  duration_ms: 55.830195
+  ...
+# Subtest: reconstruction resumes saved command even when server inbox only lists QUEUED work
+ok 7 - reconstruction resumes saved command even when server inbox only lists QUEUED work
+  ---
+  duration_ms: 64.918395
+  ...
+# Subtest: syntactically valid but incorrect result digest is not a commit receipt
+ok 8 - syntactically valid but incorrect result digest is not a commit receipt
+  ---
+  duration_ms: 52.071653
+  ...
+# Subtest: frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+ok 9 - frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+  ---
+  duration_ms: 1.25221
+  ...
+# Subtest: only the real committed receipt permits execution-owned carrier adapter release
+ok 10 - only the real committed receipt permits execution-owned carrier adapter release
+  ---
+  duration_ms: 101.584537
+  ...
+# Subtest: result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+ok 11 - result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+  ---
+  duration_ms: 35.957796
+  ...
+# Subtest: effect START is on disk before request; real result bytes saved before remote report
+ok 12 - effect START is on disk before request; real result bytes saved before remote report
+  ---
+  duration_ms: 26.122736
+  ...
+# Subtest: report response loss recovers existing result; never repeats provider invocation
+ok 13 - report response loss recovers existing result; never repeats provider invocation
+  ---
+  duration_ms: 27.931729
+  ...
+# Subtest: uncertain network effect is UNKNOWN forever until real query, never resent
+ok 14 - uncertain network effect is UNKNOWN forever until real query, never resent
+  ---
+  duration_ms: 25.551046
+  ...
+# Subtest: lost START reply and competing claimant cannot emit side effects
+ok 15 - lost START reply and competing claimant cannot emit side effects
+  ---
+  duration_ms: 15.008255
+  ...
+# Subtest: effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+ok 16 - effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+  ---
+  duration_ms: 22.581589
+  ...
+# Subtest: effect result ACK must exactly confirm actual local digest/request id; no second invocation
+ok 17 - effect result ACK must exactly confirm actual local digest/request id; no second invocation
+  ---
+  duration_ms: 24.64231
+  ...
+# Subtest: resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+ok 18 - resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+  ---
+  duration_ms: 12.049283
+  ...
+# Subtest: all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions
+ok 19 - all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions
+  ---
+  duration_ms: 34.106207
+  ...
+# Subtest: result data is schema-validated JSON, including scalar/array/null without reparsing a string
+ok 20 - result data is schema-validated JSON, including scalar/array/null without reparsing a string
+  ---
+  duration_ms: 55.445493
+  ...
+# Subtest: strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+ok 21 - strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+  ---
+  duration_ms: 5.185595
+  ...
+# Subtest: one executor persists result before stage/commit; data-only still has real commit
+ok 22 - one executor persists result before stage/commit; data-only still has real commit
+  ---
+  duration_ms: 3.37352
+  ...
+# Subtest: recovered persistent result never runs a model/provider again
+ok 23 - recovered persistent result never runs a model/provider again
+  ---
+  duration_ms: 0.790993
+  ...
+# Subtest: invalid parameters, missing runner, wrong result identity and required empty output fail closed
+ok 24 - invalid parameters, missing runner, wrong result identity and required empty output fail closed
+  ---
+  duration_ms: 1.309853
+  ...
+# Subtest: portable IEEE754 shortest canonical JSON matches shared Java fixture, including subnormal and negative zero
+ok 25 - portable IEEE754 shortest canonical JSON matches shared Java fixture, including subnormal and negative zero
+  ---
+  duration_ms: 1.052193
+  ...
+# Subtest: canonical object keys are UTF16 lexical, never JS integer-property enumeration order
+ok 26 - canonical object keys are UTF16 lexical, never JS integer-property enumeration order
+  ---
+  duration_ms: 0.474482
+  ...
+# Subtest: unregistered runners never become READY, even with a valid installed descriptor
+ok 27 - unregistered runners never become READY, even with a valid installed descriptor
+  ---
+  duration_ms: 11.03726
+  ...
+# Subtest: local scripts require actual measured tools, not tool names or booleans
+ok 28 - local scripts require actual measured tools, not tool names or booleans
+  ---
+  duration_ms: 3.312839
+  ...
+# Subtest: provider runner requires an explicit current-subject binding and revision
+ok 29 - provider runner requires an explicit current-subject binding and revision
+  ---
+  duration_ms: 6.42871
+  ...
+# Subtest: ordinary SKILL.md packages coexist without fabricated executable capability
+ok 30 - ordinary SKILL.md packages coexist without fabricated executable capability
+  ---
+  duration_ms: 1.782397
+  ...
+# Subtest: heartbeat is cached; tool probes run once per refresh for a shared tool
+ok 31 - heartbeat is cached; tool probes run once per refresh for a shared tool
+  ---
+  duration_ms: 4.891302
+  ...
+# Subtest: full session and configuration invalidation removes cached readiness immediately
+ok 32 - full session and configuration invalidation removes cached readiness immediately
+  ---
+  duration_ms: 2.554614
+  ...
+# Subtest: refresh from an old session cannot resurrect a catalog after disconnect
+ok 33 - refresh from an old session cannot resurrect a catalog after disconnect
+  ---
+  duration_ms: 5.158472
+  ...
+# Subtest: concurrent refresh only commits the latest installation measurement
+ok 34 - concurrent refresh only commits the latest installation measurement
+  ---
+  duration_ms: 4.318849
+  ...
+# Subtest: execution lookup rechecks immutable hashes, tool measurement and binding revision
+ok 35 - execution lookup rechecks immutable hashes, tool measurement and binding revision
+  ---
+  duration_ms: 3.864961
+  ...
+# Subtest: fee-only deployment information does not change readiness or cache identity
+ok 36 - fee-only deployment information does not change readiness or cache identity
+  ---
+  duration_ms: 3.164128
+  ...
+# Subtest: duplicate installations do not pick a callable winner
+ok 37 - duplicate installations do not pick a callable winner
+  ---
+  duration_ms: 1.404836
+  ...
+# Subtest: invalid digest or corrupt source clears the last successful directory without leaking error details
+ok 38 - invalid digest or corrupt source clears the last successful directory without leaking error details
+  ---
+  duration_ms: 2.234512
+  ...
+# Subtest: public directory and descriptor snapshots cannot be mutated after refresh
+ok 39 - public directory and descriptor snapshots cannot be mutated after refresh
+  ---
+  duration_ms: 1.771309
+  ...
+# Subtest: probe hashes and reason codes reject newline suffixes
+ok 40 - probe hashes and reason codes reject newline suffixes
+  ---
+  duration_ms: 1.6153
+  ...
+1..40
+# tests 40
+# suites 0
+# pass 40
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2159.782802
