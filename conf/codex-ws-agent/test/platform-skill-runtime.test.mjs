@@ -10,7 +10,7 @@ const base = overrides => new PlatformSkillRuntime({
   profile,
   commandInboxDir: '/tmp/inbox',
   wsUrl: 'wss://api.example.invalid/ws',
-  authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`,
+  authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`,
   availability: () => true,
   ...overrides
 })
@@ -19,6 +19,7 @@ test('default-off runtime advertises no controlled protocol and never constructs
   let constructions = 0
   const runtime = base({ managerFactory: () => { constructions++; throw new Error('must not construct') } })
   assert.deepEqual(runtime.commandProtocols, [])
+  assert.deepEqual(runtime.commandTypes, [])
   assert.deepEqual(await runtime.activateAndRecover(runtimeScope), { active: false, recovered: [] })
   const result = await runtime.execute({ commandType: 'PLATFORM_SKILL_INSTALL', commandId: 'command-a' })
   assert.equal(result.status, 'failed')
@@ -48,7 +49,9 @@ test('archive protocol is advertised only when explicitly enabled and its produc
     }
   })
   assert.deepEqual(runtime.commandProtocols, ['ARCHIVE_MAINTENANCE_EXECUTE/v1'])
+  assert.deepEqual(runtime.commandTypes, [])
   assert.equal((await runtime.activateAndRecover(runtimeScope)).active, true)
+  assert.deepEqual(runtime.commandTypes, ['ARCHIVE_MAINTENANCE_EXECUTE'])
   assert.deepEqual(runnerOptions.runtimeScope, runtimeScope)
   assert.equal((await runtime.execute({ commandType: 'ARCHIVE_MAINTENANCE_EXECUTE', commandId: 'archive-a' })).status, 'completed')
 
@@ -95,15 +98,19 @@ test('enabled runtime advertises only PLATFORM_SKILL_INSTALL/v1 and routes after
     execute: async message => { calls.push(`execute:${message.commandId}`); return { status: 'completed' } },
     reconcileCommandOutcome: message => ({ status: 'completed', authoritative: message.commandId === 'command-a' })
   }
-  const runtime = base({ enabled: true, managerFactory: value => { options = value; return manager } })
+  const nativeFetch = async () => { throw new Error('not called by this fixture') }
+  const runtime = base({ enabled: true, fetchFn: nativeFetch, managerFactory: value => { options = value; return manager } })
+  assert.deepEqual(runtime.commandTypes, [])
   assert.deepEqual(runtime.commandProtocols, [PLATFORM_SKILL_PROTOCOL])
   assert.equal(runtime.commandProtocols.includes('ARCHIVE_MAINTENANCE_EXECUTE/v1'), false)
   const activated = await runtime.activateAndRecover(runtimeScope)
   assert.equal(activated.active, true)
+  assert.deepEqual(runtime.commandTypes, ['PLATFORM_SKILL_INSTALL'])
   assert.deepEqual(calls, ['initialize', 'recover'])
   assert.deepEqual(options.runtimeScope, runtimeScope)
   assert.equal(options.sessionSignal.aborted, false)
-  assert.equal(options.authorizationProvider({}), `AgentRuntime ${'a'.repeat(32)}`)
+  assert.equal(options.fetchFn, nativeFetch)
+  assert.equal(options.authorizationProvider({}), `AgentRuntime rts1_${'a'.repeat(64)}`)
   assert.equal((await runtime.execute({ commandType: 'PLATFORM_SKILL_INSTALL', commandId: 'command-a' })).status, 'completed')
   assert.equal(runtime.reconcileCommandOutcome({ commandId: 'command-a' }).authoritative, true)
 })
@@ -129,6 +136,7 @@ test('disconnect fences an in-progress recovery generation and prevents activati
   assert.equal(result.active, false)
   assert.equal(result.stale, true)
   assert.equal(runtime.ready, false)
+  assert.deepEqual(runtime.commandTypes, [])
   assert.equal(runtime.reconcileCommandOutcome({ commandId: 'command-a' }), null)
   assert.equal((await runtime.execute({ commandType: 'PLATFORM_SKILL_INSTALL', commandId: 'command-a' })).status, 'failed')
 })
@@ -171,7 +179,7 @@ test('manager options cannot override server authority, state namespace, or sock
   assert.deepEqual(options.runtimeScope, runtimeScope)
   assert.notEqual(options.stateRoot, '/forged')
   assert.equal(options.wsUrl, 'wss://api.example.invalid/ws')
-  assert.equal(options.authorizationProvider({}), `AgentRuntime ${'a'.repeat(32)}`)
+  assert.equal(options.authorizationProvider({}), `AgentRuntime rts1_${'a'.repeat(64)}`)
   assert.equal(options.sessionSignal.aborted, false)
 })
 

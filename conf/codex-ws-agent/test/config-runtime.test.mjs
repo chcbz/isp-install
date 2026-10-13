@@ -24,9 +24,24 @@ const profileFor = root => ({
 const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => (
   !/^(CODEX_|AGENT_|OPENCLAW_|DEFAULT_CODEX_PROFILE$|WS_URL$)/.test(key)
 )))
-const runCli = (root, profiles, args, extraEnv = {}) => spawnSync(process.execPath, [entrypoint, ...args], {
+// Exercise current explicit profile normalization/validation, not a legacy config loader.
+const runProfileInspection = (root, profiles, args, extraEnv = {}) => spawnSync(process.execPath, ['--input-type=module', '-e', `
+  const { normalizeProfile, buildConfigurationReport, ensureProfiles } = await import(${JSON.stringify(entrypoint)});
+  const profiles = JSON.parse(process.env.TEST_PROFILES_JSON).map((profile, index) => ({
+    ...normalizeProfile(profile, {}, index, { isolated: true }),
+    runtimeIdentity: { installationId: 'test-installation-' + index, tenantId: '0', clientId: 'test-client', canonicalAgentId: profile.agentId }
+  }));
+  const settings = { profiles, defaultProfileId: 'audit', workspacePolicies: new Map(Object.entries(JSON.parse(process.env.TEST_POLICIES_JSON || '{}'))) };
+  if (process.argv.includes('--validate')) {
+    try { ensureProfiles(settings.profiles, settings.defaultProfileId, settings.workspacePolicies, false); }
+    catch (error) { console.error(error.message); process.exitCode = 1; }
+  } else {
+    const report = buildConfigurationReport(settings); console.log(JSON.stringify(report));
+    if (report.profiles.some(profile => profile.errors.length)) process.exitCode = 1;
+  }
+`, '--', ...args], {
   cwd: root, encoding: 'utf8', timeout: 10000,
-  env: { ...cleanEnv(), CODEX_PROFILES: JSON.stringify(profiles), DEFAULT_CODEX_PROFILE: 'audit', ...extraEnv }
+  env: { ...cleanEnv(), TEST_PROFILES_JSON: JSON.stringify(profiles), ...extraEnv }
 })
 
 const writeSession = (selectedProfile, sessionId, fileName = sessionId) => {
@@ -417,7 +432,7 @@ test('empty codexModel leaves model selection to Codex Home', t => {
   assert.equal(buildCodexArgs(profile, {}, 'test').includes('--model'), false)
 })
 
-test('inspect-config is read-only, secret-free and distinguishes ignored metadata from runtime abilities', t => {
+test('retained library configuration inspection is read-only, secret-free and distinguishes ignored metadata from runtime abilities', t => {
   const root = fixture(t)
   const profile = {
     ...profileFor(root), apiKey: 'profile-key-never-print',
@@ -429,10 +444,10 @@ test('inspect-config is read-only, secret-free and distinguishes ignored metadat
   writeFileSync(resolve(root, 'weather.py'), 'print("sunny")')
   const workspaceRoot = resolve(root, 'workspaces')
   const before = readdirSync(root)
-  const result = runCli(root, [profile], ['--inspect-config'], {
+  const result = runProfileInspection(root, [profile], ['--inspect-config'], {
     OPENCLAW_API_KEY: 'global-key-never-print',
     WS_URL: 'ws://127.0.0.1:1/?api_key=url-key-never-print',
-    CODEX_WORKSPACE_POLICIES: JSON.stringify({ example: {
+    TEST_POLICIES_JSON: JSON.stringify({ example: {
       root: workspaceRoot, repository: resolve(root, 'missing-repository'),
       baseRef: 'refs/heads/main', trustedRemoteUrl: 'https://git.example.com/repo.git',
       trustedRemoteRef: 'refs/heads/main'
@@ -443,7 +458,7 @@ test('inspect-config is read-only, secret-free and distinguishes ignored metadat
   const actual = report.profiles[0]
   assert.equal(actual.commandReadiness, 'policy-configured; requires --validate')
   assert.deepEqual(actual.schedulingAbilities, ['天气查询'])
-  assert.equal(actual.websocketAuthSource, 'profile.apiKey')
+  assert.equal(actual.websocketAuthSource, 'installation-derived-session')
   assert.equal(actual.modelSource, 'agent --model')
   assert.ok(actual.warnings.some(value => value.startsWith('LEGACY_ABILITIES_IGNORED:')))
   assert.ok(actual.warnings.some(value => value.startsWith('LEGACY_SKILLS_IGNORED:')))
@@ -453,12 +468,12 @@ test('inspect-config is read-only, secret-free and distinguishes ignored metadat
   assert.deepEqual(readdirSync(profile.codexHome), ['auth.json'])
 })
 
-test('inspect-config works without WebSocket credentials and reports blocked commands', t => {
+test('library inspection needs no WebSocket credential and reports blocked commands', t => {
   const root = fixture(t)
-  const result = runCli(root, [profileFor(root)], ['--inspect-config'])
+  const result = runProfileInspection(root, [profileFor(root)], ['--inspect-config'])
   assert.equal(result.status, 0, result.stderr)
   const profile = JSON.parse(result.stdout).profiles[0]
-  assert.equal(profile.websocketAuthSource, 'missing')
+  assert.equal(profile.websocketAuthSource, 'installation-derived-session')
   assert.equal(profile.commandReadiness, 'blocked-no-workspace-policy')
   assert.ok(profile.warnings.some(value => value.startsWith('WORKSPACE_POLICY_REQUIRED:')))
 })
@@ -468,30 +483,30 @@ for (const [key, value] of [
   ['codexTimeoutMs', -1], ['codexTimeoutMs', 1.5], ['codexTimeoutMs', 'invalid'], ['codexTimeoutMs', 2147483648],
   ['codexTimeoutMs', false], ['codexTimeoutMs', []]
 ]) {
-  test(`validate rejects ${key}=${value} instead of silently using an unintended policy or timeout`, t => {
+  test(`read-only validation helper rejects ${key}=${value} instead of silently using an unintended policy or timeout`, t => {
     const root = fixture(t)
-    const result = runCli(root, [{ ...profileFor(root), [key]: value }], ['--validate'], { OPENCLAW_API_KEY: 'test' })
+    const result = runProfileInspection(root, [{ ...profileFor(root), [key]: value }], ['--validate'], { OPENCLAW_API_KEY: 'test' })
     assert.notEqual(result.status, 0)
     assert.match(result.stderr, new RegExp(key))
     assert.doesNotMatch(result.stdout, /configuration valid/)
   })
 }
 
-test('inspect-config returns a failing status and structured errors for malformed execution settings', t => {
+test('read-only inspection helper returns a failing status and structured errors for malformed execution settings', t => {
   const root = fixture(t)
-  const result = runCli(root, [{ ...profileFor(root), codexTimeoutMs: 'invalid' }], ['--inspect-config'])
+  const result = runProfileInspection(root, [{ ...profileFor(root), codexTimeoutMs: 'invalid' }], ['--inspect-config'])
   assert.equal(result.status, 1)
   assert.match(JSON.parse(result.stdout).profiles[0].errors[0], /codexTimeoutMs/)
 })
 
-test('legacy CODEX_MODEL and zero timeout are inherited when the profile does not override them', t => {
+test('explicit Runtime profiles do not inherit retired CODEX_MODEL or CODEX_TIMEOUT_MS', t => {
   const root = fixture(t)
   const { codexTimeoutMs, codexModel, ...profile } = profileFor(root)
-  const result = runCli(root, [profile], ['--inspect-config'], { CODEX_MODEL: 'legacy-model', CODEX_TIMEOUT_MS: '0' })
+  const result = runProfileInspection(root, [profile], ['--inspect-config'], { CODEX_MODEL: 'legacy-model', CODEX_TIMEOUT_MS: '0' })
   assert.equal(result.status, 0, result.stderr)
   const actual = JSON.parse(result.stdout).profiles[0]
-  assert.equal(actual.codexModel, 'legacy-model')
-  assert.equal(actual.codexTimeoutMs, 0)
+  assert.equal(actual.codexModel, null)
+  assert.equal(actual.codexTimeoutMs, 900000)
 })
 
 for (const timeoutMs of [0, 10]) {
@@ -516,46 +531,38 @@ for (const timeoutMs of [0, 10]) {
 
 test('explicit profile model takes precedence over CODEX_MODEL', t => {
   const root = fixture(t)
-  const result = runCli(root, [profileFor(root)], ['--inspect-config'], { CODEX_MODEL: 'environment-model' })
+  const result = runProfileInspection(root, [profileFor(root)], ['--inspect-config'], { CODEX_MODEL: 'environment-model' })
   assert.equal(result.status, 0, result.stderr)
   assert.equal(JSON.parse(result.stdout).profiles[0].codexModel, 'test-model')
 })
 
-test('section-style profile template has a conservative inherited sandbox', t => {
+test('current profile inspection ignores retired inline and INI file environment inputs', t => {
   const root = fixture(t)
-  const profilesFile = resolve(import.meta.dirname, '..', 'codex-profiles.conf')
-  const result = runCli(root, [], ['--inspect-config'], {
-    CODEX_PROFILES_FILE: profilesFile, DEFAULT_CODEX_PROFILE: 'codex-default'
+  const result = runProfileInspection(root, [profileFor(root)], ['--inspect-config'], {
+    CODEX_PROFILES_FILE: '/must-not-read-retired-ini', CODEX_PROFILES: 'invalid legacy JSON', DEFAULT_CODEX_PROFILE: 'foreign'
   })
   assert.equal(result.status, 0, result.stderr)
   const report = JSON.parse(result.stdout)
   assert.equal(report.profiles.length, 1)
-  assert.equal(report.defaultProfileId, 'codex-default')
-  assert.equal(report.profiles[0].codexSandbox, 'workspace-write')
-  assert.equal(report.profiles[0].codexTimeoutMs, 900000)
+  assert.equal(report.defaultProfileId, 'audit')
+  assert.equal(report.profiles[0].agentId, 'audit-agent')
 })
 
-test('legacy CA bundle environment fallback reaches profile validation without exposing file contents', t => {
+test('explicit CA bundle profile setting reaches validation without exposing file contents', t => {
   const root = fixture(t)
   const selectedProfile = profileFor(root)
   const common = {
-    CODEX_TYPED_INSPECTION_PROVIDER_NETWORK: 'restricted-proxy',
-    CODEX_TYPED_INSPECTION_PROVIDER_ID: 'gpt',
-    CODEX_TYPED_INSPECTION_PROVIDER_BASE_URL: 'https://provider.example.test/v1',
-    CODEX_TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_MS: '1000'
+    typedInspectionProviderNetwork: 'restricted-proxy',
+    typedInspectionProviderId: 'gpt',
+    typedInspectionProviderBaseUrl: 'https://provider.example.test/v1',
+    typedInspectionNetworkConnectTimeoutMs: '1000'
   }
-  const relative = runCli(root, [selectedProfile], ['--inspect-config'], {
-    ...common,
-    CODEX_TYPED_INSPECTION_CA_BUNDLE_PATH: 'relative-ca.pem'
-  })
+  const relative = runProfileInspection(root, [{ ...selectedProfile, ...common, typedInspectionCaBundlePath: 'relative-ca.pem' }], ['--inspect-config'])
   assert.equal(relative.status, 1)
   const relativeReport = JSON.parse(relative.stdout)
   assert.equal(relativeReport.profiles[0].errors.includes('typedInspectionCaBundlePath must be an absolute path'), true)
 
-  const absolute = runCli(root, [selectedProfile], ['--inspect-config'], {
-    ...common,
-    CODEX_TYPED_INSPECTION_CA_BUNDLE_PATH: '/etc/ssl/certs/ca-certificates.crt'
-  })
+  const absolute = runProfileInspection(root, [{ ...selectedProfile, ...common, typedInspectionCaBundlePath: '/etc/ssl/certs/ca-certificates.crt' }], ['--inspect-config'])
   assert.equal(absolute.status, 0, absolute.stderr)
   const absoluteReport = JSON.parse(absolute.stdout)
   assert.equal(absoluteReport.profiles[0].errors.some(error => error.includes('typedInspectionCaBundlePath')), false)

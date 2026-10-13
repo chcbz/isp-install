@@ -9,6 +9,11 @@ import { ControlledImageConversationLaneV3 } from '../conversation-controlled-im
 import { retainControlledImageDeliveryV3, retainedControlledImageDeliveriesV3 } from '../controlled-image-delivery-retention-v3.mjs'
 import { controlledImageV3InputDigest } from '../conversation-reference-inputs-v3.mjs'
 
+const sessionProof = (auth, agentId = 'controlled-agent', runtimeInstanceId = 'instance-1') => ({
+  Authorization: auth, 'X-Agent-Id': agentId, 'X-Agent-Runtime-Id': runtimeInstanceId,
+  'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host',
+  'X-Agent-Session-Generation': '7'
+})
 const png = Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), Buffer.alloc(24, 9)])
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const token = '11111111-1111-4111-8111-111111111111'
@@ -19,7 +24,7 @@ const providerExecution = Object.freeze({ providerLane: 'CONTROLLED_IMAGE_HTTP_V
 const config = Object.freeze({ enabled: true, providerLane: 'CONTROLLED_IMAGE_HTTP_V1',
   bindingId: 'offline-test-binding', bindingEpoch: '1', modelId: 'offline-test-model',
   maxInputItems: 16, maxOutboundRequestAttempts: 1, precallFenceVersion: 1 })
-const auth = `AgentRuntime ${'a'.repeat(32)}`
+const auth = `AgentRuntime rts1_${'a'.repeat(64)}`
 const json = (url, payload, status = 200) => ({ status, redirected: false, url: url.href,
   headers: { get: key => key.toLowerCase() === 'content-type' ? 'application/json' : null }, json: async () => payload })
 const binary = (url, bytes) => ({ status: 200, redirected: false, url: url.href,
@@ -103,7 +108,7 @@ const setup = (t, candidate, { receipt = candidate.receipt, startMode = 'success
     throw new Error(`unexpected ${url.pathname}`)
   }
   const lane = new ControlledImageConversationLaneV3({ apiOrigin: 'http://127.0.0.1:10018', rootDir: root,
-    fetchFn, agentId: 'controlled-agent', runtimeInstanceId: 'instance-1', getAuth: () => auth,
+    fetchFn, agentId: 'controlled-agent', runtimeInstanceId: 'instance-1', getRuntimeHeaders: () => sessionProof(auth),
     controlledConfig: config, execute: async args => { executeCalls++; assert.equal(args.command.operation, candidate.command.operation)
       assert.deepEqual(args.inputs.map(input => input.source), candidate.snapshot.inputs.map(input => input.source))
       executeHook(args)
@@ -302,7 +307,7 @@ test('retained result uploads exact spool bytes with zero executor, START or sou
   assert.ok(existsSync(resolve(saved.runDirectory, 'delivery/committed.json')))
   assert.deepEqual(await fixture.lane.poll(), { processed: 0 })
   const restarted = new ControlledImageConversationLaneV3({ apiOrigin: 'http://127.0.0.1:10018', rootDir: fixture.root,
-    fetchFn: fixture.fetchFn, agentId: 'controlled-agent', runtimeInstanceId: 'replacement-runtime', getAuth: () => auth,
+    fetchFn: fixture.fetchFn, agentId: 'controlled-agent', runtimeInstanceId: 'replacement-runtime', getRuntimeHeaders: () => sessionProof(auth, 'controlled-agent', 'replacement-runtime'),
     controlledConfig: { ...config, bindingId: 'changed-provider-binding' }, execute: async () => assert.fail('no executor') })
   assert.deepEqual(await restarted.poll(), { processed: 0 })
   assert.equal(fixture.calls.filter(x => x.path.includes('/result-commits/')).length, 1)
@@ -348,7 +353,7 @@ for (const stageMode of ['lost', '404', 'drift']) test(`failed initial upload ($
   assert.equal(fixture.executeCalls(), 1)
   const oldCalls = fixture.calls.length
   const restarted = new ControlledImageConversationLaneV3({ apiOrigin: 'http://127.0.0.1:10018', rootDir: fixture.root,
-    fetchFn: fixture.fetchFn, agentId: 'controlled-agent', runtimeInstanceId: 'replacement-runtime', getAuth: () => auth,
+    fetchFn: fixture.fetchFn, agentId: 'controlled-agent', runtimeInstanceId: 'replacement-runtime', getRuntimeHeaders: () => sessionProof(auth, 'controlled-agent', 'replacement-runtime'),
     controlledConfig: { ...config, bindingId: 'changed-provider-binding' }, execute: async () => assert.fail('no executor replay') })
   assert.deepEqual(await restarted.poll(), { processed: 0, recovered: 1 })
   const recovery = fixture.calls.slice(oldCalls)

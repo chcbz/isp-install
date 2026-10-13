@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
-import { relativeModuleSpecifiers, scanRuntimeModuleClosure } from './module-import-scanner.mjs'
+import { relativeModuleSpecifiers, scanRuntimeModuleClosure } from '../module-import-scanner.mjs'
 
 test('import scanner ignores strings, comments, regexp and template text without hiding real imports', () => {
   const source = [

@@ -9,7 +9,7 @@ import { LINUX_ATOMIC_FS } from '../skill-install-manager.mjs'
 import { runManagedCommand } from '../agent-client.mjs'
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const scope = { scheme: 'native-runtime-v1', tenantId: '0', clientId: 'client-a', ownerJiacn: 'owner-a', agentId: 'agt_a', runtimeInstanceId: 'runtime-a' }
-const token = `AgentRuntime ${'1'.repeat(32)}`
+const token = `AgentRuntime rts1_${'1'.repeat(64)}`
 const wire = () => ({ schemaVersion: 1, messageType: 'command.dispatch', messageId: 'message-a',
   commandId: `cmd_controlled_${hash(Buffer.from(['0', 'client-a', 'owner-a', 'psi_a', 'agt_a', 'PLATFORM_SKILL_INSTALL'].join('\0')))}`,
   correlationId: 'psi_a', causationId: 'challenge-a', tenantId: '0', clientId: 'client-a', ownerJiacn: 'owner-a',

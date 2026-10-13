@@ -6,13 +6,12 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { buildOutputCommit } from './workspace-file-bridge.mjs'
-import { NativeConversationError, validateNativeConversationOutput } from './conversation-native.mjs'
+import { NativeConversationError, validateNativeConversationOutput, nativeSessionHeaders } from './conversation-native.mjs'
 import { materializeNativeConversationInputs, parseNativeConversationInputs } from './conversation-reference-inputs.mjs'
 
 const BASE = '/internal/agent/tasks'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/
 const TOKEN = /^[0-9a-fA-F-]{36}$/
-const AUTH = /^AgentRuntime [0-9a-f]{32}$/
 const PROVIDER_LANE = 'CONTROLLED_IMAGE_HTTP_V1'
 const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const LONG_MAX = 9223372036854775807n
@@ -78,22 +77,20 @@ const checkDirect = (reply, endpoint, status) => {
 
 export class ControlledImageConversationLane {
   #origin; #root; #fetch; #agentId; #instanceId; #auth; #run; #execute; #controlledConfig; #active = false
-  constructor ({ apiOrigin, rootDir, fetchFn = globalThis.fetch, agentId, runtimeInstanceId, getAuth, execute = null, controlledConfig } = {}) {
+  constructor ({ apiOrigin, rootDir, fetchFn = globalThis.fetch, agentId, runtimeInstanceId, getRuntimeHeaders, execute = null, controlledConfig } = {}) {
     this.#origin = originOf(apiOrigin)
     if (!rootDir || !isAbsolute(rootDir) || typeof fetchFn !== 'function' || !id(agentId) || !id(runtimeInstanceId)
-        || typeof getAuth !== 'function' || typeof execute !== 'function' || !controlledConfig?.enabled) deny('CONTROLLED_IMAGE_CONFIG_INVALID')
+        || typeof getRuntimeHeaders !== 'function' || typeof execute !== 'function' || !controlledConfig?.enabled) deny('CONTROLLED_IMAGE_CONFIG_INVALID')
     this.#root = resolve(rootDir, 'conversation-runs', agentId)
     this.#fetch = fetchFn; this.#agentId = agentId; this.#instanceId = runtimeInstanceId
-    this.#auth = getAuth; this.#execute = execute
+    this.#auth = getRuntimeHeaders; this.#execute = execute
     this.#controlledConfig = Object.freeze({ providerLane: controlledConfig.providerLane, bindingId: controlledConfig.bindingId,
       bindingEpoch: controlledConfig.bindingEpoch, modelId: controlledConfig.modelId,
       maxInputItems: controlledConfig.maxInputItems, maxOutboundRequestAttempts: controlledConfig.maxOutboundRequestAttempts,
       precallFenceVersion: controlledConfig.precallFenceVersion })
   }
   #headers () {
-    const auth = this.#auth()
-    if (!AUTH.test(auth || '')) deny('CONVERSATION_AUTH_UNAVAILABLE')
-    return { Authorization: auth, 'X-Agent-Id': this.#agentId, 'X-Agent-Runtime-Id': this.#instanceId }
+    return nativeSessionHeaders(this.#auth(), this.#agentId, this.#instanceId)
   }
   async #request (path, method, data, status = 200) {
     const endpoint = new URL(path, `${this.#origin}/`)
@@ -175,17 +172,17 @@ export class ControlledImageConversationLane {
     const lease = await this.#request(`${path}/lease`, 'POST', { commandId: command.commandId, messageId: command.messageId })
     if (!isLease(lease)) deny('CONVERSATION_LEASE_UNCERTAIN')
     const fence = { version: lease.version, token: lease.token }
-    let timer; let running = true; let renewalError; let currentExpiry = lease.expiresAt
+    let timer; let renewalPromise; let running = true; let renewalError; let currentExpiry = lease.expiresAt
     const renew = async () => {
       try {
         const next = await this.#request(`${path}/lease/renew`, 'POST', fence)
         if (!isLease(next) || next.executionId !== lease.executionId || next.version !== fence.version || next.token !== fence.token)
           deny('CONVERSATION_LEASE_UNCERTAIN')
         currentExpiry = next.expiresAt
-        if (running) timer = setTimeout(() => { void renew() }, Math.max(1, Math.floor((next.expiresAt - Date.now()) / 2)))
+        if (running) timer = setTimeout(() => { renewalPromise = renew() }, Math.max(1, Math.floor((next.expiresAt - Date.now()) / 2)))
       } catch (error) { renewalError = error }
     }
-    let runDirectory
+    let runDirectory; let terminalConfirmed = false
     try {
       const snapshot = await this.#request(`${path}/inputs`, 'POST', fence)
       const grantedInputs = parseNativeConversationInputs(snapshot, lease.executionId, fence.version)
@@ -196,7 +193,7 @@ export class ControlledImageConversationLane {
       if (realpathSync(this.#root) !== this.#root) deny('CONVERSATION_RUN_ROOT_UNSAFE')
       runDirectory = mkdtempSync(resolve(this.#root, `${command.runId}-${randomUUID()}-`))
       for (const part of ['inputs', 'outputs', 'scratch']) mkdirSync(resolve(runDirectory, part), { mode: 0o700 })
-      timer = setTimeout(() => { void renew() }, Math.max(1, Math.floor((lease.expiresAt - Date.now()) / 2)))
+      timer = setTimeout(() => { renewalPromise = renew() }, Math.max(1, Math.floor((lease.expiresAt - Date.now()) / 2)))
       const inputs = await materializeNativeConversationInputs({ inputs: grantedInputs, runDirectory,
         readInput: input => this.#readInput(path, fence, input) })
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
@@ -226,6 +223,7 @@ export class ControlledImageConversationLane {
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       const committed = await this.#request(`${path}/output-commits/${manifestId}`, 'POST', { fence, outputs: [{ outputId: 'output_1', sha256, length: output.bytes.length }] })
       if (!object(committed) || committed.state !== 'COMMITTED' || committed.manifestId !== manifestId || !Array.isArray(committed.items) || committed.items.length !== 1 || committed.items[0].outputId !== 'output_1' || committed.items[0].sha256 !== sha256) deny('CONVERSATION_COMMIT_UNCERTAIN')
+      terminalConfirmed = true
       return { committed: true }
     } catch (error) {
       const code = typeof error?.code === 'string' && (error.code.startsWith('CONVERSATION_') || error.code.startsWith('CONTROLLED_IMAGE_')) ? error.code : 'CONVERSATION_EXECUTION_FAILED'
@@ -234,10 +232,13 @@ export class ControlledImageConversationLane {
           || code === 'CONTROLLED_IMAGE_CLAIM_CORRUPT' || code === 'CONTROLLED_IMAGE_CLAIM_IO_FAILED' || renewalError) throw error
       const failed = await this.#request(`${path}/failure`, 'POST', { fence, code })
       if (!object(failed) || failed.state !== 'FAILED' || failed.executionId !== lease.executionId) deny('CONVERSATION_FAILURE_UNCERTAIN')
+      terminalConfirmed = true
       return { failed: true, code }
     } finally {
       running = false; clearTimeout(timer)
-      if (runDirectory) rmSync(runDirectory, { recursive: true, force: false })
+      // A poll owns its renewal HTTP too; do not release writer ownership early.
+      await renewalPromise
+      if (runDirectory && terminalConfirmed) rmSync(runDirectory, { recursive: true, force: false })
     }
   }
 }

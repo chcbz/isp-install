@@ -109,7 +109,7 @@ const runtime = (settings = {}) => {
     stateRoot: selectedStateRoot, wsUrl: 'wss://api.example.invalid/ws', atomicFs, now,
     createId: () => `id-${++ids}`, maxPackageBytes, maxReplayBatch, maxNativeCallMs, receiptReplayGraceMs,
     maxRetainedInstallationCopies, maxInstallationBytes, sessionSignal,
-    authorizationProvider: async () => `AgentRuntime ${'1'.repeat(32)}`,
+    authorizationProvider: async () => `AgentRuntime rts1_${'1'.repeat(64)}`,
     downloadFn: async arguments_ => { downloads++; return downloadFn ? downloadFn(arguments_) : bytes },
     sendResultFn: async arguments_ => { sends++; return sendResultFn ? sendResultFn(arguments_) : receipt(arguments_.command, arguments_.outcome, arguments_.errorCode) } }
   if (Object.hasOwn(settings, 'enabled')) options.enabled = settings.enabled

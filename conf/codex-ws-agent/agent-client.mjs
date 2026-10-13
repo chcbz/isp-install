@@ -28,13 +28,14 @@ import {
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { GitWorkspaceManager, WorkspaceManagerError, loadWorkspacePolicies } from './workspace-manager.mjs'
+import { GitWorkspaceManager, WorkspaceManagerError } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { PlatformSkillRuntime } from './platform-skill-runtime.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 import { NativeConversationLane } from './conversation-native.mjs'
+import { runNativeConversationTextFile, textFileExecutionDeclaration } from './conversation-text-file.mjs'
 import { ControlledImageConversationLane } from './conversation-controlled-image.mjs'
 import { ControlledImageConversationLaneV3 } from './conversation-controlled-image-v3.mjs'
 import { buildNativeBountyExecutionDeclaration } from './native-bounty-capability.mjs'
@@ -109,18 +110,6 @@ const workspaceFileToolchainEnvironment = () => {
   } : {}
 }
 
-const envPath = resolve(process.cwd(), '.env')
-if (existsSync(envPath)) {
-  for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const index = trimmed.indexOf('=')
-    if (index < 0) continue
-    const key = trimmed.slice(0, index).trim()
-    const value = trimmed.slice(index + 1).trim()
-    if (!process.env[key]) process.env[key] = value
-  }
-}
 
 export const PROCESS_RUNTIME_INSTANCE_ID = randomUUID()
 export const PROTOCOL_VERSION = 1
@@ -163,6 +152,7 @@ const MESSAGE_ID_REQUIRED_TYPES = new Set([
 const RESERVED_FIELDS = [
   'schemaVersion', 'tenantId', 'clientId', 'agentId', 'sourceAgentId', 'targetAgentId',
   'receiverAgentId', 'runtimeInstanceId', 'messageId', 'requestId', 'commandId', 'commandType',
+  'installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'sessionGeneration', 'payloadReference', 'runtimeCommand',
   'correlationId', 'causationId', 'conversationId', 'taskId', 'workItemId',
   'issuedAt', 'sentAt', 'timestamp', 'expiresAt', 'attempt', 'turnId', 'dispatchId', 'conversationGeneration',
   'requestRevision', 'route', 'content', 'contextSnapshotId', 'contextHash', 'contextSnapshot', 'sourceVector', 'factsManifest',
@@ -519,59 +509,12 @@ const resolveExecutable = command => {
   return ''
 }
 
-const parseScalarValue = rawValue => {
-  const value = String(rawValue || '').trim()
-  if (!value) return ''
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1)
-  }
-  if (value === 'true') return true
-  if (value === 'false') return false
-  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value)
-  return value
-}
-
 const configError = (message, exitOnError = true) => {
   if (exitOnError) {
     console.error(message)
     process.exit(1)
   }
   throw new Error(message)
-}
-
-const parseSectionProfiles = (raw, fallbackProfile, options = {}) => {
-  const exitOnError = options.exitOnError !== false
-  const profiles = []
-  let current = null
-  let defaults = {}
-  for (const originalLine of String(raw).split(/\r?\n/)) {
-    const line = originalLine.trim()
-    if (!line || line.startsWith('#')) continue
-    if (/^\[(default|profile\.default|agent\.default)\]$/.test(line)) {
-      if (current) profiles.push(current)
-      current = { __section: 'default' }
-      continue
-    }
-    const sectionMatch = line.match(/^\[(agent|profile)\.([^\]]+)\]$/)
-    if (sectionMatch) {
-      if (current) profiles.push(current)
-      current = { profileId: sectionMatch[2] }
-      continue
-    }
-    if (!current) continue
-    const index = line.indexOf('=')
-    if (index < 0) continue
-    current[line.slice(0, index).trim()] = parseScalarValue(line.slice(index + 1).trim())
-  }
-  if (current) profiles.push(current)
-  const defaultIndex = profiles.findIndex(profile => profile.__section === 'default')
-  if (defaultIndex >= 0) {
-    defaults = { ...profiles[defaultIndex] }
-    delete defaults.__section
-    profiles.splice(defaultIndex, 1)
-  }
-  if (!profiles.length) configError('CODEX_PROFILES_FILE section format is empty or invalid', exitOnError)
-  return profiles.map((profile, index) => normalizeProfile({ ...defaults, ...profile }, fallbackProfile, index))
 }
 
 const parseStringList = value => (Array.isArray(value) ? value : String(value || '').split(','))
@@ -596,8 +539,8 @@ const parseOptionalPositiveInteger = value => {
   return typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN
 }
 
-export const normalizeProfile = (profile, fallback = {}, index = 0) => {
-  if (Object.hasOwn(profile, 'typedInspectionApiOrigin') || Object.hasOwn(fallback, 'typedInspectionApiOrigin') || process.env.CODEX_TYPED_INSPECTION_API_ORIGIN)
+export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated = false } = {}) => {
+  if (Object.hasOwn(profile, 'typedInspectionApiOrigin') || Object.hasOwn(fallback, 'typedInspectionApiOrigin') || (!isolated && process.env.CODEX_TYPED_INSPECTION_API_ORIGIN))
     throw new Error('Separate typedInspectionApiOrigin is not supported; configure workspaceFileApiOrigin for all native lanes')
   const agentId = profile.agentId || fallback.agentId || `local-codex-${index + 1}`
   const status = String(profile.status || fallback.status || '').trim().toLowerCase()
@@ -651,6 +594,12 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     chatDedupeRetentionMs: parsePositiveInteger(profile.chatDedupeRetentionMs ?? fallback.chatDedupeRetentionMs, 30 * 24 * 60 * 60 * 1000),
     abilities: parseStringList(profile.abilities ?? fallback.abilities),
     skills: parseStringList(profile.skills ?? fallback.skills),
+    skillInstallEnabled: parseEnabledFlag(profile.skillInstallEnabled ?? fallback.skillInstallEnabled),
+    platformSkillInstallEnabled: parseEnabledFlag(profile.platformSkillInstallEnabled ?? fallback.platformSkillInstallEnabled),
+    archiveMaintenanceEnabled: parseEnabledFlag(profile.archiveMaintenanceEnabled ?? fallback.archiveMaintenanceEnabled),
+    controlledCommandOwnerJiacn: String(profile.controlledCommandOwnerJiacn ?? fallback.controlledCommandOwnerJiacn ?? '').trim(),
+    platformSkillMaxRetainedCopies: parsePositiveInteger(profile.platformSkillMaxRetainedCopies ?? fallback.platformSkillMaxRetainedCopies, 2),
+    platformSkillMaxInstallationBytes: Number(profile.platformSkillMaxInstallationBytes ?? fallback.platformSkillMaxInstallationBytes ?? 0),
     workspacePolicyId: profile.workspacePolicyId || fallback.workspacePolicyId || '',
     workspaceRole: profile.workspaceRole || fallback.workspaceRole || 'coder',
     workspaceNoTaskPolicy: profile.workspaceNoTaskPolicy || fallback.workspaceNoTaskPolicy || 'reject',
@@ -667,6 +616,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
     nativeConversationHttpPollEnabled: parseEnabledFlag(
       profile.nativeConversationHttpPollEnabled ?? fallback.nativeConversationHttpPollEnabled
     ),
+    nativeConversationTextFileEnabled: parseEnabledFlag(profile.nativeConversationTextFileEnabled ?? fallback.nativeConversationTextFileEnabled),
     nativeConversationImageGenerationEnabled: parseEnabledFlag(
       profile.nativeConversationImageGenerationEnabled ?? fallback.nativeConversationImageGenerationEnabled
     ),
@@ -678,108 +628,6 @@ export const normalizeProfile = (profile, fallback = {}, index = 0) => {
   }
 }
 
-const legacyProfile = () => normalizeProfile({
-  profileId: process.env.CODEX_PROFILE_ID || process.env.AGENT_ID || 'default',
-  agentId: process.env.AGENT_ID || 'local-codex',
-  agentName: process.env.AGENT_NAME || '本地 Codex',
-  personaName: process.env.AGENT_PERSONA || '吴用',
-  codexBin: process.env.CODEX_BIN || 'codex',
-  codexHome: process.env.CODEX_HOME || '',
-  codexWorkdir: process.env.CODEX_WORKDIR || process.cwd(),
-  codexSandbox: process.env.CODEX_SANDBOX || 'workspace-write',
-  codexApproval: process.env.CODEX_APPROVAL || 'never',
-  codexSessionMode: process.env.CODEX_SESSION_MODE || 'new',
-  codexTimeoutMs: parseCodexTimeoutMs(process.env.CODEX_TIMEOUT_MS),
-  codexModel: process.env.CODEX_MODEL || '',
-  chatEngine: process.env.CODEX_CHAT_ENGINE || 'legacy-codex',
-  fastChatEnabled: process.env.CODEX_FAST_CHAT_ENABLED || false,
-  appServerEnabled: process.env.CODEX_APP_SERVER_ENABLED || false,
-  trueDeltaEnabled: process.env.CODEX_TRUE_DELTA_ENABLED || false,
-  typedDeliberationEnabled: process.env.CODEX_TYPED_DELIBERATION_ENABLED || false,
-  typedInspectionEnabled: process.env.CODEX_TYPED_INSPECTION_ENABLED || false,
-  typedInspectionRootDir: process.env.CODEX_TYPED_INSPECTION_ROOT_DIR || '',
-  typedInspectionStateRoot: process.env.CODEX_TYPED_INSPECTION_STATE_ROOT || '',
-  typedInspectionProfileId: process.env.CODEX_TYPED_INSPECTION_PROFILE_ID || '',
-  typedInspectionEngineContractId: process.env.CODEX_TYPED_INSPECTION_ENGINE_CONTRACT_ID || '',
-  typedInspectionProviderId: process.env.CODEX_TYPED_INSPECTION_PROVIDER_ID || '',
-  typedInspectionProviderBaseUrl: process.env.CODEX_TYPED_INSPECTION_PROVIDER_BASE_URL || '',
-  typedInspectionProviderWireApi: process.env.CODEX_TYPED_INSPECTION_PROVIDER_WIRE_API || 'responses',
-  typedInspectionProviderNetwork: process.env.CODEX_TYPED_INSPECTION_PROVIDER_NETWORK || 'isolated',
-  typedInspectionNetworkConnectTimeoutMs: process.env.CODEX_TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_MS || '',
-  typedInspectionCaBundlePath: process.env.CODEX_TYPED_INSPECTION_CA_BUNDLE_PATH || '',
-  typedInspectionCarrierEvidencePath: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_PATH || '',
-  typedInspectionCarrierEvidenceDigest: process.env.CODEX_TYPED_INSPECTION_CARRIER_EVIDENCE_DIGEST || '',
-  typedInspectionBwrapBin: process.env.CODEX_TYPED_INSPECTION_BWRAP_BIN || '/usr/bin/bwrap',
-  typedInspectionSupportedInputs: process.env.CODEX_TYPED_INSPECTION_SUPPORTED_INPUTS || '',
-  chatInboxMaxFiles: process.env.CODEX_CHAT_INBOX_MAX_FILES || 1024,
-  chatInboxMaxBytes: process.env.CODEX_CHAT_INBOX_MAX_BYTES || 67108864,
-  chatArchiveMaxFiles: process.env.CODEX_CHAT_ARCHIVE_MAX_FILES || 256,
-  chatArchiveMaxBytes: process.env.CODEX_CHAT_ARCHIVE_MAX_BYTES || 16777216,
-  chatArchiveRetentionMs: process.env.CODEX_CHAT_ARCHIVE_RETENTION_MS || 604800000,
-  chatDedupeMaxEntries: process.env.CODEX_CHAT_DEDUPE_MAX_ENTRIES || 100000,
-  chatDedupeMaxBytes: process.env.CODEX_CHAT_DEDUPE_MAX_BYTES || 134217728,
-  chatDedupeRetentionMs: process.env.CODEX_CHAT_DEDUPE_RETENTION_MS || 2592000000,
-  workspacePolicyId: process.env.CODEX_WORKSPACE_POLICY_ID || '',
-  workspaceRole: process.env.CODEX_WORKSPACE_ROLE || 'coder',
-  workspaceNoTaskPolicy: process.env.CODEX_WORKSPACE_NO_TASK_POLICY || 'reject',
-  workspaceNonCodingCommandTypes: process.env.CODEX_WORKSPACE_NON_CODING_COMMAND_TYPES || '',
-  executionReportCommandTypes: process.env.CODEX_EXECUTION_REPORT_COMMAND_TYPES || '',
-  workspaceFallbackWorkdir: process.env.CODEX_WORKSPACE_FALLBACK_WORKDIR || '',
-  workspaceFileApiOrigin: process.env.CODEX_WORKSPACE_FILE_API_ORIGIN || '',
-  workspaceFileRootDir: process.env.CODEX_WORKSPACE_FILE_ROOT_DIR || '',
-  workspaceFileRuntimeAuthHeader: process.env.CODEX_WORKSPACE_FILE_RUNTIME_AUTH_HEADER || '',
-  nativeConversationHttpPollEnabled: ['1', 'true'].includes(
-    String(process.env.CYF_CONVERSATION_HTTP_POLL_ENABLED || '').trim().toLowerCase()
-  ),
-  nativeConversationImageGenerationEnabled: ['1', 'true'].includes(
-    String(process.env.CYF_CONVERSATION_IMAGEGEN_ENABLED || '').trim().toLowerCase()
-  ),
-  isDefault: true
-})
-
-const loadProfilesRaw = (options = {}) => {
-  const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-  if (profilesFile) {
-    try {
-      return readFileSync(resolve(profilesFile), 'utf8')
-    } catch (error) {
-      configError(`failed to read CODEX_PROFILES_FILE ${profilesFile}: ${error.message}`, options.exitOnError !== false)
-    }
-  }
-  return process.env.CODEX_PROFILES || ''
-}
-
-const parseProfiles = (raw, fallbackProfile, options = {}) => {
-  const exitOnError = options.exitOnError !== false
-  if (!raw || !String(raw).trim()) return [fallbackProfile]
-  const text = String(raw).trim()
-  if (/^\[(agent|profile)\./m.test(text)) return parseSectionProfiles(text, fallbackProfile, { exitOnError })
-  let parsed
-  try {
-    parsed = JSON.parse(text)
-  } catch (error) {
-    configError(`CODEX_PROFILES must be valid JSON: ${error.message}`, exitOnError)
-  }
-  if (!Array.isArray(parsed) || parsed.length === 0) configError('CODEX_PROFILES must be a non-empty JSON array', exitOnError)
-  return parsed.map((profile, index) => normalizeProfile(profile || {}, fallbackProfile, index))
-}
-
-const loadRuntimeConfig = (options = {}) => {
-  const loadedProfiles = parseProfiles(loadProfilesRaw(options), legacyProfile(), options).filter(profile => profile.enabled)
-  if (!loadedProfiles.length) configError('CODEX_PROFILES has no enabled profiles', options.exitOnError !== false)
-  const configuredDefaultProfile = process.env.DEFAULT_CODEX_PROFILE
-  const selected = configuredDefaultProfile && loadedProfiles.find(
-    profile => profile.profileId === configuredDefaultProfile || profile.agentId === configuredDefaultProfile
-  )
-  return {
-    profiles: loadedProfiles,
-    defaultProfileId: selected?.profileId || loadedProfiles.find(profile => profile.isDefault)?.profileId || loadedProfiles[0].profileId,
-    workspacePolicies: loadWorkspacePolicies()
-  }
-}
-
-let managedHostModule = null
-let managedHostChannel = null
 let config = null
 let defaultProfile = null
 let shuttingDown = false
@@ -1048,7 +896,13 @@ export class PersistentCommandInbox {
     for (const fileName of this.listJsonFiles(this.recoveryDir)) {
       const filePath = resolve(this.recoveryDir, fileName)
       try {
-        const validated = this.readAndValidate(filePath, new Set(['recovery_required']))
+        const validated = this.readAndValidate(filePath, new Set(['recovery_required', 'completed']))
+        if (validated.record.state === 'completed') {
+          result.completedRecords.push(validated)
+          this.settleCompletedFile(filePath, fileName, validated.record)
+          result.completed += 1
+          continue
+        }
         result.recoveryRecords.push({ ...validated, fileName, path: filePath })
         result.recoveryRequired += 1
       } catch (error) {
@@ -1121,6 +975,19 @@ export class PersistentCommandInbox {
     return validated
   }
 
+  persistE05Result(item, material) {
+    const validated = this.assertExecutable(item)
+    const binding = e05ReassignmentBinding(this.profile, validated.normalized)
+    if (!binding) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+    validateE05Material(binding, material)
+    const digest = canonicalSha256(material)
+    if (validated.record.e05ResultDigest && validated.record.e05ResultDigest !== digest) throw e05Failure('E05_RESULT_MATERIAL_CONFLICT')
+    const record = { ...validated.record, e05ResultMaterial: JSON.parse(JSON.stringify(material)), e05ResultDigest: digest }
+    atomicWriteJson(this.fs, item.path, record)
+    item.record = record // markCompleted must not overwrite the only recovery material
+    return digest
+  }
+
   markCompleted(item, outcome) {
     const completed = {
       ...item.record,
@@ -1129,7 +996,8 @@ export class PersistentCommandInbox {
       outcome: {
         status: outcome?.status || 'completed',
         exitCode: outcome?.exitCode ?? null,
-        errorMessage: outcome?.errorMessage || ''
+        errorMessage: outcome?.errorMessage || '',
+        ...(outcome?.workspaceCleanup ? { workspaceCleanup: outcome.workspaceCleanup } : {})
       }
     }
     atomicWriteJson(this.fs, item.path, completed)
@@ -1412,7 +1280,14 @@ const buildFingerprintSource = normalized => {
 
 export class CommandFingerprint {
   static compute(normalized) {
-    return computeSha256(JSON.stringify(canonicalizeFingerprintValue(buildFingerprintSource(normalized))))
+    const business = buildFingerprintSource(normalized)
+    // Runtime r2 fingerprints the original canonical wire, not its ACK projection.
+    // In particular expiry, source/reference/binding and skill product installation
+    // cannot disappear through the generic transport-field filter. No derived
+    // installation, ISO date, nullable reference or current session is added here.
+    const raw = normalized?.rawPayload || normalized
+    if (isObject(raw) && (hasOwn(raw, 'tenantId') || hasOwn(raw, 'clientId'))) return canonicalSha256(raw).slice(7)
+    return computeSha256(JSON.stringify(canonicalizeFingerprintValue(business)))
   }
 }
 
@@ -1527,6 +1402,16 @@ export class DurableDedupeLedger {
     if (entry.status === LEDGER_STATUS.RECOVERY_REQUIRED && typeof entry.rejectReason !== 'string') {
       throw new Error('recovery-required ledger entry requires rejectReason')
     }
+    if (entry.runtimeAckCommits) {
+      if (!isObject(entry.runtimeAckCommits) || !isObject(entry.runtimeCommand)) throw new Error('invalid Runtime ACK checkpoint')
+      for (const receipt of Object.values(entry.runtimeAckCommits)) {
+        if (!isObject(receipt) || Object.keys(receipt).sort().join(',') !== 'contextDigest,deliveryVersion,kind,status'
+            || !['ADVANCED', 'PRIOR'].includes(receipt.kind) || !ACK_STATUS_VALUES.has(receipt.status)
+            || !Number.isSafeInteger(receipt.deliveryVersion) || receipt.deliveryVersion < 1
+            || receipt.contextDigest !== canonicalSha256(entry.runtimeCommand)) throw new Error('invalid Runtime D06 commit evidence')
+      }
+    }
+    if (entry.runtimeCleanupConfirmedDigest && (!entry.outcome?.workspaceCleanup || entry.runtimeCleanupConfirmedDigest !== canonicalSha256(entry.outcome.workspaceCleanup))) throw new Error('invalid Runtime cleanup checkpoint')
     return entry
   }
 
@@ -1636,6 +1521,7 @@ export class DurableDedupeLedger {
       recoveryRequiredAt: status === LEDGER_STATUS.RECOVERY_REQUIRED ? now : null,
       rejectReason: meta.rejectReason || null,
       outcome: null,
+      ...(meta.runtimeCommand ? { runtimeCommand: { ...meta.runtimeCommand } } : {}),
       ackReceivedEmitted: false,
       ackStartedEmitted: false,
       ackCompletedEmitted: false,
@@ -1722,7 +1608,8 @@ export class DurableDedupeLedger {
       outcome: {
         status: outcome?.status || 'completed',
         exitCode: outcome?.exitCode ?? null,
-        errorMessage: outcome?.errorMessage || ''
+        errorMessage: outcome?.errorMessage || '',
+        ...(outcome?.workspaceCleanup ? { workspaceCleanup: outcome.workspaceCleanup } : {})
       }
     }
     this._writeEntry(commandId, entry)
@@ -1799,6 +1686,31 @@ export class DurableDedupeLedger {
     }
     this._writeEntry(commandId, recoveryEntry)
     return { entry: recoveryEntry, conflict: null }
+  }
+
+  markRuntimeCleanupConfirmed(commandId, digest) {
+    const entry = this.getEntry(commandId)
+    const receipt = this.runtimeAckCommit(commandId, entry?.runtimeCommand?.messageId || '')
+    if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry?.status) || !entry.outcome?.workspaceCleanup
+        || receipt?.status !== entry.status || digest !== canonicalSha256(entry.outcome.workspaceCleanup)) throw new AgentProtocolError('RUNTIME_CLEANUP_CHECKPOINT_CONFLICT', 'Cleanup marker requires immutable terminal proof')
+    this._writeEntry(commandId, { ...entry, runtimeCleanupConfirmedDigest: digest })
+  }
+
+  runtimeAckCommit(commandId, messageId) {
+    const entry = this.getEntry(commandId)
+    return entry?.runtimeAckCommits?.[Buffer.from(messageId).toString('hex')] || null
+  }
+
+  markRuntimeAckCommitted(commandId, command, result) {
+    const entry = this.getEntry(commandId)
+    if (!entry || !entry.runtimeCommand || canonicalSha256(entry.runtimeCommand) !== canonicalSha256(command)) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_CONFLICT', 'Runtime HTTP result must match original persisted command context')
+    const key = Buffer.from(command.messageId).toString('hex')
+    const previous = entry.runtimeAckCommits?.[key]
+    if (!['ADVANCED', 'PRIOR'].includes(result.kind) || !ACK_STATUS_VALUES.has(result.status)
+        || !Number.isSafeInteger(result.deliveryVersion) || result.deliveryVersion < 1
+        || previous && result.deliveryVersion < previous.deliveryVersion) throw new AgentProtocolError('RUNTIME_ACK_RESULT_INVALID', 'HTTP ACK result is not a monotonic D06 commit')
+    this._writeEntry(commandId, { ...entry, runtimeAckCommits: { ...(entry.runtimeAckCommits || {}),
+      [key]: { kind: result.kind, status: result.status, deliveryVersion: result.deliveryVersion, contextDigest: canonicalSha256(command) } } })
   }
 
   markAckEmitted(commandId, ackStatus, marker = {}) {
@@ -2479,6 +2391,21 @@ export class AckOutbox {
     })
   }
 
+  commitRuntimeDelivery(expected, result, ledger) {
+    return this.withPendingEnvelopesLocked('runtime-http-commit', pending => {
+      const head = pending[0]
+      if (!head || head.fileName !== expected.fileName || canonicalSha256(head.record) !== canonicalSha256(expected.record)) throw new AgentProtocolError('RUNTIME_ACK_FIFO_CHANGED', 'ACK FIFO changed during HTTP confirmation')
+      const previous = ledger.runtimeAckCommit(head.envelope.commandId, head.envelope.runtimeCommand.messageId)
+      if (!result || result.status !== head.envelope.ackStatus || !['ADVANCED', 'PRIOR'].includes(result.kind)
+          || !Number.isSafeInteger(result.deliveryVersion) || result.deliveryVersion < 1
+          || previous && (result.deliveryVersion < previous.deliveryVersion
+            || result.kind === 'ADVANCED' && result.deliveryVersion <= previous.deliveryVersion)) throw new AgentProtocolError('RUNTIME_ACK_COMMIT_UNCONFIRMED', 'HTTP result does not confirm the queued status/version')
+      ledger.markRuntimeAckCommitted(head.envelope.commandId, head.envelope.runtimeCommand, result)
+      if (head.marker.kind !== 'none') ledger.markAckEmitted(head.envelope.commandId, head.envelope.ackStatus, head.marker)
+      this.dequeue(head.fileName)
+    })
+  }
+
   withPendingEnvelopesLocked(operation, callback) {
     this._assertHealthy()
     return this._withSequenceLock(operation, () => {
@@ -2501,7 +2428,7 @@ export class SerialExecutionGate {
 // Durable CHAT acknowledgements are replayable across process restarts. Their
 // dispatch/message identity remains durable; the authenticated socket identity
 // must be bound at send time, never omitted or replayed from an old process.
-export const bindChatDispatchAckToSession = (envelope, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
+export const bindChatDispatchAckToSession = (envelope, profile, runtimeInstanceId = profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID) => {
   if (envelope?.messageType !== 'chat.dispatch.ack') return envelope
   if (envelope.agentId !== profile?.agentId || typeof runtimeInstanceId !== 'string' ||
       !runtimeInstanceId || runtimeInstanceId === profile.agentId) {
@@ -2510,7 +2437,7 @@ export const bindChatDispatchAckToSession = (envelope, profile, runtimeInstanceI
   return { ...envelope, sourceAgentId: profile.agentId, runtimeInstanceId }
 }
 
-export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
+export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID) => {
   const envelope = {
     schemaVersion: PROTOCOL_VERSION,
     messageType: MESSAGE_TYPES.COMMAND_ACK,
@@ -2527,16 +2454,51 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = P
   if (meta.workItemId) envelope.workItemId = meta.workItemId
   if (meta.rejectReason) envelope.rejectReason = meta.rejectReason
   if (meta.outcome) envelope.outcome = meta.outcome
+  if (profile.runtimeIdentity) {
+    delete envelope.runtimeInstanceId
+    if (!meta.runtimeCommand) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Runtime ACK requires its immutable original work context')
+    envelope.runtimeCommand = Object.freeze({ ...meta.runtimeCommand })
+  }
   return envelope
 }
 
+
+const exactRuntimeCommandField = value => typeof value === 'string' && value.length > 0
+  && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value)
+
+// r2: verify ORIGINAL codec identity first; only then project trusted installation
+// and canonical Agent into the existing ACK DTO. Product installation is DATA.
+export const runtimeCommandContext = (profile, message) => {
+  const raw = message.rawPayload || message
+  if (!isObject(raw) || hasOwn(message, 'runtimeCommand') || hasOwn(raw, 'runtimeCommand')) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_FORBIDDEN', 'Wire cannot supply a replacement checkpoint or session proof')
+  const identity = profile.runtimeIdentity
+  if (!identity || profile.agentId !== identity.canonicalAgentId
+      || !['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].every(key => exactRuntimeCommandField(identity[key]))
+      || raw.tenantId !== identity.tenantId || raw.clientId !== identity.clientId || raw.targetAgentId !== identity.canonicalAgentId
+      || hasOwn(raw, 'canonicalAgentId') && raw.canonicalAgentId !== identity.canonicalAgentId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Original dispatch must match the trusted complete subject before projection')
+  if (hasOwn(raw, 'installationId')) {
+    if (raw.commandType === 'SKILL_INSTALL') {
+      if (raw.installationId === identity.installationId) throw new AgentProtocolError('RUNTIME_COMMAND_INSTALLATION_CONFUSION', 'Skill product installation must not be Runtime authorization')
+    } else if (raw.installationId !== identity.installationId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Business frame cannot replace Runtime installation')
+  }
+  for (const key of ['messageId', 'correlationId', 'commandId', 'commandType', 'taskId']) if (!exactRuntimeCommandField(raw[key])) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Dispatch must carry original D06 message and work context')
+  if (!Number.isSafeInteger(raw.expiresAt) || !Number.isFinite(new Date(raw.expiresAt).getTime())) throw new AgentProtocolError('RUNTIME_COMMAND_EXPIRY_INVALID', 'Original expiry must be a safe integer within the epoch millisecond date range')
+  const reference = hasOwn(raw, 'payloadReference') ? raw.payloadReference : null
+  const workItem = hasOwn(raw, 'workItemId') ? raw.workItemId : null
+  if (reference !== null && !exactRuntimeCommandField(reference)) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Payload reference is null or an actual nonblank wire value')
+  if (workItem !== null && !exactRuntimeCommandField(workItem)) throw new AgentProtocolError('RUNTIME_COMMAND_WORK_INVALID', 'Work item is null or an actual nonblank wire value')
+  return Object.freeze({ installationId: identity.installationId, tenantId: identity.tenantId, clientId: identity.clientId,
+    canonicalAgentId: identity.canonicalAgentId, messageId: raw.messageId, correlationId: raw.correlationId,
+    commandId: raw.commandId, taskId: raw.taskId, workItemId: workItem,
+    payloadReference: reference, expiresAt: new Date(raw.expiresAt).toISOString() })
+}
 
 export class AgentMessageProcessor {
   constructor({
     profile, inbox, runCommand, runChat, recoverChat = null, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
     recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
     ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null, chatInbox = null, chatAckOutbox = null, lanes = null,
-    chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
+    sendCommandAckFn = null, onCommandTerminalConfirmed = null, chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
   }) {
     this.profile = profile
     this.inbox = inbox
@@ -2552,6 +2514,10 @@ export class AgentMessageProcessor {
     this.ackOutbox = ackOutbox
     this.executionReportOutbox = executionReportOutbox
     this.sendFn = sendFn
+    this.onCommandTerminalConfirmed = onCommandTerminalConfirmed
+    this.sendCommandAckFn = sendCommandAckFn
+    this.runtimeAckTail = Promise.resolve()
+    this.runtimeAckCompletions = new Map() // transient exact-record waiters; never a second checkpoint
     this.chatInbox = chatInbox
     this.chatAckOutbox = chatAckOutbox
     this.lanes = lanes || new FairLaneScheduler()
@@ -2607,7 +2573,8 @@ export class AgentMessageProcessor {
       targetAgentId: message.targetAgentId || '',
       taskId: message.taskId || '',
       workItemId: message.workItemId || '',
-      expiresAt: message.expiresAt
+      expiresAt: message.expiresAt,
+      ...(this.profile.runtimeIdentity ? { runtimeCommand: runtimeCommandContext(this.profile, message) } : {})
     }
   }
 
@@ -2620,7 +2587,11 @@ export class AgentMessageProcessor {
     if (check.action === 'conflict') {
       throw new Error(`completed inbox record conflicts with ledger for ${message.commandId}`)
     }
-    const entry = this.ledger.markCompleted(message.commandId, completed.record.outcome)
+    const previous = this.ledger.getEntry(message.commandId)
+    const entry = previous?.status === LEDGER_STATUS.RECOVERY_REQUIRED && completed.record.e05ResultMaterial
+        && e05ReassignmentBinding(this.profile, message)
+      ? this.ledger.markReconciledOutcome(message.commandId, completed.record.outcome, 'E05_HTTP_ORIGINAL_RESULT')
+      : this.ledger.markCompleted(message.commandId, completed.record.outcome)
     this._emitAck(entry.status, {
       ...meta,
       commandId: message.commandId,
@@ -2765,9 +2736,16 @@ export class AgentMessageProcessor {
       }
 
       if (item.record.state === 'completed') {
-        if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(entry.status)) this._reconcileCompletedRecord(item)
+        if ([ACK_STATUS.RECEIVED, ACK_STATUS.STARTED].includes(entry.status)
+            || entry.status === LEDGER_STATUS.RECOVERY_REQUIRED && item.record.e05ResultMaterial && e05ReassignmentBinding(this.profile, item.normalized)) this._reconcileCompletedRecord(item)
         else if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry.status)) {
           throw new AgentProtocolError('COMMAND_STATE_CONFLICT', `Completed inbox record conflicts with ledger status ${entry.status} for ${commandId}`)
+        } else if (this.profile.runtimeIdentity && item.record.e05ResultMaterial && e05ReassignmentBinding(this.profile, item.normalized)
+            && this.ledger.runtimeAckCommit(commandId, item.normalized.messageId)?.status !== entry.status
+            && !this.ackOutbox?.pendingEnvelopes().some(head => head.envelope.commandId === commandId && head.envelope.ackStatus === entry.status)) {
+          // Crash after confirmed business result + local terminal ledger, but
+          // before ACK enqueue: reconstruct from the SAME completed checkpoint.
+          this._emitAck(entry.status, { ...this._commandMeta(item.normalized), commandId, outcome: entry.outcome })
         }
         continue
       }
@@ -2820,6 +2798,31 @@ export class AgentMessageProcessor {
     }
   }
 
+  async reconcileE05Results({ nativeFetch, apiOrigin }) {
+    if (this.e05Reconciliation) return this.e05Reconciliation
+    this.e05Reconciliation = (async () => {
+      const index = this.inbox.commandStateIndex()
+      for (const records of index.values()) {
+        if (records.length !== 1) throw e05Failure('E05_RESULT_RECOVERY_REQUIRED')
+        const item = records[0]
+        if (item.record.state !== 'recovery_required' || !e05ReassignmentBinding(this.profile, item.normalized)) continue
+        if (!item.record.e05ResultMaterial) continue // no original output: never rerun
+        let outcome
+        try { outcome = await recoverE05Result({ profile: this.profile, message: item.normalized, record: item.record, nativeFetch, apiOrigin }) }
+        catch { continue } // 404/409/unavailable keep original material and nonterminal state
+        const entry = this.ledger?.getEntry(item.normalized.commandId)
+        if (!entry || entry.fingerprint !== CommandFingerprint.compute(item.normalized)
+            || ![ACK_STATUS.STARTED, LEDGER_STATUS.RECOVERY_REQUIRED].includes(entry.status)) throw e05Failure('E05_RESULT_RECOVERY_REQUIRED')
+        const completed = this.inbox.markCompleted(item, outcome)
+        const terminal = this.ledger.markReconciledOutcome(item.normalized.commandId, outcome, 'E05_HTTP_ORIGINAL_RESULT')
+        this.inbox.settleCompletedFile(item.path, item.fileName, completed)
+        const ack = this._emitAck(terminal.status, { ...this._commandMeta(item.normalized), commandId: item.normalized.commandId, outcome: terminal.outcome })
+        if (ack.confirmation) await ack.confirmation
+      }
+    })().finally(() => { this.e05Reconciliation = null })
+    return this.e05Reconciliation
+  }
+
   _recordRecoveryRequired(recovered) {
     const message = recovered.normalized
     const meta = this._commandMeta(message)
@@ -2832,6 +2835,7 @@ export class AgentMessageProcessor {
       if (result.conflict) marker = { kind: 'conflict', recordId: result.conflict.recordId }
       else marker = { kind: 'entry' }
     }
+    if (this.profile.runtimeIdentity && e05ReassignmentBinding(this.profile, message)) return
     this._emitAck(ACK_STATUS.REJECTED, {
       ...meta,
       commandId: message.commandId,
@@ -2883,6 +2887,10 @@ export class AgentMessageProcessor {
   }
 
   _replayLedgerEntry(entry, meta) {
+    if (entry.status === LEDGER_STATUS.RECOVERY_REQUIRED && this.profile.runtimeIdentity) {
+      const records = this.inbox.commandStateIndex().get(entry.commandId) || []
+      if (records.length === 1 && e05ReassignmentBinding(this.profile, records[0].normalized)) return { ackStatus: null, recoveryRequired: true }
+    }
     const replay = this._ackForLedgerEntry(entry)
     this._emitAck(replay.ackStatus, {
       ...meta,
@@ -3106,6 +3114,18 @@ export class AgentMessageProcessor {
       return { kind: 'rejected', error }
     }
 
+    if (this.profile.runtimeIdentity && ['sessionToken','runtimeAuthorization','enrollmentSecret','apiKey'].some(key => hasOwn(message, key) || hasOwn(message.payload || {}, key))) {
+      const error = new AgentProtocolError('RUNTIME_WIRE_CREDENTIAL_FORBIDDEN', 'Credentials must not be carried by business frames')
+      this.onReject(error, raw); return { kind: 'rejected', error }
+    }
+    if (this.profile.runtimeIdentity && message.messageType === MESSAGE_TYPES.COMMAND_DISPATCH) {
+      try {
+        runtimeCommandContext(this.profile, message)
+        const transport = getProfileState(this.profile)?.runtimeTransport
+        if (transport && (!transport.ready() || !transport.readyCommandTypes().includes(message.commandType))) throw new AgentProtocolError('RUNTIME_COMMAND_ADAPTER_UNAVAILABLE', 'Current channel does not admit this command adapter')
+      }
+      catch (error) { this.onReject(error, raw); return { kind: 'rejected', error } }
+    }
     switch (message.messageType) {
       case MESSAGE_TYPES.COMMAND_DISPATCH: {
         const commandId = message.commandId
@@ -3147,6 +3167,11 @@ export class AgentMessageProcessor {
           }
 
           if (check.action === 'conflict') {
+            // Conflicting payload cannot mutate D06 for the original command.
+            if (this.profile.runtimeIdentity) {
+              const error = new AgentProtocolError('COMMAND_FINGERPRINT_CONFLICT', 'Duplicate command has different immutable context/payload')
+              this.onReject(error, raw); return { kind: 'rejected', error }
+            }
             this._emitAck(ACK_STATUS.REJECTED, {
               ...meta,
               commandId,
@@ -3229,6 +3254,8 @@ export class AgentMessageProcessor {
 
   async runDrain() {
     while (!this.paused && !this.stopped && !this.failClosedError) {
+      if (this.profile.runtimeIdentity && !await this.replayAcks()) { this.pause(); return }
+      if (this.paused || this.stopped || this.failClosedError) return
       let item
       try {
         item = this.inbox.claimNext()
@@ -3274,6 +3301,7 @@ export class AgentMessageProcessor {
             ...this._commandMeta(validated.normalized),
             commandId: validated.normalized.commandId
           })
+          if (startedAck.confirmation) await startedAck.confirmation
           if (!startedAck.persisted || !startedAck.sent || !startedAck.markerPersisted
               || !startedAck.dequeued || this.failClosedError) {
             let reason
@@ -3301,7 +3329,7 @@ export class AgentMessageProcessor {
       this.commandActive = true
       let outcome
       try {
-        outcome = await this.runCommand(validated.normalized, validated.record)
+        outcome = await this.runCommand(validated.normalized, validated.record, { persistE05Result: material => this.inbox.persistE05Result(item, material) })
       } catch (error) {
         outcome = ['PLATFORM_SKILL_INSTALL', 'ARCHIVE_MAINTENANCE_EXECUTE'].includes(validated.normalized.commandType)
           ? { status: 'recovery_required', errorMessage: `CONTROLLED_COMMAND_RECOVERY_REQUIRED: ${error.message}` }
@@ -3320,7 +3348,7 @@ export class AgentMessageProcessor {
             reason
           )
           if (marked?.conflict) throw new Error(`recovery fingerprint conflict for ${validated.normalized.commandId}`)
-          this._failClosed(new AgentProtocolError('COMMAND_COMMITTED_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
+          if (!e05ReassignmentBinding(this.profile, validated.normalized)) this._failClosed(new AgentProtocolError('COMMAND_COMMITTED_RECOVERY_REQUIRED', reason), recovered.record.rawPayload)
         } catch (error) {
           this._failClosed(new AgentProtocolError(
             'COMMAND_COMPLETION_PERSIST_ERROR',
@@ -3329,12 +3357,14 @@ export class AgentMessageProcessor {
         } finally {
           this.commandActive = false
         }
+        if (!this.failClosedError) continue
         return
       }
       const durableOutcome = {
         status: outcome?.status === 'failed' ? 'failed' : 'completed',
         exitCode: outcome?.exitCode,
-        errorMessage: outcome?.errorMessage || ''
+        errorMessage: outcome?.errorMessage || '',
+        ...(outcome?.workspaceCleanup ? { workspaceCleanup: outcome.workspaceCleanup } : {})
       }
       try {
         const completed = this.inbox.markCompleted(item, durableOutcome)
@@ -3347,7 +3377,7 @@ export class AgentMessageProcessor {
             outcome: entry.outcome
           })
         }
-        if (this.executionReportOutbox?.profile.executionReportCommandTypes.includes(validated.normalized.commandType)) {
+        if (this.executionReportOutbox?.profile.executionReportCommandTypes?.includes(validated.normalized.commandType)) {
           this.executionReportOutbox.enqueueAndSend(validated.normalized, durableOutcome, this.sendFn)
         }
         this.inbox.settleCompletedFile(item.path, item.fileName, completed)
@@ -3454,6 +3484,7 @@ export class AgentMessageProcessor {
       dequeued: false
     }
     if (!this.ackOutbox) return delivery
+    if (this.profile.runtimeIdentity) return this._emitRuntimeAck(ackStatus, meta, marker)
     const envelope = buildAckEnvelope(this.profile, ackStatus, meta)
     try {
       this.ackOutbox.enqueueAndWithPendingEnvelopesLocked(envelope, marker, (pending, queued) => {
@@ -3471,7 +3502,101 @@ export class AgentMessageProcessor {
     return delivery
   }
 
+  _emitRuntimeAck(status, meta, marker) {
+    const delivery = { persisted: false, sent: false, markerPersisted: false, dequeued: false }
+    try {
+      const queued = this.ackOutbox.enqueue(buildAckEnvelope(this.profile, status, meta), marker)
+      delivery.persisted = true
+      // Register synchronously, before any queued flush can resume from HTTP.
+      // The digest binds subject/message/status/context/marker/queue sequence,
+      // not just a filename, marker, absent head, or latest per-message receipt.
+      const target = Object.freeze({ fileName: queued.fileName, recordDigest: canonicalSha256(queued.record) })
+      const completion = { target, proof: null }
+      this.runtimeAckCompletions.set(target.fileName, completion)
+      delivery.confirmation = this._scheduleRuntimeAckFlush(target).then(confirmed => {
+        if (confirmed) Object.assign(delivery, { sent: true, markerPersisted: true, dequeued: true })
+        return confirmed
+      }).finally(() => { this.runtimeAckCompletions.delete(target.fileName) })
+    } catch (error) { this._failClosed(new AgentProtocolError('ACK_OUTBOX_PERSIST_ERROR', error.message), meta) }
+    return delivery
+  }
+
+  _scheduleRuntimeAckFlush(target = null) {
+    const targetConfirmed = () => {
+      const completion = target && this.runtimeAckCompletions.get(target.fileName)
+      return completion?.target === target && completion.proof?.recordDigest === target.recordDigest
+    }
+    const operation = this.runtimeAckTail.catch(() => false).then(async () => {
+      // An older replay/heartbeat may already have certified this exact record.
+      if (target && !this.stopped && targetConfirmed()) return true
+      while (typeof this.sendCommandAckFn === 'function' && !this.stopped) {
+        const head = this.ackOutbox.pendingEnvelopes()[0] // lock ends before HTTP wait
+        if (!head) { await this._cleanupRuntimeTerminals(); return !this.stopped && (!target || targetConfirmed()) }
+        const command = head.envelope.runtimeCommand
+        if (!command) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_REQUIRED', 'Legacy ACK requires stopped-writer migration, not an auth fallback')
+        this._assertRuntimeAckContext(head)
+        const completion = this.runtimeAckCompletions.get(head.fileName)
+        const recordDigest = canonicalSha256(head.record)
+        if (completion && completion.target.recordDigest !== recordDigest) throw new AgentProtocolError('RUNTIME_ACK_FIFO_CHANGED', 'Queued ACK differs from its immutable confirmation target')
+        const prior = this.ledger.runtimeAckCommit(head.envelope.commandId, command.messageId)
+        let result
+        try { result = await this.sendCommandAckFn(command, head.envelope.ackStatus, prior?.deliveryVersion ?? null) }
+        catch (error) {
+          // Retain FIFO on real transport or protocol rejection; never infer commit.
+          this.runtimeAckFailure = error
+          // A later record's rejection cannot erase this target's certified commit.
+          return Boolean(target && !this.stopped && targetConfirmed())
+        }
+        if (canonicalSha256(head.record) !== recordDigest) throw new AgentProtocolError('RUNTIME_ACK_FIFO_CHANGED', 'ACK confirmation context changed during HTTP')
+        this.ackOutbox.commitRuntimeDelivery(head, result, this.ledger)
+        // Only the original locked commit's COMPLETE return certifies the exact
+        // HTTP status/version, durable ledger, marker, dequeue and lock release.
+        // Throws even after a marker/unlink leave no proof; a later empty FIFO
+        // must not turn that failed commit into a successful confirmation.
+        if (completion) completion.proof = Object.freeze({ recordDigest, contextDigest: canonicalSha256(command),
+          kind: result.kind, status: result.status, deliveryVersion: result.deliveryVersion })
+      }
+      return false
+    }).catch(error => { this._failClosed(new AgentProtocolError(error.code || 'RUNTIME_ACK_CHECKPOINT_ERROR', error.message), {}); return false })
+    this.runtimeAckTail = operation
+    return operation
+  }
+
+  _assertRuntimeAckContext(head) {
+    const command = head.envelope.runtimeCommand
+    const entry = this.ledger.getEntry(head.envelope.commandId)
+    const digest = canonicalSha256(command)
+    if (!entry || !isObject(entry.runtimeCommand) || head.envelope.commandId !== command.commandId || digest !== canonicalSha256(entry.runtimeCommand)) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_CONFLICT', 'Queued ACK must match the original ledger projection before HTTP')
+    const records = this.inbox.commandStateIndex().get(entry.commandId) || []
+    if (records.length > 1 || records.length === 1 && (CommandFingerprint.compute(records[0].normalized) !== entry.fingerprint
+        || canonicalSha256(runtimeCommandContext(this.profile, records[0].normalized)) !== digest)) throw new AgentProtocolError('RUNTIME_ACK_CONTEXT_CONFLICT', 'Original wire fingerprint and ACK projection must both match before HTTP')
+  }
+
+  async _cleanupRuntimeTerminals() {
+    if (typeof this.onCommandTerminalConfirmed !== 'function') return
+    const index = this.inbox.commandStateIndex()
+    for (const entry of this.ledger.listEntries()) {
+      if (![ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(entry.status) || !entry.outcome?.workspaceCleanup) continue
+      const digest = canonicalSha256(entry.outcome.workspaceCleanup)
+      if (entry.runtimeCleanupConfirmedDigest === digest) continue
+      const receipt = this.ledger.runtimeAckCommit(entry.commandId, entry.runtimeCommand?.messageId || '')
+      if (!receipt || receipt.status !== entry.status || receipt.contextDigest !== canonicalSha256(entry.runtimeCommand)) continue
+      const items = index.get(entry.commandId) || []
+      if (items.length !== 1 || items[0].record.state !== 'completed' || CommandFingerprint.compute(items[0].normalized) !== entry.fingerprint
+          || canonicalSha256(items[0].record.outcome.workspaceCleanup) !== digest) throw new AgentProtocolError('RUNTIME_CLEANUP_CHECKPOINT_CONFLICT', 'Terminal cleanup must match original completed command checkpoint')
+      try {
+        await this.onCommandTerminalConfirmed(items[0].normalized, entry.outcome.workspaceCleanup)
+        // Original checkpoint remains the only cleanup retry authority as well.
+        this.ledger.markRuntimeCleanupConfirmed(entry.commandId, digest)
+      } catch (error) {
+        this.runtimeCleanupFailure = error.code || 'RUNTIME_CLEANUP_UNCONFIRMED'
+        this.onReject(new AgentProtocolError(this.runtimeCleanupFailure, 'Terminal materials retained for exact cleanup reconciliation'), {})
+      }
+    }
+  }
+
   replayAcks() {
+    if (this.profile.runtimeIdentity) return this._scheduleRuntimeAckFlush()
     if (!this.ackOutbox || !this.sendFn) return 0
     let replayed = 0
     try {
@@ -3502,7 +3627,7 @@ const codexSessionMapKey = (profile, message) => {
   const agentId = profile?.agentId
   const conversationId = message?.conversationId
   if (typeof agentId !== 'string' || !agentId || typeof conversationId !== 'string' || !conversationId.trim()) return ''
-  return `${agentId}:${conversationId}`
+  return `${profile.runtimeSubjectKey || agentId}:${conversationId}`
 }
 
 const normalizedCodexSessionEntries = value => {
@@ -3597,24 +3722,10 @@ const removeApiKeyQuery = parsed => {
 
 export const sanitizeWebSocketEndpoint = url => removeApiKeyQuery(new URL(url)).toString()
 
-export const buildWebSocketUrl = (url, apiKey, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => {
-  const parsed = removeApiKeyQuery(new URL(url))
-  if (profile?.agentId) {
-    parsed.searchParams.set('agent_id', profile.agentId)
-    parsed.searchParams.set('agentId', profile.agentId)
-  }
-  parsed.searchParams.set('runtime_instance_id', runtimeInstanceId)
-  parsed.searchParams.set('runtimeInstanceId', runtimeInstanceId)
-  return parsed.toString()
-}
+export const buildWebSocketUrl = () => { throw new AgentProtocolError('RUNTIME_INSTALLATION_SESSION_REQUIRED', 'WebSocket authorization requires the installation-derived session') }
+export const buildWebSocketOptions = () => { throw new AgentProtocolError('RUNTIME_INSTALLATION_SESSION_REQUIRED', 'API-key WebSocket authentication is retired') }
 
-export const buildWebSocketOptions = (apiKey, profile) => {
-  const selectedApiKey = profile?.apiKey || apiKey
-  if (!selectedApiKey) throw new Error('WebSocket API key is required')
-  return { headers: { 'X-API-Key': selectedApiKey } }
-}
-
-export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID) => ({
+export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInstanceId = profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID) => ({
   ...payload,
   type: messageType,
   schemaVersion: payload?.schemaVersion || PROTOCOL_VERSION,
@@ -3629,12 +3740,15 @@ export const buildProtocolEnvelope = (messageType, payload, profile, runtimeInst
 })
 
 const getProfileById = profileId => config?.profiles.find(profile => profile.profileId === profileId || profile.agentId === profileId)
-const getProfileState = profile => profileStates.get(profile.agentId)
+const profileStateKey = profile => profile.runtimeSubjectKey || profile.agentId
+const getProfileState = profile => profileStates.get(profileStateKey(profile))
 
 const MAX_WS_BUFFERED_BYTES = 1024 * 1024
 
 const sendRaw = (event, profile = defaultProfile) => {
   const state = getProfileState(profile)
+  if (profile?.runtimeIdentity) return state?.runtimeTransport?.send?.(event) === true
+  if (!profile?.runtimeIdentity) return false
   if (!state?.ws || state.ws.readyState !== WebSocketClient.OPEN) return false
   if (Number(state.ws.bufferedAmount || 0) > MAX_WS_BUFFERED_BYTES) return false
   state.ws.send(typeof event === 'string' ? event : JSON.stringify(event))
@@ -3646,7 +3760,7 @@ const sendProtocol = (messageType, payload = {}, profile = defaultProfile) => se
   profile
 )
 
-const sendLegacy = (type, payload = {}, profile = defaultProfile) => sendRaw({
+const sendLegacy = (type, payload = {}, profile = defaultProfile) => !profile?.runtimeIdentity && sendRaw({
   ...payload,
   type,
   requestId: `${type}-${Date.now()}-${randomUUID()}`,
@@ -4089,7 +4203,7 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => {
 }
 
 export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null,
-  typedInspectionProfileRuntime = null, controlledImageV3Runtime = null, commandProtocols = []) => {
+  typedInspectionProfileRuntime = null, controlledImageV3Runtime = null) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, appServerAdapter)
   const typedInspection = typedInspectionProfileRuntime?.declaration?.() || null
   const providerRuntime = controlledImageProviderRuntime(nativeRuntime, controlledImageV3Runtime)
@@ -4098,8 +4212,8 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
     personaName: profile.personaName,
     endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
     abilities: resolveProfileAbilities(profile),
-    ...(commandProtocols.length ? { commandProtocols: [...commandProtocols] } : {}),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
+    nativeTextFileExecution: textFileExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
     nativeBountyExecution: buildNativeBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
     controlledImageBountyExecution: buildControlledImageBountyExecutionDeclaration({ profile, runtime: nativeRuntime, online }),
     controlledImageBountyExecutionV3: buildControlledImageBountyExecutionV3Declaration({
@@ -4126,6 +4240,7 @@ const sendStatus = (profile, status, extra = {}) => {
 // Presence is status-only, so a measured readiness transition must refresh registration.
 export const publishMeasuredRuntimeCapabilities = (profile, state, { registerFn = registerAgent } = {}) => {
   const stage = state?.registration?.snapshot?.().stage
+  if (profile?.runtimeIdentity) return !state?.disposed && state?.runtimeTransport?.refreshCapabilities?.() === true
   if (!state || state.disposed || state.ws?.readyState !== 1 ||
       !['pending_ack', 'ack_timeout', 'registered'].includes(stage)) return false
   return registerFn(profile) === true
@@ -4139,10 +4254,11 @@ export const publishTypedInspectionReadiness = (profile, state, { registerFn = r
 
 const registerAgent = profile => {
   const state = getProfileState(profile)
+  if (profile?.runtimeIdentity) return state?.runtimeTransport?.refreshCapabilities?.() === true
   const envelope = buildProtocolEnvelope(
     MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(
       profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN,
-      state.appServerAdapter, state.typedInspectionProfileRuntime, state.controlledImageV3SourceRuntime, state.platformSkillRuntime.commandProtocols
+      state.appServerAdapter, state.typedInspectionProfileRuntime, state.controlledImageV3SourceRuntime
     ), profile
   )
   return sendRegistrationWithAckObservation({
@@ -4372,7 +4488,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     return
   }
 
-  const sessionStore = overrides.sessionStore || codexSessionStore
+  const sessionStore = overrides.sessionStore || getProfileState(profile)?.sessionStore || codexSessionStore
   let args
   try {
     args = buildCodexArgs(profile, message, prompt, codexWorkdir, Boolean(workspace) || overrides.forceNewSession === true,
@@ -4400,7 +4516,8 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   try {
     child = spawnFn(profile.codexBin, args, {
       cwd: codexWorkdir,
-      env: { ...process.env, ...(profile.codexHome ? { CODEX_HOME: profile.codexHome } : {}), ...(overrides.env || {}) },
+      env: profile.runtimeIdentity ? buildRuntimeExecutionEnvironment(profile, overrides.env)
+        : { ...process.env, ...(profile.codexHome ? { CODEX_HOME: profile.codexHome } : {}), ...(overrides.env || {}) },
       stdio: ['ignore', 'pipe', 'pipe']
     })
   } catch (error) {
@@ -4419,7 +4536,8 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     return
   }
 
-  currentRuns.set(profile.agentId, child)
+  if (profile.runtimeIdentity) child.once('close', () => confirmedRuntimeChildClosures.add(child))
+  currentRuns.set(profileStateKey(profile), child)
   const controls = overrides.controls || { markRunning: () => {}, isCancelled: () => false }
   try { controls.markRunning(() => { if (child.exitCode === null && !child.killed) child.kill('SIGTERM') }, { engine: 'legacy-codex', pid: child.pid || null }) }
   catch (error) { try { child.kill('SIGTERM') } catch {}; throw error }
@@ -4484,7 +4602,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     settled = true
     clearTimeout(timeout)
     if (jsonLineBuffer.trim()) handleJsonLine(jsonLineBuffer)
-    currentRuns.delete(profile.agentId)
+    currentRuns.delete(profileStateKey(profile))
     if (sessionCaptureEligible && runSessionId && !sessionRemembered && findCodexSessionById(profile, runSessionId)) {
       sessionStore?.remember(profile, message, runSessionId)
     }
@@ -4687,7 +4805,7 @@ export const runReadOnlyInspection = async (profile, message, options = {}) => {
 }
 export const runConfirmedCommand = (profile, message, options = {}) => runCodex(profile, message, 'command', options)
 
-const profileConfigurationErrors = profile => {
+export const profileConfigurationErrors = profile => {
   const errors = []
   if (!['read-only', 'workspace-write', 'danger-full-access'].includes(profile.codexSandbox)) {
     errors.push('codexSandbox must be read-only, workspace-write, or danger-full-access')
@@ -4744,10 +4862,13 @@ const profileConfigurationErrors = profile => {
     errors.push('workspaceFileApiOrigin and workspaceFileRootDir must be configured together')
   }
   if (profile.workspaceFileRuntimeAuthHeader) {
-    errors.push('workspaceFileRuntimeAuthHeader must not be configured; use the current WebSocket registration token only')
+    errors.push('workspaceFileRuntimeAuthHeader must not be configured; use the current installation-derived Runtime session only')
   }
   if (workspaceFileControls.every(value => Boolean(value)) && !workspaceFileToolchain().ready) {
     errors.push('release-local workspace delivery toolchain is missing or incomplete')
+  }
+  if (profile.nativeConversationTextFileEnabled && (!profile.nativeConversationHttpPollEnabled || profile.controlledImageHttpEnabled || profile.nativeConversationImageGenerationEnabled)) {
+    errors.push('Text file execution requires native HTTP polling and a non-controlled-image profile')
   }
   if (profile.nativeConversationImageGenerationEnabled && !profile.nativeConversationHttpPollEnabled) {
     errors.push('nativeConversationImageGenerationEnabled requires nativeConversationHttpPollEnabled=true')
@@ -4756,7 +4877,15 @@ const profileConfigurationErrors = profile => {
       || profile.controlledImageHttpEnabled) && !workspaceFileControls.every(value => Boolean(value))) {
     errors.push('native conversation HTTP poll/executor requires workspaceFileApiOrigin and workspaceFileRootDir')
   }
-  errors.push(...controlledImageHttpConfigurationErrors(profile, { env: process.env }))
+  const controlledRuntimeEnabled = profile.platformSkillInstallEnabled || profile.archiveMaintenanceEnabled
+  if (controlledRuntimeEnabled && (!profile.runtimeIdentity || profile.runtimeIdentity.tenantId !== '0'
+      || !profile.controlledCommandOwnerJiacn || profile.controlledCommandOwnerJiacn === '0'
+      || Buffer.byteLength(profile.controlledCommandOwnerJiacn) > 50 || /[\x00-\x1f\x7f]/u.test(profile.controlledCommandOwnerJiacn))) {
+    errors.push('platform/archive controlled commands require unified Runtime tenant 0 and an explicit controlledCommandOwnerJiacn')
+  }
+  if (!Number.isSafeInteger(profile.platformSkillMaxRetainedCopies) || profile.platformSkillMaxRetainedCopies < 1 || profile.platformSkillMaxRetainedCopies > 32) errors.push('platformSkillMaxRetainedCopies must be an integer from 1 to 32')
+  if (!Number.isSafeInteger(profile.platformSkillMaxInstallationBytes) || profile.platformSkillMaxInstallationBytes < 0) errors.push('platformSkillMaxInstallationBytes must be a non-negative safe integer')
+  errors.push(...controlledImageHttpConfigurationErrors(profile, { env: profile.runtimeIdentity ? profile.runtimeProviderEnvironment || {} : process.env }))
   errors.push(...controlledImageGptCliConfigurationErrors(profile))
   return errors
 }
@@ -4791,7 +4920,7 @@ export const buildConfigurationReport = runtimeConfig => ({
       appServerSchemaContractId: profile.appServerSchemaContractId,
       codexModel: profile.codexModel || null,
       modelSource: profile.codexModel ? 'agent --model' : 'Codex configuration/default',
-      websocketAuthSource: profile.apiKey ? 'profile.apiKey' : (process.env.OPENCLAW_API_KEY ? 'OPENCLAW_API_KEY' : 'missing'),
+      websocketAuthSource: profile.runtimeIdentity ? 'installation-derived-session' : 'retired-api-key',
       workspacePolicyId: profile.workspacePolicyId || null,
       workspaceFileRuntime: profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
         ? 'awaiting-current-registration' : 'disabled',
@@ -4985,7 +5114,7 @@ export const runWorkspaceFileCommand = async ({
 }) => {
   const command = strictWorkspaceFileCommand(message)
   if (!command) return null
-  if (!workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(workspaceFileRuntimeAuthHeader)) {
+  if (!workspaceFileBridge || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(workspaceFileRuntimeAuthHeader)) {
     return workspaceFileFailure(message, new AgentProtocolError(
       'WORKSPACE_FILE_RUNTIME_UNAVAILABLE',
       'Strict workspace file command requires controlled runtime API origin, root, and AgentRuntime authorization configuration'
@@ -4993,7 +5122,7 @@ export const runWorkspaceFileCommand = async ({
   }
 
   const title = message.title || message.currentTaskTitle || 'Codex 执行任务'
-  let materialized = false
+  let materialized = false; let cleanupProof; let terminalConfirmed = false
   const imageResults = []
   let result
   sendStatusFn(profile, 'busy', { taskId: message.taskId || command.taskId, title })
@@ -5001,15 +5130,15 @@ export const runWorkspaceFileCommand = async ({
     const materializedRun = await workspaceFileBridge.materializeInputs(message.payload, {
       runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
       runtimeAgentId: profile.agentId,
-      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+      runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
     })
-    materialized = true
+    materialized = true; cleanupProof = materializedRun.cleanupProof
     await workspaceFileBridge.startExecution(message.payload, {
       commandId: message.commandId,
       messageId: message.messageId,
       runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
       runtimeAgentId: profile.agentId,
-      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+      runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
     })
     const outcome = await runCodexFn(profile, {
       ...message,
@@ -5033,15 +5162,16 @@ export const runWorkspaceFileCommand = async ({
       const committed = await workspaceFileBridge.uploadOutputsAndCommit(message.payload, {
         runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
         runtimeAgentId: profile.agentId,
-        runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+        runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
       })
+      terminalConfirmed = true
       result = { ...outcome, workspaceFileManifestId: committed.manifestId }
     }
   } catch (error) {
     result = workspaceFileFailure(message, error instanceof WorkspaceFileBridgeError || error instanceof AgentProtocolError
       ? error
       : new AgentProtocolError('WORKSPACE_FILE_ERROR', 'workspace file command failed'))
-    if (error?.code === 'START_OUTCOME_UNKNOWN') result.status = 'recovery_required'
+    if (['START_OUTCOME_UNKNOWN', 'COMMIT_FAILED', 'UPLOAD_FAILED'].includes(error?.code)) result.status = 'recovery_required'
   } finally {
     if (materialized && result?.status === 'failed') {
       const match = /^([A-Z][A-Z0-9_]{0,99}):/.exec(result.errorMessage || '')
@@ -5049,11 +5179,13 @@ export const runWorkspaceFileCommand = async ({
         await workspaceFileBridge.reportFailure(message.payload, match?.[1] || 'CODEX_EXECUTION_FAILED', {
           runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
           runtimeAgentId: profile.agentId,
-          runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+          runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
         })
-      } catch {}
+        terminalConfirmed = true
+      } catch { result.status = 'recovery_required' }
     }
-    if (materialized) {
+    if (profile.runtimeIdentity && terminalConfirmed && cleanupProof && result?.status !== 'recovery_required') result.workspaceCleanup = cleanupProof
+    if (materialized && !profile.runtimeIdentity && result?.status !== 'recovery_required') {
       try { workspaceFileBridge.cleanup(message.payload) } catch (error) {
         result = workspaceFileFailure(message, error)
       }
@@ -5063,10 +5195,242 @@ export const runWorkspaceFileCommand = async ({
   return result
 }
 
+// E05 is the existing command-bound reassignment lane, not every TASK command.
+// Read the original codec payload so normalization cannot erase its lease binding.
+export const e05ReassignmentBinding = (profile, message) => {
+  const raw = message.rawPayload || message
+  const payload = raw.payload || {}
+  const context = payload.context || {}
+  const tags = context.tags
+  const signalled = context.bindingVersion != null
+    || context.reassignmentId != null || payload.reason === 'lease_expired_reassignment'
+    || Array.isArray(tags) && tags.some(tag => ['lease-expired', 'reassignment'].includes(tag))
+  if (!signalled) return null
+  runtimeCommandContext(profile, message) // match trusted complete subject BEFORE projection
+  const references = context.referenceIds
+  if (raw.commandType !== 'WORK_ITEM_EXECUTE' || payload.actionType !== 'work_item_execute'
+      || payload.reason !== 'lease_expired_reassignment'
+      || !['supervised', 'manual'].includes(payload.autonomyLevel) || payload.requiresApproval !== true
+      || context.bindingVersion !== 'e05-reassignment-v1'
+      || typeof context.reassignmentId !== 'string' || !/^rsn_[0-9a-f]{64}$/.test(context.reassignmentId)
+      || !exactRuntimeCommandField(raw.workItemId)
+      || !Array.isArray(tags) || tags.length !== 2 || tags[0] !== 'lease-expired' || tags[1] !== 'reassignment'
+      || !Array.isArray(references) || references.length !== 1
+      || typeof references[0] !== 'string' || !/^cmd_hall_action_[0-9a-f]{64}$/.test(references[0])
+      || references[0] === raw.commandId) {
+    throw new AgentProtocolError('E05_REASSIGNMENT_BINDING_INVALID', 'Reassignment requires its original command/source/work binding')
+  }
+  // Service.commandDraft and receipt.resultWorkItemVersion both use current.version+1.
+  // This is the INITIAL read/start expected version, not a predicted heartbeat CAS.
+  // Later requests must use the last confirmed lease response.workItemVersion.
+  const version = context.contextVersion
+  if (typeof version !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(version)
+      || !Number.isSafeInteger(Number(version))) {
+    throw new AgentProtocolError('E05_REASSIGNMENT_VERSION_INVALID', 'Initial work item version must have an exact nonnegative decimal representation')
+  }
+  return Object.freeze({ taskId: raw.taskId, workItemId: raw.workItemId, commandId: raw.commandId,
+    reassignmentId: context.reassignmentId, expectedWorkItemVersion: Number(version),
+    actorAgentId: profile.runtimeIdentity.canonicalAgentId })
+}
+
+// Memory-only business lease authority. The wire is raw DTO, not JsonResult.data.
+const e05Failure = code => new AgentProtocolError(code, code)
+const e05Integer = value => Number.isSafeInteger(value) && value >= 0
+const e05Epoch = value => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime())
+const e05InternalPath = binding => `/internal/agent/tasks/${binding.taskId}/work-items/${binding.workItemId}/reassignments/${binding.reassignmentId}/commands/${binding.commandId}`
+const e05PathBinding = binding => {
+  if (!['taskId', 'workItemId', 'reassignmentId', 'commandId'].every(key => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(binding[key]))) throw e05Failure('E05_PATH_INVALID')
+}
+const e05Http = async (nativeFetch, apiOrigin, path, method = 'GET', body = null) => {
+  const endpoint = new URL(path, apiOrigin)
+  let response
+  try { response = await nativeFetch(endpoint, { method, redirect: 'error', cache: 'no-store',
+    headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}) }) }
+  catch { throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN') }
+  if (!response || !Number.isInteger(response.status)) throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN')
+  if (response.status !== 200) throw e05Failure(`E05_HTTP_${response.status}`)
+  // Existing lease POSTs legitimately include the exact manifest actor query.
+  // Compare the full requested URL; the new internal GETs remain query-free.
+  if (response.redirected === true || response.url !== endpoint.href || !/^application\/json(?:\s*;|$)/i.test(response.headers?.get?.('content-type') || '')) throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN')
+  try { return await response.json() } catch { throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN') }
+}
+
+export const createE05LeaseAdapter = ({ binding, nativeFetch, apiOrigin, now = Date.now }) => {
+  e05PathBinding(binding)
+  let confirmed = null
+  let busy = false
+  let unknown = false
+  const internal = e05InternalPath(binding)
+  const original = `/agent/tasks/${binding.taskId}/work-items/${binding.workItemId}/reassignments/${binding.reassignmentId}/lease`
+  const validate = dto => {
+    const keys = ['reassignmentId', 'commandId', 'taskId', 'workItemId', 'agentId', 'status', 'leaseToken', 'leaseUntil', 'workItemVersion', 'attemptCount', 'maxAttempts', 'changedAt']
+    if (!isObject(dto) || Object.keys(dto).sort().join() !== keys.sort().join()
+        || ['reassignmentId', 'commandId', 'taskId', 'workItemId'].some(key => dto[key] !== binding[key])
+        || dto.agentId !== binding.actorAgentId || !['claimed', 'running'].includes(dto.status)
+        || !exactRuntimeCommandField(dto.leaseToken) || /REDACTED/i.test(dto.leaseToken)
+        || !e05Epoch(dto.leaseUntil) || dto.leaseUntil <= now() || !e05Epoch(dto.changedAt) || dto.changedAt >= dto.leaseUntil
+        || !e05Integer(dto.workItemVersion) || dto.workItemVersion < binding.expectedWorkItemVersion
+        || !e05Integer(dto.attemptCount) || !e05Integer(dto.maxAttempts) || dto.attemptCount < 1 || dto.attemptCount > dto.maxAttempts
+        || confirmed && (dto.leaseToken !== confirmed.leaseToken || dto.attemptCount !== confirmed.attemptCount
+          || dto.maxAttempts !== confirmed.maxAttempts || dto.workItemVersion < confirmed.workItemVersion
+          || dto.leaseUntil < confirmed.leaseUntil || dto.changedAt < confirmed.changedAt
+          || confirmed.status === 'running' && dto.status !== 'running')) throw e05Failure('E05_LEASE_PROOF_INVALID')
+    return Object.freeze({ ...dto })
+  }
+  const exclusive = async operation => {
+    if (busy) throw e05Failure('E05_LEASE_OPERATION_IN_FLIGHT')
+    busy = true
+    try { return await operation() } finally { busy = false }
+  }
+  const readback = async () => {
+    unknown = true
+    const dto = validate(await e05Http(nativeFetch, apiOrigin, `${internal}/lease`))
+    confirmed = dto; unknown = false
+    return { status: dto.status, workItemVersion: dto.workItemVersion, leaseUntil: dto.leaseUntil }
+  }
+  const mutate = (suffix, leaseDurationMillis) => exclusive(async () => {
+    if (unknown || suffix && !confirmed) throw e05Failure('E05_LEASE_READBACK_REQUIRED')
+    if (suffix === '/heartbeat' && (!e05Integer(leaseDurationMillis) || leaseDurationMillis < 1 || leaseDurationMillis > 900000)) throw e05Failure('E05_LEASE_DURATION_INVALID')
+    const version = confirmed?.workItemVersion ?? binding.expectedWorkItemVersion
+    const body = { commandId: binding.commandId, expectedWorkItemVersion: version,
+      ...(suffix === '/heartbeat' ? { leaseDurationMillis } : {}) }
+    let dto
+    try {
+      dto = validate(await e05Http(nativeFetch, apiOrigin, `${original}${suffix}?actorAgentId=${encodeURIComponent(binding.actorAgentId)}`, 'POST', body))
+      if (!suffix && (dto.status !== 'claimed' || dto.workItemVersion !== version)
+          || suffix && dto.status !== 'running' || suffix === '/start' && dto.workItemVersion <= version) throw e05Failure('E05_LEASE_PROOF_INVALID')
+      confirmed = dto
+    } catch (error) {
+      unknown = true
+      // Never repeat a POST or predict CAS. Only the exact original live receipt
+      // GET may recover an ambiguous response; explicit ACL/version failures stay closed.
+      if (!['E05_HTTP_OUTCOME_UNKNOWN', 'E05_HTTP_503'].includes(error.code)) throw error
+      await readback()
+      if (!suffix && (confirmed.status !== 'claimed' || confirmed.workItemVersion !== version)
+          || suffix && confirmed.status !== 'running' || suffix === '/start' && confirmed.workItemVersion <= version) { unknown = true; throw e05Failure('E05_LEASE_READBACK_REQUIRED') }
+    }
+    return { status: confirmed.status, workItemVersion: confirmed.workItemVersion, leaseUntil: confirmed.leaseUntil }
+  })
+  return Object.freeze({
+    read: () => mutate(''), start: () => mutate('/start'), heartbeat: duration => mutate('/heartbeat', duration),
+    readback: () => exclusive(readback),
+    current: () => {
+      if (unknown || !confirmed || confirmed.leaseUntil <= now()) throw e05Failure('E05_LEASE_READBACK_REQUIRED')
+      return { status: confirmed.status, workItemVersion: confirmed.workItemVersion, leaseUntil: confirmed.leaseUntil }
+    },
+    commit: material => exclusive(async () => {
+      if (unknown || !confirmed || confirmed.status !== 'running' || confirmed.leaseUntil <= now()
+          || material.expectedWorkItemVersion !== confirmed.workItemVersion) throw e05Failure('E05_LEASE_READBACK_REQUIRED')
+      return e05Http(nativeFetch, apiOrigin, `${internal}/result-commit`, 'POST', { ...material, leaseToken: confirmed.leaseToken })
+    })
+  })
+}
+
+const e05Material = (binding, outcome) => {
+  const content = outcome.output
+  if (typeof content !== 'string' || !content.trim()) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+  return { workItemId: binding.workItemId, producerAgentId: binding.actorAgentId,
+    artifact: { artifactId: `artifact_e05_${canonicalSha256({ commandId: binding.commandId, reassignmentId: binding.reassignmentId })}`,
+      workItemId: binding.workItemId, producerAgentId: binding.actorAgentId, artifactType: 'summary', title: 'E05 Result', content,
+      storageUri: null, contentBytes: null, contentMimeType: null,
+      contentHash: createHash('sha256').update(content, 'utf8').digest('hex'), contentByteLength: Buffer.byteLength(content, 'utf8'),
+      artifactVersion: 1, expectedPreviousVersion: 0, visibility: 'task_members', metadata: {} } }
+}
+const validateE05Material = (binding, material) => {
+  if (!isObject(material) || Object.keys(material).sort().join() !== 'artifact,expectedWorkItemVersion,producerAgentId,workItemId'
+      || material.workItemId !== binding.workItemId || material.producerAgentId !== binding.actorAgentId
+      || !e05Integer(material.expectedWorkItemVersion) || material.expectedWorkItemVersion < binding.expectedWorkItemVersion
+      || !isObject(material.artifact)) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+  const expected = e05Material(binding, { output: material.artifact.content })
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(material.artifact.artifactId)) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+  expected.artifact.artifactId = material.artifact.artifactId
+  if (canonicalSha256(expected.artifact) !== canonicalSha256(material.artifact)) throw e05Failure('E05_RESULT_MATERIAL_INVALID')
+  return material
+}
+export const validateE05Result = (binding, material, view) => {
+  validateE05Material(binding, material)
+  if (!isObject(view) || Object.keys(view).sort().join() !== 'artifact,status,submittedAt,taskId,workItemId,workItemVersion'
+      || view.taskId !== binding.taskId || view.workItemId !== binding.workItemId || view.status !== 'submitted'
+      || !e05Integer(view.workItemVersion) || view.workItemVersion !== material.expectedWorkItemVersion + 1
+      || !e05Epoch(view.submittedAt) || !isObject(view.artifact)) throw e05Failure('E05_RESULT_PROOF_INVALID')
+  const artifact = view.artifact
+  for (const [key, value] of Object.entries(material.artifact)) {
+    if (['contentBytes', 'expectedPreviousVersion', 'contentMimeType'].includes(key)) continue
+    if (canonicalSha256(artifact[key] ?? null) !== canonicalSha256(value)) throw e05Failure('E05_RESULT_PROOF_INVALID')
+  }
+  if (artifact.taskId !== binding.taskId || artifact.managedStorage !== false || artifact.contentMimeType !== 'text/plain'
+      || !e05Epoch(artifact.createdAt)) throw e05Failure('E05_RESULT_PROOF_INVALID')
+  return { status: 'completed', exitCode: 0 }
+}
+export const recoverE05Result = async ({ profile, message, record, nativeFetch, apiOrigin }) => {
+  const binding = e05ReassignmentBinding(profile, message)
+  if (!binding || !record?.e05ResultMaterial || record.e05ResultDigest !== canonicalSha256(record.e05ResultMaterial)) throw e05Failure('E05_RESULT_RECOVERY_REQUIRED')
+  e05PathBinding(binding)
+  const material = validateE05Material(binding, record.e05ResultMaterial)
+  const view = await e05Http(nativeFetch, apiOrigin, `${e05InternalPath(binding)}/result-commit`)
+  return validateE05Result(binding, material, view)
+}
+
+const runE05Command = async ({ profile, message, binding, workspaceManager, runCodexFn,
+  nativeFetch, apiOrigin, commandCheckpoint, now = Date.now, signal, sessionCurrent = () => true }) => {
+  // Missing trusted integration keeps the former guard effective, not frame flags.
+  if (typeof nativeFetch !== 'function' || !apiOrigin || !commandCheckpoint?.persistE05Result) throw new AgentProtocolError('E05_LEASE_RESULT_ADAPTER_UNAVAILABLE', 'E05_LEASE_RESULT_ADAPTER_UNAVAILABLE: trusted lease/result/checkpoint adapter required')
+  let cancelled = false; let cancel = null; let timer = null; let expiryTimer = null; let executing = true; const httpAbort = new AbortController(); let heartbeatDuration = null; let heartbeat = Promise.resolve(); let leaseFailed = false
+  const abort = () => { if (cancelled) return; cancelled = true; httpAbort.abort(); try { cancel?.() } catch {} }
+  const assertSession = () => {
+    if (signal?.aborted || !sessionCurrent() || cancelled) throw e05Failure('E05_SESSION_CHANGED')
+  }
+  const lease = createE05LeaseAdapter({ binding, apiOrigin, now, nativeFetch: (url, options) => { assertSession(); return nativeFetch(url, { ...options, signal: httpAbort.signal }) } })
+  const schedule = () => {
+    if (!executing) return
+    const current = lease.current()
+    // Scheduling derives from the actual business lease, not a performance deadline.
+    clearTimeout(expiryTimer)
+    expiryTimer = setTimeout(() => { leaseFailed = true; abort() }, Math.max(1, current.leaseUntil - now()))
+    timer = setTimeout(() => {
+      heartbeat = (async () => {
+        try { assertSession(); await lease.heartbeat(heartbeatDuration); assertSession(); schedule() }
+        catch { leaseFailed = true; abort() }
+      })()
+    }, Math.max(1, Math.floor((current.leaseUntil - now()) / 3)))
+  }
+  signal?.addEventListener('abort', abort, { once: true })
+  try {
+    assertSession(); await lease.read(); assertSession(); await lease.start(); assertSession()
+    heartbeatDuration = Math.min(900000, lease.current().leaseUntil - now())
+    schedule()
+    const outcome = await runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true,
+      // E05 business completion is solely result-commit. Keep normal TASK reports untouched.
+      sendLegacyFn: () => {}, controls: { markRunning: fn => { cancel = fn; if (cancelled) fn() }, isCancelled: () => cancelled } })
+    executing = false; clearTimeout(timer); await heartbeat
+    assertSession(); if (leaseFailed) throw e05Failure('E05_LEASE_READBACK_REQUIRED')
+    if (outcome?.status !== 'completed') return { status: 'failed', exitCode: outcome?.exitCode ?? null, errorMessage: 'E05_EXECUTOR_FAILED' }
+    const material = { ...e05Material(binding, outcome), expectedWorkItemVersion: lease.current().workItemVersion }
+    validateE05Material(binding, material)
+    // Persist original body WITHOUT leaseToken before the sole business write.
+    await commandCheckpoint.persistE05Result(material)
+    assertSession()
+    let view
+    try { view = await lease.commit(material); return validateE05Result(binding, material, view) }
+    catch {
+      // Lost response, including a committed write whose body was malformed: GET
+      // only. Never repeat publication or regenerate model output/artifact keys.
+      assertSession()
+      return await recoverE05Result({ profile, message, record: { e05ResultMaterial: material, e05ResultDigest: canonicalSha256(material) }, nativeFetch, apiOrigin })
+    }
+  } catch { return { status: 'recovery_required', errorMessage: 'E05_RESULT_RECOVERY_REQUIRED' } }
+  finally { executing = false; clearTimeout(timer); clearTimeout(expiryTimer); signal?.removeEventListener('abort', abort); await heartbeat }
+}
+
 export const runManagedCommand = async ({
   profile, message, skillInstallManager, platformSkillRuntime = null, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
-  materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus
+  materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus,
+  nativeFetch, apiOrigin, commandCheckpoint, now = Date.now, signal, sessionCurrent
 }) => {
+  const binding = e05ReassignmentBinding(profile, message)
+  if (binding) return runE05Command({ profile, message, binding, workspaceManager, runCodexFn,
+    nativeFetch, apiOrigin, commandCheckpoint, now, signal, sessionCurrent })
   const workspaceFileResult = await runWorkspaceFileCommand({
     profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader, runCodexFn, materializeImageFn, sendStatusFn
   })
@@ -5123,10 +5487,10 @@ const exactResponseUrl = (response, endpoint) => {
  * existing persistent inbox so crashes/restarts retain the same dedupe and recovery semantics as
  * websocket-delivered commands.
  */
-export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = globalThis.fetch } = {}) => {
+export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = state?.runtimeTransport?.nativeFetch || globalThis.fetch } = {}) => {
   if (!profile || !state?.workspaceFileBridge || !state?.processor) return { dispatched: 0, rejected: 0 }
   const auth = state.workspaceFileRuntimeAuthHeader || ''
-  if (!/^AgentRuntime [0-9a-f]{32}$/.test(auth) || typeof fetchFn !== 'function') {
+  if (!/^AgentRuntime rts1_[0-9a-f]{64}$/.test(auth) || typeof fetchFn !== 'function') {
     throw new AgentProtocolError('WORKSPACE_FILE_RUNTIME_UNAVAILABLE', 'workspace runtime polling is not configured')
   }
   const endpoint = new URL(WORKSPACE_FILE_QUEUE_PATH, state.workspaceFileBridge.apiOrigin)
@@ -5136,7 +5500,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = glob
       Authorization: auth,
       Accept: 'application/json',
       'X-Agent-Id': profile.agentId,
-      'X-Agent-Runtime-Id': PROCESS_RUNTIME_INSTANCE_ID
+      'X-Agent-Runtime-Id': profile.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
     }
   }
   let response
@@ -5203,17 +5567,18 @@ const stopWorkspaceFilePoller = state => {
   if (!state) return
   clearInterval(state.workspaceFilePollTimer)
   state.workspaceFilePollTimer = null
-  state.workspaceFilePollInFlight = false
+  // Stopping admission must not release an in-flight owner's guard.
 }
 
 const startWorkspaceFilePoller = (profile, state) => {
   stopWorkspaceFilePoller(state)
-  if (!state?.workspaceFileBridge || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
+  if (!state?.workspaceFileBridge || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
   const tick = async () => {
     if (state.workspaceFilePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.workspaceFilePollInFlight = true
     try {
-      const result = await pollWorkspaceFileCommands({ profile, state })
+      const polling = pollWorkspaceFileCommands({ profile, state }); state.workspaceFilePollPromise = polling
+      const result = await polling
       if (result.rejected) console.warn(`workspace command rejected | profile=${profile.profileId} | count=${result.rejected}`)
     } catch (error) {
       // Do not include request/header values in diagnostics.
@@ -5235,11 +5600,11 @@ const stopNativeConversationPoller = state => {
 }
 const startNativeConversationPoller = (profile, state) => {
   stopNativeConversationPoller(state)
-  if (!state?.conversationNativeLane || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
+  if (!state?.conversationNativeLane || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
   const tick = async () => {
     if (state.conversationNativePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.conversationNativePollInFlight = true
-    try { await state.conversationNativeLane.poll() } catch (error) {
+    try { const polling = state.conversationNativeLane.poll(); state.conversationNativePollPromise = polling; await polling } catch (error) {
       const code = typeof error?.code === 'string' && /^CONVERSATION_[A-Z_]{1,80}$/.test(error.code)
         ? error.code : 'CONVERSATION_UNAVAILABLE'
       console.warn(`native conversation poll unavailable | profile=${profile.profileId} | code=${code}`)
@@ -5260,13 +5625,13 @@ export const stopControlledImageV3ConversationPoller = state => {
 export const startControlledImageV3ConversationPoller = (profile, state) => {
   stopControlledImageV3ConversationPoller(state)
   if (!state?.conversationControlledImageV3Lane
-      || !/^AgentRuntime [0-9a-f]{32}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return false
+      || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return false
   const tick = async () => {
     const openState = WebSocketClient?.OPEN ?? 1
     if (state.conversationControlledImageV3PollInFlight || state.ws?.readyState !== openState
         || state.processor.paused || state.disposed) return
     state.conversationControlledImageV3PollInFlight = true
-    try { await state.conversationControlledImageV3Lane.poll() } catch (error) {
+    try { const polling = state.conversationControlledImageV3Lane.poll(); state.conversationControlledImageV3PollPromise = polling; await polling } catch (error) {
       const code = typeof error?.code === 'string' && /^CONVERSATION_[A-Z_]{1,80}$/.test(error.code)
         ? error.code : 'CONVERSATION_UNAVAILABLE'
       console.warn(`controlled image v3 poll unavailable | profile=${profile.profileId} | code=${code}`)
@@ -5382,7 +5747,7 @@ const terminateChild = (profile, child, signal = 'SIGTERM') => {
 
 const terminateAllRuns = () => {
   for (const profile of config.profiles) {
-    const child = currentRuns.get(profile.agentId)
+    const child = currentRuns.get(profileStateKey(profile))
     if (child) {
       terminateChild(profile, child, 'SIGTERM')
       setTimeout(() => terminateChild(profile, child, 'SIGKILL'), 5000)
@@ -5398,6 +5763,7 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}, managedI
     workspaceFileRootDir: source.workspaceFileRootDir || '',
     nativeConversationHttpPollEnabled: controlled?.nativeConversationHttpPollEnabled === true ||
       source.nativeConversationHttpPollEnabled === true,
+    nativeConversationTextFileEnabled: !controlled && source.nativeConversationTextFileEnabled === true,
     nativeConversationImageGenerationEnabled: controlled ? false : source.nativeConversationImageGenerationEnabled === true,
     controlledImageHttpEnabled: controlled?.controlledImageHttpEnabled === true,
     controlledImageHttpEndpoint: controlled?.controlledImageHttpEndpoint || '',
@@ -5427,7 +5793,7 @@ export const resolveManagedRuntimeProfile = (profile, source = {}, managedImageS
 /** Fully composed source-aware v3 runtime for production registration and polling. */
 export const createControlledImageV3SourceRuntime = ({
   profile,
-  getAuth = () => '',
+  getRuntimeHeaders = () => null,
   controlledEnv = process.env,
   providerFetchFn = globalThis.fetch,
   nativeFetchFn = globalThis.fetch,
@@ -5454,7 +5820,7 @@ export const createControlledImageV3SourceRuntime = ({
     cliConfig
   })
   if (profile?.enabled === false || profile?.controlledImageHttpEnabled !== true || !httpPollEnabled
-      || !profile?.workspaceFileApiOrigin || !profile?.workspaceFileRootDir || typeof getAuth !== 'function') return unavailable()
+      || !profile?.workspaceFileApiOrigin || !profile?.workspaceFileRootDir || typeof getRuntimeHeaders !== 'function') return unavailable()
   if (declaredAdapterKind && ![CONTROLLED_IMAGE_PROVIDER_LANE, CONTROLLED_IMAGE_GPT_CLI_ADAPTER].includes(declaredAdapterKind)) {
     return unavailable()
   }
@@ -5484,7 +5850,7 @@ export const createControlledImageV3SourceRuntime = ({
     const executor = args => controlledExecutor.execute(args)
     const pollProtocol = createPollProtocol({ apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir, agentId: profile.agentId, runtimeInstanceId,
-      getAuth, fetchFn: nativeFetchFn, execute: executor, controlledConfig })
+      getRuntimeHeaders, fetchFn: nativeFetchFn, execute: executor, controlledConfig })
     if (typeof pollProtocol?.poll !== 'function') return unavailable({ controlledConfig, cliConfig, credentialReady: true })
     return Object.freeze({
       configReady: true,
@@ -5503,11 +5869,12 @@ export const createControlledImageV3SourceRuntime = ({
 export const createNativeBountyExecutionRuntime = ({
   profile,
   workspaceFileBridge,
-  getAuth = () => '',
+  getRuntimeHeaders = () => null,
   toolchainReady = workspaceFileToolchain().ready,
   createPollProtocol = options => new NativeConversationLane(options),
   createControlledPollProtocol = options => new ControlledImageConversationLane(options),
   executeImage = args => runNativeConversationImage({ profile, ...args }),
+  executeTextFile = args => runNativeConversationTextFile({ profile, ...args, runCodexFn: runCodex }),
   controlledEnv = process.env,
   providerFetchFn = globalThis.fetch,
   nativeFetchFn = globalThis.fetch,
@@ -5534,7 +5901,7 @@ export const createNativeBountyExecutionRuntime = ({
     && httpPollEnabled
     && profile?.workspaceFileApiOrigin
     && profile?.workspaceFileRootDir
-    && typeof getAuth === 'function'
+    && typeof getRuntimeHeaders === 'function'
   )
 
   if (controlledSelected) {
@@ -5581,8 +5948,8 @@ export const createNativeBountyExecutionRuntime = ({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir,
       agentId: profile.agentId,
-      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
-      getAuth,
+      runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID,
+      getRuntimeHeaders,
       fetchFn: nativeFetchFn,
       execute: executor,
       controlledConfig
@@ -5604,6 +5971,22 @@ export const createNativeBountyExecutionRuntime = ({
     })
   }
 
+  const textFileEnabled = profile?.nativeConversationTextFileEnabled === true
+  if (baseReady && textFileEnabled && !profile?.nativeConversationImageGenerationEnabled
+      && typeof executeTextFile === 'function' && typeof createPollProtocol === 'function') {
+    const executor = args => {
+      if (args.command?.outputContentMimeType !== 'text/plain') throw new AgentProtocolError('CONVERSATION_TEXT_FILE_COMMAND_INVALID', 'Only text/plain is enabled')
+      return executeTextFile(args)
+    }
+    const pollProtocol = createPollProtocol({ apiOrigin: profile.workspaceFileApiOrigin,
+      rootDir: profile.workspaceFileRootDir, agentId: profile.agentId,
+      runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID,
+      getRuntimeHeaders, fetchFn: nativeFetchFn, execute: executor, requireNoInputs: true })
+    if (typeof pollProtocol?.poll !== 'function') return unavailable({ adapterKind: 'CODEX_TEXT_FILE_NATIVE_V1' })
+    return Object.freeze({ configReady: true, httpPollEnabled: true, executor, pollProtocol,
+      adapterKind: 'CODEX_TEXT_FILE_NATIVE_V1', nativeTextFileV1Ready: true,
+      nativeBountyV1Ready: false, controlledImageV2Ready: false, credentialReady: false, controlledConfig: null })
+  }
   const executorEnabled = profile?.nativeConversationImageGenerationEnabled === true
   const configReady = Boolean(
     baseReady
@@ -5619,8 +6002,8 @@ export const createNativeBountyExecutionRuntime = ({
     apiOrigin: profile.workspaceFileApiOrigin,
     rootDir: profile.workspaceFileRootDir,
     agentId: profile.agentId,
-    runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
-    getAuth,
+    runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID,
+    getRuntimeHeaders,
     fetchFn: nativeFetchFn,
     execute: executor
   })
@@ -5639,9 +6022,10 @@ export const createNativeBountyExecutionRuntime = ({
 }
 
 
-const createProfileState = profile => {
+const createProfileState = (profile, profileConfig = config) => {
+  const runtimeInstanceId = profile.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
   const workspacePolicy = profile.workspacePolicyId
-    ? config.workspacePolicies.get(profile.workspacePolicyId)
+    ? profileConfig.workspacePolicies.get(profile.workspacePolicyId)
     : null
   const workspaceManager = workspacePolicy
     ? new GitWorkspaceManager({ policy: workspacePolicy, agentId: profile.agentId, role: profile.workspaceRole }).initialize()
@@ -5650,49 +6034,58 @@ const createProfileState = profile => {
     ? new WorkspaceFileBridge({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: profile.workspaceFileRootDir,
-      fetchFn: globalThis.fetch,
+      fetchFn: (url, options) => getProfileState(profile)?.runtimeTransport?.nativeFetch(url, options) || Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Native session required')),
       validateOutput: validateWorkspaceFileOutput
     })
     : null
+  const nativeFetch = profile.runtimeIdentity ? (url, options) => {
+    const transport = getProfileState(profile)?.runtimeTransport
+    if (!transport?.nativeFetch) return Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Current native session is required'))
+    return transport.nativeFetch(url, options)
+  } : globalThis.fetch
   const nativeBountyExecutionRuntime = createNativeBountyExecutionRuntime({
     profile,
     workspaceFileBridge,
-    getAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || ''
+    getRuntimeHeaders: () => getProfileState(profile)?.runtimeTransport?.headers(),
+    ...(profile.runtimeIdentity ? { controlledEnv: profile.runtimeProviderEnvironment || {} } : {}),
+    runtimeInstanceId, nativeFetchFn: nativeFetch
   })
   const conversationNativeLane = nativeBountyExecutionRuntime.pollProtocol
   const controlledImageV3SourceRuntime = createControlledImageV3SourceRuntime({
     profile,
-    getAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || ''
+    getRuntimeHeaders: () => getProfileState(profile)?.runtimeTransport?.headers(),
+    ...(profile.runtimeIdentity ? { controlledEnv: profile.runtimeProviderEnvironment || {} } : {}),
+    runtimeInstanceId, nativeFetchFn: nativeFetch
   })
   const conversationControlledImageV3Lane = controlledImageV3SourceRuntime.pollProtocol
   const inbox = new PersistentCommandInbox({
-    rootDir: config.commandInboxDir,
+    rootDir: profileConfig.commandInboxDir,
     profile,
-    successPolicy: config.commandInboxSuccessPolicy
+    successPolicy: profileConfig.commandInboxSuccessPolicy
   })
   const ledger = new DurableDedupeLedger({
-    rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile)),
+    rootDir: resolve(profileConfig.commandInboxDir, safeProfileDirectory(profile)),
     profile
   })
   const ackOutbox = new AckOutbox({
-    rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile)),
+    rootDir: resolve(profileConfig.commandInboxDir, safeProfileDirectory(profile)),
     profile
   })
-  const chatInbox = new PersistentChatInbox({ rootDir: config.commandInboxDir, profile })
-  const chatAckOutbox = new ChatAckOutbox({ rootDir: config.commandInboxDir, profile })
-  const threadBindingStore = new ThreadBindingStore({ rootDir: config.commandInboxDir, profile }).initialize()
+  const chatInbox = new PersistentChatInbox({ rootDir: profileConfig.commandInboxDir, profile })
+  const chatAckOutbox = new ChatAckOutbox({ rootDir: profileConfig.commandInboxDir, profile })
+  const threadBindingStore = new ThreadBindingStore({ rootDir: profileConfig.commandInboxDir, profile }).initialize()
   const chatWorkdir = prepareChatWorkdir({
-    rootDir: resolve(config.commandInboxDir, 'chat-workdirs'), profile,
+    rootDir: resolve(profileConfig.commandInboxDir, 'chat-workdirs'), profile,
     forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
   })
   const typedInspectionMaterializer = profile.workspaceFileApiOrigin && profile.typedInspectionRootDir
     ? new TypedInspectionMaterializer({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
-      fetchFn: globalThis.fetch,
-      getRuntimeAuth: () => profileStates.get(profile.agentId)?.workspaceFileRuntimeAuthHeader || '',
+      fetchFn: nativeFetch,
+      getRuntimeHeaders: () => getProfileState(profile)?.runtimeTransport?.headers(),
       agentId: profile.agentId,
-      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
+      runtimeInstanceId: runtimeInstanceId,
       forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
     })
     : null
@@ -5713,20 +6106,20 @@ const createProfileState = profile => {
   const sendAckFn = envelope => sendRaw(bindChatDispatchAckToSession(envelope, profile), profile)
   const executionReportOutbox = new ExecutionReportOutbox({
     profile,
-    rootDir: resolve(config.commandInboxDir, safeProfileDirectory(profile), 'execution-report-outbox'),
-    runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+    rootDir: resolve(profileConfig.commandInboxDir, safeProfileDirectory(profile), 'execution-report-outbox'),
+    runtimeInstanceId: runtimeInstanceId
   })
   const skillInstallManager = new SkillInstallManager({
     profile,
-    stateRoot: defaultSkillInstallStateRoot(config.commandInboxDir, profile, config.wsUrl),
-    wsUrl: config.wsUrl,
-    apiKey: config.apiKey,
-    enabled: config.skillInstallEnabled,
-    maxPackageBytes: config.skillInstallMaxBytes,
-    maxExtractedBytes: config.skillInstallMaxExtractedBytes,
-    fetchFn: globalThis.fetch,
+    stateRoot: defaultSkillInstallStateRoot(profileConfig.commandInboxDir, profile, profileConfig.wsUrl),
+    wsUrl: profileConfig.wsUrl,
+    enabled: profile.runtimeIdentity ? profile.skillInstallEnabled === true : profileConfig.skillInstallEnabled,
+    getRuntimeHeaders: profile.runtimeIdentity ? () => getProfileState(profile)?.runtimeTransport?.headers() : null,
+    maxPackageBytes: profileConfig.skillInstallMaxBytes,
+    maxExtractedBytes: profileConfig.skillInstallMaxExtractedBytes,
+    fetchFn: nativeFetch,
     sendResultFn: envelope => sendRaw(envelope, profile),
-    runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID
+    runtimeInstanceId: runtimeInstanceId
   })
   ledger.initialize()
   ackOutbox.initialize()
@@ -5738,18 +6131,25 @@ const createProfileState = profile => {
   let state
   const platformSkillRuntime = new PlatformSkillRuntime({
     profile,
-    commandInboxDir: config.commandInboxDir,
-    wsUrl: config.wsUrl,
-    enabled: config.platformSkillInstallEnabled,
-    archiveEnabled: config.archiveMaintenanceEnabled,
-    authorizationProvider: () => state?.registration.nativeRuntimeAuthHeader || '',
+    commandInboxDir: profileConfig.commandInboxDir,
+    wsUrl: profileConfig.wsUrl,
+    enabled: profile.platformSkillInstallEnabled,
+    archiveEnabled: profile.archiveMaintenanceEnabled,
+    authorizationProvider: () => state?.runtimeTransport?.headers?.().Authorization || '',
+    fetchFn: nativeFetch,
     managerOptions: {
-      maxRetainedInstallationCopies: config.platformSkillMaxRetainedCopies,
-      maxInstallationBytes: config.platformSkillMaxInstallationBytes
+      maxRetainedInstallationCopies: profile.platformSkillMaxRetainedCopies,
+      maxInstallationBytes: profile.platformSkillMaxInstallationBytes
     }
   })
   state = {
     profile,
+    sessionStore: profile.runtimeIdentity ? createCodexSessionStore(resolve(profile.runtimeStateRoot, 'codex-session-map.json')) : null,
+    runtimeTransport: null,
+    commandAdapterReady: profile.runtimeIdentity ? (() => {
+      const probe = spawnSync(profile.codexBin, ['--version'], { encoding: 'utf8', env: buildRuntimeExecutionEnvironment(profile), timeout: 15000 })
+      return probe.status === 0 && /^codex-cli [0-9]+\.[0-9]+\.[0-9]+\s*$/.test(probe.stdout || '')
+    })() : true,
     ws: null,
     heartbeatTimer: null,
     workspaceFilePollTimer: null,
@@ -5792,8 +6192,8 @@ const createProfileState = profile => {
     processor: null,
     registration: new RegistrationAckObserver({
       agentId: profile.agentId,
-      runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
-      timeoutMs: config.registrationAckTimeoutMs
+      runtimeInstanceId: runtimeInstanceId,
+      timeoutMs: profileConfig.registrationAckTimeoutMs
     }),
     registrationReady: false,
     managedRegistered: false,
@@ -5813,7 +6213,7 @@ const createProfileState = profile => {
   state.ensureTypedInspectionProfile = async () => {
     if (!state.typedInspectionProfileRuntime || state.typedInspectionProfileFailure) return state.typedInspectionProfileRuntime
     if (!state.typedInspectionProfilePromise) state.typedInspectionProfilePromise = state.typedInspectionProfileRuntime.measure().then(() => {
-      if (!state.disposed && profileStates.get(profile.agentId) === state) publishTypedInspectionReadiness(profile, state)
+      if (!state.disposed && getProfileState(profile) === state) publishTypedInspectionReadiness(profile, state)
       return state.typedInspectionProfileRuntime
     }).catch(error => {
       state.typedInspectionProfileFailure = error
@@ -5827,7 +6227,7 @@ const createProfileState = profile => {
   }
   if (state.typedInspectionProfileRuntime) void state.ensureTypedInspectionProfile()
   if (profile.fastChatEnabled && profile.appServerEnabled) {
-    const isCurrent = () => !state.disposed && (!profileStates.has(profile.agentId) || profileStates.get(profile.agentId) === state)
+    const isCurrent = () => !state.disposed && (!profileStates.has(profileStateKey(profile)) || getProfileState(profile) === state)
     const scheduleRestart = () => {
       if (shuttingDown || !isCurrent() || state.appServerPermanentFailure || state.appServerRestartTimer) return
       const delay = Math.min(30000, 250 * (2 ** Math.min(state.appServerRestartAttempt, 7)))
@@ -5845,9 +6245,12 @@ const createProfileState = profile => {
       const delay = Math.max(0, state.appServerNotBefore - Date.now())
       state.appServerPromise = new Promise(resolvePromise => setTimeout(resolvePromise, delay)).then(async () => {
         if (shuttingDown || !isCurrent()) return null
-        const schemaMeasurement = measureCodexAppServerBinary(profile)
+        const schemaMeasurement = measureCodexAppServerBinary(profile, profile.runtimeIdentity ? {
+          spawnSyncFn: (binary, args, options) => spawnSync(binary, args, { ...options, env: buildRuntimeExecutionEnvironment(profile) })
+        } : {})
         if (!isCurrent()) return null
-        const adapter = AppServerAdapter.spawn(profile, { cwd: chatWorkdir, schemaMeasurement })
+        const adapter = AppServerAdapter.spawn(profile, { cwd: chatWorkdir, schemaMeasurement,
+          ...(profile.runtimeIdentity ? { spawnFn: (binary, args, options) => spawn(binary, args, { ...options, env: { ...buildRuntimeExecutionEnvironment(profile), NO_PROXY: '*', no_proxy: '*' } }) } : {}) })
         state.appServerStartingAdapter = adapter
         try { await adapter.verifySpawnedExecutable(); await adapter.initialize() } catch (error) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); throw error }
         adapter.readback.hostedWireContract = hostedWireContract
@@ -5885,11 +6288,22 @@ const createProfileState = profile => {
   state.processor = new AgentMessageProcessor({
     profile,
     inbox,
-    runCommand: message => {
+    runCommand: (message, record, commandCheckpoint) => {
+      if (profile.runtimeIdentity && !state.runtimeTransport?.ready?.()) throw new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Runtime execution requires its current installation session')
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
-      return legacyExecutionGate.run(() => runManagedCommand({ profile, message, skillInstallManager, platformSkillRuntime, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader }))
+      const transport = state.runtimeTransport
+      const generation = profile.runtimeIdentity ? transport.headers()['X-Agent-Session-Generation'] : null
+      const controller = new AbortController()
+      state.e05CommandAbort = controller
+      return legacyExecutionGate.run(() => runManagedCommand({ profile, message, skillInstallManager, platformSkillRuntime, workspaceManager, workspaceFileBridge,
+        workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader, commandCheckpoint, apiOrigin: profile.runtimeApiOrigin,
+        nativeFetch: transport?.nativeFetch, signal: controller.signal,
+        sessionCurrent: () => state.runtimeTransport === transport && transport?.ready?.()
+          && transport.headers()['X-Agent-Session-Generation'] === generation }))
+        .finally(() => { if (state.e05CommandAbort === controller) state.e05CommandAbort = null })
     },
     runChat: async (message, controls) => {
+      if (profile.runtimeIdentity && !state.runtimeTransport?.ready?.()) throw new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Runtime execution requires its current installation session')
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
       if (isTypedInspectionDispatch(message)) {
         const inspectionProfile = await state.ensureTypedInspectionProfile()
@@ -5929,6 +6343,10 @@ const createProfileState = profile => {
       : skillInstallManager.acknowledgeResultReceipt(message),
     recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message)
       || platformSkillRuntime.reconcileCommandOutcome(message),
+    onCommandTerminalConfirmed: profile.runtimeIdentity ? (message, proof) => {
+      if (!strictWorkspaceFileCommand(message) || !workspaceFileBridge) throw new AgentProtocolError('RUNTIME_CLEANUP_CONTEXT_INVALID', 'Cleanup requires original workspace command')
+      return workspaceFileBridge.cleanupConfirmed(message.payload, proof)
+    } : null,
     onReject: (error, raw) => {
       console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
       sendProtocol(MESSAGE_TYPES.PROTOCOL_ERROR, {
@@ -5942,6 +6360,7 @@ const createProfileState = profile => {
     ackOutbox,
     executionReportOutbox,
     sendFn: sendAckFn,
+    sendCommandAckFn: profile.runtimeIdentity ? (...args) => state.runtimeTransport?.acknowledge(...args) || Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Current Runtime session required')) : null,
     chatInbox,
     chatAckOutbox,
     lanes
@@ -5961,162 +6380,10 @@ const createProfileState = profile => {
   return state
 }
 
-const isProfileBusy = profile => getProfileState(profile)?.processor?.isBusy() || currentRuns.has(profile.agentId)
+const isProfileBusy = profile => getProfileState(profile)?.processor?.isBusy() || currentRuns.has(profileStateKey(profile))
 
 export const canPublishProfileOnline = (profile, state) => !profile.managedGeneration
   || Boolean(state?.managedRegistered && state?.managedEngine?.ready)
-
-export const activateRegisteredProfile = async (profile, state) => {
-  const registeredSocket = state.ws
-  const registrationGeneration = state.registration.generation
-  const runtimeScope = state.registration.runtimeScope
-  state.workspaceFileRuntimeAuthHeader = state.registration.runtimeAuthHeader
-  try {
-    if (runtimeScope && state.platformSkillRuntime.commandProtocols.length) {
-      const recovery = await state.platformSkillRuntime.activateAndRecover(runtimeScope)
-      if (!recovery.active || state.ws !== registeredSocket || state.registration.generation !== registrationGeneration
-          || state.registration.runtimeScope?.runtimeInstanceId !== runtimeScope.runtimeInstanceId) return false
-    } else {
-      state.platformSkillRuntime.disconnect(runtimeScope
-        ? 'platform skill runtime is disabled or unsupported'
-        : 'legacy registration has no native runtime authority')
-    }
-    if (runtimeScope && state.platformSkillRuntime.commandProtocols.includes('ARCHIVE_MAINTENANCE_EXECUTE/v1')) {
-      const recoveryMessages = [...state.inbox.commandStateIndex().values()]
-        .flat()
-        .filter(item => item.normalized.commandType === 'ARCHIVE_MAINTENANCE_EXECUTE'
-          && ['processing', 'recovery_required'].includes(item.record.state))
-        .sort((left, right) => left.record.queueSequence - right.record.queueSequence)
-        .map(item => item.normalized)
-      await state.platformSkillRuntime.recoverArchiveCommands(recoveryMessages)
-      if (state.ws !== registeredSocket || state.registration.generation !== registrationGeneration
-          || state.registration.runtimeScope?.runtimeInstanceId !== runtimeScope.runtimeInstanceId) return false
-    }
-    const reconciliation = state.processor.reconcileAuthoritativeState()
-    if (!reconciliation?.reconciled || reconciliation.failClosedCode) {
-      throw new Error(`controlled reconciliation failed: ${reconciliation?.failClosedCode || 'unknown'}`)
-    }
-    state.registrationReady = true
-    if (state.workspaceFileRuntimeAuthHeader) startWorkspaceFilePoller(profile, state)
-    if (canPublishProfileOnline(profile, state)) {
-      sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-      resumeRegisteredProfile(profile, state)
-    }
-    return true
-  } catch (error) {
-    console.warn(`registered recovery failed | profile=${profile.profileId} | ${error?.message || error}`)
-    if (state.ws !== registeredSocket || state.registration.generation !== registrationGeneration) return false
-    state.registration.disconnect()
-    state.registrationReady = false
-    state.platformSkillRuntime.disconnect('registered recovery failed')
-    state.workspaceFileRuntimeAuthHeader = ''
-    state.processor.pause()
-    try { registeredSocket?.close() } catch {}
-    return false
-  }
-}
-
-// Diagnostic only: one read-only queue GET, no dispatch, retries, or receipt body logging.
-// Run only for an explicitly enabled managed CHAT profile and its exact native receipt.
-export const observeTypedRuntimeAuthentication = async ({ profile, receipt, authHeader, apiOrigin,
-  runtimeInstanceId = PROCESS_RUNTIME_INSTANCE_ID, fetchFn = globalThis.fetch } = {}) => {
-  if (!profile?.typedDeliberationEnabled || !profile.managedGeneration ||
-      receipt?.typedDeliberation?.state !== 'READY') return { state: 'NOT_APPLICABLE' }
-  const binding = receipt.runtimeAuth
-  if (!binding || binding.scheme !== 'native-runtime-v1' || binding.agentId !== profile.agentId ||
-      binding.runtimeInstanceId !== runtimeInstanceId || binding.tenantId !== profile.managedTenantId ||
-      binding.clientId !== profile.managedClientId || binding.ownerJiacn !== profile.managedOwnerJiacn ||
-      !/^AgentRuntime [0-9a-f]{32}$/.test(authHeader || '')) return { state: 'RECEIPT_BINDING_MISMATCH' }
-  try {
-    const origin = new URL(apiOrigin)
-    if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password) {
-      return { state: 'INVALID_API_ORIGIN' }
-    }
-    const response = await fetchFn(new URL('/internal/agent/tasks/workspace-executions/commands', origin), {
-      method: 'GET', redirect: 'error', headers: { Authorization: authHeader, Accept: 'application/json',
-        'X-Agent-Id': profile.agentId, 'X-Agent-Runtime-Id': runtimeInstanceId }
-    })
-    // A queue read never claims or executes a command. Do not retain any returned work data.
-    await response.body?.cancel()
-    return { state: response.status === 401 ? 'CURRENT_BINDING_DENIED' : 'HTTP_OBSERVED', httpStatus: response.status }
-  } catch { return { state: 'TRANSPORT_ERROR' } }
-}
-
-const handleMessage = async (profile, raw) => {
-  let parsed
-  try { parsed = JSON.parse(raw.toString()) } catch (error) {
-    getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_JSON', `Invalid JSON message: ${error.message}`), raw.toString())
-    return
-  }
-  if (!isObject(parsed)) {
-    getProfileState(profile)?.processor?.onReject(new AgentProtocolError('INVALID_ENVELOPE', 'Agent message must be a JSON object'), parsed)
-    return
-  }
-  const state = getProfileState(profile)
-  const registrationOutcome = state?.registration.observe(parsed)
-  if (registrationOutcome === 'registered') {
-    // Registration ACK is transport authority only. Recover native durable state,
-    // then reconcile the single inbox/ledger, and only then permit queue drain.
-    if (!await activateRegisteredProfile(profile, state)) return
-    if (profile.typedDeliberationEnabled) {
-      const receipt = parsed.payload || parsed
-      console.log(`typed runtime registration | agent=${profile.agentId} | requested=${buildTypedDeliberationDeclaration(profile, state.appServerAdapter)?.state || 'UNDECLARED'} | receipt=${receipt.typedDeliberation?.state || 'UNDECLARED'} | schema=${state.appServerAdapter?.readback?.schema?.schemaContractId || 'unmeasured'}`)
-    }
-    if (profile.typedDeliberationEnabled && profile.managedGeneration) {
-      const origin = new URL(config.wsUrl)
-      origin.protocol = origin.protocol === 'wss:' ? 'https:' : 'http:'
-      void observeTypedRuntimeAuthentication({ profile, receipt: parsed.payload || parsed,
-        authHeader: state.workspaceFileRuntimeAuthHeader, apiOrigin: origin.origin
-      }).then(observation => console.log(`typed runtime authentication | agent=${profile.agentId} | state=${observation.state} | http=${observation.httpStatus ?? 'none'}`))
-    }
-  }
-  if (isLegacyInboundControlFrame(parsed)) {
-    if (parsed.type === 'agent_message_saved') {
-      await state?.processor?.handle(parsed)
-    } else if (profile.managedGeneration && managedHostModule?.managedRegistration(parsed, profile, PROCESS_RUNTIME_INSTANCE_ID)) {
-      const state = getProfileState(profile)
-      if (state?.managedEngine?.ready && !state.managedRegistered) {
-        state.managedRegistered = true
-        if (!state.registrationReady || !canPublishProfileOnline(profile, state)) return
-        sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-        resumeRegisteredProfile(profile, state)
-      }
-    } else if (parsed.type === 'connected') {
-      registerAgent(profile)
-    } else if (parsed.type === 'ping') {
-      sendLegacy('pong', {}, profile)
-    }
-    return
-  }
-  if (profile.managedGeneration && !getProfileState(profile)?.managedRegistered) return
-  await getProfileState(profile)?.processor?.handle(raw.toString())
-}
-
-const doReconnect = profile => {
-  const state = getProfileState(profile)
-  if (!state || shuttingDown || state.reconnectScheduled) return
-  const now = Date.now()
-  if (!state.reconnectStartedAt) state.reconnectStartedAt = now
-  const elapsed = now - state.reconnectStartedAt
-  if (elapsed >= config.reconnectMaxMs) {
-    if (profile.managedGeneration) {
-      state.managedRegistered = false
-      state.processor.pause()
-      console.warn(`managed reconnect deferred | profile=${profile.profileId}`)
-      return // Rent reconciliation may retry; never restart unrelated legacy profiles.
-    }
-    shutdown(1, `reconnect timeout for profile ${profile.profileId}`)
-    return
-  }
-  const delay = Math.min(30000, 1000 * 2 ** state.reconnectAttempt, config.reconnectMaxMs - elapsed)
-  state.reconnectAttempt += 1
-  state.reconnectScheduled = true
-  state.reconnectTimer = setTimeout(() => {
-    state.reconnectScheduled = false
-    state.reconnectTimer = null
-    connectProfile(profile)
-  }, delay)
-}
 
 export const startBoundedExecutionReportReplay = ({ outbox, sendFn, isStable = () => true, schedule = callback => setImmediate(callback) }) => {
   let cancelled = false
@@ -6147,102 +6414,9 @@ export const startBoundedSkillResultReplay = ({
   return () => { cancelled = true }
 }
 
-const resumeRegisteredProfile = (profile, state) => {
-  clearInterval(state.heartbeatTimer)
-  state.resultReplayCancel?.()
-  state.executionReportReplayCancel?.()
-  const replaySocket = state.ws
-  const replayToken = `connection:${randomUUID()}`
-  state.executionReportReplayCancel = startBoundedExecutionReportReplay({
-    outbox: state.executionReportOutbox,
-    sendFn: envelope => sendRaw(envelope, profile),
-    isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN
-  })
-  state.resultReplayCancel = startBoundedSkillResultReplay({
-    manager: state.skillInstallManager,
-    replayToken,
-    isStable: () => state.ws === replaySocket && replaySocket.readyState === WebSocketClient.OPEN,
-    onBatch: replayed => {
-      if (replayed) console.warn(`skill result replay | profile=${profile.profileId} | replayed=${replayed}`)
-    }
-  })
-  const replayed = state.processor.replayAcks()
-  if (replayed) console.warn(`ack replay | profile=${profile.profileId} | replayed=${replayed}`)
-  state.processor.resume()
-  startWorkspaceFilePoller(profile, state)
-  startNativeConversationPoller(profile, state)
-  startControlledImageV3ConversationPoller(profile, state)
-  state.heartbeatTimer = setInterval(() => sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online'), config.heartbeatMs)
-}
-
-const connectProfile = profile => {
-  const state = getProfileState(profile)
-  if (!state) return
-  clearReconnectState(state)
-  clearInterval(state.heartbeatTimer)
-  stopWorkspaceFilePoller(state)
-  stopNativeConversationPoller(state)
-  stopControlledImageV3ConversationPoller(state)
-  state.registration.disconnect()
-  state.registrationReady = false
-  state.platformSkillRuntime.disconnect('socket reconnect')
-  state.workspaceFileRuntimeAuthHeader = ''
-  if (state.ws && state.ws.readyState !== WebSocketClient.CLOSED) {
-    try { state.ws.close() } catch {}
-  }
-  let closeFired = false
-  state.managedRegistered = false
-  state.ws = new WebSocketClient(
-    buildWebSocketUrl(config.wsUrl, config.apiKey, profile),
-    buildWebSocketOptions(config.apiKey, profile)
-  )
-  const socket = state.ws
-  socket.addEventListener('open', () => {
-    if (state.ws !== socket) return
-    clearReconnectState(state)
-    state.reconnectAttempt = 0
-    state.reconnectStartedAt = 0
-    registerAgent(profile)
-  })
-  socket.addEventListener('message', event => { if (state.ws === socket) void handleMessage(profile, event.data) })
-  socket.addEventListener('close', () => {
-    if (state.ws !== socket) return
-    state.managedRegistered = false
-    state.registration.disconnect()
-    state.registrationReady = false
-    state.platformSkillRuntime.disconnect('socket closed')
-    state.workspaceFileRuntimeAuthHeader = ''
-    closeFired = true
-    state.resultReplayCancel?.()
-    state.resultReplayCancel = null
-    state.executionReportReplayCancel?.()
-    state.executionReportReplayCancel = null
-    clearInterval(state.heartbeatTimer)
-    stopWorkspaceFilePoller(state)
-    stopNativeConversationPoller(state)
-    stopControlledImageV3ConversationPoller(state)
-    state.processor.pause()
-    if (!shuttingDown) doReconnect(profile)
-  })
-  socket.addEventListener('error', error => {
-    if (state.ws !== socket) return
-    console.error(`websocket error | profile=${profile.profileId}:`, error.message || error)
-    state.registration.disconnect()
-    state.registrationReady = false
-    state.platformSkillRuntime.disconnect('websocket error')
-    state.workspaceFileRuntimeAuthHeader = ''
-    state.processor.pause()
-    setTimeout(() => {
-      if (state.ws === socket && !closeFired && !shuttingDown && !state.reconnectScheduled) {
-        try { state.ws?.close() } catch {}
-        doReconnect(profile)
-      }
-    }, 1000)
-  })
-}
-
 export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) => {
   if (!state || state.disposed) return
+  state.e05CommandAbort?.abort()
   state.disposed = true
   if (state.appServerRestartTimer) clearTimeout(state.appServerRestartTimer)
   state.appServerRestartTimer = null
@@ -6258,9 +6432,37 @@ export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) =>
   for (const candidate of new Set([adapter, startingAdapter].filter(Boolean))) await candidate.shutdown({ timeoutMs })
 }
 
-export const disposeProfileState = async (state, reason = 'profile removed') => {
-  if (!state || state.disposed) return
+// Wait for actual owned-child close, not ChildProcess.killed (signal-sent).
+// The existing five-second SIGKILL escalation is cleanup, not a request deadline.
+const confirmedRuntimeChildClosures = new WeakSet()
+export const stopRuntimeExecutionChild = (profile, child, { escalationMs = 5000 } = {}) => {
+  if (!child || confirmedRuntimeChildClosures.has(child)) return Promise.resolve()
+  return new Promise(resolveStopped => {
+    let escalation
+    const stopped = () => { confirmedRuntimeChildClosures.add(child); clearTimeout(escalation); child.off('close', stopped); resolveStopped() }
+    child.once('close', stopped)
+    const signalOwned = signal => {
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill(signal) } catch {} // no confirmation: retain ownership and keep waiting
+      }
+    }
+    signalOwned('SIGTERM')
+    escalation = setTimeout(() => signalOwned('SIGKILL'), escalationMs)
+  })
+}
+
+export const disposeProfileState = (state, reason = 'profile removed') => {
+  if (!state) return Promise.resolve()
+  if (!state.profileShutdownPromise) state.profileShutdownPromise = disposeProfileStateOnce(state, reason)
+  return state.profileShutdownPromise
+}
+const disposeProfileStateOnce = async (state, reason) => {
   const profile = state.profile
+  state.e05CommandAbort?.abort()
+  state.processor.pause()
+  state.processor.stop()
+  // Disable ingress and auth before awaiting an engine shutdown.
+  if (profile.runtimeIdentity) { state.runtimeTransport = null; state.workspaceFileRuntimeAuthHeader = '' }
   await disposeAppServerState(state, { timeoutMs: 5000 })
   await state.typedInspectionProfileRuntime?.dispose()
   state.processor.pause()
@@ -6277,119 +6479,188 @@ export const disposeProfileState = async (state, reason = 'profile removed') => 
   state.workspaceFileRuntimeAuthHeader = ''
   sendStatus(profile, 'offline', { errorMessage: reason })
   try { state.ws?.close() } catch {}
-  const child = currentRuns.get(profile.agentId)
+  const child = currentRuns.get(profileStateKey(profile))
   if (child) {
-    terminateChild(profile, child, 'SIGTERM')
-    setTimeout(() => terminateChild(profile, child, 'SIGKILL'), 5000)
+    if (profile.runtimeIdentity) {
+      await stopRuntimeExecutionChild(profile, child)
+    } else {
+      terminateChild(profile, child, 'SIGTERM')
+      setTimeout(() => terminateChild(profile, child, 'SIGKILL'), 5000)
+    }
   }
   state.processor.stop()
-  if (profileStates.get(profile.agentId) === state) profileStates.delete(profile.agentId)
+  if (profile.runtimeIdentity) {
+    // Keep host/Agent writer locks until every owned native operation actually ends.
+    await Promise.allSettled([state.workspaceFilePollPromise, state.conversationNativePollPromise, state.conversationControlledImageV3PollPromise].filter(Boolean))
+    await state.processor.runtimeAckTail; await state.processor.waitForIdle()
+  }
+  if (getProfileState(profile) === state) profileStates.delete(profileStateKey(profile))
 }
 
-const disconnectProfile = async (profile, reason = 'profile removed') => {
-  const state = getProfileState(profile)
-  if (state) await disposeProfileState(state, reason)
+// UR-01 executor injection seam. Transport/session validation is injected by the
+// frozen Runtime wire adapter; this factory never opens legacy sockets or watches
+// .env/profile files. A second in-process host cannot replace its global context.
+let runtimeExecutionOwner = null
+export const buildRuntimeExecutionEnvironment = (profile, overrides = {}) => {
+  const allowed = new Set(['PATH', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR',
+    'CYF_WORKSPACE_FILE_TOOLCHAIN_PYTHON', 'CYF_WORKSPACE_FILE_DELIVERY_TOOL'])
+  for (const key of Object.keys(overrides || {})) if (!allowed.has(key)) throw new AgentProtocolError('RUNTIME_EXECUTION_ENV_FORBIDDEN', 'Execution environment key is not allowlisted')
+  const inherited = Object.fromEntries(['PATH', 'LANG', 'LC_ALL', 'TZ'].filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))
+  const managedProvider = Object.fromEntries(Object.entries(profile.runtimeProviderEnvironment || {}).filter(([key]) => /^CYF_MANAGED_PROVIDER_[A-Z][A-Z0-9_]*$/.test(key)))
+  return { ...inherited, ...managedProvider, ...overrides, HOME: profile.codexHome, CODEX_HOME: profile.codexHome }
 }
 
-const applyProfileConfig = async (nextProfiles, nextDefaultProfileId, reason = 'config reload') => {
-  const previousProfiles = config.profiles
-  if (managedHostModule) nextProfiles = managedHostModule.preserveManagedProfiles(previousProfiles, nextProfiles)
-  const previousByAgentId = new Map(previousProfiles.map(profile => [profile.agentId, profile]))
-  const nextByAgentId = new Map(nextProfiles.map(profile => [profile.agentId, profile]))
-  for (const previousProfile of previousProfiles) {
-    const next = nextByAgentId.get(previousProfile.agentId)
-    const state = profileStates.get(previousProfile.agentId)
-    if ((!next || !sameProfileConfig(previousProfile, next)) && state?.processor?.isBusy()) {
-      shutdown(1, `${reason}: defer active profile replacement to process restart`)
-      return
+export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigin, workspacePolicies = new Map(), providerEnvironments = new Map(), webSocketClient = null }) => {
+  if (runtimeExecutionOwner || profileStates.size) throw new AgentProtocolError('RUNTIME_EXECUTOR_HOST_BUSY', 'Only one execution host may own this process')
+  if (!Array.isArray(agents) || !agents.length || typeof runtimeInstanceId !== 'string' || !runtimeInstanceId) throw new AgentProtocolError('RUNTIME_EXECUTOR_CONFIG_REQUIRED', 'Explicit Runtime configuration is required')
+  const origin = new URL(apiOrigin)
+  if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== '/') throw new AgentProtocolError('RUNTIME_API_ORIGIN_INVALID', 'Runtime API origin must not contain credentials or routing data')
+  if (webSocketClient) WebSocketClient = webSocketClient
+  const owner = Symbol('runtime execution host')
+  const makeEntry = agent => {
+    const manifest = agent.manifest
+    const subjectKey = createHash('sha256').update(JSON.stringify({ canonicalAgentId: manifest.canonicalAgentId, clientId: manifest.clientId, tenantId: manifest.tenantId })).digest('hex')
+    if (agent.subjectKey !== subjectKey) throw new AgentProtocolError('RUNTIME_SUBJECT_KEY_INVALID', 'Runtime subject storage key must match exact identity')
+    const profile = { ...normalizeProfile(agent.profile, {}, 0, { isolated: true }), runtimeSubjectKey: subjectKey,
+      runtimeIdentity: Object.freeze({ ...manifest }), runtimeApiOrigin: origin.origin, runtimeInstanceId, runtimeStateRoot: agent.stateRoot,
+      runtimeProviderEnvironment: Object.freeze({ ...(providerEnvironments.get(subjectKey) || agent.providerEnvironment || {}) }) }
+    if (profile.agentId !== manifest.canonicalAgentId || profile.apiKey || profile.workspaceFileRuntimeAuthHeader) throw new AgentProtocolError('RUNTIME_PROFILE_IDENTITY_INVALID', 'Runtime profile cannot substitute its installation identity')
+    return [subjectKey, { agent, profile, state: null, closed: false }]
+  }
+  const entries = new Map(agents.map(makeEntry))
+  if (entries.size !== agents.length) throw new AgentProtocolError('RUNTIME_SUBJECT_DUPLICATE', 'Duplicate runtime subject')
+  const profiles = [...entries.values()].map(entry => entry.profile)
+  // Validation is per subject; an agentId is not globally unique across tenants.
+  for (const profile of profiles) ensureProfiles([profile], profile.profileId, workspacePolicies, false)
+  const previousConfig = config
+  // Mature skill-state namespacing accepts a WS base. This is not a socket URL
+  // or handshake: only its canonical API origin is used by the helper.
+  const engineOrigin = new URL(origin.origin)
+  engineOrigin.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:'
+  config = { wsUrl: engineOrigin.origin, apiKey: '', profiles, defaultProfileId: '', workspacePolicies,
+    commandInboxSuccessPolicy: 'archive', registrationAckTimeoutMs: 10000,
+    skillInstallEnabled: false, skillInstallMaxBytes: 16 * 1024 * 1024, skillInstallMaxExtractedBytes: 64 * 1024 * 1024 }
+  runtimeExecutionOwner = owner
+  let closing = null
+  const closeEntry = async entry => {
+    if (entry.closed) return
+    if (entry.state) await disposeProfileState(entry.state, 'Runtime executor stopped')
+    entry.closed = true
+    entry.state = null
+  }
+  return {
+    // Trusted local lifecycle only: never accepts wire-selected profile/path data.
+    addAgent: agent => {
+      if (closing || runtimeExecutionOwner !== owner) throw new AgentProtocolError('RUNTIME_EXECUTOR_OWNERSHIP_LOST', 'Execution host is stopping')
+      const [key, fresh] = makeEntry(agent)
+      const prior = entries.get(key)
+      if (prior && (!prior.closed || prior.agent.manifest.installationId !== agent.manifest.installationId
+          || prior.agent.manifest.manifestSha256 !== agent.manifest.manifestSha256 || prior.agent.stateRoot !== agent.stateRoot))
+        throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Existing subject must be closed with identical installation')
+      const replacement = [...entries.values()].filter(entry => entry !== prior).map(entry => entry.profile).concat(fresh.profile)
+      // Dynamic entries must retain cross-subject HOME/workdir isolation.
+      for (const profile of replacement) for (const other of replacement) {
+        if (profile === other) continue
+        for (const field of ['codexHome', 'codexWorkdir']) {
+          const left = resolve(profile[field]); const right = resolve(other[field])
+          if (left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`))
+            throw new AgentProtocolError('RUNTIME_AGENT_ROOTS_OVERLAP', 'Dynamic executor roots overlap')
+        }
+      }
+      ensureProfiles([fresh.profile], fresh.profile.profileId, workspacePolicies, false)
+      entries.set(key, fresh)
+      profiles.splice(0, profiles.length, ...replacement)
+    },
+    createExecutor: ({ subjectKey }) => {
+      const entry = entries.get(subjectKey)
+      if (!entry || entry.closed || entry.state) throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Executor subject is unknown or already attached')
+      return {
+        initialize: async () => {
+          if (entry.state || entry.closed || runtimeExecutionOwner !== owner) throw new AgentProtocolError('RUNTIME_EXECUTOR_OWNERSHIP_LOST', 'Runtime executor ownership changed')
+          entry.state = createProfileState(entry.profile, { ...config, commandInboxDir: resolve(entry.agent.stateRoot, 'inbox') })
+          profileStates.set(profileStateKey(entry.profile), entry.state)
+          if (entry.state.processor.failClosedError) throw entry.state.processor.failClosedError
+          return { initialized: true, authenticated: false }
+        },
+        // No raw JSON session is trusted here. The wire adapter supplies a bound
+        // transport after validating the server fixture and current generation.
+        bindTransport: transport => {
+          if (!entry.state || entry.closed || !transport || typeof transport.ready !== 'function' || typeof transport.send !== 'function') throw new AgentProtocolError('RUNTIME_TRANSPORT_REQUIRED', 'A bound Runtime transport is required')
+          entry.state.runtimeTransport = transport
+        },
+        attachSocket: socket => { entry.state.ws = socket },
+        durableStateHealthy: () => {
+          const state = entry.state
+          if (!state || state.disposed || state.processor.failClosedError || state.ledger.hasCorruption() || state.ackOutbox.hasCorruption()) return false
+          try { state.ackOutbox.pendingEnvelopes(); return true } catch { return false }
+        },
+        registrationPayload: () => buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
+          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime),
+        prepareSession: async () => {
+          const state = entry.state
+          const runtime = state.platformSkillRuntime
+          if (!runtime.commandProtocols.length) { runtime.disconnect('platform/archive controlled commands are disabled or unsupported'); return }
+          const identity = entry.profile.runtimeIdentity
+          const scope = Object.freeze({ scheme: 'native-runtime-v1', tenantId: identity.tenantId, clientId: identity.clientId,
+            ownerJiacn: entry.profile.controlledCommandOwnerJiacn, agentId: identity.canonicalAgentId, runtimeInstanceId })
+          const recovery = await runtime.activateAndRecover(scope)
+          if (!recovery.active || !state.runtimeTransport) throw new AgentProtocolError('CONTROLLED_RUNTIME_ACTIVATION_FAILED', 'Controlled Runtime activation did not bind the current session')
+          if (runtime.commandTypes.includes('ARCHIVE_MAINTENANCE_EXECUTE')) {
+            const messages = [...state.inbox.commandStateIndex().values()].flat()
+              .filter(item => item.normalized.commandType === 'ARCHIVE_MAINTENANCE_EXECUTE' && ['processing', 'recovery_required'].includes(item.record.state))
+              .sort((left, right) => left.record.queueSequence - right.record.queueSequence).map(item => item.normalized)
+            await runtime.recoverArchiveCommands(messages)
+          }
+          const reconciliation = state.processor.reconcileAuthoritativeState()
+          if (!reconciliation?.reconciled || reconciliation.failClosedCode) throw new AgentProtocolError(reconciliation?.failClosedCode || 'COMMAND_RECOVERY_ERROR', 'Controlled command reconciliation failed closed')
+        },
+        readyCommandTypes: () => {
+          const state = entry.state
+          if (!state || state.disposed || state.processor.failClosedError) return []
+          const types = []
+          if (state.workspaceManager && state.commandAdapterReady) types.push('TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH')
+          // WORK_ITEM_CANCEL has no independently verified exact command cancel
+          // adapter; CHAT cancellation retains its original exact turn contract.
+          if (state.skillInstallManager.enabled) types.push('SKILL_INSTALL')
+          types.push(...state.platformSkillRuntime.commandTypes)
+          return types
+        },
+        chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
+        acceptFrame: frame => entry.state.processor.handle(frame),
+        resume: async () => {
+          const state = entry.state
+          if (!state.runtimeTransport?.reportReady()) return
+          state.workspaceFileRuntimeAuthHeader = state.runtimeTransport.headers().Authorization
+          await state.processor.reconcileE05Results({ nativeFetch: state.runtimeTransport.nativeFetch, apiOrigin: origin.origin })
+          const confirmed = await state.processor.replayAcks()
+          if (state.runtimeTransport.ready() && confirmed) state.processor.resume()
+          state.executionReportOutbox.sendPending(envelope => sendRaw(envelope, entry.profile))
+          state.skillInstallManager.replayResults()
+          if (state.runtimeTransport.ready()) {
+            startWorkspaceFilePoller(entry.profile, state)
+            startNativeConversationPoller(entry.profile, state)
+            startControlledImageV3ConversationPoller(entry.profile, state)
+          }
+        },
+        suspendAdmission: () => { const state = entry.state; state.platformSkillRuntime.disconnect('Runtime admission suspended'); state.processor.pause(); stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state) },
+        disconnected: () => { const state = entry.state; state.platformSkillRuntime.disconnect('Runtime session disconnected'); state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
+        ready: () => Boolean(!entry.closed && entry.state && !entry.state.disposed && !entry.state.processor.failClosedError && entry.state.runtimeTransport?.ready?.()),
+        pause: async () => { entry.state?.platformSkillRuntime.disconnect('Runtime executor paused'); entry.state?.e05CommandAbort?.abort(); entry.state?.processor.pause(); if (entry.state) { entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
+        close: () => closeEntry(entry),
+        // This read-only structure exposes state only to the trusted adapter, not
+        // to the UI, logs, profile file or engine environment.
+        state: () => entry.state
+      }
+    },
+    close: () => {
+      if (!closing) closing = (async () => {
+        const results = await Promise.allSettled([...entries.values()].map(closeEntry))
+        if (results.some(result => result.status === 'rejected')) throw new AgentProtocolError('RUNTIME_EXECUTOR_STOP_UNCONFIRMED', 'Executor shutdown is unconfirmed')
+        if (runtimeExecutionOwner === owner) { runtimeExecutionOwner = null; config = previousConfig }
+      })()
+      return closing
     }
   }
-  for (const previousProfile of previousProfiles) {
-    const next = nextByAgentId.get(previousProfile.agentId)
-    if (!next || !sameProfileConfig(previousProfile, next)) await disconnectProfile(previousProfile, reason)
-  }
-  config.profiles = nextProfiles
-  config.defaultProfileId = nextDefaultProfileId
-  defaultProfile = getProfileById(nextDefaultProfileId) || nextProfiles[0]
-  for (const nextProfile of nextProfiles) {
-    const previous = previousByAgentId.get(nextProfile.agentId)
-    const state = profileStates.get(nextProfile.agentId)
-    if (state && previous && sameProfileConfig(previous, nextProfile)) {
-      state.profile = nextProfile
-      continue
-    }
-    const created = createProfileState(nextProfile)
-    profileStates.set(nextProfile.agentId, created)
-    connectProfile(nextProfile)
-  }
-  lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
-}
-
-const reloadProfiles = async (reason = 'config reload') => {
-  if (shuttingDown || shutdownStarted || profileReloadInFlight) return
-  profileReloadInFlight = true
-  try {
-    const next = loadRuntimeConfig({ exitOnError: false })
-    ensureProfiles(next.profiles, next.defaultProfileId, config.workspacePolicies, false)
-    if (profileSignature(next.profiles, next.defaultProfileId) !== lastProfileSignature) {
-      await applyProfileConfig(next.profiles, next.defaultProfileId, reason)
-    }
-  } catch (error) {
-    console.warn(`profile config reload skipped | reason=${reason} | ${error.message}`)
-  } finally {
-    profileReloadInFlight = false
-  }
-}
-
-const startProfileWatcher = () => {
-  lastProfileSignature = profileSignature(config.profiles.filter(profile => !profile.managedGeneration), config.defaultProfileId)
-  if (config.profileReloadMs <= 0) return
-  const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-  if (profilesFile) {
-    const resolvedProfilesFile = resolve(profilesFile)
-    watchFile(resolvedProfilesFile, { interval: config.profileReloadMs }, (current, previous) => {
-      if (current.mtimeMs !== previous.mtimeMs || current.size !== previous.size) void reloadProfiles(`file changed: ${resolvedProfilesFile}`)
-    })
-  } else {
-    profileReloadTimer = setInterval(() => { void reloadProfiles('periodic CODEX_PROFILES check') }, config.profileReloadMs)
-  }
-}
-
-const shutdown = (exitCode = 0, reason = '') => {
-  if (shutdownPromise) return shutdownPromise
-  shutdownStarted = true
-  shuttingDown = true
-  shutdownPromise = (async () => {
-    if (reason) console.warn(`shutting down codex-ws-agent | reason=${reason}`)
-    managedHostChannel?.close()
-    terminateAllRuns()
-    if (profileReloadTimer) clearInterval(profileReloadTimer)
-    const profilesFile = process.env.CODEX_PROFILES_FILE?.trim()
-    if (profilesFile) unwatchFile(resolve(profilesFile))
-    const adapterShutdowns = []
-    for (const profile of config.profiles) {
-      const state = getProfileState(profile)
-      state?.processor.pause()
-      state?.resultReplayCancel?.()
-      state?.executionReportReplayCancel?.()
-      if (state) { state.resultReplayCancel = null; state.executionReportReplayCancel = null }
-      clearReconnectState(state)
-      clearInterval(state?.heartbeatTimer)
-      stopWorkspaceFilePoller(state)
-      stopNativeConversationPoller(state)
-      stopControlledImageV3ConversationPoller(state)
-      state?.registration.disconnect()
-      if (state) { state.registrationReady = false; state.platformSkillRuntime.disconnect('process shutdown'); state.workspaceFileRuntimeAuthHeader = '' }
-      if (state) adapterShutdowns.push(disposeAppServerState(state, { timeoutMs: 5000 }).catch(error => console.error(`app-server shutdown failed | profile=${profile.profileId} | ${error.message}`)))
-      sendStatus(profile, 'offline')
-      try { state?.ws?.close() } catch {}
-    }
-    await Promise.all(adapterShutdowns)
-    cleanupCodexAppServerSnapshots()
-    await new Promise(resolveExit => setTimeout(resolveExit, 100))
-    process.exit(exitCode)
-  })()
-  return shutdownPromise
 }
 
 export const loadWebSocketClient = async () => {
@@ -6400,130 +6671,7 @@ export const loadWebSocketClient = async () => {
 }
 
 export const main = async () => {
-  const runtimeConfig = loadRuntimeConfig()
-  if (hasFlag('--inspect-config')) {
-    // Do not initialize worktrees, read auth.json/session state, or open a WebSocket.
-    const report = buildConfigurationReport(runtimeConfig)
-    console.log(JSON.stringify(report, null, 2))
-    if (report.profiles.some(profile => profile.errors.length)) process.exitCode = 1
-    return
-  }
-  WebSocketClient = await loadWebSocketClient()
-  config = {
-    wsUrl: process.env.WS_URL || 'wss://api.chaoyoufan.cn/ws/agent/channel',
-    apiKey: process.env.OPENCLAW_API_KEY || '',
-    profiles: runtimeConfig.profiles,
-    defaultProfileId: runtimeConfig.defaultProfileId,
-    workspacePolicies: runtimeConfig.workspacePolicies,
-    heartbeatMs: parseNonNegativeMs(process.env.HEARTBEAT_MS, 30000),
-    registrationAckTimeoutMs: parseNonNegativeMs(process.env.REGISTRATION_ACK_TIMEOUT_MS, 10000),
-    reconnectMaxMs: parseNonNegativeMs(process.env.RECONNECT_MAX_MS, 30 * 60 * 1000),
-    profileReloadMs: parseNonNegativeMs(process.env.CODEX_PROFILE_RELOAD_MS, 5000),
-    commandInboxDir: resolve(process.env.COMMAND_INBOX_DIR || '/home/isp/apps/codex-ws-agent/data/inbox'),
-    commandInboxSuccessPolicy: process.env.COMMAND_INBOX_SUCCESS_POLICY || 'archive',
-    skillInstallEnabled: parseEnabledFlag(process.env.AGENT_SKILL_INSTALL_ENABLED),
-    platformSkillInstallEnabled: parseEnabledFlag(process.env.AGENT_PLATFORM_SKILL_INSTALL_ENABLED),
-    archiveMaintenanceEnabled: parseEnabledFlag(process.env.AGENT_ARCHIVE_MAINTENANCE_ENABLED),
-    skillInstallMaxBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_BYTES, 16 * 1024 * 1024),
-    skillInstallMaxExtractedBytes: parsePositiveInteger(process.env.AGENT_SKILL_INSTALL_MAX_EXTRACTED_BYTES, 64 * 1024 * 1024),
-    platformSkillMaxRetainedCopies: parsePositiveInteger(process.env.AGENT_PLATFORM_SKILL_MAX_RETAINED_COPIES, 2),
-    platformSkillMaxInstallationBytes: process.env.AGENT_PLATFORM_SKILL_MAX_INSTALLATION_BYTES
-      ? parsePositiveInteger(process.env.AGENT_PLATFORM_SKILL_MAX_INSTALLATION_BYTES, 1) : 0
-  }
-  if (!config.apiKey && !config.profiles.every(profile => profile.apiKey)) {
-    configError('OPENCLAW_API_KEY is required unless every profile defines apiKey')
-  }
-  if (!['archive', 'delete'].includes(config.commandInboxSuccessPolicy)) {
-    configError('COMMAND_INBOX_SUCCESS_POLICY must be archive or delete')
-  }
-  ensureProfiles(config.profiles, config.defaultProfileId, config.workspacePolicies)
-  defaultProfile = getProfileById(config.defaultProfileId) || config.profiles[0]
-  codexSessionStore = createCodexSessionStore(
-    process.env.CODEX_SESSION_MAP_FILE || resolve(process.cwd(), 'codex-session-map.json')
-  )
-
-  if (hasFlag('--validate')) {
-    if (process.env.AGENT_MANAGED_CHAT_SCOPES_FILE) loadManagedChatScopes(process.env.AGENT_MANAGED_CHAT_SCOPES_FILE)
-    for (const profile of buildConfigurationReport(runtimeConfig).profiles) {
-      for (const warning of profile.warnings) console.warn(`configuration warning | profile=${profile.profileId} | ${warning}`)
-    }
-    for (const policy of config.workspacePolicies.values()) {
-      new GitWorkspaceManager({ policy, agentId: 'validation-agent', role: 'validator' }).initialize()
-    }
-    console.log(`configuration valid | profiles=${config.profiles.length} | workspacePolicies=${config.workspacePolicies.size} | defaultProfile=${defaultProfile.profileId} | runtimeInstanceId=${PROCESS_RUNTIME_INSTANCE_ID}`)
-    return
-  }
-
-  for (const profile of config.profiles) profileStates.set(profile.agentId, createProfileState(profile))
-  process.on('SIGINT', () => { void shutdown(0, 'SIGINT') })
-  process.on('SIGTERM', () => { void shutdown(0, 'SIGTERM') })
-  for (const profile of config.profiles) connectProfile(profile)
-  startProfileWatcher()
-  // Inert unless explicitly configured at release. Never entered by --validate.
-  if (process.env.AGENT_MANAGED_HOST_ENABLED === 'true') {
-    try {
-      managedHostModule = await import('./managed-host.mjs')
-      const { ManagedHost, startManagedHostSocket } = managedHostModule
-      const required = name => {
-        const value = process.env[name]
-        if (!value || value !== value.trim()) throw new Error(`Missing managed host release setting ${name}`)
-        return value
-      }
-      const root = required('AGENT_MANAGED_HOST_ROOT')
-      const workspacePolicyId = required('AGENT_MANAGED_HOST_WORKSPACE_POLICY_ID')
-      if (!config.workspacePolicies.has(workspacePolicyId)) throw new Error('Managed hosting requires an existing trusted workspace policy')
-      if (config.profiles.some(profile => profile.codexHome &&
-          (resolve(profile.codexHome) === root || resolve(profile.codexHome).startsWith(`${root}/`) || root.startsWith(`${resolve(profile.codexHome)}/`)))) {
-        throw new Error('Managed data root overlaps existing profiles')
-      }
-      let managedImageScopes = emptyManagedImageScopeAuthorizations()
-      const managedImageScopesPath = process.env.AGENT_MANAGED_IMAGE_SCOPES_FILE
-      if (managedImageScopesPath) {
-        try {
-          managedImageScopes = loadManagedImageScopeAuthorizations(managedImageScopesPath, { reservedProfiles: config.profiles })
-        } catch (error) {
-          console.warn(`managed image scopes unavailable; controlled image remains disabled (${error.message})`)
-        }
-      }
-      const managedChatScopes = process.env.AGENT_MANAGED_CHAT_SCOPES_FILE
-        ? loadManagedChatScopes(process.env.AGENT_MANAGED_CHAT_SCOPES_FILE) : emptyManagedChatScopes()
-      const host = new ManagedHost({ root, workspacePolicyId, templateHome: required('AGENT_MANAGED_HOST_TEMPLATE_HOME'),
-        codexBin: required('AGENT_MANAGED_HOST_CODEX_BIN'), runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
-        tenantId: required('AGENT_MANAGED_HOST_TENANT_ID'), clientId: required('AGENT_MANAGED_HOST_CLIENT_ID'),
-        ownerJiacn: required('AGENT_MANAGED_HOST_OWNER_JIACN'),
-        conflicts: (ownerJiacn, agentId, generation) => config.profiles.some(profile => profile.agentId === agentId &&
-          (profile.managedOwnerJiacn !== ownerJiacn || profile.managedGeneration !== generation)),
-        profileState: (ownerJiacn, agentId) => {
-          const state = profileStates.get(agentId)
-          return state ? { registered: state.managedRegistered && state.ws?.readyState === WebSocketClient.OPEN,
-            ownerJiacn: state.profile.managedOwnerJiacn, generation: state.profile.managedGeneration,
-            runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID } : null
-        },
-        attachProfile: async (profile, engine) => {
-          profile = resolveManagedRuntimeProfile(profile, defaultProfile, managedImageScopes, managedChatScopes)
-          let state = profileStates.get(profile.agentId)
-          if (state && (state.profile.managedOwnerJiacn !== profile.managedOwnerJiacn ||
-              state.profile.managedGeneration !== profile.managedGeneration)) throw new Error('Managed profile collision')
-          if (!state) {
-            state = createProfileState(profile)
-            profileStates.set(profile.agentId, state)
-            config.profiles.push(profile)
-            state.managedEngine = engine
-            connectProfile(profile)
-          } else {
-            state.managedEngine = engine
-            if (state.ws?.readyState !== WebSocketClient.OPEN && !state.reconnectScheduled) connectProfile(profile)
-          }
-          // Registration normally arrives on a later poll; never manufacture synchronous online proof.
-        }
-      })
-      const recovery = await host.restore()
-      if (recovery.restored || recovery.skipped) console.log(`managed hosting recovery | restored=${recovery.restored} | skipped=${recovery.skipped}`)
-      managedHostChannel = await startManagedHostSocket({ socketPath: required('AGENT_MANAGED_HOST_SOCKET'), host })
-    } catch (error) {
-      console.warn(`managed hosting channel unavailable; legacy profiles unchanged (${error.code || error.name || 'configuration error'})`)
-    }
-  }
+  throw new AgentProtocolError('UNIFIED_RUNTIME_ENTRY_REQUIRED', 'Use the installation-authorized unified Runtime --config entry; legacy API-key execution is retired')
 }
 
 const canonicalMainModuleUrl = entry => {

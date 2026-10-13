@@ -4,11 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node agent-client.mjs",
     "test": "node --test"
-  },
-  "engines": {
-    "node": ">=20"
   },
   "dependencies": {
     "ws": "^8.21.1",

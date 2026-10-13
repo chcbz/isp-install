@@ -1,67 +1,381 @@
-# CYF Agent Runtime v1
+# Unified Agent Runtime (UR-01, 2026-10-08)
 
-A separate Node 20 Runtime v1 package. It does not reuse `codex-ws-agent`, WebSocket URLs, `.env` files, legacy `api_key` configuration, profiles, or state.
+One Runtime host reuses `codex-ws-agent`; it is not a heartbeat sidecar or a new
+model executor. Current package source is **Runtime 1.0.3** (2026-10-12, baseline
+`807b86d`); source availability does not prove a particular host is installed,
+activated or business-accepted. The old engine CLI/API-key execution entry is
+retired; do not run the old service with the new ACK format.
 
-## Offline validation and installation
+**Start here:** [Self-host install, enrollment and upgrade guide](../../docs/cyf-agent-runtime-v1-self-host.md).
+It covers target-side manifest/secret preparation, owner-JWT installation
+registration, protected enrollment, host/profile configuration, service ownership
+and a new-item acceptance. The installer alone does not perform these operations.
+The earlier M3/UR03 acceptance lists later in this document are historical scoped
+evidence/gates, not a current declaration that all deployed hosts are unaccepted.
 
-```bash
-./validate.sh --manifest manifest.example.json
-npm test
+## Artifact and configuration
+
+`install.sh --target ABSOLUTE_NEW_DIRECTORY` prepares a new artifact containing
+`runtime/`, `codex-ws-agent/` and supplied `node/bin/node`, npm lock graph
+and release-local Python delivery tools. It neither enables services nor adopts,
+rewrites, enrolls or deletes existing Agent state. Python still needs a compatible
+target ABI/stdlib; mocked installer tests do not prove clean-target installation.
+
+The current clean-target acceptance candidate targets **Python 3.11.13**.
+`Pillow==10.4.0` and `reportlab==3.6.13` have published cp311/Linux x86_64
+wheels matching the inspected tool tags; the previous Pillow 8.4.0 source build
+actually failed because JPEG headers/libraries were absent. Wheel metadata is
+not installation, ABI/API or six-format acceptance evidence: the new candidate
+still requires the full isolated install/import, relocation and PNG/JPEG/PDF/
+DOCX/XLSX/PPTX create/validate/reopen checks. Other four direct pins remain
+unchanged; these six pins are not a full transitive dependency lock.
+`python-docx==0.8.11` remains a permitted pure-Python source distribution; do
+not add blanket binary-only installation, borrow host packages or install host
+JPEG/compiler dependencies to bypass the private artifact checks. The existing
+private `pip<22` bootstrap and Python dependency selection are unchanged. No compatibility
+PASS, interpreter upgrade or production activation is implied by this source fix.
+
+As of 2026-10-09, Node has no project version allowlist or minimum-version gate.
+The installer records the packaged interpreter version in `runtime/node-version.txt`
+and install/validation logs; the existing acceptance receipt also records actual
+Node version and binary SHA-256. Release records use these measured values.
+Real execution/import/dependency failures still fail the build; this does not
+claim arbitrary Node versions work or change third-party dependency requirements.
+
+Configuration lives **outside** the artifact. Static host config has these fields
+plus optional `hostingControlPath` for the private managed-subject control channel:
+
+```json
+{
+  "configVersion": 1,
+  "hostId": "operator-provisioned-persistent-host",
+  "stateRoot": "/private/host-state",
+  "agents": [
+    {
+      "manifestPath": "/private/agent-a/manifest.json",
+      "profilePath": "/private/agent-a/profile.json",
+      "stateRoot": "/private/agent-a/state"
+    }
+  ]
+}
 ```
 
-The repository release profile also provides `./install.sh runtime-v1` (which invokes
-`shell/cyf_agent_runtime_v1_install.sh`) and the `systemd/cyf-agent-runtime-v1@.service`
-template. The copied Runtime v1 payload contains its own `install.sh`, `validate.sh`, and
-`systemd/` template. Both installers create a **new** directory and never copy, read, stop,
-or overwrite `codex-ws-agent` files.
+Each sealed manifest contains exact `installationId`, `tenantId`, `clientId`,
+`canonicalAgentId`, `manifestVersion`, `runtimeProtocolVersion: "v1"`, and
+`manifestSha256` (`sha256:` + SHA256 of recursively key-sorted unsigned JSON).
+Each profile explicitly selects the same `agentId`, a `profileId`, `codexBin`,
+`codexHome`, `codexWorkdir`, and existing per-operation executor policies. For
+example, `appServerEnabled`, `fastChatEnabled`, and `skillInstallEnabled` are
+explicit booleans; none imply readiness without the real adapter. No profile may
+supply API keys, installation/session credentials or reserved Runtime identity.
 
-For a standalone sealed package delivery, use the payload installer with a real manifest:
+Pre-create private state roots (0700, current UID). Config/manifest/profile files
+must be current-UID regular files, not group/other writable; credential files are
+0600. Duplicate full subjects/installations and equal/nested/symlink-alias writable
+roots across Agents are rejected. Host state cannot overlap Agent writable roots.
+Same-UID malicious code is **not** a strong isolation boundary. Provision workspace
+policies separately; do not share writable workspaces between subjects. Existing
+cross-process locks retain ownership until confirmed shutdown; crashed writer locks
+require stopped-writer reconciliation, never automatic theft or state clearing.
+
+### Controlled archive/platform profile gates
+
+The unified Runtime profile is the only current entry for these controlled commands.
+Both `platformSkillInstallEnabled` and `archiveMaintenanceEnabled` default to `false`.
+To enable either lane, its per-subject profile must explicitly set the corresponding
+boolean to `true` and set `controlledCommandOwnerJiacn` to the exact non-zero owner
+identity; archive maintenance also uses the platform skill manager to verify the
+sealed `archive-maintainer` package. Optional bounds are
+`platformSkillMaxRetainedCopies` (default `2`) and
+`platformSkillMaxInstallationBytes` (default `0`, meaning no extra retained-copy
+budget beyond the manager's existing package/extraction limits). The Runtime
+prepares and recovers the lane under the current session before registration and
+advertises `PLATFORM_SKILL_INSTALL` or `ARCHIVE_MAINTENANCE_EXECUTE` only when the
+Linux atomic bridge and live adapter are actually ready. These flags do not restore
+the deleted API-key launcher, do not bypass manifest/session proof, and are not
+deployment or business-acceptance evidence.
+
+## Entry and authorization
+
+Use the artifact-local Node; installation/enrollment and service activation are
+separate operations, requiring their own authorization:
 
 ```bash
-./install.sh --target /home/isp/apps/cyf-agent-runtime-v1/AGENT_INSTANCE \
-  --manifest /secure/channel/manifest.json
+ARTIFACT=/path/to/prepared-artifact
+"$ARTIFACT/node/bin/node" "$ARTIFACT/runtime/agent-runtime.mjs" validate --config /private/host.json
+"$ARTIFACT/runtime/validate.sh" --root "$ARTIFACT" --config /private/host.json
+# Explicit enrollment for exactly one SHA256 full-subject storage key:
+"$ARTIFACT/node/bin/node" "$ARTIFACT/runtime/agent-runtime.mjs" enroll --config /private/host.json --subject SUBJECT_KEY
+"$ARTIFACT/node/bin/node" "$ARTIFACT/runtime/agent-runtime.mjs" run --config /private/host.json
 ```
 
-It copies only Runtime v1 files, validates the installed manifest, creates a private
-`runtime-state/` directory, and does not enable or start a service.
+`CYF_RUNTIME_V1_API_BASE_URL` must be an HTTP(S) origin without routing data or
+credentials. Enrollment alone consumes one protected environment secret or
+`CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE` (non-symlink 0600 regular file). Do not retain
+that secret in the running service environment. Each Agent persists only its own
+installation authorization in `stateRoot/runtime-authorization.json`.
 
-A deployment channel must deliver a real read-only `manifest.json` with exact `tenantId`, `clientId`, `canonicalAgentId`, `installationId`, `manifestVersion`, and `manifestSha256`. `manifestSha256` is calculated as `sha256:` plus the lowercase SHA-256 of the recursively key-sorted JSON object with the `manifestSha256` member omitted. This local packaging rule is deliberately isolated because the API design does not yet specify a manifest canonicalization wire format.
+Current shared wire r2 is pinned by API commit
+**8911817e07cd938ecc77f14c4bb373a7f0246934**, fixture SHA256
+**7a1b0b41d3d57634557401b1a6e9fdf1ccd6f2ef09e14eea1ce42acef6616312**.
+Session/proof/version semantics remain as frozen in r1; the UR03 v1 fixture
+is retained only as its unchanged historical test input, not a second protocol.
+Session POST `/agent/runtime/v1/session` uses installation Bearer plus sealed
+identity/host/boot. Only exact `JsonResult.data` identity, host, boot and increasing
+server generation is accepted. WS `/ws/agent/channel`, native `/internal/agent/`
+and command HTTP ACK use memory-only `AgentRuntime rts1_<64-lowercase-hex>` and
+five X-Agent proof headers (Id, Installation-Id, Host-Id, Runtime-Id,
+Session-Generation). No URL credentials, API-key fallback, registration-minted
+replacement token or session secrets in logs/checkpoints.
 
-## Runtime configuration
+## Frozen persistence and lifecycle boundaries
 
-Set only `CYF_RUNTIME_V1_API_BASE_URL` plus one enrollment source:
+- Event catalog stays the mature Protocol v1 catalog, including command.dispatch,
+  CHAT, exact chat.stop, work.result and their own business receipts. No new command.
+- Unique command authority is the existing per-Agent ledger + inbox + ACK outbox
+  checkpoint. No `pending-acks.json`, sidecar ACK CLI or duplicate durable queue.
+- Lock order: lifetime host/Agent ownership → per-Agent lifecycle gate → existing
+  short checkpoint locks. HTTP waits occur **outside** the short filesystem lock;
+  response commits reacquire it, revalidate FIFO head/original-context digest,
+  persist exact D06 receipt + emitted marker, then durably dequeue. A crash between
+  these steps retains idempotent replay evidence.
+- Immutable ACK context contains installation/full subject, original message,
+  correlation, command, task, nullable workItem, nullable payloadReference and ISO expiresAt.
+  Session proof is appended only when sending. First deliveryVersion is null;
+  later it is the last confirmed value, not a predicted CAS version. Only matching
+  status + valid monotonic version + ADVANCED/PRIOR confirms commit. Injected
+  clients cannot bypass the checkpoint's independent result validation.
+- RECEIVED follows durable fingerprint/inbox; STARTED is durable and HTTP-confirmed
+  before business side effects. Unknown STARTED or business write outcomes are
+  recovery-required, never automatic rerun. Expiry denies new admission, not known
+  terminal reporting. Unknown native start/upload/commit retains recovery materials.
+- Registration is token-free and request/identity/boot/session-correlated;
+  readyCommandTypes comes from measured actual adapters, empty admits no commands.
+  durableStateHealthy is computed from actual stores, not a heartbeat assertion.
+  Health loss pauses admission but allows lawful terminal/result replay. Recovery
+  refreshes registration before readmission. Chat `profiles.EXECUTE` stays disabled.
+- Native v1, controlled-image v2/v3 and typed inspection receive the six exact
+  current session headers from the trusted transport at every HTTP send. They
+  reject old 32hex credentials, missing proof, wrong Agent/boot and non-canonical
+  generation. They neither synthesize installation identity nor mint credentials.
+  Session rotation aborts only its owned native network and rejects late responses;
+  no new request deadline or forced business replay is added.
+- Workspace material cleanup requires its known native terminal plus matching
+  durable HTTP D06 terminal. The existing completed inbox/ledger stores only local
+  command fingerprint/directory/device/inode, never session proof. After restart,
+  cleanup uses that exact directory identity without input download or re-execution;
+  absent paths are idempotent, replacement/symlink/foreign paths fail closed. Cleanup
+  IO failure retains retry authority in the same ledger, not a new queue. Native
+  v1/v2/v3 unknown START/upload/commit/failure also retains its private run.
+- Stopping polls does not release an in-flight guard; shutdown awaits owned native
+  operations (including an in-flight lease renewal) and engine closure before releasing writer locks. Exact CHAT stop
+  remains request/turn/dispatch/Agent-correlated and current-channel/generation
+  checked; unverified WORK_ITEM_CANCEL is not advertised.
+- Each Agent has its own session, socket, reconnect and queues. Revocation isolates
+  only that subject. SIGTERM aborts owned transport work and waits for confirmed
+  engine shutdown before releasing writer locks. No permanent legacy auth path.
 
-- `CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE`: regular non-symlink file with mode `0600`; or
-- `CYF_RUNTIME_V1_ENROLLMENT_SECRET`: protected service-manager environment.
+### Opt-in native text-file execution (核对日 2026-10-12; source baseline `5b902c1b`)
 
-The CLI deliberately has no enrollment-secret option. Runtime authorization is persisted only below `--state-dir` in private (`0700` directory, `0600` file) storage. Do not retain the enrollment secret after a successful enrollment. Do not put any authorization value in a URL, shell history, manifest, browser, or normal log.
+An operator-managed ordinary Runtime profile may set
+`nativeConversationTextFileEnabled: true` only when the existing native HTTP poll
+lane is enabled. The managed hosting-control template remains unchanged and does
+not enable this lane; its profile boundary intentionally lacks native file roots.
+Managed-image authorization does not inherit this flag. Registration advertises text
+execution only on the initial/current online registration
+when the actual native runtime reports `nativeTextFileV1Ready`; missing/old Runtime
+state remains not-ready. Presence is status-only here and does not create a separate
+readiness revocation path; API authorization remains bound to its live Runtime session.
+The original installer execution-payload catalog explicitly includes
+`conversation-text-file.mjs` and its existing native dependencies.
 
-## Commands
+The executor accepts no references and only `text/plain`/`output_1`. It invokes the
+existing Codex CLI once with a fresh session, the private native run directory,
+`workspace-write`, and approval `never`; it then reads actual `outputs/result.txt`
+bytes (uploaded with the existing fixed `output.txt` filename) and rejects missing/empty output, invalid UTF-8, NUL, symlink and hardlink
+outputs. Chat remains read-only. The existing native lane retains the lease and
+one-shot START fence, upload and commit protocol. This source capability defaults
+off and does not imply installation, API authorization, image readiness, deployment,
+or business acceptance. Runtime package version advances from 1.0.2 to 1.0.3.
 
-```bash
-node agent-runtime.mjs validate --manifest manifest.json
-node agent-runtime.mjs enroll --manifest manifest.json --state-dir runtime-state
-node agent-runtime.mjs session --manifest manifest.json --state-dir runtime-state
-node agent-runtime.mjs heartbeat --manifest manifest.json --state-dir runtime-state
-node agent-runtime.mjs ack --manifest manifest.json --state-dir runtime-state --command command.json --status RECEIVED
-node agent-runtime.mjs run --manifest manifest.json --state-dir runtime-state
-```
+## Owner test coverage and remaining gates
 
-`ack` validates command target identity, expiry, required command fields, and monotonic state before a private durable queue is written. Reconnection resends the same `messageId` ACK; terminal acknowledgement records are retained to avoid execution replay and terminal rewrites.
+Targeted tests: `test/runtime-v1.test.mjs` (r1 request/proof/result/expiry/security),
+`test/runtime-host.test.mjs` (config/locks/isolated lifecycle/generation/health/close),
+engine `test/agent-client.test.mjs` (mature queue + D06 FIFO/STARTED/unknown result/
+restart/conflicting payload; CHAT/result dedicated confirmation),
+`test/registration-ack.test.mjs` and `test/skill-install-manager.test.mjs`.
+Native lane/runtime, workspace-file-bridge and inspection tests cover the proof
+migration, prior function/Provider-start/lease/input/output boundaries and recovery
+retention. Integrated UR03 `unified-runtime-acceptance.test.mjs` keeps its cross-end
+HTTP test explicitly NOT_RUN (skip), not a synthetic PASS.
+They use private synthetic roots/mock HTTP/socket and a local WS handshake;
+**they are not cross-end API, clean-target install, Flow or online evidence**.
 
-## API integration assumptions requiring confirmation
+Canonical dispatch projection **r2** uses the exact API codec fixture (commit
+`a2dbe65062ff4c1c511094c19233b1b25c076f3e`, SHA256
+`057a4626387846f4bf420cab046d7d0bb4d12cdae6569e90839af00161cbd5a3`).
+Raw tenant/client/targetAgentId must first match the trusted manifest, without
+nested identity aliases. ACK canonicalAgentId and Runtime installation then come
+only from that manifest; session/host/boot/generation are added by the current
+transport at send. Skill's root installationId is PRODUCT data, not Runtime proof;
+using Runtime installation as product installation is rejected. An absent actual
+payloadReference projects to null, never a fabricated source/ACL proof. Nullable
+workItem follows the codec. A safe epoch integer within the JS date range projects
+to ISO, without changing admission expiry or the original message. The existing
+source/context/reference/reassignment/lease checks are not replaced by projection.
 
-The frozen design specifies endpoint paths but not request/response schemas or command-channel transport. This package therefore sends the documented identity fields to all Runtime v1 HTTP endpoints and assumes:
+The Runtime fingerprint binds the original canonical raw wire, including original
+epoch, product installation and actual business source/context, not ACK-normalized
+fields. Before any HTTP ACK send, ledger projection and original inbox wire
+fingerprint/projection must independently match; response commit still rechecks
+FIFO/status/version under the original short lock. No second durable queue exists.
+`test/canonical-dispatch-r2.test.mjs` covers the byte-pinned E05 fixture at a frozen
+fake Date (the shared fixture clock `1001000`) through a **local real HTTP server**
+and mature checkpoint, exact shared first-ACK projection, pre-checkpoint negatives,
+expiry, lost terminal response and restart/current-session replay. This is an
+Owner client boundary test, **not the actual Java API/D06/DB integration**. The
+UR03 cross-end NOT_RUN skip is not removed or reclassified. Remaining M3 gates are
+actual client/server HTTP/native/skill acceptance and exact WORK_ITEM_CANCEL
+adapter/codec verification if that existing adapter can prove binding. Uncertain
+recovery material is retained, never manually cleared or automatically reexecuted.
+Dynamic online identity/maintenance ownership, stopped-writer state migration,
+Flow version/commit/artifact proof and three-Agent real business acceptance remain
+release gates. Current task is incomplete: **do not publish or switch production**.
 
-1. enrollment accepts `enrollmentSecret` and returns `data.runtimeAuthorization` in CYF's common JSON envelope;
-2. runtime authorization is sent as `Authorization: Bearer <runtimeAuthorization>`;
-3. ACK body uses `status` and returns `data.kind: ADVANCED|PRIOR`;
-4. session/heartbeat return `data.status`, including `REBINDS_REQUIRED`.
+## Legacy provisioning source retirement (UR-01, 2026-10-08)
 
-No command-polling or command-channel transport is invented here: `run` establishes a session, heartbeats, and flushes already durable ACKs. An API-owned command channel contract is required before it can consume commands or execute F01/E05 work.
+The unified artifact does **not** generate an API-key Agent execution entry.
+`codex-ws-agent` is an execution library, not a second service/provisioner:
 
-## Run-loop recovery
+| Exact source path | Minimal convergence |
+| --- | --- |
+| `shell/codex_ws_agent_install.sh`, `bin/codex_ws_agent.sh` | Deleted on 2026-10-09; no diagnostic wrapper or old launcher remains. The main dispatcher still rejects removed component names. |
+| `conf/codex-ws-agent/managed-host.mjs` | Deleted: no API-key broker, ensure/observe admission, credential restore/copy, generation creation or Unix provisioning socket remains. Historical association/journal/credential files are not touched. |
+| `conf/codex-ws-agent/agent-client.mjs` | Remove dead broker references; standalone CLI remains retired. Only the injected Runtime execution host is used. |
+| `conf/codex-ws-agent/package.json` | No `start` script; not an alternate executable package. Model/provider credentials remain distinct from Agent authentication. |
+| `conf/cyf-agent-runtime-v1/lib/execution-adapter.mjs` | Authoritative explicit execution-library catalog and import closure. Excludes/rejects the old broker, API-key env/profile templates, old engine execution README, old install-candidate/policy tools, offline ACK migration and diagnostic probes; also rejects reintroduced package start/prestart/poststart/bin entries and retired-path symlinks. |
+| `shell/cyf_agent_runtime_v1_install.sh`, `conf/cyf-agent-runtime-v1/install.sh` | Existing sole artifact staging path retained: fresh canonical target only, no old `.env` or profile adoption, no enrollment, service activation or state migration. |
 
-The `run` command keeps the same manifest identity and session/heartbeat/ACK protocol. It retries transient `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `EAI_AGAIN`, `UND_ERR_SOCKET`, `UND_ERR_CONNECT_TIMEOUT`, and HTTP `408`, `429`, or `5xx` failures with exponential backoff capped at 60 seconds; a successful cycle resets the delay. HTTP `401`/`403`, `REBINDS_REQUIRED`, and other non-transient failures (including TLS certificate/identity errors) stop with fixed exit status `78`; both source units prevent restart for that status. The unit uses a 5-second restart delay for other process failures; permanent auth/rebind failures never trigger identity rebinding or work replay. Retry logs contain only a fixed category and, for HTTP errors, the numeric status.
+Existing scoped provider, CHAT, native/skill and checkpoint implementations are
+not replaced. Long historical profile identifiers remain explicit provider-scope
+regression inputs; they neither provision an identity nor authorize a Runtime.
+The retired candidate/provenance checker, its templates and its dedicated tests
+were deleted on 2026-10-09. Current configuration validation, manifest/session
+contracts and execution tests remain; no old installer fixture is shipped.
 
-`SIGTERM`/`SIGINT` abort the active request or backoff wait. The loop does not start another ACK flush after cancellation. Durable pending ACK records remain governed by the existing monotonic ACK queue, and no task execution/replay behavior is added.
+### Registry, launcher and unit source convergence
+
+`install.sh` advertises only `cyf-agent-runtime-v1`/`runtime-v1` for Agent artifacts;
+profile `agent` selects the canonical Runtime component without a generic Node
+upgrade. Other component mappings and full-profile order are preserved, with only
+the retired Agent component replaced. `codex-ws-agent`/`codex` are rejected before
+any component installation, even in a mixed argument list. `shell/sh_list.txt`
+lists only the current Runtime installer. Explicit instance, prepared canonical
+parent and executable Node prerequisites still apply; no identity is inferred.
+
+The old launcher/installer stubs and API-key env/INI templates are deleted,
+along with the dual-mode candidate checker, workspace migration pre-check and
+historical API probe. The execution library no longer exports `loadRuntimeConfig`
+or `observeTypedRuntimeAuthentication`; explicit JSON profiles are normalized
+under the existing Runtime host. Current tests verify removed paths remain absent.
+
+The old unit templates remain absent. Only the existing unified Runtime unit is
+shipped. These are source changes, not removal or restart of installed services.
+The separate active ACK workstream still references its offline migration tool;
+that tool remains repository-only and excluded from the execution artifact.
+
+
+## Old/new state migration requirements — no migration performed
+
+1. Inventory **all** shared/dynamic profiles, exact tenant/client/canonical Agent,
+   verified Runtime installation mapping, work roots and maintenance Owners. The
+   three persona names are not exhaustive identities or authorization evidence.
+   Preserve private historical association, journal and credential evidence for
+   audit; never authorize a new installation using an old API key/hash or role.
+2. Require an explicit, independently verifiable, unique full-subject mapping into
+   each sealed manifest and protected installation enrollment. Ambiguous histories
+   remain blocked and untouched; do not silently restore the old broker or infer
+   ownership from directory/profile names. New session tokens and generations are
+   transport-only authority, not migration inputs or persistent queue contents.
+3. After an authorized stop of **all exact old writers**, back up code plus state
+   formats, identity maps and owned directory/inode evidence. Account for inbox,
+   original-wire fingerprints, ledger, ACK FIFO/head/last-confirmed-version and
+   receipts; CHAT inbox/outbox/request/turn/thread/session; skill result evidence
+   and outbox; execution reports; provider ledgers/fences and unknown outcomes;
+   worktrees, materials and cleanup authority. No queue clearing, paid/business
+   replay, re-delivery or inferred success from a historical WS send.
+4. Pre-r2 fingerprints and ACK formats are not silently convertible to r2. A
+   proved, explicit offline migration plan must preserve original work evidence
+   and unknown/recovery-required outcomes. The offline ACK tool is deliberately
+   **not** packaged as a Runtime startup step. Model-provider Codex home/auth is
+   separate from retired Agent credential files; no cross-Agent template copying.
+5. Cut over with one writer per full subject, never old/new simultaneous writers.
+   Recovery covers code **and** format/state/identity mapping; binary-only rollback
+   into new ACK state is unsafe. No production history migration, DDL, revocation,
+   credential rewrite, chmod, deletion or service operation is authorized here.
+
+Owned client source retirement and offline self-check can complete separately
+from these **remaining gates**: main/runner's real Java/D06/isolated-MySQL and
+native/skill cross-end acceptance (UR03 HTTP remains NOT_RUN), clean-target locked
+toolchain/Flow verification and exact source/artifact binding, full online identity
+and maintenance inventory, explicit stopped-writer migration/recovery plan,
+versioned release/cutover/old-authorization revocation, and three-Agent real business
+acceptance. Unverified WORK_ITEM_CANCEL stays unadvertised; exact CHAT cancellation
+remains supported. These are not replaced by local mocks or by a task-branch push.
+
+
+## Managed subject control (GSS-HOSTING-RUNTIME-20261010, 2026-10-10)
+
+Development source adds private `runtime-hosting-v1` control inside this SAME
+RuntimeHost: `capabilities/prepare/ensure/observe`, persistent candidates and dynamic
+subject add/recreate. Static agents remain unchanged. New subjects use an explicit
+operator-managed provider template and independent HOME/work/state. Registration
+waits no longer block peer heartbeat. See [HOSTING-CONTROL.md](HOSTING-CONTROL.md)
+for exact `hostingControlPath` schema, API/socket GID pairing, tmpfiles boot setup,
+installation handoff, uncertainty guards and acceptance-to-test coverage.
+
+The artifact installer only stages templates/modules; no production setup or
+service restart occurs. Historical clean-target harness SOURCE5666fd remains its
+frozen historical catalog, **not** current hosting payload/release evidence. Current
+installer/validator catalog and local hosting tests cover the new source; Main must
+fix a new artifact and perform authorized integration/release evidence separately.
+No actual provider/production GSS readiness or rent settlement is claimed.
+
+
+### Managed-state directory policy (2026-10-12)
+
+New hosting configurations use `/home/isp/state/cyf-agent-runtime-v1-managed/unified`.
+The operator example and tmpfiles template agree on this root (root:root 0700).
+Program artifacts stay under `/home/isp/apps/cyf-agent-runtime-v1`, and external
+configuration stays under `/home/isp/conf/cyf-agent-runtime-v1`.
+Do not recreate `/var/lib/` CYF state entries, bind mounts or symlink fallbacks.
+For an existing managed installation, move its complete state under controlled
+service shutdown and update `managedRoot` and persisted per-subject profile paths
+as one operation. Preserve journal, manifest, authorization, ACK and enrollment
+state; do not generate replacement identities or enroll again. The installer
+stages artifacts only and does not perform this migration. Static Agent state
+is not implicitly moved by changing the managed-root example.
+
+### Host configuration and static-subject image credentials (2026-10-11)
+
+The canonical host configuration directory is `/home/isp/conf/cyf-agent-runtime-v1`.
+Systemd units remain in `/etc/systemd/system`; program releases and persistent
+state retain their existing paths. Update host `profilePath` / `hostingControlPath`
+and operator-managed service drop-ins when migrating. Do not leave a second
+configuration tree or symlink fallback. The artifact installer only packages the
+unit template: it does not migrate private files or restart services.
+
+Static subjects enabling `controlledImageHttpEnabled` require an explicit
+`CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE` in the service environment file. Its
+JSON schema is `{ "configVersion": 1, "subjects": { "<full-subjectKey>": {
+"CYF_PROVIDER_IMAGE_API_KEY": "<operator-supplied-secret>" } } }`.
+Each subject must match a configured manifest identity, and the sole environment
+key must exactly match that subject profile's `controlledImageHttpApiKeyEnv`
+(`CYF_PROVIDER_*`). The file must be canonical, non-symlink, owned by the current
+UID with no group/other permissions. Unknown subjects, missing enabled subjects,
+arbitrary environment keys and malformed credentials fail validation without
+logging file contents. `validate` and `run` use the same loader. Runtime injects
+only the matching subject's values through the existing providerEnvironments
+seam; no inherited process Provider environment or other Agent HOME fallback.
+Managed-host templates retain their existing independent credential mechanism.

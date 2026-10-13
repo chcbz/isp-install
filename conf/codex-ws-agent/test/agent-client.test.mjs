@@ -30,7 +30,6 @@ import {
   buildWebSocketOptions,
   buildWebSocketUrl,
   canPublishProfileOnline,
-  activateRegisteredProfile,
   discoverCodexSkills,
   discoverWorkspaceAbilities,
   isLegacyInboundControlFrame,
@@ -46,6 +45,10 @@ import {
   runProfileChat,
   materializeImageGenerationResult,
   runManagedCommand,
+  e05ReassignmentBinding,
+  createE05LeaseAdapter,
+  recoverE05Result,
+  validateE05Result,
   sanitizeWebSocketEndpoint,
   workspaceFilePrompt
 } from '../agent-client.mjs'
@@ -957,24 +960,11 @@ test('legacy execution types, missing messageType, and ambiguous envelopes fail 
 })
 
 test('runtimeInstanceId is process-scoped while WebSocket API keys use headers', () => {
-  const url = new URL(buildWebSocketUrl('wss://example.test/ws', 'secret', profile))
-  assert.equal(url.searchParams.get('runtimeInstanceId'), PROCESS_RUNTIME_INSTANCE_ID)
-  assert.equal(url.searchParams.get('runtime_instance_id'), PROCESS_RUNTIME_INSTANCE_ID)
-  assert.equal(url.searchParams.has('api_key'), false)
-  const legacy = new URL(buildWebSocketUrl('wss://example.test/ws?api_key=legacy&API_KEY=legacy2&keep=1', 'secret', profile))
-  assert.equal([...legacy.searchParams.keys()].some(key => key.toLowerCase() === 'api_key'), false)
-  assert.equal(legacy.searchParams.get('keep'), '1')
+  assert.throws(() => buildWebSocketUrl('wss://example.test/ws', 'retired', profile), /installation-derived session/)
+  assert.throws(() => buildWebSocketOptions('retired', profile), /retired/)
   const sanitized = new URL(sanitizeWebSocketEndpoint('wss://example.test/ws?api_key=legacy&keep=1'))
   assert.equal(sanitized.searchParams.has('api_key'), false)
   assert.equal(sanitized.searchParams.get('keep'), '1')
-  assert.deepEqual(buildWebSocketOptions('fallback-secret', profile), {
-    headers: { 'X-API-Key': 'fallback-secret' }
-  })
-  assert.deepEqual(buildWebSocketOptions('fallback-secret', { ...profile, apiKey: 'profile-secret' }), {
-    headers: { 'X-API-Key': 'profile-secret' }
-  })
-  assert.throws(() => buildWebSocketOptions('', { ...profile, apiKey: '' }), /required/)
-
   const register = buildProtocolEnvelope(MESSAGE_TYPES.AGENT_REGISTER, {}, profile)
   const presence = buildProtocolEnvelope(MESSAGE_TYPES.AGENT_PRESENCE, {}, profile)
   assert.equal(register.runtimeInstanceId, PROCESS_RUNTIME_INSTANCE_ID)
@@ -1248,29 +1238,28 @@ test('installing Codex skills does not change scheduling abilities', () => {
   assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, [])
 })
 
-test('real ws upgrade sends X-API-Key header and no query credential', async () => {
+test('real ws upgrade uses memory session proof, no API key or URL credential', async () => {
+  const { RuntimeV1Client } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
   const observed = await new Promise((resolvePromise, rejectPromise) => {
     const server = createServer()
     server.on('upgrade', (request, socket) => {
-      const result = { url: request.url, apiKey: request.headers['x-api-key'] }
+      const result = { url: request.url, headers: request.headers }
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
-      socket.destroy()
-      server.close(() => resolvePromise(result))
+      socket.destroy(); server.close(() => resolvePromise(result))
     })
     server.listen(0, '127.0.0.1', async () => {
       try {
         const implementation = await loadWebSocketClient()
-        const address = server.address()
-        const target = buildWebSocketUrl(`ws://127.0.0.1:${address.port}/ws?api_key=legacy`, 'secret', profile)
-        const client = new implementation(target, buildWebSocketOptions('secret', profile))
-        client.on('error', () => {})
-      } catch (error) {
-        server.close(() => rejectPromise(error))
-      }
+        const runtime = new RuntimeV1Client({ manifest: {}, apiBaseUrl: `http://127.0.0.1:${server.address().port}`, fetchFn() {} })
+        runtime.currentSession = { sessionToken: 'rts1_' + 'a'.repeat(64), canonicalAgentId: 'agent-a', installationId: 'installation-a', hostId: 'host-a', runtimeInstanceId: 'boot-a', sessionGeneration: 7, websocketPath: '/ws/agent/channel' }
+        const client = new implementation(runtime.websocketUrl(), runtime.websocketOptions()); client.on('error', () => {})
+      } catch (error) { server.close(() => rejectPromise(error)) }
     })
   })
-  assert.equal(observed.apiKey, 'secret')
-  assert.equal(new URL(observed.url, 'ws://127.0.0.1').searchParams.has('api_key'), false)
+  assert.equal(observed.headers.authorization, 'AgentRuntime rts1_' + 'a'.repeat(64))
+  assert.equal(observed.headers['x-api-key'], undefined)
+  assert.equal(observed.headers['x-agent-session-generation'], '7')
+  assert.equal(observed.url, '/ws/agent/channel')
 })
 
 test('fsync and rename failures fail closed before command execution', async () => {
@@ -1501,7 +1490,7 @@ test('chat failure and busy branches emit chat responses only', async () => {
   await processor.waitForIdle()
 })
 
-test('public envelope preserves explicit sender identity and validate works without global WebSocket', () => {
+test('public envelope preserves sender identity; retired main rejects even without global WebSocket', () => {
   const envelope = buildProtocolEnvelope(MESSAGE_TYPES.CHAT_MESSAGE, {
     senderName: 'Explicit Sender',
     personaName: 'Explicit Persona'
@@ -1509,25 +1498,11 @@ test('public envelope preserves explicit sender identity and validate works with
   assert.equal(envelope.senderName, 'Explicit Sender')
   assert.equal(envelope.personaName, 'Explicit Persona')
 
-  const bootstrap = `
+  assert.throws(() => execFileSync(process.execPath, ['--input-type=module', '--eval', `
     delete globalThis.WebSocket;
-    process.argv.push('validate-bootstrap', '--validate');
-    const { main } = await import('./agent-client.mjs');
-    await main();
-  `
-  const output = execFileSync(process.execPath, ['--input-type=module', '--eval', bootstrap], {
-    cwd: resolve(import.meta.dirname, '..'),
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      OPENCLAW_API_KEY: 'test',
-      CODEX_PROFILES_FILE: '',
-      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
-      DEFAULT_CODEX_PROFILE: 'validate',
-      CODEX_PROFILE_RELOAD_MS: '0'
-    }
-  })
-  assert.match(output, /configuration valid/)
+    const { main } = await import('./agent-client.mjs'); await main();
+  `], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8', stdio: 'pipe' }),
+    error => error.stderr.includes('UNIFIED_RUNTIME_ENTRY_REQUIRED'))
 })
 
 
@@ -1581,6 +1556,78 @@ test('same commandId triggers dedupe and does not re-enqueue', async () => {
   assert.deepEqual(receivedAcks, ['command-1'])
   assert.deepEqual(startedAcks, ['command-1'])
   assert.deepEqual(completedAcks, ['command-1', 'command-1'])
+})
+
+test('automatic reissue duplicate replays new transport metadata without replacing queued execution', async () => {
+  const rootDir = temporaryDirectory()
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: profileStorageRoot(rootDir), profile })
+  ledger.initialize()
+  const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile })
+  ackOutbox.initialize()
+
+  let runs = 0
+  const acks = []
+  const processor = new AgentMessageProcessor({
+    profile,
+    inbox,
+    runCommand: async () => { runs += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    ledger,
+    ackOutbox,
+    sendFn: envelope => { acks.push(envelope); return true }
+  })
+  processor.start({ drain: false })
+
+  const attempt1 = command(91)
+  const attempt2 = {
+    ...attempt1,
+    messageId: 'message-91-reissue-2',
+    requestId: 'message-91-reissue-2',
+    attempt: 2
+  }
+  const attempt3 = {
+    ...attempt1,
+    messageId: 'message-91-reissue-3',
+    requestId: 'message-91-reissue-3',
+    attempt: 3
+  }
+
+  assert.equal((await processor.handle(attempt1)).kind, 'command')
+  assert.equal(runs, 0)
+  assert.equal(inbox.count('pending'), 1)
+  assert.equal(inbox.list('pending')[0].messageId, attempt1.messageId)
+
+  assert.equal((await processor.handle(attempt2)).kind, 'command-duplicate')
+  assert.equal(runs, 0)
+  assert.equal(inbox.count('pending'), 1)
+  assert.equal(inbox.list('pending')[0].messageId, attempt1.messageId)
+  assert.deepEqual(
+    acks.map(envelope => [envelope.ackStatus, envelope.correlationId]),
+    [
+      [ACK_STATUS.RECEIVED, attempt1.messageId],
+      [ACK_STATUS.RECEIVED, attempt2.messageId]
+    ]
+  )
+
+  processor.resume()
+  await processor.waitForIdle()
+  assert.equal(runs, 1)
+  assert.deepEqual(
+    acks.slice(-2).map(envelope => [envelope.ackStatus, envelope.correlationId]),
+    [
+      [ACK_STATUS.STARTED, attempt1.messageId],
+      [ACK_STATUS.SUCCEEDED, attempt1.messageId]
+    ]
+  )
+
+  assert.equal((await processor.handle(attempt3)).kind, 'command-duplicate')
+  await processor.waitForIdle()
+  assert.equal(runs, 1)
+  assert.deepEqual(
+    [acks.at(-1).ackStatus, acks.at(-1).correlationId],
+    [ACK_STATUS.SUCCEEDED, attempt3.messageId]
+  )
 })
 
 test('same commandId with different payload causes fingerprint conflict and REJECTED', async () => {
@@ -3000,39 +3047,18 @@ test('all 5 ACK status constants are defined', () => {
   assert.equal(ACK_STATUS.REJECTED, 'REJECTED')
 })
 
-test('symlinked standalone entry executes validation instead of exiting as a no-op', () => {
-  const root = temporaryDirectory()
-  const linkedEntry = resolve(root, 'agent-client.mjs')
-  symlinkSync(resolve(import.meta.dirname, '..', 'agent-client.mjs'), linkedEntry)
-  const output = execFileSync(process.execPath, [linkedEntry, '--validate'], {
-    cwd: root,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      OPENCLAW_API_KEY: 'test',
-      CODEX_PROFILES_FILE: '',
-      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate-link', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
-      DEFAULT_CODEX_PROFILE: 'validate-link',
-      CODEX_PROFILE_RELOAD_MS: '0'
-    }
-  })
-  assert.match(output, /configuration valid/)
+test('symlinked retired engine entry fails closed instead of exiting as a no-op', () => {
+  const root = temporaryDirectory(); const entry = resolve(root, 'agent-client.mjs')
+  symlinkSync(resolve(import.meta.dirname, '..', 'agent-client.mjs'), entry)
+  assert.throws(() => execFileSync(process.execPath, [entry, '--validate'], { cwd: root, encoding: 'utf8', stdio: 'pipe' }),
+    error => error.stderr.includes('legacy API-key execution is retired'))
 })
 
-test('standalone --validate still works with a06 additions', () => {
-  const output = execFileSync(process.execPath, ['agent-client.mjs', '--validate'], {
-    cwd: resolve(import.meta.dirname, '..'),
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      OPENCLAW_API_KEY: 'test',
-      CODEX_PROFILES_FILE: '',
-      CODEX_PROFILES: JSON.stringify([{ profileId: 'validate', agentId: 'agent-a', codexBin: '/bin/true', codexWorkdir: '/tmp' }]),
-      DEFAULT_CODEX_PROFILE: 'validate',
-      CODEX_PROFILE_RELOAD_MS: '0'
-    }
-  })
-  assert.match(output, /configuration valid/)
+test('retired standalone --validate cannot revive old execution credentials', () => {
+  assert.throws(() => execFileSync(process.execPath, ['agent-client.mjs', '--validate'], {
+    cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8', stdio: 'pipe',
+    env: { ...process.env, OPENCLAW_API_KEY: 'retired-test', CODEX_PROFILES: '[{"agentId":"agent-a"}]' }
+  }), error => error.stderr.includes('legacy API-key execution is retired'))
 })
 
 
@@ -3088,7 +3114,7 @@ test('strict workspace file payload uses only its private run cwd, uploads and c
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
   }
   const message = normalizeInboundMessage({
     ...command(250),
@@ -3158,12 +3184,12 @@ test('image workspace delivery materializes the one built-in imagegen raster bef
     }
   })
   const outcome = await runManagedCommand({
-    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}` },
+    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}` },
     message: normalizeInboundMessage({ ...command(253), instruction: 'remove the background', payload }),
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
     workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
     workspaceFileBridge: bridge,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
     runCodexFn: async (_profile, codexMessage, _mode, overrides) => {
       assert.match(codexMessage.prompt, /authenticated Codex imagegen capability/)
       assert.match(codexMessage.prompt, /Do not create a PNG\/JPEG yourself/)
@@ -3194,12 +3220,12 @@ test('missing built-in imagegen result fails stably and reports it to the runtim
     }
   })
   const outcome = await runManagedCommand({
-    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}` },
+    profile: { ...profile, workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: root, workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}` },
     message: normalizeInboundMessage({ ...command(254), payload }),
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
     workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
     workspaceFileBridge: bridge,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
     runCodexFn: async () => ({ status: 'completed', exitCode: 0 }),
     sendLegacyFn: () => {}, sendStatusFn: () => {}
   })
@@ -3238,7 +3264,7 @@ test('workspace command polling accepts only exact native queue envelopes and di
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
   }
   const bridge = new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => assert.fail('bridge download is not expected') })
   const valid = {
@@ -3305,7 +3331,7 @@ test('workspace command polling retries one stale undici socket before dispatchi
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
   }
   const bridge = new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => assert.fail('bridge download is not expected') })
   const state = {
@@ -3344,7 +3370,7 @@ test('workspace command polling exposes safe failure categories while failing cl
     ...profile,
     workspaceFileApiOrigin: 'https://api.example.test',
     workspaceFileRootDir: root,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
   }
   const state = { workspaceFileBridge: new WorkspaceFileBridge({ apiOrigin: configured.workspaceFileApiOrigin, rootDir: root, fetchFn: async () => {} }), workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader, processor: {} }
   const nativeUrl = 'https://api.example.test/internal/agent/tasks/workspace-executions/commands'
@@ -3395,7 +3421,7 @@ test('strict workspace file runtime failure reports failed only and command fing
   assert.deepEqual(reports, [])
 })
 
-test('workspace file upload failure is reported failed after Codex and never completed', async () => {
+test('workspace file ambiguous upload preserves recovery materials after Codex and never reports completion', async () => {
   const input = Buffer.from('workspace input\n')
   const root = temporaryDirectory()
   let posts = 0
@@ -3414,13 +3440,13 @@ test('workspace file upload failure is reported failed after Codex and never com
       ...profile,
       workspaceFileApiOrigin: 'https://api.example.test',
       workspaceFileRootDir: root,
-      workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`
+      workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`
     },
     message: normalizeInboundMessage({ ...command(252), payload: workspaceFilePayload(input) }),
     skillInstallManager: { execute: async () => assert.fail('must not select skill installer') },
     workspaceManager: { acquireCommandWorkspace: () => assert.fail('must not select Git workspace manager') },
     workspaceFileBridge: bridge,
-    workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
     runCodexFn: async (_profile, _message, _mode, overrides) => {
       mkdirSync(resolve(overrides.codexWorkdir, 'outputs'), { recursive: true })
       writeFileSync(resolve(overrides.codexWorkdir, 'outputs/result.json'), '{}')
@@ -3429,11 +3455,11 @@ test('workspace file upload failure is reported failed after Codex and never com
     sendLegacyFn: (type, payload) => reports.push({ type, payload }),
     sendStatusFn: () => {}
   })
-  assert.equal(posts, 2)
-  assert.equal(outcome.status, 'failed')
+  assert.equal(posts, 1)
+  assert.equal(outcome.status, 'recovery_required')
   assert.match(outcome.errorMessage, /^UPLOAD_FAILED:/)
   assert.ok(reports.every(report => report.payload.status === 'failed'))
-  assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), false)
+  assert.equal(existsSync(resolve(root, 'task-1', 'run-1')), true)
 })
 
 test('opt-in command execution persists and replays an exact Protocol-v1 work.result until its matching receipt', async () => {
@@ -3522,6 +3548,28 @@ test('non-opt-in command types do not create execution reports', async () => {
   processor.start()
   await processor.handle(command(1))
   await processor.waitForIdle()
+  assert.equal(outbox.pendingReports().length, 0)
+})
+
+test('missing execution report command types does not disrupt command completion', async () => {
+  const rootDir = temporaryDirectory()
+  const reportProfile = { ...profile }
+  const outbox = new ExecutionReportOutbox({ profile: reportProfile, rootDir: resolve(rootDir, 'execution-report-outbox') })
+  outbox.initialize()
+  let completedRuns = 0
+  const processor = new AgentMessageProcessor({
+    profile: reportProfile,
+    inbox: new PersistentCommandInbox({ rootDir, profile: reportProfile }),
+    runCommand: async () => { completedRuns += 1; return { status: 'completed' } },
+    runChat: async () => {},
+    executionReportOutbox: outbox,
+    sendFn: () => true
+  })
+  processor.start()
+  await processor.handle(command(1))
+  await processor.waitForIdle()
+  assert.equal(completedRuns, 1)
+  assert.equal(processor.inbox.count('pending'), 0)
   assert.equal(outbox.pendingReports().length, 0)
 })
 
@@ -3625,7 +3673,7 @@ test('late correlated registration ACK restores native queue pickup without repe
   const fetchFn = async (url, options) => {
     queueCalls++
     assert.equal(options.method, 'GET')
-    assert.equal(options.headers.Authorization, `AgentRuntime ${'a'.repeat(32)}`)
+    assert.equal(options.headers.Authorization, `AgentRuntime rts1_${'a'.repeat(64)}`)
     return { status: 200, redirected: false, url: url.toString(),
       headers: { get: () => 'application/json' }, json: async () => ({ items: [valid] }) }
   }
@@ -3634,8 +3682,8 @@ test('late correlated registration ACK restores native queue pickup without repe
   assert.equal(queueCalls, 0)
   assert.equal(observer.observe({ type: 'agent_registered', agentId: profile.agentId,
     messageId: 'registration-late-queue', runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
-    status: 'online', token: 'a'.repeat(32) }), 'registered')
-  state.workspaceFileRuntimeAuthHeader = observer.runtimeAuthHeader
+    status: 'online', durableStateHealthy: true, readyCommandTypes: [] }), 'registered')
+  state.workspaceFileRuntimeAuthHeader = `AgentRuntime rts1_${'a'.repeat(64)}` // derived separately, never minted by registration
   assert.deepEqual(await pollWorkspaceFileCommands({ profile, state, fetchFn }), { dispatched: 1, rejected: 0 })
   assert.equal(queueCalls, 1)
   assert.deepEqual(handled, [valid])
@@ -3661,7 +3709,7 @@ for (const startCase of ['transport', 'wrong-run', 'server-error', 'rejected']) 
     })
     const outcome = await runManagedCommand({ profile,
       message: normalizeInboundMessage({ ...command(987), payload: workspaceFilePayload(input) }),
-      workspaceFileBridge: bridge, workspaceFileRuntimeAuthHeader: `AgentRuntime ${'f'.repeat(32)}`,
+      workspaceFileBridge: bridge, workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
       runCodexFn: async () => assert.fail('Provider must not run without exact start receipt'),
       sendLegacyFn: () => assert.fail('must not send legacy completion'), sendStatusFn: () => {}
     })
@@ -3688,16 +3736,6 @@ test('new archive and platform commands cannot fall through to generic Codex exe
 })
 
 
-test('registration advertises only explicitly supplied supported controlled protocols', () => {
-  const disabled = buildAgentRegistrationPayload(profile)
-  assert.equal(Object.hasOwn(disabled, 'commandProtocols'), false)
-  const platformOnly = buildAgentRegistrationPayload(profile, null, false, null, null, null, ['PLATFORM_SKILL_INSTALL/v1'])
-  assert.deepEqual(platformOnly.commandProtocols, ['PLATFORM_SKILL_INSTALL/v1'])
-  assert.equal(platformOnly.commandProtocols.includes('ARCHIVE_MAINTENANCE_EXECUTE/v1'), false)
-  const both = buildAgentRegistrationPayload(profile, null, false, null, null, null, ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1'])
-  assert.deepEqual(both.commandProtocols, ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1'])
-})
-
 test('platform and archive commands route only through the supplied controlled runtime', async () => {
   let platformCalls = 0
   let codexCalls = 0
@@ -3721,48 +3759,6 @@ test('platform and archive commands route only through the supplied controlled r
   assert.equal(archive.status, 'completed')
   assert.equal(platformCalls, 2)
   assert.equal(codexCalls, 0)
-})
-
-
-test('stale registered recovery failure cannot clear a newer socket generation', async () => {
-  let rejectRecovery
-  const recovery = new Promise((resolve, reject) => { rejectRecovery = reject })
-  let runtimeDisconnects = 0
-  let pauses = 0
-  let oldSocketCloses = 0
-  let newerSocketCloses = 0
-  const oldSocket = { close: () => { oldSocketCloses += 1 } }
-  const newerSocket = { close: () => { newerSocketCloses += 1 } }
-  const registration = {
-    generation: 7,
-    runtimeScope: { runtimeInstanceId: 'runtime-a' },
-    runtimeAuthHeader: `AgentRuntime ${'a'.repeat(32)}`,
-    disconnect: () => { throw new Error('stale cleanup must not disconnect newer registration') }
-  }
-  const state = {
-    ws: oldSocket,
-    registration,
-    workspaceFileRuntimeAuthHeader: '',
-    platformSkillRuntime: {
-      commandProtocols: ['PLATFORM_SKILL_INSTALL/v1'],
-      activateAndRecover: async () => recovery,
-      disconnect: () => { runtimeDisconnects += 1 }
-    },
-    processor: { pause: () => { pauses += 1 } }
-  }
-  const activation = activateRegisteredProfile({ profileId: 'profile-a' }, state)
-  await new Promise(resolve => setImmediate(resolve))
-  state.ws = newerSocket
-  registration.generation = 8
-  registration.runtimeAuthHeader = `AgentRuntime ${'b'.repeat(32)}`
-  state.workspaceFileRuntimeAuthHeader = registration.runtimeAuthHeader
-  rejectRecovery(new Error('old recovery failed'))
-  assert.equal(await activation, false)
-  assert.equal(state.workspaceFileRuntimeAuthHeader, `AgentRuntime ${'b'.repeat(32)}`)
-  assert.equal(runtimeDisconnects, 0)
-  assert.equal(pauses, 0)
-  assert.equal(oldSocketCloses, 0)
-  assert.equal(newerSocketCloses, 0)
 })
 
 
@@ -3828,36 +3824,6 @@ test('routed platform unknown outcome remains non-terminal and restart denial pr
   assert.equal(restartedInbox.count('archive'), 0)
   assert.equal(restartedLedger.getEntry(platformMessage.commandId).status, LEDGER_STATUS.RECOVERY_REQUIRED)
   assert.equal(reruns, 0)
-})
-
-test('failed authoritative reconciliation never marks registration ready or publishes online', async () => {
-  let registrationDisconnects = 0
-  let runtimeDisconnects = 0
-  let pauses = 0
-  let closes = 0
-  const registration = {
-    generation: 3,
-    runtimeScope: null,
-    runtimeAuthHeader: '',
-    disconnect: () => { registrationDisconnects += 1; registration.generation += 1 }
-  }
-  const state = {
-    ws: { close: () => { closes += 1 } },
-    registration,
-    registrationReady: false,
-    workspaceFileRuntimeAuthHeader: '',
-    platformSkillRuntime: { commandProtocols: [], disconnect: () => { runtimeDisconnects += 1 } },
-    processor: {
-      reconcileAuthoritativeState: () => ({ reconciled: false, failClosedCode: 'COMMAND_STATE_CONFLICT' }),
-      pause: () => { pauses += 1 }
-    }
-  }
-  assert.equal(await activateRegisteredProfile({ profileId: 'profile-a' }, state), false)
-  assert.equal(state.registrationReady, false)
-  assert.equal(registrationDisconnects, 1)
-  assert.equal(runtimeDisconnects, 2)
-  assert.equal(pauses, 1)
-  assert.equal(closes, 1)
 })
 
 test('default-disabled modern durable CHAT is rejected without spawning the legacy runner', async () => {
@@ -3930,21 +3896,1118 @@ test('pre-engine recovery claim checks fingerprint and durable key under the inb
   assert.equal(seed.findByKey(accepted.key).state, 'recovery')
 })
 
+// UR-01 M3: mature checkpoint is authoritative. Session proofs never persisted.
+const unifiedProfile = () => ({ ...profile, runtimeIdentity: { installationId: 'installation-a', tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId } })
+const unifiedCommand = (number = 7001, patch = {}) => ({ ...command(number), tenantId: 'tenant-a', clientId: 'client-a',
+  correlationId: `correlation-${number}`, ...patch })
+function unifiedCheckpoint({ root = temporaryDirectory(), selectedProfile = unifiedProfile(), cleanup = null, run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }) } = {}) {
+  const selected = selectedProfile
+  const inbox = new PersistentCommandInbox({ rootDir: root, profile: selected }); inbox.initialize()
+  const store = resolve(root, Buffer.from(selected.agentId).toString('hex'))
+  const ledger = new DurableDedupeLedger({ rootDir: store, profile: selected }); ledger.initialize()
+  const outbox = new AckOutbox({ rootDir: store, profile: selected }); outbox.initialize()
+  const rejected = []
+  const processor = new AgentMessageProcessor({ profile: selected, inbox, ledger, ackOutbox: outbox, runCommand: run,
+    runChat: async () => {}, sendCommandAckFn: ack, onCommandTerminalConfirmed: cleanup, onReject: error => rejected.push(error) })
+  processor.start({ drain: false })
+  return { root, inbox, ledger, outbox, processor, rejected }
+}
 
-test('merged registration retains measured typed readiness and runtime lanes alongside explicit archive protocols', () => {
-  const declaration = { schemaVersion: '1', state: 'READY', measured: true }
-  const inspection = { declaration: () => declaration }
-  const protocols = ['PLATFORM_SKILL_INSTALL/v1', 'ARCHIVE_MAINTENANCE_EXECUTE/v1']
-  const ordinary = buildAgentRegistrationPayload(profile, null, true, null, inspection)
-  const combined = buildAgentRegistrationPayload(profile, null, true, null, inspection, null, protocols)
-  const { commandProtocols, ...remaining } = combined
-  assert.deepEqual(commandProtocols, protocols)
-  assert.deepEqual(remaining, ordinary)
-  assert.deepEqual(combined.typedInspection, declaration)
-  assert.deepEqual(combined.runtimeCapabilities, buildAgentPresencePayload(profile, 'online').runtimeCapabilities)
-  assert.ok(Object.hasOwn(combined, 'nativeBountyExecution'))
-  assert.ok(Object.hasOwn(combined, 'controlledImageBountyExecutionV3'))
-  assert.ok(Object.hasOwn(combined, 'nativeProviderCredentialBinding'))
-  protocols.push('must-not-mutate-advertisement')
-  assert.equal(combined.commandProtocols.length, 2)
+test('unified command confirms RECEIVED/STARTED before side effects; checkpoints exact versions without tokens', async () => {
+  const calls = []; let runtime
+  runtime = unifiedCheckpoint({ ack: async (context, status, version) => {
+    // Calling pending scan inside HTTP callback proves no checkpoint lock held.
+    assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, status)
+    assert.deepEqual(Object.keys(context).sort(), ['installationId','tenantId','clientId','canonicalAgentId','messageId','correlationId','commandId','taskId','workItemId','payloadReference','expiresAt'].sort())
+    calls.push({ status, version }); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 10 }
+  }, run: async () => {
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'STARTED'); calls.push({ status: 'EXECUTE' }); return { status: 'completed' }
+  } })
+  await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.deepEqual(calls, [{ status: 'RECEIVED', version: null }, { status: 'STARTED', version: 10 }, { status: 'EXECUTE' }, { status: 'SUCCEEDED', version: 20 }])
+  assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+  assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 30)
+  const checkpoint = runtime.ledger.getEntry('command-7001')
+  assert.equal(JSON.stringify(checkpoint).includes('sessionGeneration'), false); assert.equal(JSON.stringify(checkpoint).includes('sessionToken'), false)
+  runtime.processor.stop()
+})
+
+test('wrong status/version HTTP result cannot dequeue ACK or run command even with injected client', async () => {
+  for (const wrong of [{ kind: 'ADVANCED', status: 'SUCCEEDED', deliveryVersion: 1 }, { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: 0 }]) {
+    let runs = 0; const runtime = unifiedCheckpoint({ ack: async () => wrong, run: async () => { runs++; return { status: 'completed' } } })
+    await runtime.processor.handle(unifiedCommand()); await runtime.processor.runtimeAckTail
+    runtime.processor.resume(); await runtime.processor.waitForIdle()
+    assert.equal(runs, 0); assert.equal(runtime.outbox.pendingEnvelopes().length, 1)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001'), null)
+    assert.equal(runtime.processor.failClosedError.code, 'RUNTIME_ACK_COMMIT_UNCONFIRMED'); runtime.processor.stop()
+  }
+})
+
+test('unknown STARTED HTTP response becomes recovery-required; restart never re-executes', async () => {
+  let runs = 0; let confirmations = 0
+  const runtime = unifiedCheckpoint({ ack: async (_context, status, version) => {
+    if (status === 'STARTED') throw Object.assign(Error('synthetic transport loss'), { code: 'ECONNRESET' })
+    confirmations++; return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  }, run: async () => { runs++; return { status: 'completed' } } })
+  await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.equal(runs, 0); assert.equal(confirmations, 1)
+  assert.equal(runtime.inbox.count('recovery_required'), 1)
+  assert.equal(runtime.ledger.getEntry('command-7001').status, 'RECOVERY_REQUIRED'); runtime.processor.stop()
+  const restarted = unifiedCheckpoint({ root: runtime.root, run: async () => { runs++; return { status: 'completed' } } })
+  restarted.processor.resume(); await restarted.processor.waitForIdle(); assert.equal(runs, 0); restarted.processor.stop()
+})
+
+test('duplicate changed context/payload and cross-subject dispatch cannot alter original checkpoint or execute', async () => {
+  const runtime = unifiedCheckpoint(); const original = unifiedCommand()
+  await runtime.processor.handle(original); await runtime.processor.runtimeAckTail
+  const before = runtime.ledger.getEntry(original.commandId)
+  for (const patch of [{ tenantId: 'foreign' }, { canonicalAgentId: 'foreign' }, { payloadReference: 'other' }, { payload: { instruction: 'changed' } }]) {
+    const result = await runtime.processor.handle({ ...original, ...patch }); assert.equal(result.kind, 'rejected')
+  }
+  assert.equal(runtime.ledger.getEntry(original.commandId).fingerprint, before.fingerprint)
+  assert.equal(runtime.outbox.pendingEnvelopes().length, 0); runtime.processor.stop()
+})
+
+test('completed terminal checkpoint replays after restart with last confirmed version, never re-executes', async () => {
+  let runs = 0; let failed = false
+  const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } }, ack: async (_context, status, version) => {
+    if (status === 'SUCCEEDED') { failed = true; throw Object.assign(Error('synthetic'), { code: 'ECONNRESET' }) }
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  } })
+  await runtime.processor.handle(unifiedCommand(7001, { expiresAt: Date.now() + 100000 })); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.equal(runs, 1); assert.equal(failed, true); assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'SUCCEEDED')
+  runtime.processor.stop()
+  const replay = []; const restarted = unifiedCheckpoint({ root: runtime.root, run: async () => { runs++; return { status: 'completed' } }, ack: async (context, status, version) => {
+    replay.push({ context, status, version }); return { kind: 'ADVANCED', status, deliveryVersion: version + 1 }
+  } })
+  await restarted.processor.replayAcks(); restarted.processor.resume(); await restarted.processor.waitForIdle()
+  assert.equal(runs, 1); assert.equal(replay[0].status, 'SUCCEEDED'); assert.equal(replay[0].version, 2)
+  assert.equal(restarted.outbox.pendingEnvelopes().length, 0); restarted.processor.stop()
+})
+
+test('wire cannot inject replacement runtimeCommand or session secrets into immutable checkpoint', async () => {
+  const runtime = unifiedCheckpoint(); const original = unifiedCommand()
+  for (const patch of [{ runtimeCommand: { ...original, sessionToken: 'rts1_' + 'a'.repeat(64) } },
+    { sessionToken: 'rts1_' + 'a'.repeat(64) }, { runtimeAuthorization: 'synthetic-install-secret' }]) {
+    const result = await runtime.processor.handle({ ...original, ...patch }); assert.equal(result.kind, 'rejected')
+  }
+  assert.equal(runtime.inbox.count('pending'), 0); assert.equal(runtime.ledger.getEntry(original.commandId), null)
+  assert.equal(runtime.outbox.pendingEnvelopes().length, 0); runtime.processor.stop()
+})
+
+
+const syntheticCleanupProof = () => ({ fingerprint: 'a'.repeat(64), runDirectory: '/synthetic/private/task/run', device: '1', inode: '2' })
+test('runtime terminal cleanup waits for native proof and durable HTTP terminal, never WS send or uncertain ACK', async () => {
+  let blocked = true; let cleaned = 0; let runtime
+  runtime = unifiedCheckpoint({ run: async () => ({ status: 'completed', workspaceCleanup: syntheticCleanupProof() }),
+    ack: async (_context, status, version) => { if (status === 'SUCCEEDED' && blocked) throw Error('response unknown'); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } },
+    cleanup: async (message, proof) => {
+      assert.equal(message.commandId, 'command-7001'); assert.deepEqual(proof, syntheticCleanupProof())
+      assert.equal(runtime.ledger.runtimeAckCommit(message.commandId, message.messageId).status, 'SUCCEEDED')
+      assert.equal(runtime.outbox.pendingEnvelopes().length, 0, 'cleanup outside committed checkpoint lock')
+      cleaned++
+    } })
+  await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.equal(cleaned, 0); assert.equal(runtime.outbox.pendingEnvelopes().length, 1)
+  assert.deepEqual(runtime.ledger.getEntry('command-7001').outcome.workspaceCleanup, syntheticCleanupProof())
+  blocked = false; assert.equal(await runtime.processor.replayAcks(), true); assert.equal(cleaned, 1)
+  assert.ok(runtime.ledger.getEntry('command-7001').runtimeCleanupConfirmedDigest)
+  await runtime.processor.replayAcks(); assert.equal(cleaned, 1); runtime.processor.stop()
+})
+
+test('runtime cleanup IO failure retries from same checkpoint after restart without re-executing business', async () => {
+  let runs = 0; let cleanups = 0
+  const initial = unifiedCheckpoint({ run: async () => { runs++; return { status: 'failed', workspaceCleanup: syntheticCleanupProof() } },
+    cleanup: async () => { cleanups++; throw Object.assign(Error('retain'), { code: 'CLEANUP_FAILED' }) } })
+  await initial.processor.handle(unifiedCommand()); initial.processor.resume(); await initial.processor.waitForIdle(); await initial.processor.runtimeAckTail
+  assert.equal(runs, 1); assert.ok(cleanups >= 1); assert.equal(initial.outbox.pendingEnvelopes().length, 0)
+  assert.equal(initial.ledger.getEntry('command-7001').runtimeCleanupConfirmedDigest, undefined); initial.processor.stop()
+  let restoredCleanups = 0
+  const restarted = unifiedCheckpoint({ root: initial.root, run: async () => assert.fail('no replay'), cleanup: async () => { restoredCleanups++ } })
+  await restarted.processor.replayAcks(); restarted.processor.resume(); await restarted.processor.waitForIdle()
+  assert.equal(restoredCleanups, 1); assert.equal(runs, 1); restarted.processor.stop()
+})
+
+test('runtime unknown business outcome preserves all recovery material despite injected cleanup proof', async () => {
+  let cleanups = 0
+  const runtime = unifiedCheckpoint({ run: async () => ({ status: 'recovery_required', workspaceCleanup: syntheticCleanupProof() }), cleanup: async () => { cleanups++ } })
+  await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  await runtime.processor.replayAcks(); assert.equal(cleanups, 0)
+  assert.equal(runtime.ledger.getEntry('command-7001').status, 'RECOVERY_REQUIRED'); runtime.processor.stop()
+})
+
+// E05 source-stage preparation: genuine codec bytes, no fabricated business lease.
+const e05Fixture = () => JSON.parse(readFileSync(new URL('../../cyf-agent-runtime-v1/test/fixtures/command-dispatch-e05.canonical.redacted.json', import.meta.url), 'utf8'))
+const e05Profile = () => {
+  const raw = e05Fixture()
+  return { ...profile, agentId: raw.targetAgentId, runtimeIdentity: { installationId: 'installation-e05',
+    tenantId: raw.tenantId, clientId: raw.clientId, canonicalAgentId: raw.targetAgentId } }
+}
+const noE05SideEffects = selected => ({ profile: selected, workspaceFileBridge: { materialize: () => assert.fail('no materialization') },
+  workspaceManager: { acquireCommandWorkspace: () => assert.fail('no workspace lock') },
+  skillInstallManager: { execute: () => assert.fail('no skill install') }, runCodexFn: () => assert.fail('no model execution'),
+  sendStatusFn: () => assert.fail('no status'), sendLegacyFn: () => assert.fail('no report') })
+
+test('E05 original codec binding maps contextVersion to INITIAL work item version and manifest actor without wire mutation', () => {
+  const raw = e05Fixture(); const before = JSON.stringify(raw)
+  const normalized = normalizeInboundMessage(raw)
+  const fingerprint = CommandFingerprint.compute(normalized)
+  const binding = e05ReassignmentBinding(e05Profile(), normalized)
+  assert.deepEqual(binding, { taskId: raw.taskId, workItemId: raw.workItemId, commandId: raw.commandId,
+    reassignmentId: raw.payload.context.reassignmentId, expectedWorkItemVersion: 5, actorAgentId: e05Profile().runtimeIdentity.canonicalAgentId })
+  assert.equal(Object.isFrozen(binding), true)
+  assert.equal(JSON.stringify(raw), before); assert.equal(CommandFingerprint.compute(normalized), fingerprint)
+  assert.equal(Object.hasOwn(binding, 'leaseToken'), false)
+  // Normalization cannot replace the trusted actor or select a different version.
+  normalized.targetAgentId = 'foreign'; normalized.payload = { context: { contextVersion: '500' } }
+  assert.deepEqual(e05ReassignmentBinding(e05Profile(), normalized), binding)
+})
+
+test('E05 context version accepts canonical exact nonnegative decimals, never rounded or predicted lease versions', () => {
+  for (const version of ['0', '5', String(Number.MAX_SAFE_INTEGER)]) {
+    const raw = e05Fixture(); raw.payload.context.contextVersion = version
+    assert.equal(e05ReassignmentBinding(e05Profile(), normalizeInboundMessage(raw)).expectedWorkItemVersion, Number(version))
+  }
+  for (const version of [undefined, null, 5, '', '05', '-1', '+5', ' 5', '5 ', '5.0', '5e0', '9007199254740992', '9223372036854775807']) {
+    const raw = e05Fixture(); raw.payload.context.contextVersion = version
+    assert.throws(() => e05ReassignmentBinding(e05Profile(), normalizeInboundMessage(raw)), { code: 'E05_REASSIGNMENT_VERSION_INVALID' })
+  }
+})
+
+test('E05 incomplete binding/source/subject fails before every existing executor path rather than falling back', async () => {
+  const changes = [
+    raw => { delete raw.payload.context.bindingVersion },
+    raw => { raw.payload.context.bindingVersion = 'foreign' },
+    raw => { delete raw.payload.context.reassignmentId },
+    raw => { raw.payload.context.reassignmentId = 'foreign' },
+    raw => { raw.commandType = 'TASK_INVITE' },
+    raw => { raw.commandType = 'SKILL_INSTALL' },
+    raw => { raw.payload.actionType = 'workspace_file_execute' },
+    raw => { raw.payload.reason = 'ordinary' },
+    raw => { raw.payload.requiresApproval = false },
+    raw => { raw.payload.autonomyLevel = 'autonomous' },
+    raw => { raw.payload.context.tags = ['reassignment', 'lease-expired'] },
+    raw => { raw.payload.context.referenceIds = [] },
+    raw => { raw.payload.context.referenceIds = [raw.commandId] },
+    raw => { raw.workItemId = null }
+  ]
+  for (const change of changes) {
+    const raw = e05Fixture(); change(raw)
+    await assert.rejects(runManagedCommand({ ...noE05SideEffects(e05Profile()), message: normalizeInboundMessage(raw) }), { code: 'E05_REASSIGNMENT_BINDING_INVALID' })
+  }
+  for (const field of ['tenantId', 'clientId', 'targetAgentId']) {
+    const raw = e05Fixture(); raw[field] = 'foreign'
+    await assert.rejects(runManagedCommand({ ...noE05SideEffects(e05Profile()), message: normalizeInboundMessage(raw) }), { code: 'RUNTIME_COMMAND_SCOPE_MISMATCH' })
+  }
+})
+
+test('E05 refuses execution even with usable CLI or caller readiness flags until real lease AND result lifecycle is connected', async () => {
+  const raw = e05Fixture()
+  raw.e05AdapterReady = true; raw.leaseReady = true
+  await assert.rejects(runManagedCommand({ ...noE05SideEffects(e05Profile()), message: normalizeInboundMessage(raw) }), { code: 'E05_LEASE_RESULT_ADAPTER_UNAVAILABLE' })
+  // No alternate old-auth execution lane for this special binding.
+  await assert.rejects(runManagedCommand({ ...noE05SideEffects(profile), message: normalizeInboundMessage(raw) }), { code: 'RUNTIME_COMMAND_SCOPE_MISMATCH' })
+})
+
+test('ordinary six TASK command paths retain existing Codex/workspace adapter; SKILL retains its adapter, not E05 lease', async () => {
+  const selected = unifiedProfile(); const manager = {}; const calls = []
+  for (const commandType of ['TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH']) {
+    const message = normalizeInboundMessage(unifiedCommand(7800, { commandType, payload: { instruction: 'ordinary existing path', context: { contextVersion: '5' } } }))
+    assert.equal(e05ReassignmentBinding(selected, message), null)
+    const outcome = await runManagedCommand({ profile: selected, message, workspaceManager: manager,
+      runCodexFn: async (p, received, mode, options) => {
+        assert.equal(p, selected); assert.equal(received, message); assert.equal(mode, 'command')
+        assert.equal(options.workspaceManager, manager); assert.equal(options.requireWorkspace, true)
+        calls.push(commandType); return { status: 'completed' }
+      } })
+    assert.equal(outcome.status, 'completed')
+  }
+  assert.equal(calls.length, 6) // dispatch-path regression with injected executor, NOT real business acceptance
+  const skill = normalizeInboundMessage(unifiedCommand(7801, { commandType: 'SKILL_INSTALL', payload: {} }))
+  assert.deepEqual(await runManagedCommand({ profile: selected, message: skill,
+    skillInstallManager: { execute: async message => { assert.equal(message, skill); return { status: 'completed' } } },
+    runCodexFn: () => assert.fail('skill cannot select Codex') }), { status: 'completed' })
+})
+
+test('real E05 fixture through unique durable processor and guarded executor cannot produce success; ACK stub is NOT HTTP/DB lease proof', async t => {
+  t.mock.method(Date, 'now', () => 2000) // original old codec expiry; production expiry unchanged
+  const raw = e05Fixture(); const selected = e05Profile(); const statuses = []
+  const runtime = unifiedCheckpoint({ selectedProfile: selected,
+    run: message => runManagedCommand({ ...noE05SideEffects(selected), message }),
+    ack: async (_context, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  try {
+    await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.deepEqual(statuses, ['RECEIVED', 'STARTED', 'FAILED'])
+    const entry = runtime.ledger.getEntry(raw.commandId)
+    assert.equal(entry.status, 'FAILED'); assert.match(entry.outcome.errorMessage, /^E05_LEASE_RESULT_ADAPTER_UNAVAILABLE:/)
+    assert.equal(JSON.stringify(entry).includes('leaseToken'), false)
+    assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'FAILED')
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+  } finally { runtime.processor.stop() }
+})
+
+const e05Wire = () => JSON.parse(readFileSync(new URL('../../cyf-agent-runtime-v1/test/fixtures/e05-runtime-lease-result.redacted.json', import.meta.url), 'utf8'))
+const e05BusinessToken = 'synthetic_business_lease_original' // never redacted fixture authorization
+const e05Binding = () => e05ReassignmentBinding(e05Profile(), normalizeInboundMessage(e05Fixture()))
+const e05Dto = (patch = {}) => ({ ...e05Wire().getLease.response, leaseToken: e05BusinessToken, ...patch })
+const e05Response = (url, dto, status = 200) => ({ status, redirected: false, url: String(url), headers: new Headers({ 'Content-Type': 'application/json' }), json: async () => structuredClone(dto) })
+const e05Digest = value => {
+  const sort = v => Array.isArray(v) ? v.map(sort) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sort(v[k])])) : v
+  return 'sha256:' + createHash('sha256').update(JSON.stringify(sort(value))).digest('hex')
+}
+const e05ViewFor = body => {
+  const { expectedPreviousVersion, contentBytes, ...artifact } = body.artifact
+  return { taskId: 'task-1', workItemId: body.workItemId, status: 'submitted', workItemVersion: body.expectedWorkItemVersion + 1, submittedAt: 2000,
+    artifact: { ...artifact, contentMimeType: 'text/plain', taskId: 'task-1', managedStorage: false, createdAt: 2000 } }
+}
+
+test('E05 actual serializer fixture pin, no redacted lease credential accepted, original result fields exact', async () => {
+  const bytes = readFileSync(new URL('../../cyf-agent-runtime-v1/test/fixtures/e05-runtime-lease-result.redacted.json', import.meta.url))
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), 'cd0d4fb0b087d140360f5a844f3e8cdd635fac0565341d0764a050dd14d4fcfa')
+  const { leaseToken, ...material } = e05Wire().postResult.request
+  assert.deepEqual(validateE05Result(e05Binding(), material, e05Wire().postResult.response), { status: 'completed', exitCode: 0 })
+  const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+    nativeFetch: async url => e05Response(url, e05Wire().getLease.response) })
+  await assert.rejects(lease.readback(), { code: 'E05_LEASE_PROOF_INVALID' })
+  assert.equal(JSON.stringify(material).includes(leaseToken), false)
+})
+
+test('E05 lease serial read5/start6/heartbeat confirmed only, no-op allowed and token memory-only', async () => {
+  const requests = []
+  let version = 5; let status = 'claimed'
+  const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+    nativeFetch: async (url, opts) => {
+      const body = JSON.parse(opts.body); requests.push({ path: url.pathname, query: url.searchParams.toString(), body })
+      assert.equal(body.expectedWorkItemVersion, version)
+      assert.equal(url.searchParams.get('actorAgentId'), e05Binding().actorAgentId)
+      if (url.pathname.endsWith('/start')) { version = 6; status = 'running' }
+      if (url.pathname.endsWith('/heartbeat') && requests.length === 3) version = 8 // never assume +1
+      return e05Response(url, e05Dto({ status, workItemVersion: version }))
+    } })
+  await lease.read(); await lease.start(); await lease.heartbeat(900000); await lease.heartbeat(900000)
+  assert.deepEqual(requests.map(r => r.body.expectedWorkItemVersion), [5, 5, 6, 8])
+  assert.equal(lease.current().workItemVersion, 8)
+  assert.equal(JSON.stringify(lease).includes(e05BusinessToken), false)
+  assert.equal(JSON.stringify(lease.current()).includes(e05BusinessToken), false)
+  assert.equal(JSON.stringify(requests).includes(e05BusinessToken), false)
+})
+
+test('E05 start/heartbeat lost response uses exact GET live receipt, never repeats mutation', async () => {
+  for (const lost of ['start', 'heartbeat']) {
+    const methods = []; let version = 5; let status = 'claimed'; let lostOnce = false
+    const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+      nativeFetch: async (url, opts) => {
+        methods.push(`${opts.method} ${url.pathname}`)
+        if (opts.method === 'GET') { assert.equal(url.search, ''); assert.equal(opts.body, undefined); return e05Response(url, e05Dto({ status, workItemVersion: version })) }
+        const request = JSON.parse(opts.body); assert.equal(request.expectedWorkItemVersion, version)
+        if (url.pathname.endsWith('/start')) { version = 6; status = 'running' }
+        if (url.pathname.endsWith('/heartbeat')) version = 9
+        if (url.pathname.endsWith(`/${lost}`) && !lostOnce) { lostOnce = true; throw new Error('socket includes private secret that must never escape') }
+        return e05Response(url, e05Dto({ status, workItemVersion: version }))
+      } })
+    await lease.read(); await lease.start(); await lease.heartbeat(900000)
+    assert.equal(methods.filter(m => m.startsWith('GET')).length, 1)
+    assert.equal(methods.filter(m => m.startsWith('POST') && m.endsWith(`/${lost}`)).length, 1)
+    assert.equal(lease.current().workItemVersion, 9)
+  }
+})
+
+test('E05 lease foreign identity/token, expired/noninteger/rollback/status/attempt and raw-envelope negatives', async () => {
+  for (const change of [dto => { dto.taskId = 'foreign' }, dto => { dto.workItemId = 'foreign' }, dto => { dto.agentId = 'frame-agent' },
+    dto => { dto.commandId = 'foreign' }, dto => { dto.reassignmentId = 'foreign' }, dto => { dto.leaseUntil = 2000 },
+    dto => { dto.workItemVersion = 5.1 }, dto => { dto.workItemVersion = 4 }, dto => { dto.status = 'submitted' },
+    dto => { dto.attemptCount = 4 }, dto => { dto.changedAt = '2000' }, dto => ({ data: dto })]) {
+    const nativeFetch = async url => { let dto = e05Dto({ status: 'claimed', workItemVersion: 5 }); dto = change(dto) ?? dto; return e05Response(url, dto) }
+    const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000, nativeFetch })
+    await assert.rejects(lease.read(), { code: 'E05_LEASE_PROOF_INVALID' })
+    assert.throws(() => lease.current(), { code: 'E05_LEASE_READBACK_REQUIRED' })
+  }
+  let changed = false
+  const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+    nativeFetch: async url => e05Response(url, changed ? e05Dto({ leaseToken: 'foreign-token' }) : e05Dto({ status: 'claimed', workItemVersion: 5 })) })
+  await lease.read(); changed = true
+  await assert.rejects(lease.start(), { code: 'E05_LEASE_PROOF_INVALID' })
+})
+
+test('E05 in-flight mutation cannot issue another POST with an unconfirmed version', async () => {
+  let resolveResponse; let calls = 0
+  const lease = createE05LeaseAdapter({ binding: e05Binding(), apiOrigin: 'https://api.example.test', now: () => 2000,
+    nativeFetch: url => { calls++; return new Promise(resolve => { resolveResponse = () => resolve(e05Response(url, e05Dto({ status: 'claimed', workItemVersion: 5 }))) }) } })
+  const pending = lease.read()
+  await assert.rejects(lease.read(), { code: 'E05_LEASE_OPERATION_IN_FLIGHT' })
+  assert.equal(calls, 1); resolveResponse(); await pending
+})
+
+const e05OfflineNative = ({ requests = [], lostResult = false, readStatus = 200, changeResult = v => v, onCommit = () => {} } = {}) => {
+  let committed = null
+  const fetch = async (url, opts) => {
+    requests.push({ method: opts.method, path: url.pathname, query: url.search, body: opts.body ? JSON.parse(opts.body) : null })
+    if (url.pathname.endsWith('/result-commit')) {
+      if (opts.method === 'POST') {
+        const body = JSON.parse(opts.body); assert.equal(body.leaseToken, e05BusinessToken); onCommit(body)
+        committed = e05ViewFor(body)
+        if (lostResult) throw new Error('lost response')
+        return e05Response(url, changeResult(structuredClone(committed)))
+      }
+      return e05Response(url, committed && changeResult(structuredClone(committed)), readStatus)
+    }
+    if (url.pathname.endsWith('/start')) return e05Response(url, e05Dto())
+    return e05Response(url, e05Dto({ status: 'claimed', workItemVersion: 5 }))
+  }
+  return { fetch, requests, result: () => committed }
+}
+
+test('E05 original executor after lease, sole checkpoint BEFORE commit, business confirmed BEFORE SUCCEEDED ACK', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const raw = e05Fixture(); const selected = e05Profile(); const order = []; let runtime; let runs = 0
+  const native = e05OfflineNative({ onCommit: body => {
+    order.push('result')
+    const record = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+    assert.equal(record.state, 'processing'); assert.equal(record.e05ResultDigest, e05Digest(record.e05ResultMaterial))
+    assert.equal(JSON.stringify(record).includes(e05BusinessToken), false)
+    const { leaseToken, ...material } = body
+    assert.deepEqual(record.e05ResultMaterial, material)
+  } })
+  runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint,
+    apiOrigin: 'https://api.example.test', nativeFetch: native.fetch, runCodexFn: async (_profile, _message, mode, opts) => {
+      runs++; order.push('executor'); assert.equal(mode, 'command'); assert.equal(opts.requireWorkspace, true)
+      assert.deepEqual(native.requests.map(r => r.body.expectedWorkItemVersion), [5, 5])
+      opts.sendLegacyFn('task.report', { status: 'completed' }); // explicitly intercepted; no uncommitted report
+      return { status: 'completed', output: 'E05 fixture result', exitCode: 0 }
+    } }), ack: async (_context, status, version) => { order.push(status); if (status === 'SUCCEEDED') assert.ok(native.result()); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  try {
+    await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.deepEqual(order, ['RECEIVED', 'STARTED', 'executor', 'result', 'SUCCEEDED']); assert.equal(runs, 1)
+    const record = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+    assert.equal(record.state, 'completed'); assert.ok(record.e05ResultMaterial)
+    assert.equal(JSON.stringify(record).includes(e05BusinessToken), false)
+    assert.equal(runtime.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+  } finally { runtime.processor.stop() }
+})
+
+test('E05 lost result response resolved only by matching GET, no executor replay or second POST', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  for (const readStatus of [200, 404, 409, 503]) {
+    const native = e05OfflineNative({ lostResult: true, readStatus }); let runs = 0; let material
+    const result = await runManagedCommand({ profile: e05Profile(), message: normalizeInboundMessage(e05Fixture()), nativeFetch: native.fetch, apiOrigin: 'https://api.example.test',
+      commandCheckpoint: { persistE05Result: body => { material = structuredClone(body) } },
+      runCodexFn: async () => { runs++; return { status: 'completed', output: 'original immutable output' } } })
+    assert.equal(result.status, readStatus === 200 ? 'completed' : 'recovery_required'); assert.equal(runs, 1)
+    assert.deepEqual(native.requests.filter(r => r.path.endsWith('/result-commit')).map(r => r.method), ['POST', 'GET'])
+    assert.equal(JSON.stringify(material).includes(e05BusinessToken), false)
+  }
+})
+
+test('E05 restart reads original result WITHOUT old token, closes checkpoint/ACK only after original material match', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const raw = e05Fixture(); const selected = e05Profile(); let runs = 0
+  const native = e05OfflineNative({ lostResult: true, readStatus: 503 })
+  const runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint,
+    nativeFetch: native.fetch, apiOrigin: 'https://api.example.test', runCodexFn: async () => { runs++; return { status: 'completed', output: 'durable original result' } } }) })
+  await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+  assert.equal(runtime.ledger.getEntry(raw.commandId).status, LEDGER_STATUS.RECOVERY_REQUIRED)
+  assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'STARTED')
+  assert.equal(runtime.inbox.count('recovery_required'), 1); assert.equal(runtime.processor.failClosedError, null)
+  const durable = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+  assert.equal(JSON.stringify(durable).includes(e05BusinessToken), false); runtime.processor.stop()
+  const statuses = []; const restarted = unifiedCheckpoint({ root: runtime.root, selectedProfile: selected,
+    run: () => assert.fail('restarting E05 must never re-execute'),
+    ack: async (_context, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  try {
+    assert.equal(restarted.processor.failClosedError, null)
+    for (const status of [404, 409]) {
+      await restarted.processor.reconcileE05Results({ apiOrigin: 'https://api.example.test', nativeFetch: async url => e05Response(url, {}, status) })
+      assert.equal(restarted.inbox.count('recovery_required'), 1)
+    }
+    await restarted.processor.reconcileE05Results({ apiOrigin: 'https://api.example.test', nativeFetch: async (url, opts) => {
+      assert.equal(opts.method, 'GET'); assert.equal(opts.body, undefined); assert.equal(url.search, '')
+      return e05Response(url, native.result())
+    } })
+    await restarted.processor.runtimeAckTail
+    assert.equal(runs, 1); assert.deepEqual(statuses, ['SUCCEEDED']); assert.equal(restarted.inbox.count('recovery_required'), 0)
+    assert.equal(restarted.inbox.commandStateIndex().get(raw.commandId)[0].record.state, 'completed')
+    assert.equal(restarted.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+  } finally { restarted.processor.stop() }
+})
+
+test('E05 original result mismatch is never success, includes forged producer/version/content/hash/metadata/material digest', async () => {
+  const { leaseToken, ...material } = e05Wire().postResult.request
+  for (const change of [v => { v.workItemVersion = 8 }, v => { v.taskId = 'foreign' }, v => { v.artifact.producerAgentId = 'frame' },
+    v => { v.artifact.contentHash = '0'.repeat(64) }, v => { v.artifact.content = 'changed' }, v => { v.artifact.metadata = { forged: true } },
+    v => { v.artifact.artifactId = 'different' }, v => { v.status = 'completed' }]) {
+    const view = e05Wire().postResult.response; change(view)
+    assert.throws(() => validateE05Result(e05Binding(), material, view), { code: 'E05_RESULT_PROOF_INVALID' })
+  }
+  let calls = 0
+  await assert.rejects(recoverE05Result({ profile: e05Profile(), message: normalizeInboundMessage(e05Fixture()), record: { e05ResultMaterial: material, e05ResultDigest: 'forged' },
+    nativeFetch: () => { calls++; }, apiOrigin: 'https://api.example.test' }), { code: 'E05_RESULT_RECOVERY_REQUIRED' })
+  assert.equal(calls, 0)
+})
+
+test('E05 lease/start failure and checkpoint write failure are side-effect fenced; no unleased executor or business success', async () => {
+  for (const failure of ['read', 'start', 'persist']) {
+    const native = e05OfflineNative(); let runs = 0; let persists = 0
+    const outcome = await runManagedCommand({ profile: e05Profile(), message: normalizeInboundMessage(e05Fixture()), now: () => 2000, apiOrigin: 'https://api.example.test',
+      nativeFetch: (url, options) => failure !== 'persist' && (failure === 'read' ? url.pathname.endsWith('/lease') : url.pathname.endsWith('/start'))
+        ? e05Response(url, {}, 409) : native.fetch(url, options),
+      commandCheckpoint: { persistE05Result: () => { persists++; throw new Error('disk full private content not logged') } },
+      runCodexFn: async () => { runs++; return { status: 'completed', output: 'original output' } } })
+    assert.equal(outcome.status, 'recovery_required')
+    assert.equal(runs, failure === 'persist' ? 1 : 0); assert.equal(persists, failure === 'persist' ? 1 : 0)
+    assert.equal(native.requests.some(r => r.path.endsWith('/result-commit')), false)
+    assert.equal(outcome.errorMessage, 'E05_RESULT_RECOVERY_REQUIRED')
+  }
+})
+
+test('E05 original runCodex workspace acquire/release reused; exact child cancellation on session loss, no report or result success', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const selected = { ...e05Profile(), codexTimeoutMs: 0, codexHome: temporaryDirectory() }
+  const native = e05OfflineNative(); const controller = new AbortController(); let acquisitions = 0; let releases = 0; let spawned = 0; let child
+  const kills = []; const reports = []
+  const workspaceManager = { acquireCommandWorkspace: () => {
+    acquisitions++; return { workspace: { workspacePath: selected.codexHome }, release: () => { releases++ } }
+  } }
+  const outcome = await runManagedCommand({ profile: selected, message: normalizeInboundMessage(e05Fixture()), workspaceManager,
+    nativeFetch: native.fetch, apiOrigin: 'https://api.example.test', signal: controller.signal,
+    commandCheckpoint: { persistE05Result: () => assert.fail('cancelled execution cannot publish success') },
+    runCodexFn: (p, message, mode, overrides) => runCodex(p, message, mode, { ...overrides,
+      sendStatusFn: () => {}, sendProtocolFn: (...args) => reports.push(args),
+      spawnFn: (_binary, _args, options) => {
+        spawned++; child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.killed = false; child.pid = 654321
+        assert.equal(options.env.HOME, selected.codexHome); assert.equal(JSON.stringify(options.env).includes(e05BusinessToken), false)
+        child.kill = signal => { kills.push([child.pid, signal]); child.killed = true; queueMicrotask(() => { child.exitCode = 143; child.emit('close', 143) }); return true }
+        queueMicrotask(() => controller.abort())
+        return child
+      } }) })
+  assert.equal(outcome.status, 'recovery_required'); assert.deepEqual(kills, [[654321, 'SIGTERM']])
+  assert.equal(acquisitions, 1); assert.equal(releases, 1); assert.equal(spawned, 1); assert.deepEqual(reports, [])
+  assert.equal(native.requests.some(r => r.path.endsWith('/result-commit')), false)
+})
+
+test('E05 business lease expiry while heartbeat response is lost cancels exact executor, no completion claim', async () => {
+  // Short synthetic business lease, not a change to production expiry policy.
+  const start = Date.now(); let cancelled = 0; let heartbeatCalled = false; let finish; let persisted = 0
+  const binding = e05Binding()
+  const outcome = await runManagedCommand({ profile: e05Profile(), message: normalizeInboundMessage(e05Fixture()), apiOrigin: 'https://api.example.test',
+    nativeFetch: async (url, options) => {
+      const running = url.pathname.endsWith('/start')
+      if (url.pathname.endsWith('/heartbeat')) {
+        heartbeatCalled = true
+        return new Promise(resolve => { finish = () => resolve(e05Response(url, {}, 409)) })
+      }
+      return e05Response(url, e05Dto({ changedAt: start, leaseUntil: start + 120, status: running ? 'running' : 'claimed', workItemVersion: running ? 6 : 5 }))
+    },
+    commandCheckpoint: { persistE05Result: () => { persisted++ } },
+    runCodexFn: async (_p, _m, _mode, overrides) => new Promise(resolve => overrides.controls.markRunning(() => {
+      cancelled++; finish?.(); resolve({ status: 'failed', output: 'cancelled' })
+    })) })
+  assert.equal(outcome.status, 'recovery_required'); assert.equal(cancelled, 1); assert.equal(persisted, 0)
+  assert.equal(heartbeatCalled, true); assert.equal(binding.expectedWorkItemVersion, 5)
+})
+
+test('E05 recovery does not convert duplicate dispatch to terminal REJECTED or ban ordinary TASK', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const selected = e05Profile(); const raw = e05Fixture(); let runs = 0; const statuses = []
+  const native = e05OfflineNative({ lostResult: true, readStatus: 409 })
+  const runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => {
+    if (!e05ReassignmentBinding(selected, message)) { runs++; return { status: 'completed' } }
+    return runManagedCommand({ profile: selected, message, commandCheckpoint, nativeFetch: native.fetch, apiOrigin: 'https://api.example.test',
+      runCodexFn: async () => { runs++; return { status: 'completed', output: 'original' } } })
+  }, ack: async (_c, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  try {
+    await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle()
+    const duplicate = await runtime.processor.handle(raw)
+    assert.equal(duplicate.kind, 'command-duplicate'); assert.equal(runs, 1); assert.deepEqual(statuses, ['RECEIVED', 'STARTED'])
+    const ordinary = { ...raw, commandId: 'ordinary-task-command', messageId: 'ordinary-task-message', correlationId: 'ordinary-task-correlation',
+      payload: { instruction: 'ordinary task', actionType: 'work_item_execute' } }
+    await runtime.processor.handle(ordinary); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.equal(runs, 2); assert.equal(runtime.ledger.getEntry(ordinary.commandId).status, 'SUCCEEDED')
+    assert.equal(runtime.inbox.count('recovery_required'), 1); assert.equal(runtime.processor.failClosedError, null)
+  } finally { runtime.processor.stop() }
+})
+
+test('E05 crash after confirmed GET completion marker before ledger update reconciles without model/token reuse', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const selected = e05Profile(); const raw = e05Fixture(); const native = e05OfflineNative({ lostResult: true, readStatus: 409 })
+  const runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint,
+    nativeFetch: native.fetch, apiOrigin: 'https://api.example.test', runCodexFn: async () => ({ status: 'completed', output: 'original' }) }) })
+  await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle()
+  runtime.processor.stop()
+  const item = runtime.inbox.commandStateIndex().get(raw.commandId)[0]
+  const outcome = validateE05Result(e05Binding(), item.record.e05ResultMaterial, native.result())
+  runtime.inbox.markCompleted(item, outcome) // exact real crash window in recovery directory
+  const restarted = unifiedCheckpoint({ root: runtime.root, selectedProfile: selected, run: () => assert.fail('no model rerun') })
+  try {
+    await restarted.processor.runtimeAckTail
+    assert.equal(restarted.processor.failClosedError, null); assert.equal(restarted.inbox.count('recovery_required'), 0)
+    assert.equal(restarted.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+  } finally { restarted.processor.stop() }
+})
+
+test('E05 actual Node fetch HTTP→session/lease/original executor/result lostresponse→HTTP ACK→unique checkpoint, JavaDB NOT_RUN', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const { RuntimeV1Client } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
+  const raw = e05Fixture(); const selected = e05Profile(); const root = temporaryDirectory()
+  const syntheticSession = 'rts1_' + 'a'.repeat(64); const syntheticAuthorization = 'rta1_' + 'b'.repeat(64)
+  const calls = []; const results = new Map(); let version = 5; let leaseStatus = 'claimed'; let lostOnce = false; let generation = 7; let runs = 0; let runtime
+  const server = createServer(async (request, response) => {
+    let bytes = ''; for await (const part of request) bytes += part
+    const url = new URL(request.url, 'http://127.0.0.1'); const body = bytes ? JSON.parse(bytes) : null
+    calls.push({ method: request.method, path: url.pathname, query: url.search, body })
+    const send = data => { response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' }); response.end(JSON.stringify(data)) }
+    try {
+      if (url.pathname === '/agent/runtime/v1/session') {
+        assert.equal(request.headers.authorization, `Bearer ${syntheticAuthorization}`)
+        return send({ data: { ...selected.runtimeIdentity, hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: generation,
+          scheme: 'AgentRuntime', sessionToken: syntheticSession, websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' } })
+      }
+      assert.equal(request.headers.authorization, `AgentRuntime ${syntheticSession}`)
+      assert.equal(request.headers['x-agent-id'], selected.runtimeIdentity.canonicalAgentId)
+      assert.equal(request.headers['x-agent-installation-id'], selected.runtimeIdentity.installationId)
+      assert.equal(request.headers['x-agent-host-id'], 'host-fixture'); assert.equal(request.headers['x-agent-runtime-id'], 'boot-fixture')
+      assert.equal(request.headers['x-agent-session-generation'], String(generation)); assert.equal(request.headers['x-api-key'], undefined)
+      if (url.pathname.endsWith('/acks')) {
+        if (body.status === 'SUCCEEDED') assert.ok(results.get(raw.commandId))
+        assert.equal(body.deliveryVersion, { RECEIVED: null, STARTED: 1, SUCCEEDED: 2 }[body.status])
+        return send({ data: { kind: 'ADVANCED', status: body.status, deliveryVersion: (body.deliveryVersion ?? 0) + 1 } })
+      }
+      if (url.pathname.endsWith('/result-commit')) {
+        assert.equal(url.search, '')
+        if (request.method === 'GET') { assert.equal(body, null); return send(results.get(raw.commandId)) }
+        assert.equal(body.expectedWorkItemVersion, version); assert.equal(body.leaseToken, e05BusinessToken)
+        const item = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+        const { leaseToken, ...material } = body
+        assert.deepEqual(item.e05ResultMaterial, material); assert.equal(JSON.stringify(item).includes(e05BusinessToken), false)
+        results.set(raw.commandId, e05ViewFor(body))
+        if (!lostOnce) { lostOnce = true; response.destroy(); return }
+        assert.fail('lost result must not be POST replayed')
+      }
+      assert.equal(request.method, 'POST'); assert.equal(url.searchParams.get('actorAgentId'), selected.runtimeIdentity.canonicalAgentId)
+      assert.equal(body.expectedWorkItemVersion, version)
+      if (url.pathname.endsWith('/start')) { leaseStatus = 'running'; version = 6 }
+      return send(e05Dto({ status: leaseStatus, workItemVersion: version }))
+    } catch (error) { response.writeHead(500, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ code: 'TEST_ORACLE_FAILED' })); t.diagnostic(error.stack); }
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
+  const apiOrigin = `http://127.0.0.1:${server.address().port}`
+  const client = new RuntimeV1Client({ manifest: { ...selected.runtimeIdentity, manifestVersion: '1', manifestSha256: 'sha256:' + 'd'.repeat(64) }, apiBaseUrl: apiOrigin, stateDir: root, hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture' })
+  writeFileSync(client.authorizationPath(), JSON.stringify({ installationId: selected.runtimeIdentity.installationId, runtimeAuthorization: syntheticAuthorization }), { mode: 0o600 })
+  await client.session()
+  runtime = unifiedCheckpoint({ root, selectedProfile: selected, ack: (...args) => client.acknowledge(...args),
+    run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint, apiOrigin,
+      nativeFetch: (url, options) => client.nativeFetch(url, options), runCodexFn: async () => { runs++; return { status: 'completed', output: 'E05 fixture result' } } }) })
+  try {
+    await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.equal(runs, 1); assert.equal(runtime.processor.failClosedError, null); assert.equal(runtime.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+    assert.deepEqual(calls.filter(c => c.path.endsWith('/result-commit')).map(c => c.method), ['POST', 'GET'])
+    assert.deepEqual(calls.filter(c => c.path.endsWith('/acks')).map(c => c.body.status), ['RECEIVED', 'STARTED', 'SUCCEEDED'])
+    const record = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
+    assert.equal(record.state, 'completed'); assert.equal(JSON.stringify(record).includes(e05BusinessToken), false)
+    assert.equal(JSON.stringify(record).includes(syntheticSession), false)
+    assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).deliveryVersion, 3)
+    client.invalidateSession(); generation = 8; await client.session()
+    const recovered = await recoverE05Result({ profile: selected, message: normalizeInboundMessage(raw), record,
+      nativeFetch: (url, options) => client.nativeFetch(url, options), apiOrigin })
+    assert.equal(recovered.status, 'completed'); assert.equal(runs, 1)
+  } finally { runtime.processor.stop(); client.invalidateSession() }
+})
+
+test('E05 timer heartbeat final confirmed version feeds result using original runCodex output/workspace lifecycle', async () => {
+  const started = Date.now(); const native = e05OfflineNative(); let heartbeatRequests = 0; let body; let releases = 0; let originalRun = 0
+  const selected = { ...e05Profile(), codexHome: temporaryDirectory(), codexTimeoutMs: 0 }
+  const workspaceManager = { acquireCommandWorkspace: () => ({ workspace: { workspacePath: selected.codexHome }, release: () => { releases++ } }) }
+  let child
+  const result = await runManagedCommand({ profile: selected, message: normalizeInboundMessage(e05Fixture()), workspaceManager, apiOrigin: 'https://api.example.test',
+    commandCheckpoint: { persistE05Result: material => { body = material } },
+    nativeFetch: async (url, options) => {
+      if (url.pathname.endsWith('/heartbeat')) {
+        heartbeatRequests++; assert.equal(JSON.parse(options.body).expectedWorkItemVersion, 6)
+        queueMicrotask(() => { child.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Original Codex output' } }) + '\n'); child.exitCode = 0; child.emit('close', 0) })
+        return e05Response(url, e05Dto({ leaseUntil: started + 3000, changedAt: Date.now(), workItemVersion: 9 }))
+      }
+      if (url.pathname.endsWith('/result-commit')) { assert.equal(JSON.parse(options.body).expectedWorkItemVersion, 9); return native.fetch(url, options) }
+      return e05Response(url, e05Dto({ status: url.pathname.endsWith('/start') ? 'running' : 'claimed', workItemVersion: url.pathname.endsWith('/start') ? 6 : 5,
+        changedAt: started, leaseUntil: started + 180 }))
+    },
+    runCodexFn: (p, message, mode, overrides) => {
+      originalRun++
+      return runCodex(p, message, mode, { ...overrides, sendStatusFn: () => {}, spawnFn: () => {
+        child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.killed = false
+        child.kill = () => assert.fail('renewed lease must not cancel healthy original child'); return child
+      } })
+    } })
+  assert.equal(result.status, 'completed'); assert.equal(body.expectedWorkItemVersion, 9); assert.equal(body.artifact.content, 'Original Codex output')
+  assert.equal(originalRun, 1); assert.equal(releases, 1); assert.equal(heartbeatRequests, 1)
+})
+
+test('E05 immutable material cannot be replaced after original checkpoint persist', () => {
+  const selected = e05Profile(); const runtime = unifiedCheckpoint({ selectedProfile: selected })
+  try {
+    runtime.inbox.enqueue(normalizeInboundMessage(e05Fixture()))
+    const item = runtime.inbox.claimNext(); const { leaseToken, ...material } = e05Wire().postResult.request
+    runtime.inbox.persistE05Result(item, material)
+    const changed = { ...material, artifact: { ...material.artifact, content: 'replacement' } }
+    changed.artifact.contentHash = createHash('sha256').update(changed.artifact.content).digest('hex')
+    changed.artifact.contentByteLength = Buffer.byteLength(changed.artifact.content)
+    assert.throws(() => runtime.inbox.persistE05Result(item, changed), { code: 'E05_RESULT_MATERIAL_CONFLICT' })
+    assert.deepEqual(runtime.inbox.assertExecutable(item).record.e05ResultMaterial, material)
+    assert.equal(JSON.stringify(item.record).includes(leaseToken), false)
+  } finally { runtime.processor.stop() }
+})
+
+test('E05 crash after terminal ledger before HTTP ACK enqueue reconstructs from sole completed checkpoint', async t => {
+  t.mock.method(Date, 'now', () => 2000)
+  const selected = e05Profile(); const raw = e05Fixture(); const native = e05OfflineNative({ lostResult: true, readStatus: 409 })
+  const runtime = unifiedCheckpoint({ selectedProfile: selected, run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint,
+    nativeFetch: native.fetch, apiOrigin: 'https://api.example.test', runCodexFn: async () => ({ status: 'completed', output: 'original' }) }) })
+  await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); runtime.processor.stop()
+  const item = runtime.inbox.commandStateIndex().get(raw.commandId)[0]
+  const outcome = validateE05Result(e05Binding(), item.record.e05ResultMaterial, native.result())
+  runtime.inbox.markCompleted(item, outcome)
+  runtime.ledger.markReconciledOutcome(raw.commandId, outcome, 'E05_HTTP_ORIGINAL_RESULT')
+  assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+  assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'STARTED')
+  const statuses = []
+  const restarted = unifiedCheckpoint({ root: runtime.root, selectedProfile: selected, run: () => assert.fail('no model rerun'),
+    ack: async (_c, status, version) => { statuses.push(status); assert.equal(version, 2); return { kind: 'ADVANCED', status, deliveryVersion: 3 } } })
+  try {
+    await restarted.processor.runtimeAckTail
+    assert.deepEqual(statuses, ['SUCCEEDED']); assert.equal(restarted.processor.failClosedError, null)
+    assert.equal(restarted.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'SUCCEEDED')
+    assert.equal(restarted.outbox.pendingEnvelopes().length, 0)
+  } finally { restarted.processor.stop() }
+})
+
+// UR01: ACK waiters certify their immutable queue record, not a flush owner or
+// absent FIFO head. All HTTP callbacks/material below are isolated test input.
+const ackRaceDeferred = () => {
+  let resolvePromise
+  const promise = new Promise(resolve => { resolvePromise = resolve })
+  return { promise, resolve: resolvePromise }
+}
+const ackRaceCompete = (runtime, mode) => {
+  if (mode === 'untargeted') return runtime.processor._scheduleRuntimeAckFlush()
+  const replay = runtime.processor.replayAcks()
+  if (mode === 'heartbeat') runtime.processor.resume() // original adapter's replay/resume sequence
+  return replay
+}
+const ackRaceInstall = (runtime, mode) => {
+  const emit = runtime.processor._emitRuntimeAck.bind(runtime.processor)
+  const deliveries = []; const competitors = []
+  runtime.processor._emitRuntimeAck = (status, meta, marker) => {
+    if (status === 'STARTED') competitors.push(ackRaceCompete(runtime, mode))
+    const delivery = emit(status, meta, marker)
+    deliveries.push({ status, delivery })
+    return delivery
+  }
+  return { deliveries, competitors }
+}
+
+for (const mode of ['untargeted', 'replay', 'heartbeat']) test(`runtime ACK completion race: older ${mode} flush commits exact STARTED before its targeted flush`, async () => {
+  const calls = []; let runs = 0; let runtime
+  runtime = unifiedCheckpoint({ ack: async (context, status, version) => {
+    assert.equal(existsSync(runtime.outbox.lockPath), false, 'no file lock over HTTP')
+    assert.equal(context.commandId, 'command-7001'); assert.equal(context.messageId, 'message-7001')
+    calls.push({ status, version })
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  }, run: async () => {
+    runs++
+    const entry = runtime.ledger.getEntry('command-7001')
+    assert.equal(entry.runtimeAckCommits[Buffer.from('message-7001').toString('hex')].status, 'STARTED')
+    assert.equal(entry.ackStartedEmitted, true)
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+    return { status: 'completed' }
+  } })
+  const race = ackRaceInstall(runtime, mode)
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    await Promise.all(race.competitors)
+    assert.equal(runs, 1); assert.equal(runtime.processor.failClosedError, null)
+    assert.deepEqual(calls, [{ status: 'RECEIVED', version: null }, { status: 'STARTED', version: 1 }, { status: 'SUCCEEDED', version: 2 }])
+    const started = race.deliveries.find(item => item.status === 'STARTED').delivery
+    assert.equal(await started.confirmation, true)
+    assert.deepEqual([started.persisted, started.sent, started.markerPersisted, started.dequeued], [true, true, true, true])
+    assert.equal(runtime.ledger.getEntry('command-7001').status, 'SUCCEEDED')
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0, 'only transient unsettled waiters')
+  } finally { runtime.processor.stop() }
+})
+
+test('runtime ACK completion race: suspended HTTP with repeated heartbeat/replay and duplicate callbacks executes exactly once', async () => {
+  const entered = ackRaceDeferred(); const release = ackRaceDeferred()
+  let runs = 0; let startedCommitted = false; let runtime
+  const seen = []
+  runtime = unifiedCheckpoint({ ack: async (context, status, version) => {
+    assert.equal(existsSync(runtime.outbox.lockPath), false)
+    seen.push({ status, version })
+    if (status === 'STARTED' && !startedCommitted) {
+      entered.resolve(); await release.promise
+      // Original persisted marker/FIFO must still be unconfirmed during callback.
+      assert.equal(runtime.ledger.getEntry(context.commandId).ackStartedEmitted, false)
+      startedCommitted = true
+      return { kind: 'ADVANCED', status, deliveryVersion: version + 1 }
+    }
+    return { kind: status === 'STARTED' ? 'PRIOR' : 'ADVANCED', status,
+      deliveryVersion: status === 'STARTED' ? version : (version ?? 0) + 1 }
+  }, run: async () => {
+    assert.equal(startedCommitted, true); runs++
+    const entry = runtime.ledger.getEntry('command-7001')
+    assert.equal(entry.ackStartedEmitted, true)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 2)
+    return { status: 'completed' }
+  } })
+  const race = ackRaceInstall(runtime, 'heartbeat')
+  try {
+    const raw = unifiedCommand()
+    await runtime.processor.handle(raw); runtime.processor.resume(); await entered.promise
+    assert.equal(runs, 0)
+    assert.equal(runtime.outbox.pendingEnvelopes().filter(item => item.envelope.ackStatus === 'STARTED').length, 1)
+    for (let i = 0; i < 3; i++) {
+      race.competitors.push(ackRaceCompete(runtime, 'heartbeat'))
+      assert.equal((await runtime.processor.handle(raw)).kind, 'command-duplicate')
+    }
+    assert.equal(runs, 0); assert.equal(runtime.ledger.getEntry(raw.commandId).ackStartedEmitted, false)
+    release.resolve()
+    await Promise.all(race.competitors); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    const started = race.deliveries.filter(item => item.status === 'STARTED').map(item => item.delivery)
+    assert.equal(started.length, 4)
+    assert.deepEqual(await Promise.all(started.map(delivery => delivery.confirmation)), [true, true, true, true])
+    assert.equal(runs, 1); assert.equal(runtime.processor.failClosedError, null)
+    assert.equal(runtime.inbox.commandStateIndex().get(raw.commandId)[0].record.state, 'completed'); assert.equal(runtime.inbox.count('recovery_required'), 0)
+    assert.equal(seen.filter(item => item.status === 'STARTED').length, 4)
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+    assert.equal(JSON.stringify(runtime.ledger.getEntry(raw.commandId)).includes('runtimeAckCompletions'), false)
+    assert.equal((await runtime.processor.handle(raw)).kind, 'command-duplicate')
+    await runtime.processor.runtimeAckTail; assert.equal(runs, 1)
+  } finally { release.resolve(); runtime.processor.stop() }
+})
+
+async function ackRacePrepared(options = {}) {
+  const runtime = unifiedCheckpoint(options)
+  const raw = unifiedCommand()
+  await runtime.processor.handle(raw); await runtime.processor.runtimeAckTail
+  runtime.ledger.markStarted(raw.commandId)
+  const meta = { ...runtime.processor._commandMeta(normalizeInboundMessage(raw)), commandId: raw.commandId }
+  return { runtime, raw, meta }
+}
+
+for (const [label, change] of [
+  ['tenant subject', record => { record.envelope.runtimeCommand.tenantId = 'foreign' }],
+  ['installation subject', record => { record.envelope.runtimeCommand.installationId = 'foreign' }],
+  ['canonical Agent', record => { record.envelope.runtimeCommand.canonicalAgentId = 'foreign' }],
+  ['command message', record => { record.envelope.runtimeCommand.messageId = 'foreign' }],
+  ['work context', record => { record.envelope.runtimeCommand.workItemId = 'foreign' }],
+  ['expiry context', record => { record.envelope.runtimeCommand.expiresAt = '2099-01-01T00:00:00.000Z' }],
+  ['ACK status', record => { record.envelope.ackStatus = 'RECEIVED' }],
+  ['ACK message identity', record => { record.envelope.messageId = 'foreign-ack-message' }],
+  ['queue record fence', record => { record.createdAt += 1 }],
+  ['marker identity', record => { record.marker.kind = 'none' }]
+]) test(`runtime ACK completion race: changed ${label} cannot certify or dequeue immutable target`, async () => {
+  const calls = []
+  const { runtime, meta } = await ackRacePrepared({ ack: async (_context, status, version) => {
+    calls.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  } })
+  ackRaceInstall(runtime, 'untargeted')
+  let dequeues = 0
+  const dequeue = runtime.outbox.dequeue.bind(runtime.outbox)
+  runtime.outbox.dequeue = file => { dequeues++; return dequeue(file) }
+  try {
+    const delivery = runtime.processor._emitAck('STARTED', meta)
+    const item = runtime.outbox.pendingEnvelopes()[0]
+    const waiter = runtime.processor.runtimeAckCompletions.get(item.fileName)
+    assert.equal(Object.isFrozen(waiter.target), true)
+    const path = resolve(runtime.outbox.acksDir, item.fileName)
+    const record = JSON.parse(readFileSync(path, 'utf8')); change(record)
+    writeFileSync(path, JSON.stringify(record), { mode: 0o600 }) // only private synthetic outbox
+    assert.equal(await delivery.confirmation, false)
+    await runtime.processor.runtimeAckTail
+    assert.deepEqual([delivery.sent, delivery.markerPersisted, delivery.dequeued], [false, false, false])
+    assert.deepEqual(calls, ['RECEIVED']); assert.equal(dequeues, 0)
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 1)
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'RECEIVED')
+    assert.ok(['RUNTIME_ACK_CONTEXT_CONFLICT', 'RUNTIME_ACK_FIFO_CHANGED'].includes(runtime.processor.failClosedError.code))
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+test('runtime ACK completion race: callback cannot change expected context while HTTP is suspended', async () => {
+  const entered = ackRaceDeferred(); const release = ackRaceDeferred(); let passedContext
+  const { runtime, meta } = await ackRacePrepared({ ack: async (context, status, version) => {
+    if (status === 'STARTED') { passedContext = context; entered.resolve(); await release.promise }
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  } })
+  try {
+    const delivery = runtime.processor._emitAck('STARTED', meta)
+    await entered.promise
+    passedContext.tenantId = 'callback-replacement'
+    release.resolve()
+    assert.equal(await delivery.confirmation, false)
+    assert.equal(runtime.processor.failClosedError.code, 'RUNTIME_ACK_FIFO_CHANGED')
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 1)
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+  } finally { release.resolve(); runtime.processor.stop() }
+})
+
+test('runtime ACK completion race: missing target and unrelated latest receipt never imply successful delivery', async () => {
+  const { runtime, meta } = await ackRacePrepared()
+  try {
+    await runtime.processor.handle(unifiedCommand(7002)); await runtime.processor.runtimeAckTail
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7002', 'message-7002').status, 'RECEIVED')
+    ackRaceInstall(runtime, 'untargeted')
+    const delivery = runtime.processor._emitAck('STARTED', meta)
+    runtime.outbox.dequeue(runtime.outbox.pendingEnvelopes()[0].fileName) // synthetic unexplained disappearance
+    assert.equal(await delivery.confirmation, false)
+    assert.deepEqual([delivery.sent, delivery.markerPersisted, delivery.dequeued], [false, false, false])
+    assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'RECEIVED')
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+test('runtime ACK completion race: certified record remains exact after older flush overwrites per-message receipt', async () => {
+  const { runtime, meta } = await ackRacePrepared()
+  const race = ackRaceInstall(runtime, 'replay'); let proofChecked = false
+  runtime.processor.sendCommandAckFn = async (context, status, version) => {
+    if (status === 'REJECTED') {
+      const proof = [...runtime.processor.runtimeAckCompletions.values()].find(item => item.proof?.status === 'STARTED').proof
+      assert.equal(Object.isFrozen(proof), true)
+      assert.deepEqual(Object.keys(proof).sort(), ['recordDigest', 'contextDigest', 'kind', 'status', 'deliveryVersion'].sort())
+      assert.equal(proof.contextDigest, runtime.ledger.runtimeAckCommit(context.commandId, context.messageId).contextDigest)
+      assert.equal(proof.kind, 'ADVANCED'); assert.equal(proof.deliveryVersion, 2)
+      assert.throws(() => { proof.deliveryVersion = 900 }, TypeError); proofChecked = true
+    }
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  }
+  try {
+    const started = runtime.processor._emitAck('STARTED', meta)
+    const rejected = runtime.processor._emitAck('REJECTED', { ...meta, rejectReason: 'PRIVATE SYNTHETIC successor' })
+    assert.equal(await started.confirmation, true); assert.equal(await rejected.confirmation, true)
+    await Promise.all(race.competitors)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'REJECTED')
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 3)
+    assert.equal(proofChecked, true)
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+for (const [label, result] of [
+  ['wrong status', { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: 2 }],
+  ['nonadvancing version', { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: 1 }],
+  ['regressed version', { kind: 'PRIOR', status: 'STARTED', deliveryVersion: 0 }],
+  ['unsafe version', { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: Number.MAX_SAFE_INTEGER + 1 }],
+  ['unknown result', { kind: 'UNKNOWN', status: 'STARTED', deliveryVersion: 2 }],
+  ['absent result', null]
+]) test(`runtime ACK completion race: ${label} retains STARTED outbox without execution or confirmation`, async () => {
+  let runs = 0
+  const runtime = unifiedCheckpoint({ ack: async (_context, status, version) => status === 'STARTED'
+    ? result : { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 },
+    run: async () => { runs++; return { status: 'completed' } } })
+  const race = ackRaceInstall(runtime, 'heartbeat')
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    const started = race.deliveries.find(item => item.status === 'STARTED').delivery
+    assert.equal(await started.confirmation, false); assert.equal(runs, 0)
+    assert.equal(runtime.processor.failClosedError.code, 'RUNTIME_ACK_COMMIT_UNCONFIRMED')
+    assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'STARTED')
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'RECEIVED')
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+    assert.equal(runtime.inbox.count('recovery_required'), 1)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+for (const fault of ['ledger-before', 'ledger-after', 'marker-before', 'marker-after', 'dequeue-before', 'dequeue-after', 'commit-lock-release']) {
+  test(`runtime ACK completion race: ${fault} fails closed even if latest receipt/marker/FIFO suggests success`, async () => {
+    let runs = 0
+    const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } },
+      ack: async (_context, status, version) => ({ kind: status === 'STARTED' && version === 2 ? 'PRIOR' : 'ADVANCED',
+        status, deliveryVersion: status === 'STARTED' && version === 2 ? version : (version ?? 0) + 1 }) })
+    const race = ackRaceInstall(runtime, 'untargeted'); let faultCalls = 0
+    const fail = () => { faultCalls++; throw Object.assign(Error('private injected durable ACK failure'), { code: 'EIO' }) }
+    if (fault.startsWith('ledger-')) {
+      const mark = runtime.ledger.markRuntimeAckCommitted.bind(runtime.ledger)
+      runtime.ledger.markRuntimeAckCommitted = (id, context, result) => {
+        if (result.status !== 'STARTED') return mark(id, context, result)
+        if (fault === 'ledger-after') mark(id, context, result)
+        fail()
+      }
+    } else if (fault.startsWith('marker-')) {
+      const mark = runtime.ledger.markAckEmitted.bind(runtime.ledger)
+      runtime.ledger.markAckEmitted = (id, status, marker) => {
+        if (status !== 'STARTED') return mark(id, status, marker)
+        if (fault === 'marker-after') mark(id, status, marker)
+        fail()
+      }
+    } else if (fault.startsWith('dequeue-')) {
+      const dequeue = runtime.outbox.dequeue.bind(runtime.outbox)
+      runtime.outbox.dequeue = fileName => {
+        const item = JSON.parse(readFileSync(resolve(runtime.outbox.acksDir, fileName), 'utf8'))
+        if (item.envelope.ackStatus !== 'STARTED') return dequeue(fileName)
+        if (fault === 'dequeue-after') dequeue(fileName)
+        fail()
+      }
+    } else {
+      const commit = runtime.outbox.commitRuntimeDelivery.bind(runtime.outbox)
+      const release = runtime.outbox._releaseSequenceLock.bind(runtime.outbox)
+      let isStartedCommit = false
+      runtime.outbox.commitRuntimeDelivery = (head, result, ledger) => {
+        isStartedCommit = head.envelope.ackStatus === 'STARTED'
+        try { return commit(head, result, ledger) } finally { isStartedCommit = false }
+      }
+      runtime.outbox._releaseSequenceLock = () => { release(); if (isStartedCommit) fail() }
+    }
+    try {
+      await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+      await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+      const started = race.deliveries.find(item => item.status === 'STARTED').delivery
+      assert.equal(await started.confirmation, false); assert.equal(runs, 0); assert.ok(faultCalls > 0)
+      assert.deepEqual([started.sent, started.markerPersisted, started.dequeued], [false, false, false])
+      assert.ok(runtime.processor.failClosedError); assert.equal(runtime.inbox.count('recovery_required'), 1)
+      if (['dequeue-after', 'commit-lock-release'].includes(fault)) {
+        assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
+        assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
+      } else assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'STARTED')
+      assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+    } finally { runtime.processor.stop() }
+  })
+}
+
+for (const failure of ['403', 'unknown-response']) test(`runtime ACK completion race: actual Node HTTP ${failure} never executes, unknown STARTED checkpoint restart never reruns (JavaDB NOT_RUN)`, async t => {
+  const { RuntimeV1Client } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
+  const selected = unifiedProfile(); const root = temporaryDirectory(); let runs = 0; const requests = []
+  const authorization = 'rta1_' + 'b'.repeat(64); const token = 'rts1_' + 'a'.repeat(64)
+  const server = createServer(async (request, response) => {
+    let bytes = ''; for await (const part of request) bytes += part
+    const body = JSON.parse(bytes); requests.push(body.status || 'session')
+    const send = data => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ data })) }
+    if (request.url === '/agent/runtime/v1/session') {
+      assert.equal(request.headers.authorization, `Bearer ${authorization}`)
+      return send({ ...selected.runtimeIdentity, hostId: 'race-host', runtimeInstanceId: 'race-boot', sessionGeneration: 1,
+        scheme: 'AgentRuntime', sessionToken: token, websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' })
+    }
+    assert.equal(request.headers.authorization, `AgentRuntime ${token}`)
+    assert.equal(request.headers['x-api-key'], undefined)
+    if (body.status === 'STARTED') {
+      assert.equal(body.deliveryVersion, 1)
+      if (failure === '403') { response.writeHead(403, { 'Content-Type': 'application/json' }); response.end('{"code":"TEST_FORBIDDEN"}'); return }
+      response.destroy(); return // no known HTTP commit, never inferred from transport loss
+    }
+    send({ kind: 'ADVANCED', status: body.status, deliveryVersion: (body.deliveryVersion ?? 0) + 1 })
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
+  const client = new RuntimeV1Client({ manifest: { ...selected.runtimeIdentity, manifestVersion: '1', manifestSha256: 'sha256:' + 'd'.repeat(64) },
+    apiBaseUrl: `http://127.0.0.1:${server.address().port}`, stateDir: root, hostId: 'race-host', runtimeInstanceId: 'race-boot' })
+  writeFileSync(client.authorizationPath(), JSON.stringify({ installationId: selected.runtimeIdentity.installationId, runtimeAuthorization: authorization }), { mode: 0o600 })
+  await client.session()
+  const runtime = unifiedCheckpoint({ root, selectedProfile: selected, ack: (...args) => client.acknowledge(...args),
+    run: async () => { runs++; return { status: 'completed' } } })
+  const race = ackRaceInstall(runtime, 'heartbeat')
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.ok(requests.includes('STARTED')); assert.equal(runs, 0)
+    assert.equal(await race.deliveries.find(item => item.status === 'STARTED').delivery.confirmation, false)
+    assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'STARTED')
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
+    if (failure === '403') {
+      assert.equal(runtime.processor.runtimeAckFailure.code, 'RUNTIME_HTTP_REJECTED')
+      assert.equal(runtime.processor.runtimeAckFailure.status, 403)
+    }
+    assert.equal(runtime.inbox.count('recovery_required'), 1)
+  } finally { runtime.processor.stop(); client.invalidateSession() }
+  const restarted = unifiedCheckpoint({ root, selectedProfile: selected, run: async () => { runs++; return { status: 'completed' } } })
+  try {
+    restarted.processor.resume(); await restarted.processor.waitForIdle(); await restarted.processor.runtimeAckTail
+    assert.equal(runs, 0); assert.equal(restarted.ledger.getEntry('command-7001').status, 'RECOVERY_REQUIRED')
+    assert.equal(restarted.inbox.count('recovery_required'), 1)
+    await restarted.processor.replayAcks() // await reconstructed waiters, not just the HTTP flush tail
+    assert.equal(restarted.processor.runtimeAckCompletions.size, 0, 'no transient proof survives checkpoint reconstruction')
+  } finally { restarted.processor.stop() }
+})
+
+
+test('runtime ACK completion race: stop during old flush confirmation cannot be overridden by its certified target', async () => {
+  let runtime; let runs = 0
+  runtime = unifiedCheckpoint({ ack: async (_context, status, version) => {
+    if (status === 'STARTED') runtime.processor.stop() // only in-memory synthetic processor, no process signal
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  }, run: async () => { runs++; return { status: 'completed' } } })
+  const race = ackRaceInstall(runtime, 'untargeted')
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    const started = race.deliveries.find(item => item.status === 'STARTED').delivery
+    assert.equal(runtime.processor.stopped, true); assert.equal(runs, 0)
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
+    assert.equal(await started.confirmation, false)
+    assert.deepEqual([started.sent, started.markerPersisted, started.dequeued], [false, false, false])
+    assert.equal(runtime.inbox.count('recovery_required'), 1)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { runtime.processor.stop() }
+})
+
+
+test('runtime ACK completion race: later command HTTP rejection retains its own FIFO without erasing certified target', async () => {
+  const entered = ackRaceDeferred(); const release = ackRaceDeferred()
+  const { runtime, meta } = await ackRacePrepared({ ack: async (context, status, version) => {
+    if (context.commandId === 'command-7002') throw Object.assign(Error('private second-command rejection'), { code: 'RUNTIME_HTTP_REJECTED', status: 403 })
+    if (status === 'STARTED') { entered.resolve(); await release.promise }
+    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+  } })
+  const emit = runtime.processor._emitRuntimeAck.bind(runtime.processor); const deliveries = []
+  runtime.processor._emitRuntimeAck = (status, meta, marker) => {
+    const delivery = emit(status, meta, marker); deliveries.push({ commandId: meta.commandId, delivery }); return delivery
+  }
+  try {
+    const started = runtime.processor._emitAck('STARTED', meta); await entered.promise
+    await runtime.processor.handle(unifiedCommand(7002)); release.resolve()
+    assert.equal(await started.confirmation, true)
+    await runtime.processor.runtimeAckTail
+    const other = deliveries.find(item => item.commandId === 'command-7002').delivery
+    assert.equal(await other.confirmation, false)
+    assert.deepEqual([started.sent, started.markerPersisted, started.dequeued], [true, true, true])
+    assert.deepEqual([other.sent, other.markerPersisted, other.dequeued], [false, false, false])
+    const pending = runtime.outbox.pendingEnvelopes()
+    assert.equal(pending.length, 1); assert.equal(pending[0].envelope.commandId, 'command-7002')
+    assert.equal(runtime.ledger.getEntry('command-7002').ackReceivedEmitted, false)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7002', 'message-7002'), null)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'STARTED')
+    assert.equal(runtime.processor.runtimeAckFailure.status, 403)
+  } finally { release.resolve(); runtime.processor.stop() }
+})
+
+
+test('runtime ACK completion race: stop during postcommit cleanup await cannot confirm STARTED or execute', async () => {
+  const entered = ackRaceDeferred(); const release = ackRaceDeferred(); let runs = 0
+  const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } } })
+  const cleanup = runtime.processor._cleanupRuntimeTerminals.bind(runtime.processor)
+  runtime.processor._cleanupRuntimeTerminals = async () => {
+    if (runtime.ledger.getEntry('command-7001')?.ackStartedEmitted) { entered.resolve(); await release.promise }
+    return cleanup()
+  }
+  const emit = runtime.processor._emitRuntimeAck.bind(runtime.processor); let started
+  runtime.processor._emitRuntimeAck = (status, meta, marker) => {
+    const delivery = emit(status, meta, marker)
+    if (status === 'STARTED') started = delivery
+    return delivery
+  }
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await entered.promise
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'STARTED')
+    assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
+    assert.equal(runs, 0)
+    runtime.processor.stop() // only this synthetic processor, never a process signal
+    release.resolve(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.equal(await started.confirmation, false)
+    assert.deepEqual([started.sent, started.markerPersisted, started.dequeued], [false, false, false])
+    assert.equal(runs, 0); assert.equal(runtime.inbox.count('recovery_required'), 1)
+    assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
+  } finally { release.resolve(); runtime.processor.stop() }
 })

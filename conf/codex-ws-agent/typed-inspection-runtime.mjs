@@ -1,3 +1,4 @@
+import { nativeSessionHeaders } from './conversation-native.mjs'
 import { parseNativeApiOrigin } from './workspace-file-bridge.mjs'
 import { ACTION_OUTCOME_SCHEMA, ACTION_OUTCOME_INSTRUCTIONS, validateActionFacts, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import { createHash } from 'node:crypto'
@@ -221,15 +222,18 @@ export const BUILTIN_TYPED_INSPECTION_DECODERS = freeze({
 
 
 export class TypedInspectionMaterializer {
-  constructor({ apiOrigin, rootDir, fetchFn = globalThis.fetch, getRuntimeAuth, agentId, runtimeInstanceId, parsers = {}, decoders = BUILTIN_TYPED_INSPECTION_DECODERS, forbidden = [] }) {
+  constructor({ apiOrigin, rootDir, fetchFn = globalThis.fetch, getRuntimeHeaders, agentId, runtimeInstanceId, parsers = {}, decoders = BUILTIN_TYPED_INSPECTION_DECODERS, forbidden = [] }) {
     this.origin = fixedOrigin(apiOrigin); this.root = ensurePrivateRoot(rootDir)
     for (const candidate of forbidden.filter(value => value && existsSync(resolve(value)))) if (overlap(this.root, realpathSync(resolve(candidate)))) fail('TYPED_INSPECTION_PRIVATE_DIRECTORY_OVERLAP')
-    if (typeof fetchFn !== 'function' || typeof getRuntimeAuth !== 'function' || !nonblank(agentId) || !nonblank(runtimeInstanceId) || !object(parsers) || !object(decoders)) fail('TYPED_INSPECTION_MATERIALIZER_CONFIG_INVALID')
-    this.fetchFn = fetchFn; this.getRuntimeAuth = getRuntimeAuth; this.agentId = agentId; this.runtimeInstanceId = runtimeInstanceId; this.parsers = parsers; this.decoders = decoders
+    if (typeof fetchFn !== 'function' || typeof getRuntimeHeaders !== 'function' || !nonblank(agentId) || !nonblank(runtimeInstanceId) || !object(parsers) || !object(decoders)) fail('TYPED_INSPECTION_MATERIALIZER_CONFIG_INVALID')
+    this.fetchFn = fetchFn; this.getRuntimeHeaders = getRuntimeHeaders; this.agentId = agentId; this.runtimeInstanceId = runtimeInstanceId; this.parsers = parsers; this.decoders = decoders
   }
   async materialize({ message, typed }) {
-    const auth = this.getRuntimeAuth()
-    if (!/^AgentRuntime [0-9a-f]{32}$/.test(auth || '')) fail('TYPED_INSPECTION_RUNTIME_AUTH_REQUIRED')
+    const proof = () => {
+      try { return nativeSessionHeaders(this.getRuntimeHeaders(), this.agentId, this.runtimeInstanceId) }
+      catch { fail('TYPED_INSPECTION_RUNTIME_AUTH_REQUIRED') }
+    }
+    proof() // fail before creating a private material directory
     const directoryKey = sha256(Buffer.from([typed.authorizationId, typed.manifestDigest, message.requestId, message.turnId].join('\u001f')))
     const finalDirectory = resolve(this.root, directoryKey)
     if (existsSync(finalDirectory)) fail('TYPED_INSPECTION_REQUEST_DIRECTORY_EXISTS')
@@ -243,8 +247,7 @@ export class TypedInspectionMaterializer {
         const expectedUrl = `${this.origin}${path}`
         const response = await this.fetchFn(expectedUrl, {
           method: 'GET', redirect: 'manual', headers: {
-            Authorization: auth, Accept: source.mimeType, 'X-Agent-Id': this.agentId,
-            'X-Agent-Runtime-Id': this.runtimeInstanceId, 'X-Inspection-Manifest-Digest': typed.manifestDigest
+            ...proof(), Accept: source.mimeType, 'X-Inspection-Manifest-Digest': typed.manifestDigest
           }
         })
         if (!response || response.status !== 200) {

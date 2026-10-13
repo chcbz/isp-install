@@ -60,6 +60,7 @@ export class PlatformSkillRuntime {
     enabled = false,
     archiveEnabled = false,
     authorizationProvider = () => '',
+    fetchFn = globalThis.fetch,
     managerFactory = options => new PlatformSkillManager(options),
     archiveRunnerFactory = options => new ArchiveMaintenanceRunner(options),
     availability = platformSkillRuntimeAvailable,
@@ -73,6 +74,7 @@ export class PlatformSkillRuntime {
     this.enabled = enabled === true
     this.archiveEnabled = archiveEnabled === true
     this.authorizationProvider = authorizationProvider
+    this.fetchFn = fetchFn
     this.managerFactory = managerFactory
     this.archiveRunnerFactory = archiveRunnerFactory
     this.available = (this.enabled || this.archiveEnabled) && typeof availability === 'function' && availability() === true
@@ -88,6 +90,13 @@ export class PlatformSkillRuntime {
 
   get supported() { return this.available && typeof this.managerFactory === 'function' }
   get archiveSupported() { return this.supported && this.archiveAvailable && typeof this.archiveRunnerFactory === 'function' }
+  get commandTypes() {
+    if (!this.ready || this.controller?.signal.aborted) return Object.freeze([])
+    const types = []
+    if (this.enabled && this.supported) types.push('PLATFORM_SKILL_INSTALL')
+    if (this.archiveEnabled && this.archiveSupported && this.archiveRunner) types.push(ARCHIVE_MAINTENANCE_TYPE)
+    return Object.freeze(types)
+  }
   get commandProtocols() {
     const protocols = []
     if (this.enabled && this.supported) protocols.push(PLATFORM_SKILL_PROTOCOL)
@@ -122,10 +131,11 @@ export class PlatformSkillRuntime {
       authorizationProvider: arguments_ => {
         if (controller.signal.aborted || generation !== this.generation) throw controller.signal.reason || new Error('socket registration rotated')
         const authorization = this.authorizationProvider(arguments_)
-        if (!/^AgentRuntime [0-9a-f]{32}$/u.test(authorization || '')) throw new Error('registered runtime authorization is unavailable')
+        if (!/^AgentRuntime rts1_[0-9a-f]{64}$/u.test(authorization || '')) throw new Error('registered runtime authorization is unavailable')
         return authorization
       },
-      sessionSignal: controller.signal
+      sessionSignal: controller.signal,
+      fetchFn: this.fetchFn
     })
     manager.initialize()
     this.manager = manager
@@ -159,7 +169,8 @@ export class PlatformSkillRuntime {
         platformSkillManager: manager,
         checkpointRoot: defaultArchiveMaintenanceCheckpointRoot(this.commandInboxDir, this.profile),
         checkpointProfileId: this.profile.profileId,
-        sessionSignal: controller.signal
+        sessionSignal: controller.signal,
+        fetchFn: this.fetchFn
       })
     }
     this.ready = true

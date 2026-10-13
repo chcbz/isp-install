@@ -1,0 +1,366 @@
+// Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
+// Session credentials live only here; outbound work checkpoints hold no proof.
+import { randomUUID } from 'node:crypto';
+import { RuntimeV1Client, classifyRuntimeError } from './runtime-client.mjs';
+import { moduleSpecifiers, scanRuntimeModuleClosure } from '../../codex-ws-agent/module-import-scanner.mjs';
+const adapterError = code => Object.assign(new Error(code), { code });
+const wait = (ms, signal) => new Promise(resolve => {
+  if (signal.aborted) return resolve();
+  const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
+  const timer = setTimeout(done, ms); signal.addEventListener('abort', done, { once: true });
+});
+
+export async function createExecutionAdapterFactory({ config, instanceId, apiOrigin, workspacePolicies,
+  providerEnvironments, loadEngine, socketFactory, clientFactory, logger = () => {} } = {}) {
+  const module = await (loadEngine || (() => import('../../codex-ws-agent/agent-client.mjs')))();
+  const Socket = socketFactory || await module.loadWebSocketClient();
+  const { RegistrationAckObserver } = await import('../../codex-ws-agent/registration-ack.mjs');
+  const engine = module.createRuntimeExecutionHost({ agents: config.agents, runtimeInstanceId: instanceId,
+    apiOrigin, workspacePolicies, providerEnvironments, webSocketClient: Socket });
+  const attached = new Map();
+  const known = new Set(config.agents.map(agent => agent.subjectKey));
+  let closing = false;
+  return {
+    createExecutor: options => {
+      if (closing || attached.has(options.subjectKey)) throw adapterError('RUNTIME_EXECUTOR_SUBJECT_INVALID');
+      if (!known.has(options.subjectKey)) { engine.addAgent(options.agent); known.add(options.subjectKey); }
+      const executor = engine.createExecutor(options);
+      const client = (clientFactory || (settings => new RuntimeV1Client(settings)))({ manifest: options.agent.manifest,
+        apiBaseUrl: apiOrigin, stateDir: options.agent.stateRoot, hostId: config.hostId, runtimeInstanceId: instanceId });
+      let socket = null; let observer = null; let abort = null; let loop = null; let channelConfirmed = false;
+      let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
+      let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false; let registeredAt = null; let serviceReadyAt = null; let replay = null;
+      const durable = () => executor.durableStateHealthy() === true;
+      const usable = () => executor.readyCommandTypes().length > 0 || executor.chatReady();
+      const ready = () => admitted && channelConfirmed && declaredHealthy && durable() && usable() && socket?.readyState === 1;
+      const send = envelope => {
+        if (!client.currentSession || socket?.readyState !== 1 || envelope.messageType === 'command.ack') return false;
+        const session = client.currentSession;
+        const current = { ...envelope, tenantId: session.tenantId, clientId: session.clientId, agentId: session.canonicalAgentId,
+          sourceAgentId: session.canonicalAgentId, installationId: session.installationId, hostId: session.hostId,
+          runtimeInstanceId: session.runtimeInstanceId, sessionGeneration: session.sessionGeneration };
+        socket.send(JSON.stringify(current)); return true;
+      };
+      const register = () => {
+        if (!client.currentSession || socket?.readyState !== 1) return false;
+        const healthy = durable(); declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
+        const envelope = module.buildProtocolEnvelope('agent.register', { ...executor.registrationPayload(),
+          messageId: randomUUID(), durableStateHealthy: healthy, readyCommandTypes: requestTypes }, executor.state().profile, instanceId);
+        observer.begin(envelope.messageId); channelConfirmed = false; registeredAt = null; serviceReadyAt = null;
+        if (!send(envelope)) observer.sendFailed(envelope.messageId);
+        return true;
+      };
+      const transport = {
+        ready, reportReady: () => admitted && channelConfirmed && !!client.currentSession && socket?.readyState === 1, send, readyCommandTypes: () => ready() ? executor.readyCommandTypes().filter(type => requestTypes.includes(type)) : [], headers: () => client.sessionHeaders(),
+        acknowledge: (command, status, version) => client.acknowledge(command, status, version, { signal: abort?.signal }), nativeFetch: (url, opts) => client.nativeFetch(url, opts),
+        refreshCapabilities: register
+      };
+      // Resume can await this subject's durable/native reconciliation. Never let
+      // that network work hold the shared presence loop or stack duplicate work.
+      const resume = () => {
+        if (replay || !admitted || !channelConfirmed) return;
+        replay = Promise.resolve().then(() => executor.resume()).catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' }));
+        void replay.finally(() => { replay = null; });
+      };
+      const disconnect = () => { registeredAt = null; serviceReadyAt = null; channelConfirmed = false; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const connectOnce = async signal => {
+        const session = await client.session({ signal });
+        if (signal.aborted) return;
+        observer = new RegistrationAckObserver({ agentId: session.canonicalAgentId, runtimeInstanceId: instanceId,
+          sessionProof: session, logger: { log() {}, warn() {} } });
+        executor.state().registration = observer; executor.bindTransport(transport);
+        try { await executor.prepareSession(); }
+        catch (error) { executor.disconnected(); client.invalidateSession(); throw error; }
+        const current = new Socket(client.websocketUrl(), client.websocketOptions()); socket = current;
+        executor.attachSocket(current);
+        return new Promise((resolveConnection, rejectConnection) => {
+          const stopped = () => current.close(); signal.addEventListener('abort', stopped, { once: true });
+          let ended = false;
+          const end = error => { if (ended) return; ended = true; signal.removeEventListener('abort', stopped); if (socket === current) disconnect(); error ? rejectConnection(error) : resolveConnection(); };
+          current.on('open', () => { if (socket === current && !signal.aborted) register(); });
+          current.on('error', error => { if (socket === current && !signal.aborted) logger('runtime-channel-error', { category: classifyRuntimeError(error).kind }); });
+          current.on('close', (code) => end(code === 1008 ? Object.assign(adapterError('RUNTIME_CHANNEL_REVOKED'), { status: 403 }) : null));
+          current.on('unexpected-response', (_request, response) => { current.terminate(); end(Object.assign(adapterError('RUNTIME_HANDSHAKE_REJECTED'), { status: response.statusCode })); });
+          current.on('message', bytes => {
+            if (socket !== current || signal.aborted) return;
+            let frame;
+            try { frame = JSON.parse(bytes.toString()); } catch { logger('runtime-frame-rejected', { code: 'INVALID_JSON' }); return; }
+            if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
+            const payload = frame.data && typeof frame.data === 'object' && !Array.isArray(frame.data) ? frame.data : frame;
+            const proofMismatch = layer => {
+              // Canonical skill command installationId is the PRODUCT binding.
+              // It never substitutes for the authenticated Runtime installation.
+              const productInstall = layer.messageType === 'command.dispatch' && layer.commandType === 'SKILL_INSTALL';
+              if (layer.messageType === 'command.dispatch' && (layer.tenantId !== session.tenantId || layer.clientId !== session.clientId
+                  || layer.targetAgentId !== session.canonicalAgentId || productInstall && layer.installationId === session.installationId)) return true;
+              return ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
+                .some(key => !(productInstall && key === 'installationId') && Object.hasOwn(layer, key) && layer[key] !== session[key]);
+            };
+            if (proofMismatch(frame) || proofMismatch(payload)) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH' }); return; }
+            // A type-only control event is not a business envelope. Check both
+            // supported wrapper shapes: even null/invalid explicit messageType
+            // must reach the original strict business validator, never be eaten
+            // by a cosmetic control type (including registration/error replies).
+            const layers = [frame, payload, frame.payload, payload.payload].filter(layer => layer && typeof layer === 'object' && !Array.isArray(layer));
+            const declared = layers.filter(layer => Object.hasOwn(layer, 'messageType'));
+            const typeOnlyControl = declared.length === 0;
+            const registrationError = (frame.type === 'error' || frame.type === 'protocol_error'
+              || !Object.hasOwn(frame, 'type') && frame.messageType === 'protocol.error')
+              && declared.every(layer => layer.messageType === 'protocol.error');
+            const observed = typeOnlyControl || registrationError ? observer.observe(frame) : null;
+            if (observed === 'registered') {
+              if (payload.readyCommandTypes.length !== requestTypes.length || payload.readyCommandTypes.some(type => !requestTypes.includes(type)) || payload.durableStateHealthy !== declaredHealthy) {
+                channelConfirmed = false; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
+              }
+              channelConfirmed = true; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null; resolveActivated?.(); resume(); return;
+            }
+            if (observed === 'rejected') { rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 })); current.close(1008); return; }
+            if (typeOnlyControl && (frame.type === 'connected' || frame.type === 'agent_registered')) return;
+            if (typeOnlyControl && frame.type === 'ping') { send({ schemaVersion: 1, messageType: 'pong', type: 'pong', messageId: randomUUID() }); return; }
+            if (!channelConfirmed) return;
+            // AgentWebSocketHandler.updateAgentStatus sends copyTrace(presence)
+            // plus agentId/status as agent_status_updated, without messageType.
+            // Consume ONLY this receipt, after session gates, without granting
+            // readiness, changing lifecycle state or re-registering. Unknown and
+            // error frames still take the existing registration/business paths.
+            if (typeOnlyControl && frame.type === 'agent_status_updated') {
+              if (layers.some(proofMismatch) || payload.schemaVersion !== 1
+                  || payload.agentId !== session.canonicalAgentId || payload.runtimeInstanceId !== session.runtimeInstanceId
+                  || typeof payload.messageId !== 'string' || !payload.messageId.trim() || payload.messageId.trim() !== payload.messageId
+                  || Buffer.byteLength(payload.messageId) > 128 || /[\x00-\x1f\x7f]/u.test(payload.messageId)
+                  || !['online', 'busy', 'offline', 'error'].includes(payload.status)) {
+                logger('runtime-frame-rejected', { code: 'RUNTIME_CONTROL_RECEIPT_INVALID' }); return;
+              }
+              // Do not log the frame, arbitrary trace fields, error text or tokens.
+              logger('runtime-control-receipt', { type: 'agent_status_updated' }); return;
+            }
+            // Results/CHAT persistence receipts remain WS business confirmations.
+            // Commands go through the existing durable processor, never a new queue.
+            if (frame.messageType === 'command.ack') return;
+            ingress = ingress.catch(() => {}).then(() => { if (socket === current && client.currentSession === session && channelConfirmed && !signal.aborted) return executor.acceptFrame(frame); }).catch(error => logger('runtime-frame-rejected', { code: error.code || 'INVALID_FRAME' }));
+          });
+          if (signal.aborted) current.close();
+        });
+      };
+      const startChannel = () => {
+        if (loop) return activation;
+        abort = new AbortController(); activation = new Promise((resolve, reject) => { resolveActivated = resolve; rejectActivated = reject; });
+        loop = (async () => {
+          let attempt = 0;
+          while (!abort.signal.aborted) {
+            try { await connectOnce(abort.signal); attempt = 0; }
+            catch (error) {
+              if (abort.signal.aborted) break;
+              const category = classifyRuntimeError(error).kind;
+              if (!['transient-network', 'transient-http'].includes(category)) { rejectActivated(error); admitted = false; logger('runtime-agent-isolated', { subjectKey: options.subjectKey, category }); return; }
+              logger('runtime-channel-retry', { subjectKey: options.subjectKey, category });
+            }
+            if (!abort.signal.aborted) await wait(Math.min(1000 * 2 ** Math.min(attempt++, 6), 60000), abort.signal);
+          }
+        })();
+        return activation;
+      };
+      const api = {
+        initialize: () => executor.initialize(), activate: async () => { await startChannel(); }, ready,
+        pause: async () => { admitted = false; executor.state()?.processor.pause(); },
+        heartbeat: async () => {
+          if (!client.currentSession || socket?.readyState !== 1) return;
+          const healthy = durable();
+          send(module.buildProtocolEnvelope('agent.presence', { messageId: randomUUID(), status: ready() ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId));
+          // Health revocation never removes authorization to report known outcomes.
+          if (!healthy) { declaredHealthy = false; executor.suspendAdmission(); }
+          else if (!declaredHealthy) register();
+          if (channelConfirmed) resume();
+        },
+        close: () => {
+          if (!closed) closed = (async () => {
+            admitted = false; abort?.abort(); socket?.close(); rejectActivated?.(adapterError('RUNTIME_CHANNEL_STOPPED'));
+            await loop; await ingress; await replay; await executor.close(); client.invalidateSession();
+            if (attached.get(options.subjectKey) === api) { attached.delete(options.subjectKey); known.delete(options.subjectKey); }
+          })();
+          return closed;
+        },
+        cancelActivation: () => { admitted = false; abort?.abort(); socket?.close(); rejectActivated?.(adapterError('RUNTIME_CHANNEL_STOPPED')); },
+        sessionGeneration: () => client.lastGeneration,
+        evidence: () => {
+          if (!ready() || !registeredAt || !serviceReadyAt || !client.currentSession) return null;
+          const { installationId, tenantId, clientId, canonicalAgentId, hostId, runtimeInstanceId, sessionGeneration } = client.currentSession;
+          return { installationId, tenantId, clientId, canonicalAgentId, hostId, runtimeInstanceId, sessionGeneration,
+            registeredAt, serviceReadyAt, executorReady: true, durableReady: true };
+        },
+        state: () => executor.state()
+      };
+      attached.set(options.subjectKey, api); return api;
+    },
+    heartbeat: () => Promise.allSettled([...attached.values()].map(executor => executor.heartbeat())),
+    close: async () => { closing = true; await Promise.all([...attached.values()].map(executor => executor.close())); await engine.close(); }
+  };
+}
+
+// Authoritative unified execution-library catalog, not the retired installer list.
+// No legacy auth templates/broker/install tools, private state or wildcard copy.
+// Model/provider configuration is distinct from Agent transport credentials.
+export const EXECUTION_PAYLOAD_FILES = Object.freeze([
+  ".gitignore",
+  "agent-client.mjs",
+  "archive-maintenance-checkpoints.mjs",
+  "archive-maintenance-native.mjs",
+  "archive-maintenance-runner.mjs",
+  "app-server-adapter.mjs",
+  "chat-runtime.mjs",
+  "codex-home.example.toml",
+  "contracts/api-hosted-wire-v1.json",
+  "contracts/api-hosted-wire-v1.provenance.json",
+  "controlled-image-bounty-capability.mjs",
+  "controlled-image-bounty-v3-capability.mjs",
+  "controlled-image-delivery-retention-v3.mjs",
+  "controlled-image-gpt-cli-config.mjs",
+  "controlled-image-gpt-cli-egress-gate.mjs",
+  "controlled-image-gpt-cli-executor-v3.mjs",
+  "controlled-image-http-config.mjs",
+  "controlled-image-http-executor-v3.mjs",
+  "controlled-image-http-executor.mjs",
+  "controlled-image-http-ledger.mjs",
+  "controlled-image-http-provider-binding.mjs",
+  "controlled-image-v3-files.mjs",
+  "conversation-controlled-image-v3.mjs",
+  "conversation-controlled-image.mjs",
+  "conversation-native.mjs",
+  "conversation-text-file.mjs",
+  "conversation-reference-inputs-v3.mjs",
+  "conversation-reference-inputs.mjs",
+  "evidence/typed-inspection-local-image-gpt-5.6-terra-1f95df2.json",
+  "juyiting-action-outcome.mjs",
+  "juyiting-typed-outcome-stream.mjs",
+  "juyiting-typed-outcome.mjs",
+  "managed-chat-scope-config.mjs",
+  "managed-image-scope-config.mjs",
+  "managed-image-scopes.example.json",
+  "native-bounty-capability.mjs",
+  "package-lock.json",
+  "module-import-scanner.mjs",
+  "package.json",
+  "platform-skill-manager.mjs",
+  "platform-skill-native.mjs",
+  "platform-skill-runtime.mjs",
+  "registration-ack.mjs",
+  "report-outbox.mjs",
+  "skill-install-manager.mjs",
+  "toolchain/delivery_tool.py",
+  "toolchain/requirements.txt",
+  "typed-inspection-input-carriers.mjs",
+  "typed-inspection-network.mjs",
+  "typed-inspection-profile.mjs",
+  "typed-inspection-runtime.mjs",
+  "workspace-file-bridge.mjs",
+  "workspace-manager.mjs",
+  "workspace-policies.example.json"
+]);
+
+// Reject accidentally collated historical entrypoints/tools even when their files
+// are not imported. lstat also detects symlinks/dangling links without following.
+export const RETIRED_EXECUTION_PAYLOAD_PATHS = Object.freeze([
+  'README.md', 'codex-profiles.conf', 'env.example', '.env.example',
+  'managed-host.mjs', 'install-candidate', 'install-policy-check.mjs',
+  'migrate-ack-high-water.mjs', 'contracts/probes'
+]);
+
+const payloadError = code => Object.assign(new Error(code), { code });
+
+// Offline collation only. Does not install packages, initialize an engine or
+// adopt an existing release. Layout: artifact/runtime + artifact/codex-ws-agent.
+export async function collateExecutionPayload(sourceRoot, targetRoot) {
+  const { constants, lstat, mkdir, open, realpath } = await import('node:fs/promises');
+  const { dirname, resolve } = await import('node:path');
+  const source = await realpath(sourceRoot);
+  if (source !== resolve(sourceRoot)) throw payloadError('RUNTIME_PAYLOAD_SOURCE_UNSAFE');
+  if (resolve(targetRoot) !== targetRoot || await realpath(dirname(targetRoot)) !== dirname(targetRoot)) throw payloadError('RUNTIME_PAYLOAD_TARGET_UNSAFE');
+  await mkdir(targetRoot, { mode: 0o755 }); // no recursive adoption of an existing target
+  for (const relativePath of EXECUTION_PAYLOAD_FILES) {
+    const path = resolve(source, relativePath);
+    if (await realpath(path) !== path) throw payloadError('RUNTIME_PAYLOAD_SOURCE_UNSAFE');
+    const input = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stat = await input.stat({ bigint: true });
+      if (!stat.isFile()) throw payloadError('RUNTIME_PAYLOAD_SOURCE_UNSAFE');
+      const bytes = await input.readFile();
+      const after = await input.stat({ bigint: true });
+      const current = await lstat(path, { bigint: true });
+      if (stat.dev !== current.dev || stat.ino !== current.ino || stat.mtimeNs !== after.mtimeNs
+          || stat.ctimeNs !== after.ctimeNs || stat.size !== after.size) throw payloadError('RUNTIME_PAYLOAD_SOURCE_CHANGED');
+      const outputPath = resolve(targetRoot, relativePath);
+      await mkdir(dirname(outputPath), { recursive: true, mode: 0o755 });
+      const output = await open(outputPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        relativePath === 'toolchain/delivery_tool.py' ? 0o755 : 0o644);
+      try { await output.writeFile(bytes); await output.sync(); } finally { await output.close(); }
+    } finally { await input.close(); }
+  }
+  return validateExecutionPayload(targetRoot, { dependencies: false, toolchain: false });
+}
+
+export async function validateExecutionPayload(root, { dependencies = true, toolchain = true } = {}) {
+  const { lstat, readFile, realpath } = await import('node:fs/promises');
+  const { dirname, relative, resolve, sep } = await import('node:path');
+  const canonical = await realpath(root);
+  if (canonical !== resolve(root)) throw payloadError('RUNTIME_PAYLOAD_ROOT_UNSAFE');
+  const known = new Set(EXECUTION_PAYLOAD_FILES);
+  const packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
+  const requirements = JSON.parse(await readFile(resolve(root, 'package-lock.json'), 'utf8'));
+  if (['start', 'prestart', 'poststart'].some(key => Object.hasOwn(packageJson.scripts || {}, key))
+      || Object.hasOwn(packageJson, 'bin')) throw payloadError('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN');
+  for (const retiredPath of RETIRED_EXECUTION_PAYLOAD_PATHS) {
+    try { await lstat(resolve(root, retiredPath)); } catch (cause) { if (cause.code === 'ENOENT') continue; throw cause; }
+    throw payloadError('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN');
+  }
+  let closure;
+  try { closure = scanRuntimeModuleClosure(root, 'agent-client.mjs'); }
+  catch { throw payloadError('RUNTIME_PAYLOAD_IMPORT_MISSING'); }
+  if (closure.some(relativePath => !known.has(relativePath))) throw payloadError('RUNTIME_PAYLOAD_IMPORT_MISSING');
+  for (const relativePath of EXECUTION_PAYLOAD_FILES) {
+    const path = resolve(root, relativePath);
+    if (await realpath(path) !== path || !(await lstat(path)).isFile()) throw payloadError('RUNTIME_PAYLOAD_FILE_UNSAFE');
+    if (!relativePath.endsWith('.mjs')) continue;
+    const source = await readFile(path, 'utf8');
+    let imports;
+    try { imports = moduleSpecifiers(source); } catch { throw payloadError('RUNTIME_PAYLOAD_IMPORT_UNPROVABLE'); }
+    for (const specifier of imports) {
+      if (specifier.startsWith('node:') || specifier.startsWith('data:')) continue;
+      if (specifier.startsWith('.')) {
+        const imported = relative(root, resolve(dirname(path), specifier)).split(sep).join('/');
+        if (!known.has(imported)) throw payloadError('RUNTIME_PAYLOAD_IMPORT_MISSING');
+      } else if (!Object.hasOwn(packageJson.dependencies || {}, specifier)) throw payloadError('RUNTIME_PAYLOAD_DEPENDENCY_UNDECLARED');
+    }
+  }
+  for (const privatePath of ['.env', 'runtime.env', 'data', 'codex-session-map.json']) {
+    try { await lstat(resolve(root, privatePath)); } catch (cause) { if (cause.code === 'ENOENT') continue; throw cause; }
+    throw payloadError('RUNTIME_PAYLOAD_PRIVATE_STATE_FORBIDDEN');
+  }
+  if (dependencies) {
+    // Includes transitive lock entries, not only the two direct dependencies.
+    for (const [path, expected] of Object.entries(requirements.packages || {})) {
+      if (!path) continue;
+      if (!path.startsWith('node_modules/') || expected.link || !expected.integrity) throw payloadError('RUNTIME_DEPENDENCY_LOCK_INVALID');
+      const packagePath = resolve(root, path, 'package.json');
+      if (await realpath(packagePath) !== packagePath || !(await lstat(packagePath)).isFile()) throw payloadError('RUNTIME_DEPENDENCY_PATH_UNSAFE');
+      const installed = JSON.parse(await readFile(packagePath, 'utf8'));
+      if (installed.version !== expected.version) throw payloadError('RUNTIME_DEPENDENCY_VERSION_MISMATCH');
+    }
+  }
+  if (toolchain) {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const environmentRoot = resolve(root, '.toolchain');
+    const python = resolve(environmentRoot, 'bin/python');
+    const resolvedPython = await realpath(python);
+    if (await realpath(environmentRoot) !== environmentRoot || !resolvedPython.startsWith(`${environmentRoot}/`)
+        || !(await lstat(resolvedPython)).isFile()) throw payloadError('RUNTIME_TOOLCHAIN_PATH_UNSAFE');
+    const environment = { PATH: process.env.PATH || '', LANG: 'C.UTF-8', PYTHONDONTWRITEBYTECODE: '1' };
+    // The existing helper checks real format imports; also prove the six pinned
+    // distribution versions, not merely that similarly named imports exist.
+    await promisify(execFile)(python, ['-c',
+      'import pkg_resources, sys\nfor line in open(sys.argv[1]):\n line = line.strip()\n if line and not line.startswith("#"):\n  name, version = line.split("==")\n  assert pkg_resources.get_distribution(name).version == version, "PINNED_TOOLCHAIN_VERSION_MISMATCH"',
+      resolve(root, 'toolchain/requirements.txt')], { env: environment });
+    await promisify(execFile)(python, [resolve(root, 'toolchain/delivery_tool.py'), 'health'], { env: environment });
+  }
+  return Object.freeze({ payloadCount: known.size, dependenciesValidated: dependencies, toolchainValidated: toolchain });
+}

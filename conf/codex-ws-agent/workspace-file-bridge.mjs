@@ -214,11 +214,12 @@ const assertNoSymlinkComponents = (path, { allowMissing = false } = {}) => {
   let current = sep
   for (const part of parts) {
     current = resolve(current, part)
-    if (!existsSync(current)) {
-      if (allowMissing) return
-      fail('PATH_UNSAFE', `required path does not exist: ${current}`)
+    let stat
+    try { stat = lstatSync(current) } catch (error) {
+      if (error.code === 'ENOENT') { if (allowMissing) return; fail('PATH_UNSAFE', `required path does not exist: ${current}`) }
+      throw error
     }
-    if (lstatSync(current).isSymbolicLink()) fail('PATH_UNSAFE', `symlink path component is forbidden: ${current}`)
+    if (stat.isSymbolicLink()) fail('PATH_UNSAFE', `symlink path component is forbidden: ${current}`)
   }
 }
 
@@ -552,10 +553,12 @@ export class WorkspaceFileBridge {
       }
       const fingerprint = commandFingerprint(command)
       this.#runs.set(key, Object.freeze({ fingerprint, command, runDirectory }))
+      const identity = lstatSync(runDirectory, { bigint: true })
+      const cleanupProof = Object.freeze({ fingerprint, runDirectory, device: String(identity.dev), inode: String(identity.ino) })
       return Object.freeze({
         taskId: command.taskId,
         runId: command.runId,
-        runDirectory,
+        runDirectory, cleanupProof,
         inputs: Object.freeze(materialized)
       })
     } catch (error) {
@@ -796,6 +799,35 @@ export class WorkspaceFileBridge {
       manifestId: commit.manifestId,
       outputs: commit.body.outputs
     })
+  }
+
+  // Caller must prove both native terminal and durable D06 terminal from the
+  // existing checkpoint. A restart never re-materializes inputs or executes work
+  // to recover cleanup ownership; only this recorded directory inode may be removed.
+  cleanupConfirmed(rawCommand, proof) {
+    const command = parseWorkspaceFileCommand(rawCommand)
+    const expected = this._runDirectory(command)
+    if (!isPlainObject(proof) || Object.keys(proof).sort().join(',') !== 'device,fingerprint,inode,runDirectory'
+        || proof.fingerprint !== commandFingerprint(command) || proof.runDirectory !== expected
+        || typeof proof.device !== 'string' || typeof proof.inode !== 'string'
+        || !/^[0-9]+$/.test(proof.device) || !/^[1-9][0-9]*$/.test(proof.inode)) fail('CLEANUP_PROOF_INVALID', 'cleanup proof does not match original private run')
+    assertNoSymlinkComponents(expected, { allowMissing: true })
+    if (!existsSync(expected)) { this.#runs.delete(this._runKey(command)); return { alreadyRemoved: true } }
+    assertNoSymlinkComponents(expected)
+    const before = lstatSync(expected, { bigint: true })
+    if (!before.isDirectory() || before.uid !== BigInt(process.getuid()) || String(before.dev) !== proof.device
+        || String(before.ino) !== proof.inode) fail('CLEANUP_OWNERSHIP_CHANGED', 'private run directory ownership changed; retain for reconciliation')
+    const bound = this.#runs.get(this._runKey(command))
+    if (bound && bound.fingerprint !== proof.fingerprint) fail('CLEANUP_PROOF_INVALID', 'cleanup conflicts with current run binding')
+    try {
+      rmSync(expected, { recursive: true, force: false })
+      fsyncDirectory(resolve(this.#rootDir, command.taskId))
+      this.#runs.delete(this._runKey(command))
+      return { removed: true }
+    } catch (error) {
+      if (error instanceof WorkspaceFileBridgeError) throw error
+      fail('CLEANUP_FAILED', 'private terminal run cleanup failed; checkpoint remains retryable')
+    }
   }
 
   cleanup(rawCommand) {

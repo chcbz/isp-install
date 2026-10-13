@@ -1,55 +1,13 @@
 #!/usr/bin/env node
-import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readManifest } from './lib/manifest.mjs';
-import { createLogger, readEnrollmentSecret } from './lib/security.mjs';
+import { readRuntimeHostConfig } from './lib/manifest.mjs';
+import { createLogger, readEnrollmentSecret, readRuntimeProviderEnvironments } from './lib/security.mjs';
 import { classifyRuntimeError, RuntimeV1Client } from './lib/runtime-client.mjs';
-
-function parseArgs(argv) {
-  const [command, ...rest] = argv;
-  const options = {};
-  for (let index = 0; index < rest.length; index += 1) {
-    const item = rest[index];
-    if (!item.startsWith('--')) throw new Error(`unexpected argument: ${item}`);
-    const key = item.slice(2);
-    const value = rest[index + 1];
-    if (!value || value.startsWith('--')) throw new Error(`missing value for --${key}`);
-    options[key] = value;
-    index += 1;
-  }
-  return { command, options };
-}
-
-function runtimeOptions(options, env) {
-  const manifestPath = resolve(options.manifest || 'manifest.json');
-  const stateDir = resolve(options['state-dir'] || 'runtime-state');
-  const apiBaseUrl = options['api-base-url'] || env.CYF_RUNTIME_V1_API_BASE_URL;
-  if (!apiBaseUrl) throw new Error('CYF_RUNTIME_V1_API_BASE_URL is required');
-  return { manifestPath, stateDir, apiBaseUrl };
-}
-
-function isRebindRequired(response) {
-  return response?.status === 'REBINDS_REQUIRED' || response?.sessionStatus === 'REBINDS_REQUIRED';
-}
-
-function intervalMs(env) {
-  const raw = env.CYF_RUNTIME_V1_HEARTBEAT_INTERVAL_MS || '60000';
-  if (!/^\d+$/.test(raw) || Number(raw) < 1) throw new Error('CYF_RUNTIME_V1_HEARTBEAT_INTERVAL_MS must be a positive integer');
-  return Number(raw);
-}
-
-function sleep(milliseconds, signal) {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise(resolveSleep => {
-    const timer = setTimeout(done, milliseconds);
-    function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolveSleep(); }
-    signal.addEventListener('abort', done, { once: true });
-  });
-}
-
-function retryDelay(attempt) { return Math.min(1000 * (2 ** Math.min(attempt, 6)), 60000); }
-
+import { RuntimeHost } from './lib/runtime-host.mjs';
+import { createExecutionAdapterFactory } from './lib/execution-adapter.mjs';
+import { createHostingControlServer } from './lib/hosting-server.mjs';
 export const PERMANENT_RUNTIME_EXIT_STATUS = 78;
 
 export function runtimeExitStatus(error) {
@@ -58,118 +16,91 @@ export function runtimeExitStatus(error) {
     : PERMANENT_RUNTIME_EXIT_STATUS;
 }
 
-function errorLogDetails(error) {
-  const failure = classifyRuntimeError(error);
-  return failure.status === undefined
-    ? { category: failure.kind }
-    : { category: failure.kind, status: failure.status };
-}
 
-export async function runRuntimeLoop(client, { signal, health = 'HEALTHY', heartbeatIntervalMs = 60000, logger = () => {}, wait = sleep } = {}) {
-  let retryAttempt = 0;
-  while (!signal.aborted) {
-    try {
-      const session = await client.session(health, { signal });
-      if (signal.aborted) break;
-      if (isRebindRequired(session)) throw Object.assign(new Error('rebind required'), { code: 'REBINDS_REQUIRED' });
-      const heartbeat = await client.heartbeat(health, { signal });
-      if (signal.aborted) break;
-      if (isRebindRequired(heartbeat)) throw Object.assign(new Error('rebind required'), { code: 'REBINDS_REQUIRED' });
-      if (signal.aborted) break;
-      await client.flushAcks({ signal });
-      retryAttempt = 0;
-      if (!signal.aborted) await wait(heartbeatIntervalMs, signal);
-    } catch (error) {
-      if (signal.aborted || error?.name === 'AbortError') break;
-      const failure = classifyRuntimeError(error);
-      if (!['transient-network', 'transient-http'].includes(failure.kind)) throw error;
-      logger('runtime-retry', errorLogDetails(error));
-      await wait(retryDelay(retryAttempt++), signal);
-    }
+const failure = code => Object.assign(new Error(code), { code });
+function parseArgs(argv) {
+  const [command, ...rest] = argv; const options = {};
+  for (let i = 0; i < rest.length; i += 2) {
+    if (!['--config', '--subject', '--api-base-url', '--workspace-policies'].includes(rest[i]) || !rest[i + 1]
+        || rest[i + 1].startsWith('--') || Object.hasOwn(options, rest[i].slice(2))) throw failure('RUNTIME_ARGUMENT_INVALID');
+    options[rest[i].slice(2)] = rest[i + 1];
   }
+  if (!options.config || !['validate', 'enroll', 'run'].includes(command)) throw failure('RUNTIME_CONFIG_REQUIRED');
+  return { command, options };
 }
+const wait = (ms, signal) => new Promise(resolveWait => {
+  if (signal.aborted) return resolveWait();
+  const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolveWait(); };
+  const timer = setTimeout(done, ms); signal.addEventListener('abort', done, { once: true });
+});
 
-async function readCommand(path) {
+// One lifetime host; enrollment is an explicit per-subject management operation.
+// No sidecar heartbeat-only run mode, legacy API-key entry or second ACK queue.
+export async function runUnifiedRuntime({ config, apiOrigin, instanceId = randomUUID(), signal,
+  createAdapters = createExecutionAdapterFactory, workspacePolicies, providerEnvironments, logger = () => {},
+  heartbeatIntervalMs = 30000, waitFn = wait, createControl = createHostingControlServer } = {}) {
+  const adapters = await createAdapters({ config, instanceId, apiOrigin, workspacePolicies, providerEnvironments, logger });
+  const host = new RuntimeHost({ config, instanceId, createExecutor: adapters.createExecutor, logger });
+  let controlServer = null;
   try {
-    return JSON.parse(await readFile(resolve(path), 'utf8'));
-  } catch (error) {
-    throw new Error(`unable to read command: ${error.message}`);
+    await host.start();
+    if (config.hostingControl) controlServer = await createControl({ host, config: config.hostingControl, apiOrigin, workspacePolicies, logger });
+    const activate = config.agents.map(agent => {
+      if (host.agents.get(agent.subjectKey).phase !== 'INITIALIZED') return Promise.resolve();
+      return host.activate(agent.subjectKey).catch(error => logger('runtime-agent-isolated', { subjectKey: agent.subjectKey, category: classifyRuntimeError(error).kind }));
+    });
+    // Activation may wait for a directed registration, but SIGTERM must still
+    // reach each transport/owned engine, not queue behind the lifecycle gate.
+    const stop = () => { void controlServer?.close().catch(() => {}); void adapters.close().catch(() => {}); };
+    signal.addEventListener('abort', stop, { once: true });
+    try {
+      if (signal.aborted) stop();
+      // Per-Agent registration is independent from the host heartbeat loop.
+      // Every activation has its own rejection handler above.
+      void Promise.allSettled(activate);
+      while (!signal.aborted) { await adapters.heartbeat(); if (!signal.aborted) await waitFn(heartbeatIntervalMs, signal); }
+    } finally { signal.removeEventListener('abort', stop); }
+  } finally {
+    try { await controlServer?.close(); await host.stop(); await adapters.close(); }
+    finally { if (!host.releaseHost) await controlServer?.control.releaseOwnership(); }
   }
+  return host.snapshot();
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const { command, options } = parseArgs(argv);
-  const logger = createLogger();
+  const config = await readRuntimeHostConfig(resolve(options.config));
+  const providerEnvironments = await readRuntimeProviderEnvironments(env.CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE, config.agents);
+  if (providerEnvironments.size) {
+    const { resolveControlledImageHttpConfig } = await import('../codex-ws-agent/controlled-image-http-config.mjs');
+    for (const agent of config.agents) if (providerEnvironments.has(agent.subjectKey))
+      resolveControlledImageHttpConfig(agent.profile, { env: providerEnvironments.get(agent.subjectKey) });
+  }
+  const logger = createLogger({ knownSecrets: [...providerEnvironments.values()].flatMap(value => Object.values(value)) });
   if (command === 'validate') {
-    const manifest = await readManifest(resolve(options.manifest || 'manifest.json'));
-    process.stdout.write(`${JSON.stringify({ valid: true, installationId: manifest.installationId, manifestSha256: manifest.manifestSha256 })}\n`);
-    return 0;
+    process.stdout.write(`${JSON.stringify({ valid: true, hostId: config.hostId, agentCount: config.agents.length })}\n`); return 0;
   }
-
-  const { manifestPath, stateDir, apiBaseUrl } = runtimeOptions(options, env);
-  const manifest = await readManifest(manifestPath);
-  const client = new RuntimeV1Client({ manifest, apiBaseUrl, stateDir });
-
+  const apiOrigin = options['api-base-url'] || env.CYF_RUNTIME_V1_API_BASE_URL;
+  if (!apiOrigin) throw failure('RUNTIME_API_ORIGIN_REQUIRED');
   if (command === 'enroll') {
-    const enrollment = await readEnrollmentSecret(env);
-    await client.enroll(enrollment.value);
-    logger('enrolled', { installationId: manifest.installationId, secretSource: enrollment.source });
-    return 0;
+    const agent = config.agents.find(agent => agent.subjectKey === options.subject);
+    if (!agent) throw failure('RUNTIME_EXACT_SUBJECT_REQUIRED');
+    const client = new RuntimeV1Client({ manifest: agent.manifest, apiBaseUrl: apiOrigin, stateDir: agent.stateRoot });
+    await client.enroll((await readEnrollmentSecret(env)).value);
+    logger('runtime-enrolled', { subjectKey: agent.subjectKey }); return 0;
   }
-  if (command === 'session') {
-    const response = await client.session(options.health || 'HEALTHY');
-    if (isRebindRequired(response)) throw new Error('rebind required');
-    logger('session-established', { installationId: manifest.installationId });
-    return 0;
-  }
-  if (command === 'heartbeat') {
-    const response = await client.heartbeat(options.health || 'HEALTHY');
-    if (isRebindRequired(response)) throw new Error('rebind required');
-    logger('heartbeat-sent', { installationId: manifest.installationId });
-    return 0;
-  }
-  if (command === 'ack') {
-    if (!options.command || !options.status) throw new Error('ack requires --command and --status');
-    await client.queueAck(await readCommand(options.command), options.status);
-    await client.flushAcks();
-    logger('ack-flush-complete', { installationId: manifest.installationId });
-    return 0;
-  }
-  if (command === 'run') {
-    const controller = new AbortController();
-    const stop = () => controller.abort();
-    process.once('SIGTERM', stop);
-    process.once('SIGINT', stop);
-    try {
-      try {
-        await client.loadAuthorization();
-      } catch (error) {
-        if (error.message !== 'Runtime v1 enrollment is required') throw error;
-        const enrollment = await readEnrollmentSecret(env);
-        await client.enroll(enrollment.value);
-        logger('enrolled', { installationId: manifest.installationId, secretSource: enrollment.source });
-      }
-      await runRuntimeLoop(client, {
-        signal: controller.signal,
-        health: options.health || 'HEALTHY',
-        heartbeatIntervalMs: intervalMs(env),
-        logger
-      });
-      logger('stopped', { installationId: manifest.installationId });
-      return 0;
-    } finally {
-      process.removeListener('SIGTERM', stop);
-      process.removeListener('SIGINT', stop);
-    }
-  }
-  throw new Error('usage: agent-runtime.mjs <validate|enroll|session|heartbeat|ack|run> [options]');
+  const policyFile = options['workspace-policies'] || env.CYF_RUNTIME_WORKSPACE_POLICIES_FILE;
+  const workspacePolicies = policyFile ? (await import('../codex-ws-agent/workspace-manager.mjs')).loadWorkspacePolicies({ CODEX_WORKSPACE_POLICIES_FILE: policyFile }) : new Map();
+  const interval = Number(env.CYF_RUNTIME_V1_HEARTBEAT_INTERVAL_MS || 30000);
+  if (!Number.isSafeInteger(interval) || interval < 1) throw failure('RUNTIME_HEARTBEAT_INTERVAL_INVALID');
+  const controller = new AbortController(); const stop = () => controller.abort();
+  process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  try { await runUnifiedRuntime({ config, apiOrigin, signal: controller.signal, logger, workspacePolicies, providerEnvironments, heartbeatIntervalMs: interval }); return 0; }
+  finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
 }
-
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
-if (isMain) {
-  main().catch(error => {
-    // Emit only a fixed classification and numeric HTTP status; never exception text/cause.
-    console.error(JSON.stringify({ event: 'runtime-v1-error', ...errorLogDetails(error) }));
-    process.exitCode = runtimeExitStatus(error);
-  });
-}
+if (isMain) main().catch(error => {
+  const category = classifyRuntimeError(error);
+  console.error(JSON.stringify({ event: 'runtime-error', category: category.kind, ...(category.status ? { status: category.status } : {}) }));
+  process.exitCode = runtimeExitStatus(error);
+});

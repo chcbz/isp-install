@@ -210,7 +210,7 @@ export class ArchiveMaintenanceNativeClient {
 
   _headers(command, extra = {}) {
     const authorization = this.authorizationProvider()
-    requireValue(/^AgentRuntime [0-9a-f]{32}$/u.test(authorization || ''), 'ARCHIVE_NATIVE_UNAUTHENTICATED')
+    requireValue(/^AgentRuntime rts1_[0-9a-f]{64}$/u.test(authorization || ''), 'ARCHIVE_NATIVE_UNAUTHENTICATED')
     requireValue(this.runtimeScope.agentId === command.targetAgentId && this.runtimeScope.runtimeInstanceId === command.runtimeInstanceId, 'ARCHIVE_NATIVE_UNAUTHENTICATED')
     return { Authorization: authorization, 'X-Agent-Id': this.runtimeScope.agentId, 'X-Agent-Runtime-Id': this.runtimeScope.runtimeInstanceId,
       'X-Archive-Grant-Ref': command.grantRef, 'X-Archive-Execution-Ref': command.executionRef,

@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
-import { ManagedHost } from '../managed-host.mjs'
 import {
   buildAgentRegistrationPayload,
   createControlledImageV3SourceRuntime,
@@ -154,7 +153,9 @@ test('exact managed authorization reaches real registration and poll runtime com
   const managed = resolveManagedRuntimeProfile(profile(), source(), parseManagedImageScopeAuthorizations(document(scope())))
   const runtime = createControlledImageV3SourceRuntime({
     profile: managed,
-    getAuth: () => `AgentRuntime ${'a'.repeat(32)}`,
+    getRuntimeHeaders: () => ({ Authorization: `AgentRuntime rts1_${'a'.repeat(64)}`,
+      'X-Agent-Id': managed.agentId, 'X-Agent-Runtime-Id': 'managed-runtime-fixture',
+      'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host', 'X-Agent-Session-Generation': '7' }),
     controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' },
     providerFetchFn: async () => assert.fail('Provider fetch must not run during registration or idle poll wiring'),
     nativeFetchFn: async () => assert.fail('native fetch is owned by the fake poll protocol in this fixture'),
@@ -249,16 +250,15 @@ test('schema v2 exact managed scope selects the frozen GPT CLI adapter without i
 })
 
 
-test('actual 130-character ManagedHost profile composes loader ledger executors and registration for CLI and HTTP', async t => {
+test('explicit 130-character scoped profile composes loader ledger executors and registration for CLI and HTTP', async t => {
   const root = mkdtempSync(resolve(tmpdir(), 'managed-image-long-profile-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const ownerJiacn = 'o'.repeat(28)
-  const host = new ManagedHost({ root: resolve(root, 'managed'), templateHome: resolve(root, 'template'),
-    codexBin: '/bin/true', runtimeInstanceId: 'runtime-long-profile', tenantId: 'tenant-a', clientId: 'client-a',
-    ownerJiacn: '*', attachProfile: async () => {}, profileState: () => null, conflicts: () => false,
-    workspacePolicyId: 'managed-policy' })
-  const generated = host.profileFor({ tenantId: 'tenant-a', clientId: 'client-a', ownerJiacn, agentId: AGENT,
-    intentId: GENERATION, apiKey: 'fixture-api-key' })
+  // Explicit identity fixture preserves existing provider scope/profile syntax;
+  // no broker, API-key provisioning, engine init or credential copy is involved.
+  const generated = profile({ ownerJiacn, managedOwnerJiacn: ownerJiacn,
+    profileId: `managed:owner-${Buffer.from(ownerJiacn).toString('base64url')}:${AGENT}:${GENERATION}`,
+    codexHome: resolve(root, 'home'), codexWorkdir: resolve(root, 'work') })
   assert.equal(generated.profileId.length, 130)
   assert.equal(generated.profileId,
     `managed:owner-${Buffer.from(ownerJiacn).toString('base64url')}:${AGENT}:${GENERATION}`)

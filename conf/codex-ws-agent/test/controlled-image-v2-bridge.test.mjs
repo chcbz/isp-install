@@ -11,6 +11,11 @@ import { buildControlledImageBountyExecutionDeclaration } from '../controlled-im
 import { ControlledImageHttpExecutor } from '../controlled-image-http-executor.mjs'
 import { ControlledImageHttpLedger } from '../controlled-image-http-ledger.mjs'
 
+const sessionProof = (auth, agentId = 'controlled-agent', runtimeInstanceId = 'instance-1') => ({
+  Authorization: auth, 'X-Agent-Id': agentId, 'X-Agent-Runtime-Id': runtimeInstanceId,
+  'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host',
+  'X-Agent-Session-Generation': '7'
+})
 const fixturePath = resolve(import.meta.dirname, 'fixtures/controlled-image-bridge-v1.json')
 const fixtureBytes = readFileSync(fixturePath)
 const fixture = JSON.parse(fixtureBytes)
@@ -20,7 +25,7 @@ const token = fixture.wire.provider_start_request.fence.token
 const config = Object.freeze({ enabled: true, providerLane: 'CONTROLLED_IMAGE_HTTP_V1', bindingId: command.providerExecution.bindingId,
   bindingEpoch: command.providerExecution.bindingEpoch, modelId: command.providerExecution.modelId,
   maxInputItems: 16, maxOutboundRequestAttempts: 1, precallFenceVersion: 1 })
-const auth = `AgentRuntime ${'a'.repeat(32)}`
+const auth = `AgentRuntime rts1_${'a'.repeat(64)}`
 const clone = value => JSON.parse(JSON.stringify(value))
 const json = (url, payload, status = 200) => ({ status, redirected: false, url: url.href,
   headers: { get: key => key.toLowerCase() === 'content-type' ? 'application/json' : null }, json: async () => payload })
@@ -52,7 +57,7 @@ const run = async ({ queued = command, start = startReceipt(), snapshot, execute
     throw new Error(`unexpected ${url.pathname}`)
   }
   const lane = new ControlledImageConversationLane({ apiOrigin: 'http://127.0.0.1:10018', rootDir: '/tmp', fetchFn,
-    agentId: 'controlled-agent', runtimeInstanceId: 'instance-1', getAuth: () => auth, controlledConfig: config,
+    agentId: 'controlled-agent', runtimeInstanceId: 'instance-1', getRuntimeHeaders: () => sessionProof(auth), controlledConfig: config,
     execute: async args => { executeCalls++; return execute(args) } })
   return { lane, calls, executeCalls: () => executeCalls }
 }
@@ -177,7 +182,7 @@ test('controlled executor network UNKNOWN and durable claim ambiguity never POST
     throw new Error(`unexpected native endpoint ${url.pathname}`)
   }
   const lane = new ControlledImageConversationLane({ apiOrigin: 'http://127.0.0.1:10018', rootDir: root, fetchFn: nativeFetch,
-    agentId: 'controlled-agent', runtimeInstanceId: 'instance-1', getAuth: () => auth, controlledConfig: configured,
+    agentId: 'controlled-agent', runtimeInstanceId: 'instance-1', getRuntimeHeaders: () => sessionProof(auth), controlledConfig: configured,
     execute: args => executor.execute(args) })
   await assert.rejects(lane.poll(), error => error.code === 'CONTROLLED_IMAGE_OUTCOME_UNKNOWN')
   await assert.rejects(lane.poll(), error => error.code === 'CONTROLLED_IMAGE_ALREADY_CLAIMED')

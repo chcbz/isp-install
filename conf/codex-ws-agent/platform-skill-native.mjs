@@ -87,7 +87,7 @@ const nativeUrl = (wsUrl, installationId, suffix) => {
   return url
 }
 const headers = (runtimeScope, authorization, accept) => {
-  require(typeof authorization === 'string' && /^AgentRuntime [0-9a-f]{32}$/.test(authorization), 'PLATFORM_SKILL_NATIVE_UNAUTHENTICATED')
+  require(typeof authorization === 'string' && /^AgentRuntime rts1_[0-9a-f]{64}$/.test(authorization), 'PLATFORM_SKILL_NATIVE_UNAUTHENTICATED')
   require(id(runtimeScope?.agentId) && id(runtimeScope?.runtimeInstanceId), 'PLATFORM_SKILL_NATIVE_UNAUTHENTICATED')
   return { Authorization: authorization, 'X-Agent-Id': runtimeScope.agentId, 'X-Agent-Runtime-Id': runtimeScope.runtimeInstanceId, Accept: accept }
 }

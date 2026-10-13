@@ -40,7 +40,7 @@ const installManager = async (root, scope = runtimeScope, stateName = 'platform-
   const manager = new PlatformSkillManager({ profile: { ...profile, codexHome }, runtimeScope: scope,
     stateRoot: resolve(root, stateName), wsUrl: 'wss://api.example.invalid/ws', enabled: true,
     atomicFs: fakeAtomic, now: () => now, createId: (() => { let id = 0; return () => `id-${++id}` })(),
-    authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, downloadFn: async () => approved,
+    authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, downloadFn: async () => approved,
     sendResultFn: async ({ command, outcome, errorCode }) => ({ installationId: command.installationId,
       agentId: command.targetAgentId, bindingVersion: command.bindingVersion, skillKey: command.skillKey,
       skillVersion: command.skillVersion, packageSha256: command.packageSha256, origin: 'PLATFORM_PROVISIONED',
@@ -96,7 +96,7 @@ const startApi = async ({ wire, mode = 'MANUAL', denyResult = false, publishDeni
     calls.push({ method: request.method, url: request.url, body, headers: request.headers })
     const requestUrl = new URL(request.url, 'http://127.0.0.1')
     const path = requestUrl.pathname
-    const expectedHeaders = { authorization: `AgentRuntime ${'a'.repeat(32)}`, 'x-agent-id': 'agent-a', 'x-agent-runtime-id': runtimeInstanceIdProvider(),
+    const expectedHeaders = { authorization: `AgentRuntime rts1_${'a'.repeat(64)}`, 'x-agent-id': 'agent-a', 'x-agent-runtime-id': runtimeInstanceIdProvider(),
       'x-archive-grant-ref': 'grant-a', 'x-archive-execution-ref': 'execution-a', 'x-archive-command-id': wire.commandId,
       'x-archive-command-attempt': '1', 'x-archive-execution-epoch': String(wire.payload.executionEpoch) }
     for (const [name, value] of Object.entries(expectedHeaders)) assert.equal(request.headers[name], value, name)
@@ -197,7 +197,7 @@ const startApi = async ({ wire, mode = 'MANUAL', denyResult = false, publishDeni
 for (const mode of ['MANUAL', 'AUTO']) test(`approved package runner follows authenticated ${mode} lifecycle without Codex or shell fallback`, async () => {
   const root = temporaryDirectory(); const manager = await installManager(root); const wire = archiveWire(); const api = await startApi({ wire, mode })
   try {
-    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager })
     let codex = 0
     const outcome = await runManagedCommand({ profile, message: wire, platformSkillRuntime: { execute: message => runner.execute(message) },
       skillInstallManager: { execute: async () => assert.fail('legacy install path') }, runCodexFn: async () => { codex++; return { status: 'completed' } } })
@@ -217,7 +217,7 @@ for (const mode of ['MANUAL', 'AUTO']) test(`approved package runner follows aut
 test('routed processor keeps unknown native result nonterminal in the single inbox and ledger', async () => {
   const root = temporaryDirectory(); const manager = await installManager(root); const wire = archiveWire(); const api = await startApi({ wire, denyResult: true })
   try {
-    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager })
     const inbox = new PersistentCommandInbox({ rootDir: resolve(root, 'inbox'), profile, successPolicy: 'archive' })
     const stateRoot = resolve(root, 'inbox', Buffer.from(profile.agentId).toString('hex'))
     const ledger = new DurableDedupeLedger({ rootDir: stateRoot, profile }); const ackOutbox = new AckOutbox({ rootDir: stateRoot, profile })
@@ -238,7 +238,7 @@ test('routed processor preserves a different human revision and leaves the comma
   const humanDraft = { blocks: [{ blockType: 'CHAPTER', blockKey: 'chapter-human', ordinal: 9, title: '人工编辑', titleSourceRanges: [], paragraphs: [] }], excludedSourceRanges: [] }
   const api = await startApi({ wire, initialDraft: humanDraft, initialRevision: '2' })
   try {
-    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager })
     const inbox = new PersistentCommandInbox({ rootDir: resolve(root, 'inbox'), profile, successPolicy: 'archive' })
     const stateRoot = resolve(root, 'inbox', Buffer.from(profile.agentId).toString('hex'))
     const ledger = new DurableDedupeLedger({ rootDir: stateRoot, profile }); const ackOutbox = new AckOutbox({ rootDir: stateRoot, profile })
@@ -256,7 +256,7 @@ test('routed processor preserves a different human revision and leaves the comma
 
 test('a disconnected runner cannot replay its cached terminal result through routed execution or reconciliation', async () => {
   const wire = archiveWire(); const controller = new AbortController()
-  const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: 'ws://127.0.0.1:1/ws', authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`,
+  const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: 'ws://127.0.0.1:1/ws', authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`,
     platformSkillManager: {}, sessionSignal: controller.signal, nativeClientFactory: () => ({ result: async () => terminalResult(wire, 'COMPLETED', 'MANUAL', 'validation-a') }) })
   const route = () => runManagedCommand({ profile, message: wire, platformSkillRuntime: { execute: value => runner.execute(value) },
     skillInstallManager: {}, runCodexFn: async () => assert.fail('Codex fallback') })
@@ -270,7 +270,7 @@ test('a disconnected runner cannot replay its cached terminal result through rou
 test('explicit AUTO publish denial remains nonterminal and is not retried', async () => {
   const root = temporaryDirectory(); const manager = await installManager(root); const wire = archiveWire(); const api = await startApi({ wire, mode: 'AUTO', publishDenied: true })
   try {
-    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager })
     const outcome = await runManagedCommand({ profile, message: wire, platformSkillRuntime: { execute: message => runner.execute(message) },
       skillInstallManager: {}, runCodexFn: async () => assert.fail('Codex fallback') })
     assert.equal(outcome.status, 'recovery_required')
@@ -282,7 +282,7 @@ for (const scenario of ['completed', 'failed']) test(`routed processor persists 
   const root = temporaryDirectory(); const manager = await installManager(root); const wire = archiveWire()
   const api = await startApi({ wire, mode: 'MANUAL', ...(scenario === 'failed' ? { sourceBytes: Buffer.from('正文内容\n', 'utf8') } : {}) })
   try {
-    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager })
     const inbox = new PersistentCommandInbox({ rootDir: resolve(root, 'inbox'), profile, successPolicy: 'archive' })
     const stateRoot = resolve(root, 'inbox', Buffer.from(profile.agentId).toString('hex'))
     const ledger = new DurableDedupeLedger({ rootDir: stateRoot, profile }); const ackOutbox = new AckOutbox({ rootDir: stateRoot, profile })
@@ -307,7 +307,7 @@ for (const scenario of [
   const root = temporaryDirectory(); const manager = await installManager(root); const wire = archiveWire()
   const api = await startApi({ wire, mode: scenario.mode, loseResponseAt: scenario.action, ...(scenario.sourceBytes ? { sourceBytes: scenario.sourceBytes } : {}) })
   try {
-    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+    const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl, authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager })
     const outcome = await runManagedCommand({ profile, message: wire, platformSkillRuntime: { execute: message => runner.execute(message) },
       skillInstallManager: {}, runCodexFn: async () => assert.fail('Codex fallback') })
     assert.equal(outcome.status, scenario.expected, outcome.errorMessage)
@@ -328,7 +328,7 @@ test('truncated accepted validate response body recovers from current validation
   const api = await startApi({ wire, mode: 'MANUAL', loseResponseAt: 'validate-body' })
   try {
     const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl,
-      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+      authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager })
     const outcome = await runManagedCommand({ profile, message: wire,
       platformSkillRuntime: { execute: message => runner.execute(message) }, skillInstallManager: {},
       runCodexFn: async () => assert.fail('Codex fallback') })
@@ -348,7 +348,7 @@ for (const validateAcceptanceFault of ['envelope', 'receipt', 'location']) test(
   const api = await startApi({ wire, mode: 'AUTO', validateAcceptanceFault })
   try {
     const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl,
-      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager })
+      authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager })
     const outcome = await runManagedCommand({ profile, message: wire,
       platformSkillRuntime: { execute: message => runner.execute(message) }, skillInstallManager: {},
       runCodexFn: async () => assert.fail('Codex fallback') })
@@ -374,13 +374,13 @@ test('durable chapter checkpoint survives a real runtime instance restart withou
   const checkpointRoot = resolve(root, 'archive-checkpoints')
   try {
     const first = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl,
-      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: firstManager,
+      authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: firstManager,
       checkpointRoot, checkpointProfileId: profile.profileId })
     const uncertain = await first.execute(wire)
     assert.equal(uncertain.status, 'recovery_required')
     activeRuntimeInstanceId = runtimeB.runtimeInstanceId
     const second = new ArchiveMaintenanceRunner({ runtimeScope: runtimeB, wsUrl: api.wsUrl,
-      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: secondManager,
+      authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: secondManager,
       checkpointRoot, checkpointProfileId: profile.profileId })
     const recovered = await second.execute(wire)
     assert.equal(recovered.status, 'completed', recovered.errorMessage)
@@ -507,7 +507,7 @@ test('committed local checkpoint never hides a missing or changed server chapter
     draftRevision: '0', operationKey, state: 'COMMITTED' })
   try {
     const runner = new ArchiveMaintenanceRunner({ runtimeScope, wsUrl: api.wsUrl,
-      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, platformSkillManager: manager, checkpointRoot, checkpointProfileId: profile.profileId })
+      authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, platformSkillManager: manager, checkpointRoot, checkpointProfileId: profile.profileId })
     const outcome = await runner.execute(wire)
     assert.equal(outcome.status, 'recovery_required')
     assert.match(outcome.errorMessage, /ARCHIVE_SERVER_CHECKPOINT_CHANGED/u)
@@ -528,7 +528,7 @@ test('native validate requires strict 202 receipt, scoped Location and matching 
   const invoke = async responder => {
     let call = 0
     const client = new ArchiveMaintenanceNativeClient({ runtimeScope, wsUrl: 'ws://127.0.0.1:18080/ws',
-      authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`,
+      authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`,
       fetchFn: async (url, options) => responder(++call, url, options), now: () => now })
     return client.validate(command, 'draft-a', '1', 'validate-key')
   }
@@ -573,7 +573,7 @@ test('expired producer authority cannot write while the exact terminal result re
   const command = validateArchiveMaintenanceCommand(wire, runtimeScope, Date.now(), { allowExpired: true })
   let fetches = 0
   const client = new ArchiveMaintenanceNativeClient({ runtimeScope, wsUrl: 'ws://127.0.0.1:18080/ws',
-    authorizationProvider: () => `AgentRuntime ${'a'.repeat(32)}`, fetchFn: async (url, options) => {
+    authorizationProvider: () => `AgentRuntime rts1_${'a'.repeat(64)}`, fetchFn: async (url, options) => {
       fetches += 1; assert.equal(options.method, 'GET')
       const data = url.pathname.endsWith('/result')
         ? terminalResult(wire, 'COMPLETED', 'MANUAL', 'validation-a')
