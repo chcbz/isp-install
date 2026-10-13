@@ -6,7 +6,7 @@ import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdt
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { skillDigest, skillHash, skillId } from '../skill-executor.mjs'
-import { parseSkillJson, resolveSkillEntrypoint, validateSkillData } from '../skill-manifest.mjs'
+import { parseSkillJson, resolveSkillEntrypoint, validateSkillData, skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { validateNativeConversationOutput } from '../conversation-native.mjs'
 import { SKILL_INPUT_CARRIERS } from '../skill-execution-store.mjs'
 const fail = (code, cause) => { throw Object.assign(new Error(code), { code, ...(cause ? { cause } : {}) }) }
@@ -42,6 +42,7 @@ function readPrivateFile(path) {
 }
 function packageIdentity(context) {
   if (!isAbsolute(context.packageRoot || '') || realpathSync(context.packageRoot) !== context.packageRoot || !/\.(?:mjs|js)$/.test(context.entrypoint || '')) fail('SKILL_LOCAL_ENTRYPOINT_UNAVAILABLE')
+  if (context.packageTreeDigest && skillPackageTreeDigest(context.packageRoot) !== context.packageTreeDigest) fail('SKILL_LOCAL_PACKAGE_CHANGED')
   const script = resolveSkillEntrypoint(context.packageRoot, context.entrypoint)
   return { root: context.packageRoot, script, sha256: skillHash(readFileSync(script)), entrypoint: context.entrypoint }
 }
@@ -127,7 +128,7 @@ export function createLocalScriptRunner({ nodeBinary = process.execPath, bwrapBi
     },
     probeTool: async () => { try { return { ready: true, digest: (await measure()).digest } } catch { return { ready: false, reasonCode: 'SKILL_LOCAL_ISOLATION_UNAVAILABLE' } } },
     run: async ({ command, descriptor, inputs, parameters, instruction, effects, outputDirectory }) => {
-      const entry = packageIdentity({ packageRoot: descriptor.packageRoot, entrypoint: descriptor.manifest.entrypoint }), measured = await measure()
+      const entry = packageIdentity({ packageRoot: descriptor.packageRoot, entrypoint: descriptor.manifest.entrypoint, packageTreeDigest: descriptor.packageTreeDigest }), measured = await measure()
       const seen = new Set()
       for (const input of inputs) {
         if (!skillId(input.inputRef) || seen.has(input.inputRef) || !Buffer.isBuffer(input.bytes) || skillHash(input.bytes) !== input.sha256
@@ -140,7 +141,7 @@ export function createLocalScriptRunner({ nodeBinary = process.execPath, bwrapBi
         inputs: inputs.map(input => ({ inputRef: input.inputRef, sha256: input.sha256, byteLength: String(input.byteLength), contentMimeType: input.contentMimeType, path: `/inputs/${input.inputRef}` })), outputDirectory: '/outputs' }
       const result = await effects.invoke('local-script', { ...request, entrypoint: entry.entrypoint, scriptSha256: entry.sha256, toolchainDigest: measured.digest }, async () => {
         // Recheck tool/package bytes immediately before the only process launch.
-        if (skillDigest(toolIdentity(nodeBinary, bwrapBin)) !== measured.key || packageIdentity({ packageRoot: entry.root, entrypoint: entry.entrypoint }).sha256 !== entry.sha256) fail('SKILL_LOCAL_TOOL_CHANGED')
+        if (skillDigest(toolIdentity(nodeBinary, bwrapBin)) !== measured.key || packageIdentity({ packageRoot: entry.root, entrypoint: entry.entrypoint, packageTreeDigest: descriptor.packageTreeDigest }).sha256 !== entry.sha256) fail('SKILL_LOCAL_TOOL_CHANGED')
         const value = await childResult(spawnFn, measured.tools, buildLocalScriptArgv({ tools: measured.tools, packageRoot: entry.root, entrypoint: entry.entrypoint, inputs, outputDirectory: outputRoot }), request)
         if (!exact(value, ['data', 'artifacts']) || !Array.isArray(value.artifacts)) fail('SKILL_LOCAL_RESULT_INVALID')
         const output = descriptor.manifest.outputs

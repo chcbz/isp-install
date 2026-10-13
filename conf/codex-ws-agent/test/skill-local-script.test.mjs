@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { createLocalScriptRunner } from '../skill-runners/local-script.mjs'
 import { skillHash } from '../skill-executor.mjs'
+import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { SkillEffects, SkillExecutionStore, SKILL_INPUT_CARRIERS } from '../skill-execution-store.mjs'
 const fixture = (t, body) => {
   const root = mkdtempSync(resolve(tmpdir(), 'skill-local-fixture-'))
@@ -153,4 +154,18 @@ test('local-file receipt and genuine bytes close durable result persistence/reco
   for (const runner of ['native-model', 'provider-operation', undefined])
     assert.throws(() => store.persistResult({ ...f.request.descriptor, manifest: { ...f.request.descriptor.manifest, runner } }, result), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
   assert.throws(() => store.persistResult(f.request.descriptor, { ...result, inputReceipts: [{ ...result.inputReceipts[0], sha256: '0'.repeat(64) }] }), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
+})
+
+test('ZIP-verified package dependency replacement after real probe prevents effect registration/process launch', async t => {
+  const f = fixture(t, 'console.log(JSON.stringify({data:{},artifacts:[]}));'), launches = []
+  const expected = skillPackageTreeDigest(f.request.descriptor.packageRoot)
+  f.context.packageTreeDigest = expected; f.request.descriptor.packageTreeDigest = expected
+  const runner = createLocalScriptRunner({ spawnFn: (...args) => { launches.push(args); return spawn(...args) } })
+  if (!await measured(t, runner, f.context)) return
+  const count = launches.length
+  f.request.effects = { invoke: async () => assert.fail('changed package must not register an effect') }
+  writeFileSync(resolve(f.context.packageRoot, 'dependency.mjs'), 'throw new Error("injected")', { mode: 0o400 })
+  await assert.rejects(runner.run(f.request), /SKILL_LOCAL_PACKAGE_CHANGED/)
+  assert.equal((await runner.probe(f.context)).ready, false)
+  assert.equal(launches.length, count)
 })

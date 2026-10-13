@@ -66,7 +66,7 @@ export class SkillRegistry {
         let toolchainDigest = null, bindingRevision = null, binding = null
         const measured = []
         const context = Object.freeze({ scope: this.scope, fence, skillKey: manifest.skillKey,
-          skillVersion: manifest.skillVersion, entrypoint: manifest.entrypoint, inputMimeTypes: manifest.inputs.acceptedMimeTypes, packageRoot: row.packageRoot })
+          skillVersion: manifest.skillVersion, entrypoint: manifest.entrypoint, inputMimeTypes: manifest.inputs.acceptedMimeTypes, packageRoot: row.packageRoot, packageTreeDigest: row.packageTreeDigest })
         const runner = this.runners.get(manifest.runner)
         if (!reasonCode && (typeof runner?.run !== 'function' || typeof runner?.probe !== 'function')) reasonCode = 'SKILL_RUNNER_MISSING'
         if (!reasonCode) {

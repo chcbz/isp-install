@@ -1,6 +1,6 @@
 import Ajv2020 from 'ajv/dist/2020.js'
 import { createHash } from 'node:crypto'
-import { readFileSync, realpathSync, lstatSync } from 'node:fs'
+import { constants, closeSync, fstatSync, openSync, readFileSync, readdirSync, realpathSync, lstatSync } from 'node:fs'
 import { resolve, relative, sep } from 'node:path'
 import { parseStrictTypedOutcomeJson } from './juyiting-typed-outcome.mjs'
 
@@ -69,6 +69,33 @@ export function resolveSkillEntrypoint(packageRoot, entrypoint) {
   const path = relative(root, realpathSync(candidate))
   if (!path || path === '..' || path.startsWith(`..${sep}`) || lstatSync(candidate).isSymbolicLink() || !lstatSync(candidate).isFile()) fail('SKILL_ENTRYPOINT_ESCAPE')
   return realpathSync(candidate)
+}
+/** Bind executable script/dependency bytes to the ZIP-verified installation.
+ * The host-generated marker is excluded; its expected digest lives in the private
+ * installation registry, so editing both a script and its marker cannot approve it. */
+export function skillPackageTreeDigest(packageRoot) {
+  const root = resolve(packageRoot)
+  if (realpathSync(root) !== root || !lstatSync(root).isDirectory()) fail('SKILL_PACKAGE_TREE_UNSAFE')
+  const entries = []
+  const visit = (directory, prefix = '') => {
+    for (const name of readdirSync(directory).sort()) {
+      if (!prefix && name === '.cyf-installation.json') continue
+      const path = resolve(directory, name), key = prefix ? `${prefix}/${name}` : name, stat = lstatSync(path)
+      if (stat.isSymbolicLink() || realpathSync(path) !== path || stat.uid !== process.geteuid() || stat.mode & 0o022) fail('SKILL_PACKAGE_TREE_UNSAFE')
+      if (stat.isDirectory()) { entries.push([key, 'directory']); visit(path, key) }
+      else if (stat.isFile() && stat.nlink === 1) {
+        const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+        try {
+          const before = fstatSync(fd, { bigint: true }), bytes = readFileSync(fd), after = fstatSync(fd, { bigint: true })
+          if (!before.isFile() || before.nlink !== 1n || before.size !== BigInt(bytes.length) || before.dev !== BigInt(stat.dev) || before.ino !== BigInt(stat.ino)
+              || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) fail('SKILL_PACKAGE_TREE_CHANGED')
+          entries.push([key, 'file', String(bytes.length), createHash('sha256').update(bytes).digest('hex')])
+        } finally { closeSync(fd) }
+      } else fail('SKILL_PACKAGE_TREE_UNSAFE')
+    }
+  }
+  visit(root)
+  return createHash('sha256').update(JSON.stringify(entries)).digest('hex')
 }
 function normalizeCost(value) {
   const unknown = { mode: 'UNKNOWN', amount: null, currency: null, unit: null, description: null, source: null, updatedAt: null }

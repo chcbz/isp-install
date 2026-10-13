@@ -1260,6 +1260,7 @@ test('SE2 ordinary installed descriptor remains non-executable and arbitrary HOM
 })
 
 // Actual immutable package bytes, not a fake installed descriptor/capability name.
+import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { SkillRegistry } from '../skill-registry.mjs'
 import { createNativeModelRunner } from '../skill-runners/native-model.mjs'
 import { createImageProviderRunner } from '../skill-runners/image-provider.mjs'
@@ -1295,5 +1296,28 @@ for (const item of preparedPackages.packages) {
     declaration = await registry.refresh(); assert.equal(declaration.skills[0].readiness, 'READY')
     assert.equal(declaration.skills[0].packageSha256, item.packageSha256)
     registry.setSession(null); assert.equal(registry.declaration(), null)
+  })
+}
+
+for (const mutation of ['script', 'dependency', 'forged-marker']) {
+  test(`SE2 local-script ${mutation} mutation cannot retain ZIP-verified installation identity`, async () => {
+    const manifest = executableFixture(); manifest.runner = 'local-script'; manifest.entrypoint = 'scripts/run.py'; manifest.requirements = { tools: ['python3'] }
+    const bytes = executablePackage(manifest, 'print("original")'), runtime = managerRuntime({ packageBytes: bytes })
+    assert.equal((await runtime.manager.execute(dispatch(bytes))).status, 'completed')
+    const descriptor = runtime.manager.listInstalledSkills()[0]
+    assert.match(descriptor.packageTreeDigest, /^[a-f0-9]{64}$/)
+    assert.equal(descriptor.packageTreeDigest, skillPackageTreeDigest(descriptor.packageRoot))
+    assert.equal((await runtime.manager.execute(dispatch(bytes))).idempotent, true)
+    const root = descriptor.packageRoot
+    if (mutation === 'dependency') writeFileSync(resolve(root, 'scripts/helper.py'), 'print("injected")', { mode: 0o644 })
+    else writeFileSync(resolve(root, 'scripts/run.py'), 'print("replaced")')
+    if (mutation === 'forged-marker') {
+      const markerPath = resolve(root, '.cyf-installation.json'), marker = JSON.parse(readFileSync(markerPath))
+      marker.packageTreeDigest = skillPackageTreeDigest(root)
+      writeFileSync(markerPath, JSON.stringify(marker))
+    }
+    assert.throws(() => runtime.manager.listInstalledSkills(), /durable evidence/)
+    const replay = await runtime.manager.execute(dispatch(bytes))
+    assert.notEqual(replay.status, 'completed'); assert.equal(replay.failureCode, SKILL_INSTALL_FAILURE.CONFLICT)
   })
 }
