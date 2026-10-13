@@ -1877,6 +1877,28 @@ export class SkillInstallManager {
     }
   }
 
+  /** Local installation evidence only, never server entitlement. No scan of arbitrary HOME
+   * skills: every item must match this manager's durable registry and published marker.
+   * Call on connection/install/configuration changes, not on each heartbeat. */
+  listInstalledSkills() {
+    return this._withLockSync('read-installed-skills', () => {
+      if (this.healthError) throw this.healthError
+      const items = []
+      for (const record of this._listRegistry()) {
+        if (record.state !== 'ACTIVE') continue
+        if (!validateMarker(record.targetPath, record.command, record.commandFingerprint, record.resultEnvelope.manifestSha256)) {
+          throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installed descriptor no longer matches durable evidence')
+        }
+        const manifest = record.resultEnvelope.manifestSha256
+          ? parseSkillManifest(readFileSync(resolve(record.targetPath, 'manifest.json')), record.command) : null
+        items.push(Object.freeze({ installationId: record.installationId, packageRoot: record.targetPath,
+          packageSha256: record.command.packageDigest.slice('sha256:'.length),
+          manifestSha256: record.resultEnvelope.manifestSha256 ?? null, manifest }))
+      }
+      return Object.freeze(items)
+    })
+  }
+
   reconcileCommandOutcome(message) {
     if (message?.commandType !== COMMAND_TYPE) return null
     return this._withLockSync(`reconcile-command:${message.installationId || ''}`, () => {
