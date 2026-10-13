@@ -56,7 +56,7 @@ export function validateSkillParameters(schema, raw) {
   return freeze(value)
 }
 function validEntrypoint(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value)
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._/-]*(?![\s\S])/.test(value)
     && value.split('/').every(part => part && part !== '.' && part !== '..')
 }
 export function resolveSkillEntrypoint(packageRoot, entrypoint) {
