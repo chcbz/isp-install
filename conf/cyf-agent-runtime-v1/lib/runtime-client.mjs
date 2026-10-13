@@ -106,6 +106,19 @@ const e05InternalScope = (endpoint, options) => {
     || method === 'POST' && match[5] === 'result-commit');
 };
 
+// Exact conversation route/method policy. No encoded aliases, arbitrary nested
+// /internal/** route, provider/consent fallback or caller-selected query allowed.
+export const skillConversationHttpScope = (endpoint, options = {}) => {
+  const decoded = (() => { try { return decodeURIComponent(endpoint.pathname) } catch { return null } })()
+  if (decoded === null) return false
+  if (!/^\/internal\/agent\/tasks\/(?:conversation-executions|[^/]+\/runs\/[^/]+\/conversation)(?:\/|$)/.test(decoded)) return true
+  if (endpoint.search || endpoint.pathname !== decoded) return false
+  const method = (options.method || 'GET').toUpperCase()
+  if (endpoint.pathname === '/internal/agent/tasks/conversation-executions/commands') return method === 'GET' && options.body == null
+  const id = '[A-Za-z0-9][A-Za-z0-9._:-]{0,99}'
+  return method === 'POST' && new RegExp(`^/internal/agent/tasks/${id}/runs/${id}/conversation/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|failure)$`).test(endpoint.pathname)
+}
+
 const ENROLLMENT_AUTHORIZATION = /^rta1_[0-9a-f]{64}$/;
 const safeEpoch = value => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime());
 export function validateEnrollmentResult(response, manifest) {
@@ -203,7 +216,7 @@ export class RuntimeV1Client {
     const endpoint = new URL(url);
     if (endpoint.origin !== this.apiBaseUrl || endpoint.username || endpoint.password || endpoint.hash
         || !(endpoint.pathname.startsWith('/internal/agent/') || isReassignmentLeaseEndpoint(endpoint, options, this.manifest))
-        || !e05InternalScope(endpoint, options)
+        || !e05InternalScope(endpoint, options) || !skillConversationHttpScope(endpoint, options)
         || [...endpoint.searchParams.keys()].some(key => /^(?:api[_-]?key|authorization|session[_-]?token|token)$/i.test(key))) throw fail('RUNTIME_NATIVE_SCOPE_INVALID');
     const session = this.currentSession; const proof = this.sessionHeaders();
     const signal = this.sessionAbort?.signal;
