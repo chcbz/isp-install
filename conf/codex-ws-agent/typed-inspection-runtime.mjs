@@ -12,7 +12,7 @@ import { canonicalSha256, buildContextEnvelope, buildThreadKey } from './chat-ru
 import { buildTypedInspectionNativeInputs, finalizeTypedInspectionInputReceipt } from './typed-inspection-input-carriers.mjs'
 import {
   TYPED_INSPECTION_INSTRUCTIONS, TYPED_INSPECTION_OUTPUT_SCHEMA, validateTypedInspectionOutcome,
-  typedDeliberationAdapterReady
+  typedDeliberationAdapterReady, parseStrictTypedOutcomeJson
 } from './juyiting-typed-outcome.mjs'
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -101,7 +101,7 @@ export const resolveTypedInspectionRequest = (profile, message) => {
   const keys = ['schemaVersion', 'contract', 'purpose', 'discussionFacts', 'manifest', 'manifestDigest', 'authorizationId']
   if (!exactKeys(typed, keys) || typed.schemaVersion !== 1 || typed.contract !== 'juyiting-typed-inspection-v1' || typed.purpose !== 'INSPECT' ||
       !object(typed.discussionFacts) || !object(typed.manifest) || !DIGEST.test(typed.manifestDigest) || !AUTHORIZATION.test(typed.authorizationId)) fail('TYPED_INSPECTION_MARKER_INVALID')
-  if (typed.discussionFacts.schemaVersion === 3) validateActionFacts(typed.discussionFacts)
+  // v3 facts are archived source catalogues, never new action-v4 execution facts.
   const manifest = typed.manifest
   if (!exactKeys(manifest, ['schemaVersion', 'purpose', 'scope', 'profile', 'sources']) || manifest.schemaVersion !== 1 || manifest.purpose !== 'INSPECT' || !Array.isArray(manifest.sources) || manifest.sources.length === 0 || manifest.sources.length > 32) fail('TYPED_INSPECTION_MANIFEST_INVALID')
   assertScope(manifest.scope); assertProfile(manifest.profile)
@@ -228,7 +228,14 @@ export class TypedInspectionMaterializer {
     if (typeof fetchFn !== 'function' || typeof getRuntimeHeaders !== 'function' || !nonblank(agentId) || !nonblank(runtimeInstanceId) || !object(parsers) || !object(decoders)) fail('TYPED_INSPECTION_MATERIALIZER_CONFIG_INVALID')
     this.fetchFn = fetchFn; this.getRuntimeHeaders = getRuntimeHeaders; this.agentId = agentId; this.runtimeInstanceId = runtimeInstanceId; this.parsers = parsers; this.decoders = decoders
   }
-  async materialize({ message, typed }) {
+  cleanup({ message, typed }) {
+    const key = sha256(Buffer.from([typed.authorizationId, typed.manifestDigest, message.requestId, message.turnId].join('\u001f')))
+    const directory = resolve(this.root, key)
+    if (!existsSync(directory)) return false
+    assertPrivateDirectory(directory); rmSync(directory, { recursive: true }); directoryFsync(this.root); return true
+  }
+  async materialize({ message, typed, contract = 'inspection' }) {
+    if (!['inspection', 'materials'].includes(contract)) fail('MATERIALS_TRANSPORT_INVALID')
     const proof = () => {
       try { return nativeSessionHeaders(this.getRuntimeHeaders(), this.agentId, this.runtimeInstanceId) }
       catch { fail('TYPED_INSPECTION_RUNTIME_AUTH_REQUIRED') }
@@ -243,11 +250,13 @@ export class TypedInspectionMaterializer {
     try {
       for (let index = 0; index < typed.manifest.sources.length; index++) {
         const source = typed.manifest.sources[index]
-        const path = sourcePath({ requestId: message.requestId, turnId: message.turnId, sourceRefId: source.sourceRefId })
+        const expectedPath = sourcePath({ requestId: message.requestId, turnId: message.turnId, sourceRefId: source.sourceRefId })
+        const path = contract === 'materials' ? expectedPath.replace('/inspection/', '/materials/') : expectedPath
+        if (contract === 'materials' && source.downloadUrl !== path) fail('MATERIALS_TRANSPORT_INVALID')
         const expectedUrl = `${this.origin}${path}`
         const response = await this.fetchFn(expectedUrl, {
           method: 'GET', redirect: 'manual', headers: {
-            ...proof(), Accept: source.mimeType, 'X-Inspection-Manifest-Digest': typed.manifestDigest
+            ...proof(), Accept: source.mimeType, [contract === 'materials' ? 'X-Materials-Manifest-Digest' : 'X-Inspection-Manifest-Digest']: typed.manifestDigest
           }
         })
         if (!response || response.status !== 200) {
@@ -313,6 +322,7 @@ export const INSPECTION_ACTION_OUTCOME_SCHEMA = freeze({
   ...ACTION_OUTCOME_SCHEMA,
   properties: {
     ...ACTION_OUTCOME_SCHEMA.properties,
+    schemaVersion: { type: 'integer', enum: [3] }, // archived final schema, not a new execution contract
     kind: { type: 'string', enum: ['ANSWER', 'CLARIFY'] },
     action: { type: 'null' },
     deliverable: { type: 'boolean', enum: [false] },
@@ -322,9 +332,16 @@ export const INSPECTION_ACTION_OUTCOME_SCHEMA = freeze({
 const inspectionOutcomeContract = typed => typed.discussionFacts.schemaVersion === 3 ? {
   instructions: INSPECTION_ACTION_OUTCOME_INSTRUCTIONS, outputSchema: INSPECTION_ACTION_OUTCOME_SCHEMA,
   validate: raw => {
-    const outcome = validateActionOutcome(raw, typed.discussionFacts)
-    if (outcome.kind === 'ACTION_REQUEST') fail('ACTION_INSPECT_ACTION_REQUEST_FORBIDDEN')
-    if (outcome.deliverable === true) fail('ACTION_FINAL_DELIVERABLE_ROUTE_INVALID')
+    const value = typeof raw === 'string' ? parseStrictTypedOutcomeJson(raw) : raw
+    const base = ['schemaVersion', 'kind', 'text', 'clarification', 'action']
+    const keys = [...base, ...(own(value || {}, 'deliverable') ? ['deliverable'] : []), ...(own(value || {}, 'deliveryRelation') ? ['deliveryRelation'] : [])]
+    if (!exactKeys(value, keys) || value.schemaVersion !== 3 || !inspectionFinalContent(value.text)
+        || !['ANSWER', 'CLARIFY'].includes(value.kind) || value.action !== null || (own(value, 'deliverable') && value.deliverable !== false)
+        || (own(value, 'deliveryRelation') && value.deliveryRelation !== null)
+        || (value.kind === 'ANSWER' && value.clarification !== null)
+        || (value.kind === 'CLARIFY' && !exactKeys(value.clarification, ['question', 'requiredFacts']))) fail('ARCHIVED_INSPECTION_FINAL_INVALID')
+    // Original v3 codec omitted null linkage. Preserve archived bytes/identity.
+    const { deliveryRelation, ...outcome } = value
     return outcome
   }
 } : {
@@ -460,6 +477,7 @@ export const runTypedInspection = async (profile, message, {
 } = {}) => {
   const typed = resolveTypedInspectionRequest(profile, message)
   if (!typed) fail('TYPED_INSPECTION_MARKER_REQUIRED')
+  if (typed.discussionFacts.schemaVersion === 3) fail('INSPECT_ROUTE_RETIRED')
   const measuredAdapter = adapter || (profileRuntime?.nativeReadback ? { closed: false, readback: profileRuntime.nativeReadback } : null)
   const measuredReadback = isolationReadback || profileRuntime?.contractReadback || null
   assertMeasuredInspectionProfile({ profile, typed, adapter: measuredAdapter, isolationReadback: measuredReadback })

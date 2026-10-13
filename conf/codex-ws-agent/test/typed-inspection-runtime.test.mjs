@@ -400,165 +400,6 @@ const actionMessage = () => {
   return validateChatDispatch(message)
 }
 
-test('v3 native INSPECT answers from material with bound receipt; durable replay publishes only, never starts provider', async () => {
-  const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message); const frames = []
-  const rawOutcome = { schemaVersion: 3, kind: 'ANSWER', text: '已查阅资料：bird', clarification: null, action: null, deliverable: false, deliveryRelation: null }
-  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: '已查阅资料：bird', clarification: null, action: null, deliverable: false }
-  let starts = 0; let finalPrepared = null
-  const adapter = {
-    closed: false, readback: adapterReadback(),
-    startOrResumeThread: async (_prior, policy) => { assert.match(policy.developerInstructions, /INSPECT material-reading turn/); return { threadId: 'v3-inspect-thread' } },
-    runTurn: async options => {
-      starts++; assert.deepEqual(options.policy.outputSchema, INSPECTION_ACTION_OUTCOME_SCHEMA)
-      assert.equal(options.input[1].type, 'text')
-      options.onAccepted({ threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn' })
-      return { threadId: 'v3-inspect-thread', turnId: 'v3-inspect-turn', content: JSON.stringify(rawOutcome) }
-    }
-  }
-  const result = await runTypedInspection(profile, message, {
-    adapter, isolationReadback: readback(typed),
-    materializer: { materialize: async () => ({ directory: '/private/v3-inspect', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) }, nativeInputAdapters: {},
-    controls: { markPrepared: () => {}, markRunning: () => {}, markFinalPrepared: value => { finalPrepared = value }, markFinalPublication: () => {}, isCancelled: () => false },
-    sendFinal: (_profile, _message, content, extra) => { frames.push({ content, extra }); return false }
-  })
-  assert.equal(result.serverPersistence, 'unconfirmed')
-  assert.equal(frames[0].extra.outcomeContractVersion, 3)
-  assert.deepEqual(frames[0].extra.interactionOutcome, outcome)
-  assert.equal(frames[0].extra.inspectionInputReceipt.engineTurnId, 'v3-inspect-turn')
-  await recoverTypedInspection(profile, message, { finalPrepared }, {
-    adapter: { runTurn: () => assert.fail('must not restart generation') },
-    controls: { markFinalPublication: () => {} }, sendFinal: (_profile, _message, content, extra) => { frames.push({ content, extra }); return true }
-  })
-  assert.deepEqual(frames[1], frames[0]); assert.equal(starts, 1)
-})
-
-test('v3 native INSPECT rejects ACTION_REQUEST and preserves the terminal readback', async () => {
-  const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message)
-  let starts = 0; let releases = 0; let preparation
-  const raw = JSON.stringify({ schemaVersion: 3, kind: 'ACTION_REQUEST', text: '请检查并读取已提供的图片与文本资料。', clarification: null,
-    action: { actionId: 'inspect', instruction: '检查并读取已提供的图片与文本资料。', sourceRefIds: ['source-1'] }, deliverable: false, deliveryRelation: null })
-  const adapter = { closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'inspect-action-reject-thread' }),
-    runTurn: async options => { starts++; options.onAccepted({ threadId: 'inspect-action-reject-thread', turnId: 'inspect-action-reject-turn' })
-      return { threadId: 'inspect-action-reject-thread', turnId: 'inspect-action-reject-turn', content: raw } } }
-  const controls = { markPrepared: value => { preparation = value }, markRunning: () => {}, isCancelled: () => false,
-    markFinalPrepared: () => assert.fail('ACTION_REQUEST must not be persisted as a valid inspection final') }
-  const profileRuntime = { releaseAdapter: async () => { releases++ } }
-  await assert.rejects(() => runTypedInspection(profile, message, { adapter, profileRuntime, isolationReadback: readback(typed),
-    materializer: { materialize: async () => ({ directory: '/private/inspect-action-reject', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) },
-    controls, sendFinal: () => assert.fail('ACTION_REQUEST must not publish') }), error => error.code === 'ACTION_INSPECT_ACTION_REQUEST_FORBIDDEN' && error.preserveEngineState === true)
-  assert.equal(starts, 1); assert.equal(releases, 0)
-})
-
-test('v3 rejects catalogue mismatch before fetching, without a speculative no-reread gate', () => {
-  const message = actionMessage()
-  const changed = structuredClone(message); changed.contextSnapshot.facts.typedInspection.discussionFacts.availableSources[0].mediaType = 'audio'
-  assert.throws(() => resolveTypedInspectionRequest(profile, changed), /ACTION_INSPECTION_CATALOG_MISMATCH/)
-  assert.doesNotThrow(() => resolveTypedInspectionRequest(profile, message))
-})
-
-
-test('full v3 wire carries 32 mixed actual material bytes through native preparation and receipts', async () => {
-  // Real PNG/WAV decode and private file I/O. HTTP responses and native engine are fixtures;
-  // this does not assert installed-engine multimedia capability or call a Provider.
-  const crc32 = bytes => { let crc = 0xffffffff; for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0) } return (crc ^ 0xffffffff) >>> 0 }
-  const chunk = (type, data) => { const n = Buffer.alloc(4); n.writeUInt32BE(data.length); const body = Buffer.concat([Buffer.from(type), data]); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body)); return Buffer.concat([n, body, crc]) }
-  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4); ihdr[8] = 8; ihdr[9] = 6
-  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(Buffer.from([0, 255, 0, 0, 255]))), chunk('IEND', Buffer.alloc(0))])
-  const wav = Buffer.alloc(46); wav.write('RIFF'); wav.writeUInt32LE(38, 4); wav.write('WAVE', 8); wav.write('fmt ', 12); wav.writeUInt32LE(16, 16)
-  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34)
-  wav.write('data', 36); wav.writeUInt32LE(2, 40); wav.writeInt16LE(1234, 44)
-  const variants = [
-    { mediaKind: 'text', mimeType: 'text/plain', carrier: 'DIRECT_TEXT', bytes: Buffer.from('bird notes') },
-    { mediaKind: 'image', mimeType: 'image/png', carrier: 'LOCAL_IMAGE', bytes: png },
-    { mediaKind: 'audio', mimeType: 'audio/wav', carrier: 'LOCAL_AUDIO', bytes: wav },
-    { mediaKind: 'file', mimeType: 'application/json', carrier: 'PARSED_TEXT', bytes: Buffer.from('{"topic":"bird document"}') }
-  ]
-  const message = structuredClone(actionMessage()); const marker = message.contextSnapshot.facts.typedInspection
-  const materialBytes = new Map()
-  marker.manifest.sources = Array.from({ length: 32 }, (_, index) => {
-    const { bytes, ...format } = variants[index % variants.length]
-    const source = sourceFor(bytes, { ...format, sourceRefId: `source-${String(index).padStart(2, '0')}`,
-      selector: { ...sourceFor().selector, fileId: `file-${index}`, purpose: index % 2 ? 'REFERENCE' : 'INPUT' } })
-    materialBytes.set(source.sourceRefId, bytes); return source
-  })
-  marker.discussionFacts.availableSources = marker.manifest.sources.map(s => ({ sourceRefId: s.sourceRefId, kind: 'TASK_WORKSPACE_FILE', mediaType: s.mediaKind }))
-  marker.manifestDigest = canonicalSha256(marker.manifest)
-  message.contextSnapshot.facts.actionContinuation = { schemaVersion: 3, origin: 'AGENT_ACTION', originalUserMessageId: '901', instruction: '核对每份资料。'.repeat(1000) }
-  message.factsManifest = message.contextSnapshot.facts
-  message.contextHash = canonicalSha256({ sourceVector: message.sourceVector, facts: message.factsManifest }); message.contextSnapshot.contextHash = message.contextHash
-  // Exercise the same JSON normalization and durable admission boundary as an inbound frame.
-  const normalized = normalizeInboundMessage(JSON.stringify(message))
-  const typed = resolveTypedInspectionRequest(profile, normalized)
-  const isolation = readback(typed)
-  isolation.supportedInputs = isolation.supportedInputs.slice(0, 4)
-  const root = mkdtempSync(resolve(tmpdir(), 'mixed-inspection-wire-')); chmodSync(root, 0o700)
-  const fetched = []; const finals = []; let calls = 0
-  try {
-    const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example/', rootDir: root,
-      getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'b'.repeat(64)}`), agentId: ids.targetAgentId, runtimeInstanceId: 'runtime-1',
-      parsers: { 'application/json': { parserConfigDigest: prefixed('json-topic-parser'), parse: ({ bytes }) => JSON.parse(bytes.toString('utf8')).topic } },
-      fetchFn: async (url, options) => {
-        const source = marker.manifest.sources.find(s => url.endsWith(`/${s.sourceRefId}/content`))
-        assert.ok(source, url); fetched.push(source.sourceRefId)
-        assert.equal(options.headers['X-Inspection-Manifest-Digest'], typed.manifestDigest)
-        return response({ url, bytes: materialBytes.get(source.sourceRefId), mimeType: source.mimeType })
-      }
-    })
-    const adapter = { closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'mixed-thread' }),
-      runTurn: async options => {
-        calls++; assert.equal(options.input.length, 33)
-        const envelope = JSON.parse(options.input[0].text)
-        assert.equal(envelope.currentUserMessage.content, message.content)
-        assert.deepEqual(envelope.authoritative.facts.typedInspection.manifest.sources, marker.manifest.sources)
-        assert.equal(envelope.authoritative.facts.actionContinuation.instruction, message.factsManifest.actionContinuation.instruction)
-        options.input.slice(1).forEach((input, index) => {
-          const variant = index % 4
-          if (variant === 1 || variant === 2) {
-            assert.equal(input.type, variant === 1 ? 'localImage' : 'localAudio')
-            assert.deepEqual(readFileSync(input.path), variants[variant].bytes)
-          } else {
-            assert.equal(input.type, 'text'); assert.match(input.text, /^UNTRUSTED INSPECTION MATERIAL/)
-            assert.ok(input.text.includes(variant === 0 ? 'bird notes' : 'bird document'))
-          }
-        })
-        options.onAccepted({ threadId: 'mixed-thread', turnId: 'mixed-turn' })
-        return { threadId: 'mixed-thread', turnId: 'mixed-turn', content: JSON.stringify({ schemaVersion: 3, kind: 'ANSWER', text: '已整理资料。', clarification: null, action: null }) }
-      }
-    }
-    await runTypedInspection(profile, normalized, { adapter, materializer, isolationReadback: isolation,
-      nativeInputAdapters: {
-        localImage: { supportedMimeTypes: ['image/png'], toNativeInput: ({ path }) => ({ type: 'localImage', path }) },
-        localAudio: { supportedMimeTypes: ['audio/wav'], toNativeInput: ({ path }) => ({ type: 'localAudio', path }) }
-      },
-      controls: { markPrepared: () => {}, markRunning: () => {}, markFinalPrepared: () => {}, markFinalPublication: () => {}, isCancelled: () => false },
-      sendFinal: (_profile, _message, content, extra) => { finals.push({ content, extra }); return false }
-    })
-    assert.equal(calls, 1); assert.deepEqual(fetched, marker.manifest.sources.map(s => s.sourceRefId))
-    assert.equal(finals.length, 1); assert.equal(finals[0].extra.inspectionInputReceipt.sources.length, 32)
-    assert.deepEqual(finals[0].extra.inspectionInputReceipt.sources.map(s => s.sha256), marker.manifest.sources.map(s => s.sha256))
-    assert.equal(finals[0].extra.inspectionInputReceipt.engineTurnId, 'mixed-turn')
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('v3 material-reading ANSWER cannot mark itself as the task deliverable', async () => {
-  const message = actionMessage(); const typed = resolveTypedInspectionRequest(profile, message)
-  let starts = 0; let finals = 0
-  const adapter = { closed: false, readback: adapterReadback(), startOrResumeThread: async () => ({ threadId: 'inspect-marker-thread' }),
-    runTurn: async options => {
-      starts++; options.onAccepted({ threadId: 'inspect-marker-thread', turnId: 'inspect-marker-turn' })
-      return { threadId: 'inspect-marker-thread', turnId: 'inspect-marker-turn', content: JSON.stringify({
-        schemaVersion: 3, kind: 'ANSWER', text: '已阅读资料', clarification: null, action: null, deliverable: true }) }
-    }
-  }
-  await assert.rejects(() => runTypedInspection(profile, message, { adapter, isolationReadback: readback(typed),
-    materializer: { materialize: async () => ({ directory: '/private/marker-inspect', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) },
-    nativeInputAdapters: {}, controls: { markPrepared: () => {}, markRunning: () => {}, markFinalPrepared: () => {}, markFinalPublication: () => {}, isCancelled: () => false },
-    sendFinal: () => { finals++ }
-  }), /ACTION_FINAL_DELIVERABLE_ROUTE_INVALID/)
-  assert.equal(starts, 1); assert.equal(finals, 0)
-})
-
-
 test('materializer reuses native origin validation, permitting configured loopback ports but never remote plaintext or escaped origins', () => {
   const rootDir = mkdtempSync(resolve(tmpdir(), 'typed-inspection-shared-origin-'))
   try {
@@ -615,32 +456,38 @@ test('content rejection records only HTTP status while retaining strict no-model
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('INSPECT v3 forbids delivery linkage in output schema and preserves completed native state on validation rejection', async () => {
-  assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.kind, { type: 'string', enum: ['ANSWER', 'CLARIFY'] })
-  assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.action, { type: 'null' })
-  assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.deliverable, { type: 'boolean', enum: [false] })
-  assert.deepEqual(INSPECTION_ACTION_OUTCOME_SCHEMA.properties.deliveryRelation, { type: 'null' })
-  const base = messageFor(); const facts = JSON.parse(JSON.stringify(base.contextSnapshot.facts))
-  facts.typedInspection.discussionFacts = { schemaVersion: 3, availableActions: [], availableSources: discussionFacts.availableSources, inspectedSourceRefIds: [] }
-  const contextHash = canonicalSha256({ sourceVector: base.sourceVector, facts })
-  const message = validateChatDispatch({ ...base, factsManifest: facts, contextHash, contextSnapshot: { ...base.contextSnapshot, contextHash, facts } })
-  const typed = resolveTypedInspectionRequest(profile, message); let starts = 0; let releases = 0; let preparation
-  const raw = JSON.stringify({ schemaVersion: 3, kind: 'ANSWER', text: 'Terminal but invalid delivery relation.', clarification: null, action: null,
-    deliverable: false, deliveryRelation: { mode: 'APPEND', parentOutcomeId: 'not-a-delivery-parent', parentFinalDigest: prefixed('invalid') } })
-  const adapter = { closed: false, readback: adapterReadback(),
-    startOrResumeThread: async () => ({ threadId: 'terminal-thread', state: 'HOT' }),
-    runTurn: async options => { starts++; assert.equal(options.policy.outputSchema, INSPECTION_ACTION_OUTCOME_SCHEMA)
-      options.onAccepted({ threadId: 'terminal-thread', turnId: 'terminal-turn' }); return { threadId: 'terminal-thread', turnId: 'terminal-turn', content: raw } },
-    reconcileTurn: async () => ({ status: 'TERMINAL', terminalStatus: 'completed', turnId: 'terminal-turn',
-      turn: { items: [{ type: 'agentMessage', text: raw }] } }) }
-  const controls = { markPrepared: value => { preparation = value }, markRunning: () => {}, isCancelled: () => false,
-    markFinalPrepared: () => assert.fail('invalid reply must not be persisted as a valid final') }
-  const profileRuntime = { releaseAdapter: async () => { releases++ } }
-  await assert.rejects(() => runTypedInspection(profile, message, { adapter, profileRuntime, isolationReadback: readback(typed),
-    materializer: { materialize: async () => ({ directory: '/private/terminal', sources: [{ ...sourceFor(), bytes: Buffer.from('bird\n') }] }) },
-    controls, sendFinal: () => assert.fail('invalid final must not publish') }), error => error.code === 'ACTION_DELIVERY_PARENT_INVALID' && error.preserveEngineState === true)
-  await assert.rejects(() => recoverTypedInspection(profile, message, { preparation, engine: { threadId: 'terminal-thread', turnId: 'terminal-turn' } },
-    { adapter, profileRuntime, isolationReadback: readback(typed), controls, sendFinal: () => assert.fail('must not publish invalid readback') }),
-    error => error.code === 'ACTION_DELIVERY_PARENT_INVALID' && error.preserveEngineState === true)
-  assert.equal(starts, 1); assert.equal(releases, 0)
+// Historical terminal replay only. New mixed-material execution is covered by
+// materials-chat.test.mjs on the original CHAT turn and action-v4.
+import { buildTypedInspectionNativeInputs } from '../typed-inspection-input-carriers.mjs'
+test('archived v3 INSPECT cannot start another model/material read; archived catalogue still rejects mismatch', async () => {
+  const message = actionMessage()
+  await assert.rejects(runTypedInspection(profile, message, { materializer: { materialize: () => assert.fail('no historical write lane') },
+    adapter: { runTurn: () => assert.fail('no v3 model') } }), error => error.code === 'INSPECT_ROUTE_RETIRED')
+  const corrupted = structuredClone(message)
+  corrupted.contextSnapshot.facts.typedInspection.discussionFacts.availableSources[0].mediaType = 'audio'
+  assert.throws(() => resolveTypedInspectionRequest(profile, corrupted), /ACTION_INSPECTION_CATALOG_MISMATCH/)
+})
+test('archived v3 computed final replays immutable original identity without engine/runner and rejects forged linkage', async () => {
+  const message = actionMessage(), typed = resolveTypedInspectionRequest(profile, message), source = sourceFor()
+  const converted = buildTypedInspectionNativeInputs({ authorizationId: typed.authorizationId, manifestDigest: typed.manifestDigest,
+    sources: [{ sourceRefId: source.sourceRefId, sha256: source.sha256, byteLength: source.byteLength, mimeType: source.mimeType,
+      carrier: source.carrier, carrierContractDigest: source.carrierContractDigest, bytes: Buffer.from('bird\n') }] })
+  const receipt = { ...converted.inspectionInputReceiptDraft, engineThreadId: 'archived-thread', engineTurnId: 'archived-turn' }
+  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: 'Archived synthetic terminal result.', clarification: null, action: null, deliverable: false }
+  const outboundMessageId = 'inspection_final_' + 'a'.repeat(64), threadKey = 'thk:archived'
+  const prepared = { schemaVersion: 1, contract: 'juyiting-typed-inspection-final-v1', authorizationId: typed.authorizationId,
+    manifestDigest: typed.manifestDigest, requestId: message.requestId, turnId: message.turnId, dispatchId: message.dispatchId,
+    outboundMessageId, content: outcome.text,
+    extra: { status: 'completed', routeUsed: 'INSPECT_NATIVE', productPolicy: 'fixed-manifest-read-only', threadGeneration: threadKey,
+      outcomeContractVersion: 3, interactionOutcome: outcome, inspectionInputReceipt: receipt, outboundMessageId },
+    result: { status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed', threadId: 'archived-thread',
+      turnId: 'archived-turn', threadKey, inputDigest: receipt.inputDigest, outboundMessageId } }
+  const finalPrepared = { ...prepared, finalDigest: canonicalSha256(prepared) }
+  let sent
+  await recoverTypedInspection(profile, message, { finalPrepared }, { controls: {}, sendFinal: (_p, _m, content, extra) => { sent = { content, extra }; return true },
+    adapter: { runTurn: () => assert.fail('never replay native model'), reconcileTurn: () => assert.fail('durable final requires no engine') } })
+  assert.equal(sent.content, outcome.text); assert.deepEqual(sent.extra, prepared.extra)
+  const forged = structuredClone(finalPrepared); forged.extra.interactionOutcome.deliveryRelation = { mode: 'APPEND' }
+  const { finalDigest, ...preimage } = forged; forged.finalDigest = canonicalSha256(preimage)
+  await assert.rejects(recoverTypedInspection(profile, message, { finalPrepared: forged }, { sendFinal: () => assert.fail('no changed historical linkage') }), /ARCHIVED_INSPECTION_FINAL_INVALID/)
 })

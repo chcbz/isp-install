@@ -1,0 +1,165 @@
+TAP version 13
+# Subtest: public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+ok 1 - public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+  ---
+  duration_ms: 185.722679
+  ...
+# Subtest: material digest/identity/exact download path are rejected before any fetch or model
+ok 2 - material digest/identity/exact download path are rejected before any fetch or model
+  ---
+  duration_ms: 105.205154
+  ...
+# Subtest: missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+ok 3 - missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+  ---
+  duration_ms: 10.824691
+  ...
+# Subtest: completed material CHAT terminal readback is recovered without model execution or refetch
+ok 4 - completed material CHAT terminal readback is recovered without model execution or refetch
+  ---
+  duration_ms: 136.170543
+  ...
+# Subtest: unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+ok 5 - unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+  ---
+  duration_ms: 159.038403
+  ...
+# Subtest: materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+ok 6 - materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+  ---
+  duration_ms: 388.307402
+  ...
+# Subtest: v4 registration and presence expose exact nested materials declaration only after measurement
+ok 7 - v4 registration and presence expose exact nested materials declaration only after measurement
+  ---
+  duration_ms: 4.916614
+  ...
+# Subtest: public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+ok 8 - public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+  ---
+  duration_ms: 0.832123
+  ...
+# Subtest: frozen API v3 wire remains immutable historical source evidence with all 32 actual input hashes
+ok 9 - frozen API v3 wire remains immutable historical source evidence with all 32 actual input hashes
+  ---
+  duration_ms: 55.840536
+  ...
+# Subtest: historical CHAT v3 cannot propose automatic INSPECT or fall back to a new legacy model call
+ok 10 - historical CHAT v3 cannot propose automatic INSPECT or fall back to a new legacy model call
+  ---
+  duration_ms: 18.665099
+  ...
+# Subtest: independent INSPECT execution is retired before download/model, even with valid historical authorization
+ok 11 - independent INSPECT execution is retired before download/model, even with valid historical authorization
+  ---
+  duration_ms: 16.8442
+  ...
+# Subtest: archived native manifest source/scope corruption is rejected, never silently truncated or rebound
+ok 12 - archived native manifest source/scope corruption is rejected, never silently truncated or rebound
+  ---
+  duration_ms: 60.116637
+  ...
+# Subtest: non-empty fixed-origin materialization succeeds without freezing Buffer views and writes private immutable bytes
+ok 13 - non-empty fixed-origin materialization succeeds without freezing Buffer views and writes private immutable bytes
+  ---
+  duration_ms: 43.736493
+  ...
+# Subtest: materializer rejects redirect, response URL drift, MIME, declared length and digest mismatch before native conversion
+ok 14 - materializer rejects redirect, response URL drift, MIME, declared length and digest mismatch before native conversion
+  ---
+  duration_ms: 25.714951
+  ...
+# Subtest: private root symlink is rejected and concrete PNG decoder inflates actual scanlines
+ok 15 - private root symlink is rejected and concrete PNG decoder inflates actual scanlines
+  ---
+  duration_ms: 4.61133
+  ...
+# Subtest: unmeasured profile and conflicting CHAT/INSPECT markers fail before materialization or engine start
+ok 16 - unmeasured profile and conflicting CHAT/INSPECT markers fail before materialization or engine start
+  ---
+  duration_ms: 3.189291
+  ...
+# Subtest: native INSPECT durably prepares a fixed v2 final before publication and never weakens CHAT v1
+ok 17 - native INSPECT durably prepares a fixed v2 final before publication and never weakens CHAT v1
+  ---
+  duration_ms: 7.621298
+  ...
+# Subtest: existing durable inbox persists preparation and original engine binding across restart recovery
+ok 18 - existing durable inbox persists preparation and original engine binding across restart recovery
+  ---
+  duration_ms: 161.9812
+  ...
+# Subtest: INSPECT thread key binds authority inputs while CHAT key remains byte-compatible and ignores new fields
+ok 19 - INSPECT thread key binds authority inputs while CHAT key remains byte-compatible and ignores new fields
+  ---
+  duration_ms: 0.693506
+  ...
+# Subtest: unknown acceptance recovery performs only thread/read reconciliation and finalizes with recovered actual IDs
+ok 20 - unknown acceptance recovery performs only thread/read reconciliation and finalizes with recovered actual IDs
+  ---
+  duration_ms: 5.815464
+  ...
+# Subtest: recovery preserves request engine state when durable final persistence itself fails
+ok 21 - recovery preserves request engine state when durable final persistence itself fails
+  ---
+  duration_ms: 2.616308
+  ...
+# Subtest: durable final survives false, throw and unconfirmed write publication, replays after restart with one fixed identity, and never restarts the engine
+ok 22 - durable final survives false, throw and unconfirmed write publication, replays after restart with one fixed identity, and never restarts the engine
+  ---
+  duration_ms: 749.755605
+  ...
+# Subtest: missing runtime authentication and unavailable parser fail before fetch or native start
+ok 23 - missing runtime authentication and unavailable parser fail before fetch or native start
+  ---
+  duration_ms: 10.770525
+  ...
+# Subtest: recovery rejects mismatched terminal bindings and ambiguous model finals
+ok 24 - recovery rejects mismatched terminal bindings and ambiguous model finals
+  ---
+  duration_ms: 2.782755
+  ...
+# Subtest: inspection resolves exact INPUT and REFERENCE selectors and neutral conversation assets
+ok 25 - inspection resolves exact INPUT and REFERENCE selectors and neutral conversation assets
+  ---
+  duration_ms: 6.617033
+  ...
+# Subtest: inspection full dispatch and envelope preserve the complete 32-item catalogue and long action without truncation
+ok 26 - inspection full dispatch and envelope preserve the complete 32-item catalogue and long action without truncation
+  ---
+  duration_ms: 22.129456
+  ...
+# Subtest: materializer reuses native origin validation, permitting configured loopback ports but never remote plaintext or escaped origins
+ok 27 - materializer reuses native origin validation, permitting configured loopback ports but never remote plaintext or escaped origins
+  ---
+  duration_ms: 2.358558
+  ...
+# Subtest: real materializer fetch failure leaves no engine/preparation evidence and preserves safe original reclaim
+ok 28 - real materializer fetch failure leaves no engine/preparation evidence and preserves safe original reclaim
+  ---
+  duration_ms: 137.820305
+  ...
+# Subtest: content rejection records only HTTP status while retaining strict no-model failure
+ok 29 - content rejection records only HTTP status while retaining strict no-model failure
+  ---
+  duration_ms: 23.044457
+  ...
+# Subtest: archived v3 INSPECT cannot start another model/material read; archived catalogue still rejects mismatch
+ok 30 - archived v3 INSPECT cannot start another model/material read; archived catalogue still rejects mismatch
+  ---
+  duration_ms: 2.754896
+  ...
+# Subtest: archived v3 computed final replays immutable original identity without engine/runner and rejects forged linkage
+ok 31 - archived v3 computed final replays immutable original identity without engine/runner and rejects forged linkage
+  ---
+  duration_ms: 3.346851
+  ...
+1..31
+# tests 31
+# suites 0
+# pass 31
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3574.5663

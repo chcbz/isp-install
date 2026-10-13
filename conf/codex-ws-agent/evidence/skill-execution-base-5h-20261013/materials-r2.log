@@ -1,0 +1,108 @@
+TAP version 13
+# Subtest: public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+ok 1 - public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+  ---
+  duration_ms: 196.376658
+  ...
+# Subtest: material digest/identity/exact download path are rejected before any fetch or model
+not ok 2 - material digest/identity/exact download path are rejected before any fetch or model
+  ---
+  duration_ms: 18.764205
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/materials-chat.test.mjs:102:1'
+  failureType: 'testCodeFailure'
+  error: 'CHAT_OWNER_MISMATCH'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    validateChatDispatch (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/chat-runtime.mjs:184:48)
+    reseal (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/materials-chat.test.mjs:25:259)
+    TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/materials-chat.test.mjs:105:73)
+    Test.runInAsyncScope (node:async_hooks:206:9)
+    Test.run (node:internal/test_runner/test:796:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:526:18)
+    Test.postRun (node:internal/test_runner/test:889:19)
+    Test.run (node:internal/test_runner/test:835:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+ok 3 - missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+  ---
+  duration_ms: 18.664622
+  ...
+# Subtest: completed material CHAT terminal readback is recovered without model execution or refetch
+ok 4 - completed material CHAT terminal readback is recovered without model execution or refetch
+  ---
+  duration_ms: 129.266376
+  ...
+# Subtest: unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+ok 5 - unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+  ---
+  duration_ms: 112.875214
+  ...
+# Subtest: materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+not ok 6 - materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+  ---
+  duration_ms: 94.421642
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/materials-chat.test.mjs:133:1'
+  failureType: 'testCodeFailure'
+  error: 'CHAT_INBOX_LOCK_BUSY'
+  code: 'CHAT_INBOX_CAPACITY_EXCEEDED'
+  stack: |-
+    PersistentChatInbox._withLock (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/chat-runtime.mjs:320:32)
+    PersistentChatInbox.claim (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/chat-runtime.mjs:584:17)
+    TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/materials-chat.test.mjs:135:78)
+    Test.runInAsyncScope (node:async_hooks:206:9)
+    Test.run (node:internal/test_runner/test:796:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:526:18)
+    Test.postRun (node:internal/test_runner/test:889:19)
+    Test.run (node:internal/test_runner/test:835:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: v4 registration and presence expose exact nested materials declaration only after measurement
+ok 7 - v4 registration and presence expose exact nested materials declaration only after measurement
+  ---
+  duration_ms: 4.136804
+  ...
+# Subtest: public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+ok 8 - public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+  ---
+  duration_ms: 0.70646
+  ...
+# Subtest: strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+ok 9 - strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+  ---
+  duration_ms: 5.044507
+  ...
+# Subtest: one executor persists result before stage/commit; data-only still has real commit
+ok 10 - one executor persists result before stage/commit; data-only still has real commit
+  ---
+  duration_ms: 3.465126
+  ...
+# Subtest: recovered persistent result never runs a model/provider again
+ok 11 - recovered persistent result never runs a model/provider again
+  ---
+  duration_ms: 0.685887
+  ...
+# Subtest: invalid parameters, missing runner, wrong result identity and required empty output fail closed
+ok 12 - invalid parameters, missing runner, wrong result identity and required empty output fail closed
+  ---
+  duration_ms: 1.244416
+  ...
+# Subtest: portable IEEE754 shortest canonical JSON matches shared Java fixture, including subnormal and negative zero
+ok 13 - portable IEEE754 shortest canonical JSON matches shared Java fixture, including subnormal and negative zero
+  ---
+  duration_ms: 0.997191
+  ...
+# Subtest: canonical object keys are UTF16 lexical, never JS integer-property enumeration order
+ok 14 - canonical object keys are UTF16 lexical, never JS integer-property enumeration order
+  ---
+  duration_ms: 0.420346
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 12
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1229.700139

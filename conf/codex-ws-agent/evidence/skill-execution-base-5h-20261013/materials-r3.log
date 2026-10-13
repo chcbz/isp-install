@@ -1,0 +1,72 @@
+TAP version 13
+# Subtest: public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+ok 1 - public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+  ---
+  duration_ms: 193.287152
+  ...
+# Subtest: material digest/identity/exact download path are rejected before any fetch or model
+ok 2 - material digest/identity/exact download path are rejected before any fetch or model
+  ---
+  duration_ms: 91.934766
+  ...
+# Subtest: missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+ok 3 - missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+  ---
+  duration_ms: 10.294277
+  ...
+# Subtest: completed material CHAT terminal readback is recovered without model execution or refetch
+ok 4 - completed material CHAT terminal readback is recovered without model execution or refetch
+  ---
+  duration_ms: 116.661593
+  ...
+# Subtest: unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+ok 5 - unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+  ---
+  duration_ms: 114.27518
+  ...
+# Subtest: materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+not ok 6 - materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+  ---
+  duration_ms: 352.208768
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/materials-chat.test.mjs:133:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /FAST_CHAT_ROUTE_INVALID/. Input:
+    
+    'AgentProtocolError: Modern Fast CHAT accepts only route=CHAT'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'Modern Fast CHAT accepts only route=CHAT'
+  stack: |-
+    runFastChat (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/agent-client.mjs:4723:40)
+    TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/materials-chat.test.mjs:144:24)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/materials-chat.test.mjs:144:3)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: v4 registration and presence expose exact nested materials declaration only after measurement
+ok 7 - v4 registration and presence expose exact nested materials declaration only after measurement
+  ---
+  duration_ms: 4.317065
+  ...
+# Subtest: public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+ok 8 - public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+  ---
+  duration_ms: 0.710853
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 7
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1269.176988

@@ -36,6 +36,7 @@ import { SkillBindings } from './skill-bindings.mjs'
 import { createImageProviderRunner } from './skill-runners/image-provider.mjs'
 import { createNativeModelRunner } from './skill-runners/native-model.mjs'
 import { buildMaterialsInputs } from './materials-input.mjs'
+import { resolveChatMaterials, prepareChatMaterials, materialsEngineBinding, buildMaterialsChatFinal, publishMaterialsChatFinal } from './materials-chat.mjs'
 import { parseSkillJson } from './skill-manifest.mjs'
 import { skillDigest } from './skill-executor.mjs'
 import { SkillRegistry } from './skill-registry.mjs'
@@ -2502,7 +2503,7 @@ export const runtimeCommandContext = (profile, message) => {
 
 export class AgentMessageProcessor {
   constructor({
-    profile, inbox, runCommand, runChat, recoverChat = null, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
+    profile, inbox, runCommand, runChat, recoverChat = null, onChatFinalConfirmed = () => {}, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
     recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
     ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null, chatInbox = null, chatAckOutbox = null, lanes = null,
     sendCommandAckFn = null, onCommandTerminalConfirmed = null, chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
@@ -2512,6 +2513,7 @@ export class AgentMessageProcessor {
     this.runCommand = runCommand
     this.runChat = runChat
     this.recoverChat = recoverChat
+    this.onChatFinalConfirmed = onChatFinalConfirmed
     this.onTaskEvent = onTaskEvent
     this.onWorkResultReceipt = onWorkResultReceipt
     this.recoverCommandOutcome = recoverCommandOutcome
@@ -2942,7 +2944,7 @@ export class AgentMessageProcessor {
     for (const item of this.chatInbox.listRecovery()) {
       if (canResumePreEngineInspection(item.record)) {
         if (!this.preEngineRecoveryAttempts.has(item.key)) this._scheduleChat(item, true)
-      } else if (this.recoverChat && (item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' && (item.record.preparation || item.record.finalPrepared)) this._scheduleChatRecovery(item)
+      } else if (this.recoverChat && ((item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' || item.record.message?.contextSnapshot?.facts?.materialsInput) && (item.record.preparation || item.record.finalPrepared)) this._scheduleChatRecovery(item)
     }
   }
   _retryChatRecovery(item) {
@@ -2978,6 +2980,7 @@ export class AgentMessageProcessor {
       this._clearChatRecoveryRetry(outcome.key)
       const active = this.activeChats.get(outcome.key)
       if (active) active.state = 'FINAL_PERSISTED'
+      Promise.resolve().then(() => this.onChatFinalConfirmed(outcome)).catch(error => this.onReject(new AgentProtocolError('CHAT_CONFIRMED_CLEANUP_PENDING', error.code || 'Execution-owned cleanup pending'), {}))
       return { kind: 'chat-final-saved', status: outcome.status, key: outcome.key, confirmation: outcome.confirmation }
     } catch (error) {
       const protocolError = new AgentProtocolError(error?.code || 'CHAT_FINAL_ACK_REJECTED', error?.message || 'Durable CHAT final acknowledgement was rejected')
@@ -3009,7 +3012,7 @@ export class AgentMessageProcessor {
         if (retry && !this._chatFinalPersistenceConfirmed(item.key)) this._retryChatRecovery(item)
       }
     }
-    try { void this.lanes.enqueue('inspect', this._chatFairness(message), task, `recovery:${this._chatTurnKey(message)}`).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_ERROR', error.message), message.rawPayload) }) }
+    try { void this.lanes.enqueue((message.route || message.routing?.interactionMode) === 'INSPECT' ? 'inspect' : 'chat', this._chatFairness(message), task, `recovery:${this._chatTurnKey(message)}`).catch(error => { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_ERROR', error.message), message.rawPayload) }) }
     catch (error) { this.activeChats.delete(item.key); this.onReject(new AgentProtocolError('CHAT_RECOVERY_LANE_FULL', error.message), message.rawPayload) }
   }
   _scheduleChat(item, preEngineRecovery = false) {
@@ -3037,7 +3040,7 @@ export class AgentMessageProcessor {
           const recovered = this.chatInbox.recoveryRequired(claimed, result.recoveryReason || 'CHAT_RECOVERY_REQUIRED')
           if (recovered.state === 'COMPLETED' && recovered.finalConfirmation?.serverPersistence === 'confirmed') this._clearChatRecoveryRetry(claimed.key)
           else {
-            retryInspectionFinal = (claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' && Boolean(claimed.record.finalPrepared)
+            retryInspectionFinal = Boolean(claimed.record.finalPrepared) && ((claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' || claimed.record.message?.contextSnapshot?.facts?.materialsInput)
             const recoveryAck = { status: 'recovery_required', errorCode: result.recoveryReason || 'CHAT_RECOVERY_REQUIRED', reason: result.recoveryReason || 'CHAT recovery is required' }
             try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
           }
@@ -3047,7 +3050,7 @@ export class AgentMessageProcessor {
           const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
           const recovered = this.chatInbox.recoveryRequired(claimed, `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`, unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED')
           if (!(recovered.state === 'COMPLETED' && recovered.finalConfirmation?.serverPersistence === 'confirmed')) {
-            reconcileInspection = unknown && (claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT'
+            reconcileInspection = unknown && ((claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' || claimed.record.message?.contextSnapshot?.facts?.materialsInput)
             const recoveryAck = { status: 'recovery_required', errorCode: error?.code || 'CHAT_RUNTIME_ERROR', reason: String(error.message || 'CHAT runtime failure').slice(0, 512) }
             try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
             this.onReject(new AgentProtocolError(unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : (error?.code || 'CHAT_RUNTIME_ERROR'), error.message), claimed.record.message.rawPayload)
@@ -4163,7 +4166,7 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => {
     errorMessage: extra.errorMessage || '',
     abilities: resolveProfileAbilities(profile),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
-    ...(typedDeliberation ? { typedDeliberation } : {}),
+    ...(typedDeliberation ? { typedDeliberation: online && typedInspection ? { ...typedDeliberation, materialsInput: { schemaVersion: 1, supportedInputs: typedInspection.supportedInputs } } : typedDeliberation } : {}),
     ...(online && typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {}),
     ...(online && extra.skillRegistry?.declaration?.() ? { skillExecution: extra.skillRegistry.declaration() } : {})
   }
@@ -4179,7 +4182,7 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
     endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
     abilities: resolveProfileAbilities(profile),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
-    ...(typedDeliberation ? { typedDeliberation } : {}),
+    ...(typedDeliberation ? { typedDeliberation: online && typedInspection ? { ...typedDeliberation, materialsInput: { schemaVersion: 1, supportedInputs: typedInspection.supportedInputs } } : typedDeliberation } : {}),
     ...(online && typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {}),
     ...(online && skillRegistry?.declaration?.() ? { skillExecution: skillRegistry.declaration() } : {})
   }
@@ -4708,7 +4711,8 @@ const appServerReadbackSummary = adapter => {
 export const runFastChat = async (profile, message, {
   adapter = null, adapterPromise = null, bindingStore = null, controls = { markRunning: () => {}, isCancelled: () => false },
   fallback = null, sendProtocolFn = sendProtocol, chatWorkdir = profile.chatWorkdir, getAppServerFailure = () => null,
-  enginePolicyHash = '', instructionSourceHash = '', modelConfigHash = '', toolPolicyHash = ''
+  enginePolicyHash = '', instructionSourceHash = '', modelConfigHash = '', toolPolicyHash = '',
+  materialsRuntime = null, materialsMaterializer = null, materialsInputAdapters = {}
 } = {}) => {
   const modern = message?.durable === true || (message?.ackRequired === true && message?.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED')
   const legacy = (reason, secureBoundaryRequired = false) => {
@@ -4726,6 +4730,8 @@ export const runFastChat = async (profile, message, {
   const actionRequest = resolveActionChatRequest(profile, message)
   if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'typedDeliberation') && !actionRequest) throw new AgentProtocolError('ACTION_PROTOCOL_VERSION_INVALID', 'New durable planning accepts only action-v4')
   const typedRequest = actionRequest
+  const materials = resolveChatMaterials(profile, message)
+  if (materials && (!typedRequest || typeof controls.markPrepared !== 'function' || typeof controls.markFinalPrepared !== 'function')) throw new AgentProtocolError('MATERIALS_DURABILITY_REQUIRED', 'Materials CHAT requires a frozen action-v4 turn and durable inbox')
   const outputSchema = actionRequest ? ACTION_OUTCOME_SCHEMA : TYPED_DELIBERATION_OUTPUT_SCHEMA
   const outcomeInstructions = actionRequest ? ACTION_OUTCOME_INSTRUCTIONS : TYPED_DELIBERATION_INSTRUCTIONS
   const outcomeContractDigest = actionRequest ? ACTION_OUTCOME_CONTRACT_DIGEST : TYPED_DELIBERATION_CONTRACT_DIGEST
@@ -4734,6 +4740,14 @@ export const runFastChat = async (profile, message, {
   }
   if (!message.contextSnapshot) throw new AgentProtocolError('FAST_CHAT_CONTEXT_REQUIRED', 'Modern durable CHAT requires contextSnapshot')
   let selectedAdapter = adapter
+  let preparedMaterials = null
+  if (materials) {
+    preparedMaterials = await prepareChatMaterials({ profile, message, materials, materializer: materialsMaterializer, profileRuntime: materialsRuntime, adapters: materialsInputAdapters })
+    await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
+      inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft })
+    selectedAdapter = await materialsRuntime.openAdapter(preparedMaterials.inputDirectory, message.dedupeKey || message.messageId, materialsEngineBinding(message, materials, materialsRuntime))
+    chatWorkdir = '/inputs'
+  }
   if (!selectedAdapter && adapterPromise) {
     try { selectedAdapter = await adapterPromise }
     catch (error) {
@@ -4756,23 +4770,25 @@ export const runFastChat = async (profile, message, {
   const effectiveEnginePolicyHash = enginePolicyHash
     ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
     : canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {}, ...(typedRequest ? { typedContractBinding } : {}) })
-  const effectiveToolPolicyHash = toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
+  const effectiveToolPolicyHash = materials ? canonicalSha256({ profile: materialsRuntime.contractReadback, manifestDigest: materials.manifestDigest }) : toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
   const effectiveInstructionSourceHash = instructionSourceHash
     ? (typedRequest ? canonicalSha256({ base: instructionSourceHash, typedContractBinding }) : instructionSourceHash)
     : canonicalSha256({ source: 'runtime-static', instructions: developerInstructions, ...(typedRequest ? { typedContractBinding } : {}) })
   const effectiveModelConfigHash = modelConfigHash || canonicalSha256({ model: profile.chatModel || profile.codexModel || 'default', effort: profile.chatReasoningEffort || '', models: selectedAdapter.readback?.models || {}, config: selectedAdapter.readback?.config || {} })
   const key = buildThreadKey({ tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId, mode: 'CHAT', workspaceScopeHash: 'none', cwd: chatWorkdir, enginePolicyHash: effectiveEnginePolicyHash, toolPolicyHash: effectiveToolPolicyHash, instructionSourceHash: effectiveInstructionSourceHash, modelConfigHash: effectiveModelConfigHash, conversationGeneration: String(message.conversationGeneration) })
   metrics.queueAt = Date.now()
-  const prior = bindingStore?.get(key)
+  const prior = materials ? null : bindingStore?.get(key)
   if (prior?.state === 'RECOVERY_REQUIRED') throw Object.assign(new Error('THREAD_BINDING_RECOVERY_REQUIRED'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
   const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions })
   bindingStore?.put(key, binding)
+  if (materials) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
+    inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft, threadKey: key, engineThreadId: binding.threadId })
   metrics.engineStartAt = Date.now()
   let acceptedTurn = null; let typedStreamError = null
   const decoder = typedRequest ? new TypedOutcomeTextStreamDecoder() : null
   try {
     const result = await selectedAdapter.runTurn({
-      threadId: binding.threadId, clientUserMessageId: message.messageId, input: JSON.stringify(envelope),
+      threadId: binding.threadId, clientUserMessageId: message.messageId, input: preparedMaterials ? [{ type: 'text', text: JSON.stringify(envelope) }, ...preparedMaterials.nativeInputs] : JSON.stringify(envelope),
       policy: { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, ...(typedRequest ? { outputSchema } : {}) },
       onAccepted: accepted => { acceptedTurn = accepted; controls.markRunning(() => selectedAdapter.interrupt(accepted.threadId, accepted.turnId), accepted) },
       onDelta: event => {
@@ -4790,6 +4806,7 @@ export const runFastChat = async (profile, message, {
       }
     })
     if (typedStreamError) throw typedStreamError
+    if (materials && (result.finishReason !== 'completed' || result.threadId !== binding.threadId || !result.turnId || (acceptedTurn?.turnId && acceptedTurn.turnId !== result.turnId))) throw new AgentProtocolError('MATERIALS_NATIVE_RESULT_UNKNOWN', 'No exact completed native turn readback')
     if (controls.isCancelled()) return { status: 'cancelled', turnId: result.turnId, routeUsed: 'CHAT_FAST', metrics }
     metrics.finalAt = Date.now()
     if (typedRequest) {
@@ -4797,6 +4814,14 @@ export const runFastChat = async (profile, message, {
       if (profile.trueDeltaEnabled) {
         const suffix = decoder.finish(outcome.text)
         if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn) }
+      }
+      if (materials) {
+        const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [])
+        const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: outcome, receiptDraft: preparedMaterials.inspectionInputReceiptDraft,
+          engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key, validateOutcome })
+        await controls.markFinalPrepared(finalPrepared)
+        return publishMaterialsChatFinal({ profile, message, materials, finalPrepared, validateOutcome, controls,
+          sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
       }
       sendChatFinal(profile, message, outcome.text, {
         status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key,
@@ -4815,6 +4840,29 @@ export const runFastChat = async (profile, message, {
     if (typedStreamError && error.code !== 'TURN_ACCEPTANCE_UNKNOWN') throw typedStreamError
     throw error
   }
+}
+
+export const recoverMaterialsChat = async (profile, message, record, { profileRuntime = null, adapter = null, controls = {}, sendFinal } = {}) => {
+  const materials = resolveChatMaterials(profile, message), facts = resolveActionChatRequest(profile, message)
+  if (!materials || !facts || typeof sendFinal !== 'function') throw new AgentProtocolError('MATERIALS_RECOVERY_BINDING_INVALID', 'Exact CHAT material request required')
+  const validateOutcome = raw => validateActionOutcome(raw, facts, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [])
+  if (record.finalPrepared) return publishMaterialsChatFinal({ profile, message, materials, finalPrepared: record.finalPrepared, validateOutcome, controls, sendFinal })
+  const preparation = record.preparation
+  if (preparation?.contract !== 'juyiting-materials-chat-v1' || preparation.authorizationId !== materials.authorizationId || preparation.manifestDigest !== materials.manifestDigest) throw new AgentProtocolError('MATERIALS_RECOVERY_BINDING_INVALID', 'Exact persisted preparation required')
+  const engineThreadId = record.engine?.threadId || preparation.engineThreadId, expectedTurnId = record.engine?.turnId
+  if (!engineThreadId) return { status: 'recovery_required', reconciliationStatus: 'ACCEPTANCE_UNKNOWN' }
+  const selected = adapter || await profileRuntime.openAdapter(preparation.inputDirectory, message.dedupeKey || message.messageId, materialsEngineBinding(message, materials, profileRuntime), { requireExistingState: true })
+  const readback = await selected.reconcileTurn({ threadId: engineThreadId, turnId: expectedTurnId || null, clientUserMessageId: message.messageId })
+  if (readback?.status !== 'TERMINAL') return { status: 'recovery_required', reconciliationStatus: readback?.status || 'RECOVERY_REQUIRED' }
+  const turnId = readback.turnId || readback.turn?.id
+  if (readback.terminalStatus !== 'completed' || (readback.result?.thread?.id && readback.result.thread.id !== engineThreadId) || !turnId || (expectedTurnId && turnId !== expectedTurnId)) throw new AgentProtocolError('MATERIALS_RECOVERY_TURN_INVALID', 'Readback is not the original completed turn')
+  const messages = (readback.turn?.items || []).filter(item => ['agentMessage', 'agent_message'].includes(item.type) && typeof item.text === 'string')
+  if (messages.length !== 1) throw new AgentProtocolError('MATERIALS_RECOVERY_FINAL_INVALID', 'One exact native final required')
+  const content = messages[0].text
+  const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: content, receiptDraft: preparation.inspectionInputReceiptDraft, engineThreadId, engineTurnId: turnId, threadKey: preparation.threadKey, validateOutcome })
+  if (typeof controls.markFinalPrepared !== 'function') throw new AgentProtocolError('MATERIALS_DURABILITY_REQUIRED', 'Durable final storage required')
+  await controls.markFinalPrepared(finalPrepared)
+  return publishMaterialsChatFinal({ profile, message, materials, finalPrepared, validateOutcome, controls, sendFinal })
 }
 
 export const runProfileChat = (profile, message, {
@@ -4841,13 +4889,7 @@ export const isTypedInspectionDispatch = message => Boolean(
   (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedInspection'))
 )
 
-export const runReadOnlyInspection = async (profile, message, options = {}) => {
-  try { return await runTypedInspection(profile, message, options) }
-  catch (error) {
-    if (error instanceof AgentProtocolError) throw error
-    throw new AgentProtocolError(error?.code || 'TYPED_INSPECTION_RUNTIME_ERROR', error?.message || 'Typed inspection runtime failed closed')
-  }
-}
+export const runReadOnlyInspection = async () => { throw new AgentProtocolError('INSPECT_ROUTE_RETIRED', 'Materials belong to the original CHAT turn') }
 export const runConfirmedCommand = (profile, message, options = {}) => runCodex(profile, message, 'command', options)
 
 export const profileConfigurationErrors = profile => {
@@ -6309,13 +6351,18 @@ const createProfileState = (profile, profileConfig = config) => {
       if (isTypedInspectionDispatch(message)) throw new AgentProtocolError('INSPECT_ROUTE_RETIRED', 'Materials belong to the original CHAT turn; independent INSPECT execution is retired')
       return runProfileChat(profile, message, {
         adapter: state.appServerAdapter, adapterPromise: state.ensureAppServer ? state.ensureAppServer() : state.appServerPromise, bindingStore: threadBindingStore,
-        controls, chatWorkdir, legacyGate: legacyExecutionGate, getAppServerFailure: () => state.appServerPermanentFailure
+        controls, chatWorkdir, legacyGate: legacyExecutionGate, getAppServerFailure: () => state.appServerPermanentFailure,
+        materialsRuntime: message.contextSnapshot?.facts?.materialsInput ? await state.ensureTypedInspectionProfile() : null,
+        materialsMaterializer: typedInspectionMaterializer, materialsInputAdapters: typedInspectionNativeInputAdapters
       })
     },
     recoverChat: async (message, record, controls = {}) => {
       const route = message.route || message.routing?.interactionMode
+      if (route === 'CHAT' && message.contextSnapshot?.facts?.materialsInput) return recoverMaterialsChat(profile, message, record, {
+        profileRuntime: record.finalPrepared ? null : await state.ensureTypedInspectionProfile(), controls,
+        sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra) })
       if (route !== 'INSPECT') return { status: 'recovery_required', reconciliationStatus: 'UNSUPPORTED_ROUTE' }
-      const inspectionProfile = await state.ensureTypedInspectionProfile()
+      const inspectionProfile = record.finalPrepared ? null : await state.ensureTypedInspectionProfile()
       await state.registration.waitForRegistration()
       try {
         return await recoverTypedInspection(profile, message, record, {
@@ -6325,6 +6372,13 @@ const createProfileState = (profile, profileConfig = config) => {
       } catch (error) {
         throw new AgentProtocolError(error?.code || 'TYPED_INSPECTION_RECOVERY_ERROR', error?.message || 'Typed inspection recovery failed closed')
       }
+    },
+    onChatFinalConfirmed: async outcome => {
+      const record = outcome.record
+      if (record?.finalConfirmation?.serverPersistence !== 'confirmed' || record.finalPrepared?.contract !== 'juyiting-materials-chat-final-v1') return
+      const message = record.message, materials = resolveChatMaterials(profile, message)
+      await state.typedInspectionProfileRuntime?.releaseAdapter(message.dedupeKey || message.messageId)
+      typedInspectionMaterializer?.cleanup({ message, typed: materials })
     },
     onTaskEvent: message => {
       const key = message.workItemId || message.taskId || message.messageId
