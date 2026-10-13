@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "skillKey": "image-generate",
+      "skillVersion": "1.0.0",
+      "packageFile": "image-generate-1.0.0.zip",
+      "packageSha256": "f9fb128f304a538219496e6eb3366dce2e3aea2fc5eb93befe3354692a0a45e9",
+      "packageByteLength": 1788,
+      "manifestFile": "image-generate/manifest.json",
+      "manifestSha256": "50550f471ef53bcbd1f0deb2111362df3caaddf0c81896c2eea119193255c5ff",
+      "runner": "provider-operation",
+      "entrypoint": "image-http.generate"
+    },
+    {
+      "skillKey": "image-edit",
+      "skillVersion": "1.0.0",
+      "packageFile": "image-edit-1.0.0.zip",
+      "packageSha256": "1203016bbafa59db7ff853123c519ee976a037fed40faff310c7faf5615e0f14",
+      "packageByteLength": 1751,
+      "manifestFile": "image-edit/manifest.json",
+      "manifestSha256": "27c6061d950788ac835d07cfdadcd5883eea7d7ee8cf850d9be3371b6f0f5ff8",
+      "runner": "provider-operation",
+      "entrypoint": "image-http.edit"
+    },
+    {
+      "skillKey": "analysis",
+      "skillVersion": "1.0.0",
+      "packageFile": "analysis-1.0.0.zip",
+      "packageSha256": "048164ca81e12e2b685eb6f80336ecf1af4fa087c74b3164dff25ee130728605",
+      "packageByteLength": 2554,
+      "manifestFile": "analysis/manifest.json",
+      "manifestSha256": "b73d463190318e65a08b8dbe1b3e14f8a0f13b35cded5ffb5a09937678bd93a8",
+      "runner": "native-model",
+      "entrypoint": "native-model.data"
+    },
+    {
+      "skillKey": "text-file",
+      "skillVersion": "1.0.0",
+      "packageFile": "text-file-1.0.0.zip",
+      "packageSha256": "05e0b794bdd4df9f9fde2bdf5c3f44633da4edd1a1a5dc3d583a4d1bba4270fd",
+      "packageByteLength": 1777,
+      "manifestFile": "text-file/manifest.json",
+      "manifestSha256": "b8cd4e8dc573b419311db4a5be0af0e14e2aecb40d11caf503518273f3c32424",
+      "runner": "native-model",
+      "entrypoint": "native-model.text-file"
+    }
+  ],
+  "state": "PREPARED_NOT_PUBLISHED",
+  "boundaries": [
+    "No provider requests",
+    "No market registration",
+    "No production installation"
+  ]
+}

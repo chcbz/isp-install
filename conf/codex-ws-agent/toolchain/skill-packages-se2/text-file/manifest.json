@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "skillKey": "text-file",
+  "skillVersion": "1.0.0",
+  "title": "文本文件",
+  "description": "从实际任务资料生成完整UTF-8文本文件。",
+  "runner": "native-model",
+  "entrypoint": "native-model.text-file",
+  "parametersSchema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false,
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
+  "inputs": {
+    "minItems": 0,
+    "maxItems": 32,
+    "acceptedMimeTypes": [
+      "text/plain",
+      "text/markdown",
+      "application/json",
+      "image/png",
+      "audio/wav"
+    ]
+  },
+  "outputs": {
+    "dataSchema": null,
+    "mimeTypes": [
+      "text/plain"
+    ],
+    "multiple": false,
+    "artifactsRequired": true
+  },
+  "requirements": {},
+  "costInfo": {
+    "mode": "UNKNOWN",
+    "amount": null,
+    "currency": null,
+    "unit": "turn",
+    "description": "模型服务费用仅登记展示，不构成审批或扣费。",
+    "source": null,
+    "updatedAt": null
+  }
+}

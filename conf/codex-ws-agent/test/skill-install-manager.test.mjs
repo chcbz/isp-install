@@ -1258,3 +1258,40 @@ test('SE2 ordinary installed descriptor remains non-executable and arbitrary HOM
   const descriptors = runtime.manager.listInstalledSkills()
   assert.equal(descriptors.length, 1); assert.equal(descriptors[0].manifest, null)
 })
+
+// Actual immutable package bytes, not a fake installed descriptor/capability name.
+import { SkillRegistry } from '../skill-registry.mjs'
+import { createNativeModelRunner } from '../skill-runners/native-model.mjs'
+import { createImageProviderRunner } from '../skill-runners/image-provider.mjs'
+const preparedPackages = JSON.parse(readFileSync(new URL('../toolchain/skill-packages-se2/release-inputs.json', import.meta.url)))
+for (const item of preparedPackages.packages) {
+  test(`SE2 prepared ${item.skillKey} installs actual ZIP and readiness requires measured runner/binding`, async () => {
+    const bytes = readFileSync(new URL(`../toolchain/skill-packages-se2/${item.packageFile}`, import.meta.url))
+    assert.equal(bytes.length, item.packageByteLength); assert.equal(digest(bytes).slice(7), item.packageSha256)
+    const runtime = managerRuntime({ packageBytes: bytes })
+    const result = await runtime.manager.execute(dispatch(bytes, { skillKey: item.skillKey }))
+    assert.equal(result.status, 'completed'); assert.equal(result.resultEnvelope.manifestSha256, item.manifestSha256)
+    const rows = runtime.manager.listInstalledSkills()
+    assert.equal(rows[0].manifest.entrypoint, item.entrypoint)
+    const scope = { tenantId: '0', ownerJiacn: 'owner', clientId: 'client', agentId: 'agent-a' }
+    const runners = new Map(), binding = { ready: true, scope, bindingId: 'fixture-image', revision: '1', digest: 'b'.repeat(64) }
+    const registry = new SkillRegistry({ scope, loadInstalled: () => rows, runnerRegistry: runners, resolveBinding: async () => binding })
+    registry.setSession({ installationId: 'installation-a', hostId: 'host-a', runtimeInstanceId: 'boot-a', sessionGeneration: 1 })
+    let declaration = await registry.refresh()
+    assert.equal(declaration.skills[0].readiness, 'UNAVAILABLE'); assert.equal(declaration.skills[0].reasonCode, 'SKILL_RUNNER_MISSING')
+    const noCall = () => assert.fail('Readiness must never invoke provider/model')
+    if (item.runner === 'provider-operation') {
+      registry.runners.set(item.runner, createImageProviderRunner({ bindings: { resolve: async () => binding }, scope, fetchFn: noCall }))
+      binding.ready = false
+      assert.equal((await registry.refresh()).skills[0].readiness, 'UNAVAILABLE')
+      binding.ready = true
+    } else {
+      registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64) }), runModel: noCall }))
+      assert.equal((await registry.refresh()).skills[0].reasonCode, 'MATERIALS_CARRIER_UNAVAILABLE')
+      registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png', 'audio/wav'] }), runModel: noCall }))
+    }
+    declaration = await registry.refresh(); assert.equal(declaration.skills[0].readiness, 'READY')
+    assert.equal(declaration.skills[0].packageSha256, item.packageSha256)
+    registry.setSession(null); assert.equal(registry.declaration(), null)
+  })
+}

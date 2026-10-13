@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "skillKey": "analysis",
+  "skillVersion": "1.0.0",
+  "title": "资料分析",
+  "description": "在隔离原生模型中使用实际授权资料生成结构化分析。",
+  "runner": "native-model",
+  "entrypoint": "native-model.data",
+  "parametersSchema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false,
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
+  "inputs": {
+    "minItems": 0,
+    "maxItems": 32,
+    "acceptedMimeTypes": [
+      "text/plain",
+      "text/markdown",
+      "application/json",
+      "image/png",
+      "audio/wav"
+    ]
+  },
+  "outputs": {
+    "dataSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "inputRef": {
+                "type": "string"
+              },
+              "finding": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "inputRef",
+              "finding"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "summary",
+        "findings"
+      ],
+      "additionalProperties": false
+    },
+    "mimeTypes": [],
+    "multiple": false,
+    "artifactsRequired": false
+  },
+  "requirements": {},
+  "costInfo": {
+    "mode": "UNKNOWN",
+    "amount": null,
+    "currency": null,
+    "unit": "turn",
+    "description": "模型服务费用仅登记展示，不构成审批或扣费。",
+    "source": null,
+    "updatedAt": null
+  }
+}
