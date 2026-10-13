@@ -1,0 +1,929 @@
+TAP version 13
+# (node:3716984) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: byte-pinned E05 r2 at fake clock reaches local real HTTP ACK and unique mature checkpoint before business
+ok 1 - byte-pinned E05 r2 at fake clock reaches local real HTTP ACK and unique mature checkpoint before business
+  ---
+  duration_ms: 520.990309
+  ...
+# Subtest: lost real HTTP terminal receipt replays original r2 checkpoint after expiry and session rotation, without reexecution
+ok 2 - lost real HTTP terminal receipt replays original r2 checkpoint after expiry and session rotation, without reexecution
+  ---
+  duration_ms: 490.828443
+  ...
+# Subtest: r2 matches raw complete subject before projection, rejecting nested identity aliases and Runtime/product confusion
+ok 3 - r2 matches raw complete subject before projection, rejecting nested identity aliases and Runtime/product confusion
+  ---
+  duration_ms: 3.110252
+  ...
+# Subtest: r2 safely normalizes epoch and actual nullable values, never invented references or empty-string work keys
+ok 4 - r2 safely normalizes epoch and actual nullable values, never invented references or empty-string work keys
+  ---
+  duration_ms: 2.818985
+  ...
+# Subtest: raw r2 fingerprint binds epoch/product/source/context; same ID changed payload cannot change original D06 checkpoint
+ok 5 - raw r2 fingerprint binds epoch/product/source/context; same ID changed payload cannot change original D06 checkpoint
+  ---
+  duration_ms: 223.305344
+  ...
+# Subtest: r2 queued ACK projection and original raw checkpoint are independently checked BEFORE real HTTP
+    # Subtest: projection
+    ok 1 - projection
+      ---
+      duration_ms: 173.587655
+      ...
+    # Subtest: raw-source
+    ok 2 - raw-source
+      ---
+      duration_ms: 155.023743
+      ...
+    1..2
+ok 6 - r2 queued ACK projection and original raw checkpoint are independently checked BEFORE real HTTP
+  ---
+  duration_ms: 330.176356
+  ...
+# Subtest: unchanged E05 is rejected for new admission after expiry; only REJECTED reaches local HTTP and no business runs
+ok 7 - unchanged E05 is rejected for new admission after expiry; only REJECTED reaches local HTTP and no business runs
+  ---
+  duration_ms: 182.363645
+  ...
+# Subtest: r2 invalid raw subjects/epochs/contexts cannot create a checkpoint or send any HTTP ACK
+ok 8 - r2 invalid raw subjects/epochs/contexts cannot create a checkpoint or send any HTTP ACK
+  ---
+  duration_ms: 94.581922
+  ...
+# Subtest: nullable workItem from canonical DTO reaches HTTP as null, never an empty work key
+ok 9 - nullable workItem from canonical DTO reaches HTTP as null, never an empty work key
+  ---
+  duration_ms: 395.459967
+  ...
+# Subtest: operator example is valid standalone managed template, with correct schema/profile and exact API GID pair
+ok 10 - operator example is valid standalone managed template, with correct schema/profile and exact API GID pair
+  ---
+  duration_ms: 12.81934
+  ...
+# Subtest: hosting config read validates private template and binary without executing, creating HOME or mutating journal
+ok 11 - hosting config read validates private template and binary without executing, creating HOME or mutating journal
+  ---
+  duration_ms: 81.022302
+  ...
+# Subtest: optional host schema is strict and backwards static source remains valid; hosting path loads frozen local config
+ok 12 - optional host schema is strict and backwards static source remains valid; hosting path loads frozen local config
+  ---
+  duration_ms: 131.936383
+  ...
+# Subtest: managed template denies identity, credential, HOME, path, command and environment inheritance fields
+ok 13 - managed template denies identity, credential, HOME, path, command and environment inheritance fields
+  ---
+  duration_ms: 38.383177
+  ...
+# Subtest: provider config requires one exact independent provider with managed env, no raw auth/include/alternate provider
+ok 14 - provider config requires one exact independent provider with managed env, no raw auth/include/alternate provider
+  ---
+  duration_ms: 39.496326
+  ...
+# Subtest: config files, binary, private roots and socket parent must be canonical, owned and correctly permissioned
+ok 15 - config files, binary, private roots and socket parent must be canonical, owned and correctly permissioned
+  ---
+  duration_ms: 58.684696
+  ...
+# Subtest: managedRoot cannot alias host, static subject, HOME/workdir or socket parent; malformed profile fails pure validation
+ok 16 - managedRoot cannot alias host, static subject, HOME/workdir or socket parent; malformed profile fails pure validation
+  ---
+  duration_ms: 62.662974
+  ...
+# Subtest: single source installer/validator explicitly collate control payload and tmpfiles; source service parity and reboot ordering
+ok 17 - single source installer/validator explicitly collate control payload and tmpfiles; source service parity and reboot ordering
+  ---
+  duration_ms: 9.482386
+  ...
+# Subtest: frozen Main synthetic fixture has exact provenance and accepted request/manifest catalogs
+ok 18 - frozen Main synthetic fixture has exact provenance and accepted request/manifest catalogs
+  ---
+  duration_ms: 4.525651
+  ...
+# Subtest: strict reused parser rejects duplicate/Unicode aliases and sanitizes arbitrary secret property errors
+ok 19 - strict reused parser rejects duplicate/Unicode aliases and sanitizes arbitrary secret property errors
+  ---
+  duration_ms: 2.379152
+  ...
+# Subtest: wire rejects missing/unknown credentials, unsafe generations, association aliases and unknown protocol
+ok 20 - wire rejects missing/unknown credentials, unsafe generations, association aliases and unknown protocol
+  ---
+  duration_ms: 0.939333
+  ...
+# Subtest: capabilities is exact scope and configured host, not socket existence
+ok 21 - capabilities is exact scope and configured host, not socket existence
+  ---
+  duration_ms: 84.126385
+  ...
+# Subtest: prepare concurrent replay persists one private installation/secret and has no activation or enrollment
+ok 22 - prepare concurrent replay persists one private installation/secret and has no activation or enrollment
+  ---
+  duration_ms: 71.895972
+  ...
+# Subtest: immutable association cannot be reused across owners, subjects, scopes or changed ensure candidate
+ok 23 - immutable association cannot be reused across owners, subjects, scopes or changed ensure candidate
+  ---
+  duration_ms: 45.349544
+  ...
+# Subtest: ensure replay starts one native enroll/session and adds one subject to SAME host without peer mutation
+ok 24 - ensure replay starts one native enroll/session and adds one subject to SAME host without peer mutation
+  ---
+  duration_ms: 103.64611
+  ...
+# Subtest: free reprovision allocates once, same install/manifest/secret expiry; closes only subject and gets fresh session
+ok 25 - free reprovision allocates once, same install/manifest/secret expiry; closes only subject and gets fresh session
+  ---
+  duration_ms: 109.933931
+  ...
+# Subtest: reprovision requires exact original association and unexpired lease; allocation overflow refuses
+ok 26 - reprovision requires exact original association and unexpired lease; allocation overflow refuses
+  ---
+  duration_ms: 41.014804
+  ...
+# Subtest: enrollment-response loss persists recovery marker and never reuses consumed secret on ensure/restart
+ok 27 - enrollment-response loss persists recovery marker and never reuses consumed secret on ensure/restart
+  ---
+  duration_ms: 105.89432
+  ...
+# Subtest: restart reloads admitted dynamic subjects only and rejects stale persisted/live READY until fresh registration
+ok 28 - restart reloads admitted dynamic subjects only and rejects stale persisted/live READY until fresh registration
+  ---
+  duration_ms: 146.953069
+  ...
+# Subtest: live readiness is fresh exact session/durable/executor/operation proof, not prior online or persisted snapshot
+ok 29 - live readiness is fresh exact session/durable/executor/operation proof, not prior online or persisted snapshot
+  ---
+  duration_ms: 124.87883
+  ...
+# Subtest: prepared journal corruption and unmanaged existing roots fail closed without enrollment or adoption
+ok 30 - prepared journal corruption and unmanaged existing roots fail closed without enrollment or adoption
+  ---
+  duration_ms: 95.13332
+  ...
+# Subtest: private UDS usable trusted group0660/parent0750, exact newline response, duplicate rejection and lost prepare reply recovery
+ok 31 - private UDS usable trusted group0660/parent0750, exact newline response, duplicate rejection and lost prepare reply recovery
+  ---
+  duration_ms: 68.693774
+  ...
+# Subtest: UDS rejects unsafe world/writable parents and existing files/listeners without unlinking them
+ok 32 - UDS rejects unsafe world/writable parents and existing files/listeners without unlinking them
+  ---
+  duration_ms: 35.385463
+  ...
+# Subtest: lost actual ensure UDS response recovers identical admission without another installation/enrollment/session
+ok 33 - lost actual ensure UDS response recovers identical admission without another installation/enrollment/session
+  ---
+  duration_ms: 102.290289
+  ...
+# Subtest: reprovision supersedes pending registration through subject cancellation, not shared host restart
+ok 34 - reprovision supersedes pending registration through subject cancellation, not shared host restart
+  ---
+  duration_ms: 123.645754
+  ...
+# Subtest: clean shutdown while registration pending reloads admission without marking false recovery or reenrolling
+ok 35 - clean shutdown while registration pending reloads admission without marking false recovery or reenrolling
+  ---
+  duration_ms: 150.897603
+  ...
+# Subtest: journal write uncertainty closes admission and every queued mutation, preserving unknown durable result
+ok 36 - journal write uncertainty closes admission and every queued mutation, preserving unknown durable result
+  ---
+  duration_ms: 35.682501
+  ...
+# Subtest: persisted journal rejects extra fields, orphan operation, duplicate installation and noncontiguous generations
+ok 37 - persisted journal rejects extra fields, orphan operation, duplicate installation and noncontiguous generations
+  ---
+  duration_ms: 44.550681
+  ...
+# Subtest: Java bridge entry actual UDS/controller initial/replay/free reprovision and stop-with-open-stdin cleanup
+ok 38 - Java bridge entry actual UDS/controller initial/replay/free reprovision and stop-with-open-stdin cleanup
+  ---
+  duration_ms: 266.267928
+  ...
+# Subtest: Java bridge EOF closes listener and all exclusively owned roots
+ok 39 - Java bridge EOF closes listener and all exclusively owned roots
+  ---
+  duration_ms: 132.116747
+  ...
+# Subtest: RuntimeHost dynamic add/recreate uses existing host, serializes one subject, retains lock and preserves peers
+ok 40 - RuntimeHost dynamic add/recreate uses existing host, serializes one subject, retains lock and preserves peers
+  ---
+  duration_ms: 99.766282
+  ...
+# Subtest: RuntimeHost rejects dynamic identity/installation/root collision without altering peers
+ok 41 - RuntimeHost rejects dynamic identity/installation/root collision without altering peers
+  ---
+  duration_ms: 77.802317
+  ...
+# Subtest: mature engine adds and recreates closed entry, refreshes profiles/profileStates, independent peers retain exact state
+ok 42 - mature engine adds and recreates closed entry, refreshes profiles/profileStates, independent peers retain exact state
+  ---
+  duration_ms: 861.004632
+  ...
+# Subtest: provider environment reaches actual child via allowlisted builder, never inherited user credentials/HOME/Node options
+ok 43 - provider environment reaches actual child via allowlisted builder, never inherited user credentials/HOME/Node options
+  ---
+  duration_ms: 89.81041
+  ...
+# Subtest: adapter replaces only closed subject/session; stalled durable replay cannot block peer heartbeat
+ok 44 - adapter replaces only closed subject/session; stalled durable replay cannot block peer heartbeat
+  ---
+  duration_ms: 62.161425
+  ...
+# Subtest: one pending registration cannot block existing peer heartbeat or host SIGTERM
+ok 45 - one pending registration cannot block existing peer heartbeat or host SIGTERM
+  ---
+  duration_ms: 58.437779
+  ...
+# Subtest: private socket trusted-group child UID1001/GID1000 can exchange while untrusted GID is denied (root-only local fixture)
+ok 46 - private socket trusted-group child UID1001/GID1000 can exchange while untrusted GID is denied (root-only local fixture)
+  ---
+  duration_ms: 160.975348
+  ...
+# Subtest: registry/profile/list converge only the Agent entry; unrelated component mappings and profile order remain
+ok 47 - registry/profile/list converge only the Agent entry; unrelated component mappings and profile order remain
+  ---
+  duration_ms: 11.44797
+  ...
+# Subtest: legacy dispatcher names fail before any component call even in a mixed request
+ok 48 - legacy dispatcher names fail before any component call even in a mixed request
+  ---
+  duration_ms: 69.1712
+  ...
+# Subtest: agent profile/canonical component/current alias reach the real Runtime installer without a version gate and propagate its rejection
+ok 49 - agent profile/canonical component/current alias reach the real Runtime installer without a version gate and propagate its rejection
+  ---
+  duration_ms: 255.256418
+  ...
+# Subtest: interactive Runtime rejection and unrelated component failure propagate without changing their install mapping
+ok 50 - interactive Runtime rejection and unrelated component failure propagate without changing their install mapping
+  ---
+  duration_ms: 90.347934
+  ...
+# Subtest: help/list expose current Runtime prerequisites without installing anything
+ok 51 - help/list expose current Runtime prerequisites without installing anything
+  ---
+  duration_ms: 22.160488
+  ...
+# Subtest: no legacy unit source remains; current single-artifact units and installation guides name only the unified path
+ok 52 - no legacy unit source remains; current single-artifact units and installation guides name only the unified path
+  ---
+  duration_ms: 5.530173
+  ...
+# Subtest: Runtime and execution-package metadata impose no project Node version gate
+ok 53 - Runtime and execution-package metadata impose no project Node version gate
+  ---
+  duration_ms: 1.39125
+  ...
+# Subtest: disabled profiles need no Provider file or process environment fallback
+ok 54 - disabled profiles need no Provider file or process environment fallback
+  ---
+  duration_ms: 2.928364
+  ...
+# Subtest: explicit environments remain isolated by full subject and immutable
+ok 55 - explicit environments remain isolated by full subject and immutable
+  ---
+  duration_ms: 29.177381
+  ...
+# Subtest: unknown or disabled subjects and missing enabled subject are rejected
+ok 56 - unknown or disabled subjects and missing enabled subject are rejected
+  ---
+  duration_ms: 4.731872
+  ...
+# Subtest: canonical private files required; errors never echo file/credential
+ok 57 - canonical private files required; errors never echo file/credential
+  ---
+  duration_ms: 9.440642
+  ...
+# Subtest: exact schema and image-only key reject arbitrary environment injection
+ok 58 - exact schema and image-only key reject arbitrary environment injection
+  ---
+  duration_ms: 22.457982
+  ...
+# Subtest: known provider values are removed from logger message text
+ok 59 - known provider values are removed from logger message text
+  ---
+  duration_ms: 1.215534
+  ...
+# Subtest: unified run passes exact explicit mapping into existing adapters
+ok 60 - unified run passes exact explicit mapping into existing adapters
+  ---
+  duration_ms: 41.460643
+  ...
+# Subtest: systemd canonical configuration templates match and preserve /etc systemd boundary
+ok 61 - systemd canonical configuration templates match and preserve /etc systemd boundary
+  ---
+  duration_ms: 4.997347
+  ...
+# Subtest: actual CLI validate consumes file and validates enabled image credential without execution
+ok 62 - actual CLI validate consumes file and validates enabled image credential without execution
+  ---
+  duration_ms: 214.164896
+  ...
+# Subtest: shared skill binding references reuse only existing private full-subject credentials; missing new binding is UNAVAILABLE
+ok 63 - shared skill binding references reuse only existing private full-subject credentials; missing new binding is UNAVAILABLE
+  ---
+  duration_ms: 171.191313
+  ...
+# Subtest: three complete subjects initialize immutable config without writing any state
+ok 64 - three complete subjects initialize immutable config without writing any state
+  ---
+  duration_ms: 87.35373
+  ...
+# Subtest: duplicate complete subjects and installation authorization are rejected independently
+ok 65 - duplicate complete subjects and installation authorization are rejected independently
+  ---
+  duration_ms: 36.774526
+  ...
+# Subtest: reject equal writable root collision without adopting state
+ok 66 - reject equal writable root collision without adopting state
+  ---
+  duration_ms: 15.333925
+  ...
+# Subtest: reject nested writable root collision without adopting state
+ok 67 - reject nested writable root collision without adopting state
+  ---
+  duration_ms: 12.250604
+  ...
+# Subtest: reject state writable root collision without adopting state
+ok 68 - reject state writable root collision without adopting state
+  ---
+  duration_ms: 13.258055
+  ...
+# Subtest: reject host writable root collision without adopting state
+ok 69 - reject host writable root collision without adopting state
+  ---
+  duration_ms: 10.85353
+  ...
+# Subtest: reject alias writable root collision without adopting state
+ok 70 - reject alias writable root collision without adopting state
+  ---
+  duration_ms: 13.222621
+  ...
+# Subtest: reject ancestor-alias writable root collision without adopting state
+ok 71 - reject ancestor-alias writable root collision without adopting state
+  ---
+  duration_ms: 15.508353
+  ...
+# Subtest: identity substitution, legacy credentials and injected runtime keys fail closed
+ok 72 - identity substitution, legacy credentials and injected runtime keys fail closed
+  ---
+  duration_ms: 56.117071
+  ...
+# Subtest: sealed/config file mutations and symlink replacement are rejected
+ok 73 - sealed/config file mutations and symlink replacement are rejected
+  ---
+  duration_ms: 20.297192
+  ...
+# Subtest: one host boots three isolated executors; initialization never means READY and revoke is per Agent
+ok 74 - one host boots three isolated executors; initialization never means READY and revoke is per Agent
+  ---
+  duration_ms: 54.48679
+  ...
+# Subtest: one initialization failure is redacted and does not tear down other Agents
+ok 75 - one initialization failure is redacted and does not tear down other Agents
+  ---
+  duration_ms: 41.961112
+  ...
+# Subtest: stop during initialization waits and never opens a late execution channel
+ok 76 - stop during initialization waits and never opens a late execution channel
+  ---
+  duration_ms: 54.887918
+  ...
+# Subtest: unconfirmed executor shutdown retains both Agent and host writer ownership
+ok 77 - unconfirmed executor shutdown retains both Agent and host writer ownership
+  ---
+  duration_ms: 39.449611
+  ...
+# Subtest: existing stale or replaced writer locks are never stolen/deleted
+ok 78 - existing stale or replaced writer locks are never stolen/deleted
+  ---
+  duration_ms: 11.09269
+  ...
+# Subtest: replaced private root cannot make an old owner delete a new root lock
+ok 79 - replaced private root cannot make an old owner delete a new root lock
+  ---
+  duration_ms: 19.037332
+  ...
+# Subtest: writer ownership persists identity and boot IDs independently and releases only once
+ok 80 - writer ownership persists identity and boot IDs independently and releases only once
+  ---
+  duration_ms: 28.688348
+  ...
+# Subtest: unprotected/symlink state roots are not repaired or adopted
+ok 81 - unprotected/symlink state roots are not repaired or adopted
+  ---
+  duration_ms: 5.607365
+  ...
+# Subtest: injected adapter refuses guessed sessions and never imports legacy environment
+ok 82 - injected adapter refuses guessed sessions and never imports legacy environment
+  ---
+  duration_ms: 1033.964929
+  ...
+# Subtest: mature executor retains isolated subjects/session namespaces and allowlisted child environment
+ok 83 - mature executor retains isolated subjects/session namespaces and allowlisted child environment
+  ---
+  duration_ms: 1245.787991
+  ...
+# Subtest: unified library catalog closes actual engine imports without retired provisioning or host state
+ok 84 - unified library catalog closes actual engine imports without retired provisioning or host state
+  ---
+  duration_ms: 352.148333
+  ...
+# Subtest: unified library rejects reintroduced legacy auth/provisioning assets, symlinks and executable package entries
+ok 85 - unified library rejects reintroduced legacy auth/provisioning assets, symlinks and executable package entries
+  ---
+  duration_ms: 354.302017
+  ...
+# Subtest: packaged engine literal import tampering or linked source fails closed
+ok 86 - packaged engine literal import tampering or linked source fails closed
+  ---
+  duration_ms: 1635.857631
+  ...
+# Subtest: owned child cleanup escalates after signal-sent and awaits close, without leaking host secrets
+ok 87 - owned child cleanup escalates after signal-sent and awaits close, without leaking host secrets
+  ---
+  duration_ms: 154.120881
+  ...
+# Subtest: multi-Agent validate CLI reads config without engine effects; run fails closed until wire is bound
+ok 88 - multi-Agent validate CLI reads config without engine effects; run fails closed until wire is bound
+  ---
+  duration_ms: 136.405689
+  ...
+# Subtest: installer refuses existing targets, unavailable Node and unprepared parents before dependencies
+ok 89 - installer refuses existing targets, unavailable Node and unprepared parents before dependencies
+  ---
+  duration_ms: 393.563058
+  ...
+# Subtest: dependency preparation failure never publishes or leaves its stage; does not invoke Python
+ok 90 - dependency preparation failure never publishes or leaves its stage; does not invoke Python
+  ---
+  duration_ms: 2176.97694
+  ...
+# Subtest: validator checks full artifact-local dependency/toolchain graph instead of accepting payload-only collation
+ok 91 - validator checks full artifact-local dependency/toolchain graph instead of accepting payload-only collation
+  ---
+  duration_ms: 8357.490212
+  ...
+# Subtest: validator artifact import loads the real engine without invoking its retired CLI
+ok 92 - validator artifact import loads the real engine without invoking its retired CLI
+  ---
+  duration_ms: 4897.545871
+  ...
+# Subtest: validator artifact import regression reproduces eval ambiguity and keeps direct engine CLI retired
+ok 93 - validator artifact import regression reproduces eval ambiguity and keeps direct engine CLI retired
+  ---
+  duration_ms: 2861.740103
+  ...
+# Subtest: validator artifact import fails closed for a missing local module or execution host export
+ok 94 - validator artifact import fails closed for a missing local module or execution host export
+  ---
+  duration_ms: 2378.737949
+  ...
+# Subtest: single-artifact units pin local Node and shared host config; shell entry has no activation/reload
+ok 95 - single-artifact units pin local Node and shared host config; shell entry has no activation/reload
+  ---
+  duration_ms: 2.422689
+  ...
+# Subtest: toolchain validation refuses a host-global interpreter alias instead of falsely claiming release closure
+ok 96 - toolchain validation refuses a host-global interpreter alias instead of falsely claiming release closure
+  ---
+  duration_ms: 1049.663713
+  ...
+# Subtest: presence receipt control stays out of business, never re-registers or mutates readiness
+ok 97 - presence receipt control stays out of business, never re-registers or mutates readiness
+  ---
+  duration_ms: 69.337497
+  ...
+# Subtest: presence receipt control cannot grant registration; explicit business types cannot spoof ACK
+ok 98 - presence receipt control cannot grant registration; explicit business types cannot spoof ACK
+  ---
+  duration_ms: 42.405129
+  ...
+# Subtest: presence receipt control rejects wrong subject/session and malformed trace without logging secrets
+ok 99 - presence receipt control rejects wrong subject/session and malformed trace without logging secrets
+  ---
+  duration_ms: 16.231633
+  ...
+# Subtest: presence receipt control does not swallow explicit business declarations or normal ping
+ok 100 - presence receipt control does not swallow explicit business declarations or normal ping
+  ---
+  duration_ms: 20.971752
+  ...
+# Subtest: presence receipt control keeps genuine correlated registration errors and session fencing
+    # Subtest: error
+    ok 1 - error
+      ---
+      duration_ms: 19.421162
+      ...
+    # Subtest: protocol_error
+    ok 2 - protocol_error
+      ---
+      duration_ms: 30.18757
+      ...
+    # Subtest: protocol.error
+    ok 3 - protocol.error
+      ---
+      duration_ms: 32.395661
+      ...
+    # Subtest: typed-error
+    ok 4 - typed-error
+      ---
+      duration_ms: 47.698027
+      ...
+    1..4
+ok 101 - presence receipt control keeps genuine correlated registration errors and session fencing
+  ---
+  duration_ms: 131.014689
+  ...
+# Subtest: presence receipt control preserves unknown/error rejection and canonical CHAT/command/persistence ingress
+ok 102 - presence receipt control preserves unknown/error rejection and canonical CHAT/command/persistence ingress
+  ---
+  duration_ms: 53.224879
+  ...
+# Subtest: two independent session channels activate only exact receipt; health revocation keeps terminal reporting
+ok 103 - two independent session channels activate only exact receipt; health revocation keeps terminal reporting
+  ---
+  duration_ms: 60.399553
+  ...
+# Subtest: zero real adapters authenticate channel but never advertise or become execution-ready
+ok 104 - zero real adapters authenticate channel but never advertise or become execution-ready
+  ---
+  duration_ms: 41.719992
+  ...
+# Subtest: stale generation or outer/nested proof mismatch cannot activate/enter engine; CHAT/result keep their own channel
+ok 105 - stale generation or outer/nested proof mismatch cannot activate/enter engine; CHAT/result keep their own channel
+  ---
+  duration_ms: 20.569852
+  ...
+# Subtest: CHAT-only registration rejects durable ACK disagreement even with empty command types
+ok 106 - CHAT-only registration rejects durable ACK disagreement even with empty command types
+  ---
+  duration_ms: 15.267024
+  ...
+# Subtest: closing pending registration releases activation and only owned executor, no shutdown deadlock
+ok 107 - closing pending registration releases activation and only owned executor, no shutdown deadlock
+  ---
+  duration_ms: 13.391416
+  ...
+# Subtest: policy revocation isolates one subject while peer channel remains ready
+ok 108 - policy revocation isolates one subject while peer channel remains ready
+  ---
+  duration_ms: 15.854557
+  ...
+# Subtest: unified SIGTERM while registration activation waits closes transports before host lifecycle gate
+ok 109 - unified SIGTERM while registration activation waits closes transports before host lifecycle gate
+  ---
+  duration_ms: 86.405417
+  ...
+# Subtest: unified runtime heartbeat stops after SIGTERM and does not create a second ACK authority
+ok 110 - unified runtime heartbeat stops after SIGTERM and does not create a second ACK authority
+  ---
+  duration_ms: 188.717605
+  ...
+# Subtest: normal reconnect rotates only owned session; old socket, old generation and peer stop never reach cancel adapter
+ok 111 - normal reconnect rotates only owned session; old socket, old generation and peer stop never reach cancel adapter
+  ---
+  duration_ms: 1022.032153
+  ...
+# Subtest: canonical skill product installation is data; wrong raw scope/Runtime-product confusion never reaches engine
+ok 112 - canonical skill product installation is data; wrong raw scope/Runtime-product confusion never reaches engine
+  ---
+  duration_ms: 15.232778
+  ...
+# Subtest: venv generated launchers preserve direct CLI, argv, modes and RECORD integrity across stage deletion
+ok 113 - venv generated launchers preserve direct CLI, argv, modes and RECORD integrity across stage deletion
+  ---
+  duration_ms: 852.574577
+  ...
+# Subtest: venv publication fails closed for unknown stage references, launcher bodies and stale links
+ok 114 - venv publication fails closed for unknown stage references, launcher bodies and stale links
+  ---
+  duration_ms: 207.864212
+  ...
+# Subtest: venv validator rejects stale shell trampolines and activation even when imports could pass
+ok 115 - venv validator rejects stale shell trampolines and activation even when imports could pass
+  ---
+  duration_ms: 344.391453
+  ...
+# Subtest: Python 3.11 cfg command audit maps only its exact venv operand preserving every base field, quotes, modes and stage-to-target bytes
+ok 116 - Python 3.11 cfg command audit maps only its exact venv operand preserving every base field, quotes, modes and stage-to-target bytes
+  ---
+  duration_ms: 686.431802
+  ...
+# Subtest: Python 3.11 cfg relocation rejects unknown command, stale home/base/body/foreign stage and duplicate fields without deleting audit metadata
+ok 117 - Python 3.11 cfg relocation rejects unknown command, stale home/base/body/foreign stage and duplicate fields without deleting audit metadata
+  ---
+  duration_ms: 584.856563
+  ...
+# Subtest: Python 3.11 cfg command remains subject to the ORIGINAL strict stale validator after successful preparation
+ok 118 - Python 3.11 cfg command remains subject to the ORIGINAL strict stale validator after successful preparation
+  ---
+  duration_ms: 131.515773
+  ...
+# Subtest: PPTX semantic reopen reconstructs original producer wrapping and rejects lost/reordered/extra text
+ok 119 - PPTX semantic reopen reconstructs original producer wrapping and rejects lost/reordered/extra text
+  ---
+  duration_ms: 80.143064
+  ...
+# Subtest: current delivery dependency candidate keeps six exact pins and one fixed payload source
+ok 120 - current delivery dependency candidate keeps six exact pins and one fixed payload source
+  ---
+  duration_ms: 8.206528
+  ...
+# Subtest: local fixture identity and origin schema reject retired inputs before any acceptance IO
+ok 121 - local fixture identity and origin schema reject retired inputs before any acceptance IO
+  ---
+  duration_ms: 21.163551
+  ...
+# Subtest: artifact consumer callback type rejection precedes every acceptance side effect
+ok 122 - artifact consumer callback type rejection precedes every acceptance side effect
+  ---
+  duration_ms: 3.934883
+  ...
+# Subtest: artifact consumer all-checks gate makes zero callback calls and original tail still cleans
+ok 123 - artifact consumer all-checks gate makes zero callback calls and original tail still cleans
+  ---
+  duration_ms: 3274.079438
+  ...
+# Subtest: artifact consumer deep-freezes exact ordered projection and one-shot await preserves borrowed target
+ok 124 - artifact consumer deep-freezes exact ordered projection and one-shot await preserves borrowed target
+  ---
+  duration_ms: 6015.035392
+  ...
+# Subtest: artifact consumer invalid/throwing/explicit failure results preserve C gates and cleanup without leaking errors
+ok 125 - artifact consumer invalid/throwing/explicit failure results preserve C gates and cleanup without leaking errors
+  ---
+  duration_ms: 15430.523241
+  ...
+# Subtest: artifact consumer pre-gates reject changed fixed source, archive, target identity, Node and original payload
+ok 126 - artifact consumer pre-gates reject changed fixed source, archive, target identity, Node and original payload
+  ---
+  duration_ms: 11765.92166
+  ...
+# Subtest: artifact consumer post-readback catches original members, dependencies, modes, links, source and Node tampering
+ok 127 - artifact consumer post-readback catches original members, dependencies, modes, links, source and Node tampering
+  ---
+  duration_ms: 7601.778236
+  ...
+# Subtest: artifact consumer absent callback retains original standalone tail/cleanup and no consumer receipt
+ok 128 - artifact consumer absent callback retains original standalone tail/cleanup and no consumer receipt
+  ---
+  duration_ms: 486.2421
+  ...
+# Subtest: artifact consumer return schema is exact plain data with only the declared failure code whitelist
+ok 129 - artifact consumer return schema is exact plain data with only the declared failure code whitelist
+  ---
+  duration_ms: 2.695898
+  ...
+# Subtest: S01 workspace CLI: explicit file reproduces old string empty Map and passes real loaded policy to Runtime boundary
+ok 130 - S01 workspace CLI: explicit file reproduces old string empty Map and passes real loaded policy to Runtime boundary
+  ---
+  duration_ms: 32.621463
+  ...
+# Subtest: S01 workspace CLI: CYF file input reaches original loader without inheriting legacy inline/file keys
+ok 131 - S01 workspace CLI: CYF file input reaches original loader without inheriting legacy inline/file keys
+  ---
+  duration_ms: 11.894516
+  ...
+# Subtest: S01 workspace CLI: CLI file has priority over CYF file rather than merging either scope
+ok 132 - S01 workspace CLI: CLI file has priority over CYF file rather than merging either scope
+  ---
+  duration_ms: 9.083664
+  ...
+# Subtest: S01 workspace CLI: invalid selected CLI file never falls back to a valid CYF file
+ok 133 - S01 workspace CLI: invalid selected CLI file never falls back to a valid CYF file
+  ---
+  duration_ms: 22.116018
+  ...
+# Subtest: S01 workspace CLI: absent or empty CYF file defaults to an empty Map and ignores old-only policy inputs
+ok 134 - S01 workspace CLI: absent or empty CYF file defaults to an empty Map and ignores old-only policy inputs
+  ---
+  duration_ms: 23.185795
+  ...
+# Subtest: S01 workspace CLI: original loader rejects relative before any Runtime execution
+ok 135 - S01 workspace CLI: original loader rejects relative before any Runtime execution
+  ---
+  duration_ms: 18.269199
+  ...
+# Subtest: S01 workspace CLI: original loader rejects missing before any Runtime execution
+ok 136 - S01 workspace CLI: original loader rejects missing before any Runtime execution
+  ---
+  duration_ms: 23.972464
+  ...
+# Subtest: S01 workspace CLI: original loader rejects file-symlink before any Runtime execution
+ok 137 - S01 workspace CLI: original loader rejects file-symlink before any Runtime execution
+  ---
+  duration_ms: 27.712862
+  ...
+# Subtest: S01 workspace CLI: original loader rejects ancestor-symlink before any Runtime execution
+ok 138 - S01 workspace CLI: original loader rejects ancestor-symlink before any Runtime execution
+  ---
+  duration_ms: 18.060187
+  ...
+# Subtest: S01 workspace CLI: original loader rejects invalid-json before any Runtime execution
+ok 139 - S01 workspace CLI: original loader rejects invalid-json before any Runtime execution
+  ---
+  duration_ms: 40.267627
+  ...
+# Subtest: S01 workspace CLI: original loader rejects invalid-shape before any Runtime execution
+ok 140 - S01 workspace CLI: original loader rejects invalid-shape before any Runtime execution
+  ---
+  duration_ms: 16.41434
+  ...
+# Subtest: S01 workspace CLI: original loader rejects relative-resource before any Runtime execution
+ok 141 - S01 workspace CLI: original loader rejects relative-resource before any Runtime execution
+  ---
+  duration_ms: 15.683175
+  ...
+# Subtest: S01 workspace CLI: original loader rejects overlapping-resources before any Runtime execution
+ok 142 - S01 workspace CLI: original loader rejects overlapping-resources before any Runtime execution
+  ---
+  duration_ms: 17.176075
+  ...
+# Subtest: S01 workspace CLI: original loader rejects remote-credentials before any Runtime execution
+ok 143 - S01 workspace CLI: original loader rejects remote-credentials before any Runtime execution
+  ---
+  duration_ms: 18.613381
+  ...
+# Subtest: skill measurement activation waits for its follow-up registration and never loops on heartbeat
+ok 144 - skill measurement activation waits for its follow-up registration and never loops on heartbeat
+  ---
+  duration_ms: 13.622626
+  ...
+# Subtest: unmatched ACK and presence cannot supply a skill subject to the executor
+ok 145 - unmatched ACK and presence cannot supply a skill subject to the executor
+  ---
+  duration_ms: 14.239046
+  ...
+# Subtest: manifest exact explicit identity and SHA remain validated
+ok 146 - manifest exact explicit identity and SHA remain validated
+  ---
+  duration_ms: 3.821732
+  ...
+# Subtest: protected secret and authorization reads reject permissions, file/ancestor symlinks
+ok 147 - protected secret and authorization reads reject permissions, file/ancestor symlinks
+  ---
+  duration_ms: 23.38198
+  ...
+# Subtest: logs redact installation and AgentRuntime credentials including free text
+ok 148 - logs redact installation and AgentRuntime credentials including free text
+  ---
+  duration_ms: 1.303765
+  ...
+# Subtest: installation Bearer derives memory-only session; WS/ACK use exactly five proof headers
+ok 149 - installation Bearer derives memory-only session; WS/ACK use exactly five proof headers
+  ---
+  duration_ms: 35.919712
+  ...
+# Subtest: malformed or foreign session, old native token, and nonmonotonic generation fail closed
+ok 150 - malformed or foreign session, old native token, and nonmonotonic generation fail closed
+  ---
+  duration_ms: 17.999946
+  ...
+# Subtest: response must match status, kind, valid monotonic confirmed version (never predicted CAS)
+ok 151 - response must match status, kind, valid monotonic confirmed version (never predicted CAS)
+  ---
+  duration_ms: 0.671917
+  ...
+# Subtest: ACK transport failure and session rotation racing response cannot confirm commit
+ok 152 - ACK transport failure and session rotation racing response cannot confirm commit
+  ---
+  duration_ms: 16.268552
+  ...
+# Subtest: expiry blocks new RECEIVED/STARTED, not executed terminal reports; context has no mutable proof
+ok 153 - expiry blocks new RECEIVED/STARTED, not executed terminal reports; context has no mutable proof
+  ---
+  duration_ms: 1.963764
+  ...
+# Subtest: native fetch enforces same origin/prefix, appends current session proof and strips old auth
+ok 154 - native fetch enforces same origin/prefix, appends current session proof and strips old auth
+  ---
+  duration_ms: 60.491007
+  ...
+# Subtest: credential-bearing base URL and malformed response envelope fail closed
+ok 155 - credential-bearing base URL and malformed response envelope fail closed
+  ---
+  duration_ms: 6.669564
+  ...
+# Subtest: retry classification does not turn TLS/auth/rebind errors into blind retries
+ok 156 - retry classification does not turn TLS/auth/rebind errors into blind retries
+  ---
+  duration_ms: 0.996159
+  ...
+# Subtest: source systemd templates suppress permanent exit and back off restarts
+ok 157 - source systemd templates suppress permanent exit and back off restarts
+  ---
+  duration_ms: 2.093468
+  ...
+# Subtest: native session rotation aborts only owned transport and rejects late responses from the old proof
+ok 158 - native session rotation aborts only owned transport and rejects late responses from the old proof
+  ---
+  duration_ms: 4.968106
+  ...
+# Subtest: native explicit user cancellation composes with session signal without invalidating peers or the session
+ok 159 - native explicit user cancellation composes with session signal without invalidating peers or the session
+  ---
+  duration_ms: 11.311306
+  ...
+# Subtest: r2 ACK nullable reference/work item is explicit; absent, blank, forged identity or extra proof is not an ACL fallback
+ok 160 - r2 ACK nullable reference/work item is explicit; absent, blank, forged identity or extra proof is not an ACL fallback
+  ---
+  duration_ms: 3.580031
+  ...
+# Subtest: E05 native scope permits exactly existing POST lease/read-start-heartbeat shapes and manifest-bound actor; no wire change
+ok 161 - E05 native scope permits exactly existing POST lease/read-start-heartbeat shapes and manifest-bound actor; no wire change
+  ---
+  duration_ms: 9.338219
+  ...
+# Subtest: E05 native wrong/missing/duplicate actor, methods, broad routes and encoded aliases fail before fetch
+ok 162 - E05 native wrong/missing/duplicate actor, methods, broad routes and encoded aliases fail before fetch
+  ---
+  duration_ms: 4.167832
+  ...
+# Subtest: E05 native lease route is still session-fenced: invalidate aborts transport and a late old-proof response cannot confirm
+ok 163 - E05 native lease route is still session-fenced: invalidate aborts transport and a late old-proof response cannot confirm
+  ---
+  duration_ms: 3.743387
+  ...
+# Subtest: enrollment uses actual b47 nested record fixture only, with synthetic authorization rather than REDACTED markers
+ok 164 - enrollment uses actual b47 nested record fixture only, with synthetic authorization rather than REDACTED markers
+  ---
+  duration_ms: 1.712516
+  ...
+# Subtest: enrollment nested installation requires exact full subject, manifest, ACTIVE state and nullable heartbeat; no top-level fallback
+ok 165 - enrollment nested installation requires exact full subject, manifest, ACTIVE state and nullable heartbeat; no top-level fallback
+  ---
+  duration_ms: 8.023907
+  ...
+# Subtest: enrollment successful authorization is private atomic persisted/read back; public return and attempt record have no credential
+ok 166 - enrollment successful authorization is private atomic persisted/read back; public return and attempt record have no credential
+  ---
+  duration_ms: 22.12326
+  ...
+# Subtest: lost enrollment response or invalid envelope is recovery-required, nonretryable across process restart and never secret-bearing
+ok 167 - lost enrollment response or invalid envelope is recovery-required, nonretryable across process restart and never secret-bearing
+  ---
+  duration_ms: 41.076094
+  ...
+# Subtest: enrollment cannot report success after authorization persistence failure or silently overwrite preexisting credentials
+ok 168 - enrollment cannot report success after authorization persistence failure or silently overwrite preexisting credentials
+  ---
+  duration_ms: 10.288472
+  ...
+# Subtest: enrollment exclusive durable attempt fences simultaneous independent clients: exactly one HTTP request
+ok 169 - enrollment exclusive durable attempt fences simultaneous independent clients: exactly one HTTP request
+  ---
+  duration_ms: 19.195576
+  ...
+# Subtest: enrollment invalid secret and unsafe attempt path reject before HTTP and preserve private files
+ok 170 - enrollment invalid secret and unsafe attempt path reject before HTTP and preserve private files
+  ---
+  duration_ms: 2.436032
+  ...
+# Subtest: E05 internal result and lease allow only frozen three method/path pairs, no caller actor/body/query
+ok 171 - E05 internal result and lease allow only frozen three method/path pairs, no caller actor/body/query
+  ---
+  duration_ms: 4.815327
+  ...
+# Subtest: synthetic three-Agent host keeps directory, child env, and lifecycle isolated; one Agent failure/revocation leaves peers active
+ok 172 - synthetic three-Agent host keeps directory, child env, and lifecycle isolated; one Agent failure/revocation leaves peers active
+  ---
+  duration_ms: 100.696377
+  ...
+# Subtest: redacted API wire fixture is pinned as data; it is not treated as client/server integration evidence
+ok 173 - redacted API wire fixture is pinned as data; it is not treated as client/server integration evidence
+  ---
+  duration_ms: 5.901755
+  ...
+# Subtest: NOT_RUN: HTTP ACK commit, stale-generation rejection, recovery and restart unknown-result non-replay
+ok 174 - NOT_RUN: HTTP ACK commit, stale-generation rejection, recovery and restart unknown-result non-replay # SKIP M3 cross-end interfaces/implementation not integrated; mock-only test would not be valid evidence
+  ---
+  duration_ms: 0.297168
+  ...
+# Subtest: hosting example and tmpfiles use the same canonical private state root
+ok 175 - hosting example and tmpfiles use the same canonical private state root
+  ---
+  duration_ms: 8.744452
+  ...
+# Subtest: both packaged and root service templates use the external configuration root
+ok 176 - both packaged and root service templates use the external configuration root
+  ---
+  duration_ms: 2.433058
+  ...
+# Subtest: MySQL actual installer-generated config and template both retain binlog for three days
+ok 177 - MySQL actual installer-generated config and template both retain binlog for three days
+  ---
+  duration_ms: 4.38539
+  ...
+1..177
+# tests 183
+# suites 0
+# pass 182
+# fail 0
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 86638.636764

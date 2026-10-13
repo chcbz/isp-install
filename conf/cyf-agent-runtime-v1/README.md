@@ -1,8 +1,8 @@
 # Unified Agent Runtime (UR-01, 2026-10-08)
 
 One Runtime host reuses `codex-ws-agent`; it is not a heartbeat sidecar or a new
-model executor. Current package source is **Runtime 1.0.3** (2026-10-12, baseline
-`807b86d`); source availability does not prove a particular host is installed,
+model executor. Current package source is the **Runtime 1.1.0 candidate** (2026-10-13, skill-execution
+base `b79558e4`); source availability does not prove a particular host is installed,
 activated or business-accepted. The old engine CLI/API-key execution entry is
 retired; do not run the old service with the new ACK format.
 

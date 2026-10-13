@@ -128,3 +128,46 @@ test('only the real committed receipt permits execution-owned carrier adapter re
   await assert.rejects(new SkillConversationLane(missing.options).poll(), /SKILL_COMMIT_UNCONFIRMED/)
   assert.equal(unsafeRelease, 0)
 })
+
+test('a pending UNKNOWN retains its error but does not starve unrelated next inbox execution', async t => {
+  const first = fixture(t), second = fixture(t)
+  first.effects.set('native-model', { status: 'START_RECORDED' })
+  await assert.rejects(first.lane.poll(), /SKILL_RESULT_UNKNOWN/)
+  second.c.executionId = 'pwe_2'; second.c.runId = 'run_2'; second.c.commandId = 'cmd_2'; second.c.messageId = 'msg_2'
+  const options = { ...first.options, runners: second.options.runners, fetchFn: async (url, opts) => {
+    if (url.pathname.endsWith('/commands')) return response(url, { items: [second.c] })
+    return (url.pathname.includes('/runs/run_2/') ? second.options : first.options).fetchFn(url, opts)
+  } }
+  const lane = new SkillConversationLane(options)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(lane.poll(), error => {
+      assert.equal(error.code, 'SKILL_RESULT_UNKNOWN'); assert.equal(error.processed, 1)
+      assert.deepEqual(error.executionErrors, [{ executionId: first.c.executionId, code: 'SKILL_RESULT_UNKNOWN' }])
+      return true
+    })
+  }
+  assert.equal(first.modelCalls(), 0); assert.equal(second.modelCalls(), 1)
+  assert.equal(second.calls.filter(path => path.includes('/result-commits/')).length, 1)
+})
+
+test('shared store or session failures immediately halt poll instead of crossing the security boundary', async t => {
+  for (const code of ['SKILL_SESSION_CHANGED', 'SKILL_STORE_UNSAFE', 'SKILL_STORE_IDENTITY_CONFLICT']) {
+    const f = fixture(t), calls = [], original = Object.assign(new Error(code), { code, cause: new Error('actual cause') })
+    const second = { ...command(), executionId: 'pwe_2', runId: 'run_2' }
+    f.lane.fetch = async url => response(url, { items: [f.c, second] })
+    f.lane.process = async command => { calls.push(command.executionId); throw original }
+    await assert.rejects(f.lane.poll(), error => error === original)
+    assert.deepEqual(calls, ['pwe_1']); assert.equal(f.lane.active, false)
+  }
+})
+
+test('isolated poll failures preserve first original transport cause without leaking provider response data', async t => {
+  const f = fixture(t), cause = Object.assign(new Error('private provider response'), { code: 'ECONNRESET' })
+  const original = Object.assign(new Error('SKILL_TRANSPORT_UNKNOWN'), { code: 'SKILL_TRANSPORT_UNKNOWN', cause })
+  f.lane.process = async () => { throw original }
+  await assert.rejects(f.lane.poll(), error => {
+    assert.equal(error, original); assert.equal(error.cause, cause); assert.equal(error.processed, 0)
+    assert.deepEqual(error.executionErrors, [{ executionId: f.c.executionId, code: 'SKILL_TRANSPORT_UNKNOWN' }])
+    return true
+  })
+})

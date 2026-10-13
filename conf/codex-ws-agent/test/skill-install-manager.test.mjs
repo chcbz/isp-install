@@ -1269,10 +1269,12 @@ for (const item of preparedPackages.packages) {
     const bytes = readFileSync(new URL(`../toolchain/skill-packages-se2/${item.packageFile}`, import.meta.url))
     assert.equal(bytes.length, item.packageByteLength); assert.equal(digest(bytes).slice(7), item.packageSha256)
     const runtime = managerRuntime({ packageBytes: bytes })
-    const result = await runtime.manager.execute(dispatch(bytes, { skillKey: item.skillKey }))
+    const result = await runtime.manager.execute(dispatch(bytes, { skillKey: item.skillKey, skillVersion: item.skillVersion }))
     assert.equal(result.status, 'completed'); assert.equal(result.resultEnvelope.manifestSha256, item.manifestSha256)
     const rows = runtime.manager.listInstalledSkills()
     assert.equal(rows[0].manifest.entrypoint, item.entrypoint)
+    assert.equal(rows[0].manifest.skillVersion, item.skillVersion)
+    if (item.runner === 'native-model') assert.deepEqual(rows[0].manifest.inputs.acceptedMimeTypes, ['text/plain', 'text/markdown', 'application/json', 'image/png'])
     const scope = { tenantId: '0', ownerJiacn: 'owner', clientId: 'client', agentId: 'agent-a' }
     const runners = new Map(), binding = { ready: true, scope, bindingId: 'fixture-image', revision: '1', digest: 'b'.repeat(64) }
     const registry = new SkillRegistry({ scope, loadInstalled: () => rows, runnerRegistry: runners, resolveBinding: async () => binding })
@@ -1288,7 +1290,7 @@ for (const item of preparedPackages.packages) {
     } else {
       registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64) }), runModel: noCall }))
       assert.equal((await registry.refresh()).skills[0].reasonCode, 'MATERIALS_CARRIER_UNAVAILABLE')
-      registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png', 'audio/wav'] }), runModel: noCall }))
+      registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png'] }), runModel: noCall }))
     }
     declaration = await registry.refresh(); assert.equal(declaration.skills[0].readiness, 'READY')
     assert.equal(declaration.skills[0].packageSha256, item.packageSha256)

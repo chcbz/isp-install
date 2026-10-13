@@ -1,0 +1,150 @@
+TAP version 13
+# Subtest: public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+ok 1 - public CHAT consumes the same 32 real mixed bytes, host receipts, durable final replay without another model turn
+  ---
+  duration_ms: 182.369166
+  ...
+# Subtest: material digest/identity/exact download path are rejected before any fetch or model
+ok 2 - material digest/identity/exact download path are rejected before any fetch or model
+  ---
+  duration_ms: 78.716288
+  ...
+# Subtest: missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+ok 3 - missing measured carrier and tool isolation fails before native turn, never treats ability text as readiness
+  ---
+  duration_ms: 10.656164
+  ...
+# Subtest: completed material CHAT terminal readback is recovered without model execution or refetch
+ok 4 - completed material CHAT terminal readback is recovered without model execution or refetch
+  ---
+  duration_ms: 129.409633
+  ...
+# Subtest: unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+ok 5 - unknown/absent terminal readback never restarts model and altered durable receipt is rejected
+  ---
+  duration_ms: 128.914711
+  ...
+# Subtest: materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+ok 6 - materials final requires exact existing server save ACK before inbox completion; no standalone INSPECT
+  ---
+  duration_ms: 393.209383
+  ...
+# Subtest: v4 registration and presence expose exact nested materials declaration only after measurement
+ok 7 - v4 registration and presence expose exact nested materials declaration only after measurement
+  ---
+  duration_ms: 5.188686
+  ...
+# Subtest: public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+ok 8 - public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace
+  ---
+  duration_ms: 0.881079
+  ...
+# Subtest: one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+ok 9 - one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+  ---
+  duration_ms: 98.225037
+  ...
+# Subtest: lost final response reads back the identical committed result without a second write or model call
+ok 10 - lost final response reads back the identical committed result without a second write or model call
+  ---
+  duration_ms: 65.968771
+  ...
+# Subtest: stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+ok 11 - stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+  ---
+  duration_ms: 157.017952
+  ...
+# Subtest: a recorded/unknown effect can never be issued by a successor claimant
+ok 12 - a recorded/unknown effect can never be issued by a successor claimant
+  ---
+  duration_ms: 29.107909
+  ...
+# Subtest: exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+ok 13 - exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+  ---
+  duration_ms: 1.917424
+  ...
+# Subtest: committed server envelope resumes without local blob/staging or a runnable dependency
+ok 14 - committed server envelope resumes without local blob/staging or a runnable dependency
+  ---
+  duration_ms: 59.949955
+  ...
+# Subtest: reconstruction resumes saved command even when server inbox only lists QUEUED work
+ok 15 - reconstruction resumes saved command even when server inbox only lists QUEUED work
+  ---
+  duration_ms: 53.440624
+  ...
+# Subtest: syntactically valid but incorrect result digest is not a commit receipt
+ok 16 - syntactically valid but incorrect result digest is not a commit receipt
+  ---
+  duration_ms: 79.948829
+  ...
+# Subtest: frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+ok 17 - frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+  ---
+  duration_ms: 1.092646
+  ...
+# Subtest: only the real committed receipt permits execution-owned carrier adapter release
+ok 18 - only the real committed receipt permits execution-owned carrier adapter release
+  ---
+  duration_ms: 98.861248
+  ...
+# Subtest: a pending UNKNOWN retains its error but does not starve unrelated next inbox execution
+ok 19 - a pending UNKNOWN retains its error but does not starve unrelated next inbox execution
+  ---
+  duration_ms: 88.757668
+  ...
+# Subtest: shared store or session failures immediately halt poll instead of crossing the security boundary
+ok 20 - shared store or session failures immediately halt poll instead of crossing the security boundary
+  ---
+  duration_ms: 4.257152
+  ...
+# Subtest: isolated poll failures preserve first original transport cause without leaking provider response data
+ok 21 - isolated poll failures preserve first original transport cause without leaking provider response data
+  ---
+  duration_ms: 1.409429
+  ...
+# Subtest: one shared bindings config never substitutes another subject or process.env credential
+ok 22 - one shared bindings config never substitutes another subject or process.env credential
+  ---
+  duration_ms: 4.199532
+  ...
+# Subtest: fee metadata changes do not alter binding digest/revision; no approval or charge step
+ok 23 - fee metadata changes do not alter binding digest/revision; no approval or charge step
+  ---
+  duration_ms: 0.799026
+  ...
+# Subtest: generic image broker reuses exact codec and controlled endpoint without consent
+ok 24 - generic image broker reuses exact codec and controlled endpoint without consent
+  ---
+  duration_ms: 26.780024
+  ...
+# Subtest: image edits actually transmit verified reference bytes; real errors/redirects are not faked
+ok 25 - image edits actually transmit verified reference bytes; real errors/redirects are not faked
+  ---
+  duration_ms: 2.073741
+  ...
+# Subtest: native text file contains actual model result and can use authorized input material
+ok 26 - native text file contains actual model result and can use authorized input material
+  ---
+  duration_ms: 1.623013
+  ...
+# Subtest: missing native carrier is unavailable, never imaginary image understanding
+ok 27 - missing native carrier is unavailable, never imaginary image understanding
+  ---
+  duration_ms: 0.557465
+  ...
+# Subtest: native skill admitting media is unavailable until that exact MIME has a measured real carrier
+ok 28 - native skill admitting media is unavailable until that exact MIME has a measured real carrier
+  ---
+  duration_ms: 0.705278
+  ...
+1..28
+# tests 28
+# suites 0
+# pass 28
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2680.853032

@@ -25,23 +25,23 @@
     },
     {
       "skillKey": "analysis",
-      "skillVersion": "1.0.0",
-      "packageFile": "analysis-1.0.0.zip",
-      "packageSha256": "048164ca81e12e2b685eb6f80336ecf1af4fa087c74b3164dff25ee130728605",
-      "packageByteLength": 2554,
+      "skillVersion": "1.0.1",
+      "packageFile": "analysis-1.0.1.zip",
+      "packageSha256": "b2f283c3019b0ff2b632188ea64e6af98d2d61c753e2c0925d9f78132436b864",
+      "packageByteLength": 2671,
       "manifestFile": "analysis/manifest.json",
-      "manifestSha256": "b73d463190318e65a08b8dbe1b3e14f8a0f13b35cded5ffb5a09937678bd93a8",
+      "manifestSha256": "a7a3e48cb21d7537278d514f3484f4df8da301fd6948dcc70f2cb019e26a6d34",
       "runner": "native-model",
       "entrypoint": "native-model.data"
     },
     {
       "skillKey": "text-file",
-      "skillVersion": "1.0.0",
-      "packageFile": "text-file-1.0.0.zip",
-      "packageSha256": "05e0b794bdd4df9f9fde2bdf5c3f44633da4edd1a1a5dc3d583a4d1bba4270fd",
-      "packageByteLength": 1777,
+      "skillVersion": "1.0.1",
+      "packageFile": "text-file-1.0.1.zip",
+      "packageSha256": "16da21a3af2066100217488774e59cbe4238e3769b4f9f61f07b1916191dc915",
+      "packageByteLength": 1894,
       "manifestFile": "text-file/manifest.json",
-      "manifestSha256": "b8cd4e8dc573b419311db4a5be0af0e14e2aecb40d11caf503518273f3c32424",
+      "manifestSha256": "696e2b5cf906ccaa64dc436d455665328ce07773ed09d684781971b99e1de96c",
       "runner": "native-model",
       "entrypoint": "native-model.text-file"
     }

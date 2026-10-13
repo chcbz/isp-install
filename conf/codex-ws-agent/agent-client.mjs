@@ -5671,9 +5671,11 @@ const startNativeConversationPoller = (profile, state) => {
     if (state.conversationNativePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.conversationNativePollInFlight = true
     try { const polling = state.conversationNativeLane.poll(); state.conversationNativePollPromise = polling; await polling } catch (error) {
-      const code = typeof error?.code === 'string' && /^CONVERSATION_[A-Z_]{1,80}$/.test(error.code)
+      const code = typeof error?.code === 'string' && /^(?:CONVERSATION|SKILL|MATERIALS)_[A-Z_]{1,80}$/.test(error.code)
         ? error.code : 'CONVERSATION_UNAVAILABLE'
-      console.warn(`native conversation poll unavailable | profile=${profile.profileId} | code=${code}`)
+      const processed = Number.isSafeInteger(error?.processed) && error.processed >= 0 ? error.processed : 0
+      const causeCode = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'ABORT_ERR'].includes(error?.cause?.code) ? error.cause.code : 'NONE'
+      console.warn(`native conversation poll unavailable | profile=${profile.profileId} | code=${code} | processed=${processed} | cause=${causeCode}`)
     } finally { state.conversationNativePollInFlight = false }
   }
   void tick()

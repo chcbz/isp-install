@@ -145,8 +145,22 @@ export class SkillConversationLane {
         if (previous && skillDigest(previous) !== skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
         commands.set(command.executionId, command)
       }
-      let processed = 0
-      for (const command of commands.values()) { await this.process(command); processed++ }
+      let processed = 0, firstError = null
+      const executionErrors = [], proof = JSON.stringify(this.headers())
+      for (const command of commands.values()) {
+        // A command-local UNKNOWN must not starve unrelated work. A changed
+        // subject/session or unsafe shared checkpoint tree ends the whole poll.
+        if (proof !== JSON.stringify(this.headers())) fail('SKILL_SESSION_CHANGED')
+        try { await this.process(command); processed++ } catch (error) {
+          const code = error?.code
+          if (typeof code !== 'string' || !/^(?:SKILL|MATERIALS)_[A-Z_]{1,80}$/.test(code)
+              || /^(?:SKILL_SESSION_|SKILL_STORE_|SKILL_SCOPE_|SKILL_LANE_CONFIG_|SKILL_API_ORIGIN_)/.test(code)) throw error
+          firstError ||= error
+          executionErrors.push({ executionId: command.executionId, code })
+        }
+      }
+      // Preserve the actual first error and cause, not a fake success/failure.
+      if (firstError) { Object.assign(firstError, { processed, executionErrors }); throw firstError }
       return { processed }
     } finally { this.active = false }
   }
