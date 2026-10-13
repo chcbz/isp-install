@@ -2,18 +2,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { ACTION_OUTCOME_SCHEMA, validateActionFacts, validateActionOutcome, resolveActionChatRequest } from '../juyiting-action-outcome.mjs'
-const fixture = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v3.json', import.meta.url), 'utf8'))
+const fixture = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
 const facts = () => structuredClone(fixture.facts)
 const action = () => structuredClone(fixture.outcomes[2])
 
-test('v3 supports direct answer, real clarification, mixed-material inspection and non-image execution', () => {
-  assert.deepEqual(ACTION_OUTCOME_SCHEMA.properties.schemaVersion.enum, [3])
+test('v4 supports answer, clarification and schema-bound material skills, not top-level inspection', () => {
+  assert.deepEqual(ACTION_OUTCOME_SCHEMA.properties.schemaVersion.enum, [4])
   for (const outcome of fixture.outcomes) assert.deepEqual(validateActionOutcome(JSON.stringify(outcome), facts()), outcome)
-  assert.equal(Object.isFrozen(validateActionFacts(facts()).availableActions[0].inputMediaTypes), true)
+  assert.equal(Object.isFrozen(validateActionFacts(facts()).availableActions[0].inputMimeTypes), true)
 })
 
 test('32 selected sources are complete, 33 is invalid; no-source execution needs no reference-image branch', () => {
-  const f = facts(); f.availableSources = Array.from({ length: 32 }, (_, i) => ({ sourceRefId: `s${i}`, kind: 'TASK_WORKSPACE_FILE', mediaType: ['text', 'image', 'audio', 'file'][i % 4] }))
+  const f = facts(); f.availableSources = Array.from({ length: 32 }, (_, i) => ({ sourceRefId: `s${i}`, kind: 'TASK_WORKSPACE_FILE', mediaType: ['text', 'image', 'audio', 'file'][i % 4], mimeType: ['text/plain', 'image/png', 'audio/wav', 'application/pdf'][i % 4] }))
   const a = action(); a.action.sourceRefIds = f.availableSources.map(s => s.sourceRefId)
   assert.equal(validateActionOutcome(a, f).action.sourceRefIds.length, 32)
   f.availableSources.push({ ...f.availableSources[0], sourceRefId: 's32' })
@@ -33,7 +33,7 @@ test('rejects unadvertised action, injected grant/path, wrong branch, source, du
   ]) { const a = action(); mutate(a); assert.throws(() => validateActionOutcome(a, facts())) }
   const f = facts(); f.availableActions = []
   assert.throws(() => validateActionOutcome(action(), f), /ACTION_NOT_ADVERTISED/)
-  const imageOnly = facts(); imageOnly.availableActions[0].inputMediaTypes = ['image']
+  const imageOnly = facts(); imageOnly.availableActions[0].inputMimeTypes = ['image/png']
   assert.throws(() => validateActionOutcome(action(), imageOnly), /ACTION_SELECTION_INVALID/)
   assert.throws(() => validateActionOutcome('{"schemaVersion":3,"schemaVersion":3}', facts()), error => error.code === 'TYPED_OUTCOME_DUPLICATE_KEY')
   assert.throws(() => validateActionOutcome(JSON.stringify(action()) + ' trailing', facts()), error => error.code === 'TYPED_OUTCOME_INVALID_JSON')
@@ -44,8 +44,8 @@ test('rejects unadvertised action, injected grant/path, wrong branch, source, du
 test('capability and read facts are exact; previous reading does not add an unsupported rejection gate', () => {
   for (const mutate of [
     f => { f.availableActions.push(f.availableActions[0]) }, f => { f.availableActions[0].maxSources = 33 },
-    f => { f.availableActions[0].kind = 'EXECUTE' }, f => { f.availableActions[0].minSources = 0 },
-    f => { f.availableActions[0].inputMediaTypes = ['shell'] }, f => { f.inspectedSourceRefIds = ['unknown'] },
+    f => { f.availableActions[0].kind = 'INSPECT_INPUTS' }, f => { f.availableActions[0].operation = 'GENERATE_IMAGE' },
+    f => { f.availableActions[0].inputMimeTypes = ['shell'] }, f => { f.inspectedSourceRefIds = ['unknown'] },
     f => { f.availableSources.push(f.availableSources[0]) }, f => { f.grant = 'forged' }
   ]) { const f = facts(); mutate(f); assert.throws(() => validateActionFacts(f)) }
   const f = facts(); f.inspectedSourceRefIds = f.availableSources.map(s => s.sourceRefId)
@@ -54,7 +54,7 @@ test('capability and read facts are exact; previous reading does not add an unsu
   assert.doesNotThrow(() => validateActionOutcome(action(), f))
 })
 
-test('v3 CHAT dispatch binds exact task/conversation/generation/target; unknown versions never downgrade to v3', () => {
+test('v4 CHAT dispatch binds exact task/conversation/generation/target; unknown versions never downgrade to v3', () => {
   const profile = { agentId: 'a', typedDeliberationEnabled: true }
   const message = { durable: true, route: 'CHAT', taskId: 'task', conversationId: 'c', conversationGeneration: '1', targetAgentId: 'a',
     contextSnapshot: { facts: { typedDeliberation: facts(), conversation: { id: 'c', generation: '1', scopeType: 'bounty' }, task: { id: 'task' }, targetAgentId: 'a' } } }
@@ -69,7 +69,7 @@ test('v3 CHAT dispatch binds exact task/conversation/generation/target; unknown 
 
 test('explicit text deliverable marker is durable Boolean data, not inferred from ANSWER or permission', () => {
   const answer = structuredClone(fixture.outcomes[0])
-  assert.equal(Object.hasOwn(validateActionOutcome(answer, facts()), 'deliverable'), false)
+  assert.equal(Object.hasOwn(validateActionOutcome(answer, facts()), 'deliverable'), true)
   assert.equal(ACTION_OUTCOME_SCHEMA.properties.deliverable.type, 'boolean')
   assert.ok(ACTION_OUTCOME_SCHEMA.required.includes('deliverable'))
   for (const deliverable of [false, true]) {
@@ -89,7 +89,7 @@ test('explicit text deliverable marker is durable Boolean data, not inferred fro
 test('explicit text relations require the exact advertised durable parent and never infer from linkage', () => {
   const parent = { outcomeId: 'original-text', finalDigest: `sha256:${'a'.repeat(64)}` }
   for (const mode of ['APPEND', 'REPLACE', 'RESET']) {
-    const value = { schemaVersion: 3, kind: 'ANSWER', text: '原文改稿  ', clarification: null, action: null, deliverable: true,
+    const value = { schemaVersion: 4, kind: 'ANSWER', text: '原文改稿  ', clarification: null, action: null, deliverable: true,
       deliveryRelation: { mode, parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest } }
     assert.deepEqual(validateActionOutcome(value, facts(), parent), value)
     assert.equal(Object.isFrozen(validateActionOutcome(value, facts(), parent).deliveryRelation), true)
@@ -97,9 +97,9 @@ test('explicit text relations require the exact advertised durable parent and ne
     assert.throws(() => validateActionOutcome(value, facts(), { ...parent, finalDigest: `sha256:${'b'.repeat(64)}` }), /ACTION_DELIVERY_PARENT_INVALID/)
     assert.throws(() => validateActionOutcome({ ...value, deliverable: false }, facts(), parent), /ACTION_DELIVERY_PARENT_INVALID/)
   }
-  const old = { schemaVersion: 3, kind: 'ANSWER', text: '文字成果', clarification: null, action: null, deliverable: true }
+  const old = { schemaVersion: 4, kind: 'ANSWER', text: '文字成果', clarification: null, action: null, deliverable: true, deliveryRelation: null }
   assert.deepEqual(validateActionOutcome({ ...old, deliveryRelation: null }, facts(), parent), old)
-  assert.equal(Object.hasOwn(validateActionOutcome(old, facts(), parent), 'deliveryRelation'), false)
+  assert.equal(Object.hasOwn(validateActionOutcome(old, facts(), parent), 'deliveryRelation'), true)
 })
 
 
@@ -108,7 +108,7 @@ test('actual API read fixture preserves identical explicit parent identity acros
   for (const group of groups) {
     const original = group.initial.outcome; const current = group.updated.outcome
     const parent = { outcomeId: original.outcomeId, finalDigest: original.finalDigest }
-    const native = { schemaVersion: 3, kind: current.kind, text: current.text, clarification: null, action: null,
+    const native = { schemaVersion: 4, kind: current.kind, text: current.text, clarification: null, action: null,
       deliverable: current.deliverable, deliveryRelation: current.deliveryRelation }
     const result = validateActionOutcome(native, facts(), parent)
     assert.deepEqual(result, native); assert.equal(result.deliveryRelation.mode, group.mode)
@@ -120,7 +120,7 @@ test('actual API read fixture preserves identical explicit parent identity acros
 test('earlier retained replacement requires the exact advertised target while keeping its causal basis', () => {
   const group = JSON.parse(readFileSync(new URL('./fixtures/retained-text-delivery-v3.json', import.meta.url), 'utf8'))
   const ad = group.admissionFacts; const view = group.updated.outcome
-  const outcome = { schemaVersion: 3, kind: 'ANSWER', text: view.text, clarification: null, action: null, deliverable: true, deliveryRelation: view.deliveryRelation }
+  const outcome = { schemaVersion: 4, kind: 'ANSWER', text: view.text, clarification: null, action: null, deliverable: true, deliveryRelation: view.deliveryRelation }
   assert.deepEqual(validateActionOutcome(outcome, facts(), ad.deliveryParent, ad.deliveryTargets), outcome)
   assert.notEqual(outcome.deliveryRelation.targetOutcomeId, outcome.deliveryRelation.parentOutcomeId)
   assert.throws(() => validateActionOutcome(outcome, facts(), ad.deliveryParent), /ACTION_DELIVERY_TARGET_INVALID/)
@@ -146,7 +146,7 @@ test('only exact advertised EXECUTE may append or reset its future batch; planni
     assert.throws(() => validateActionOutcome(value, facts(), { ...parent, finalDigest: `sha256:${'b'.repeat(64)}` }), /ACTION_DELIVERY_PARENT_INVALID/)
     assert.throws(() => validateActionOutcome({ ...value, deliverable: true }, facts(), parent), /ACTION_OUTCOME_UNION_INVALID/)
     const inspection = action(); inspection.deliverable = false; inspection.deliveryRelation = value.deliveryRelation
-    assert.throws(() => validateActionOutcome(inspection, facts(), parent), /ACTION_DELIVERY_PARENT_INVALID/)
+    assert.doesNotThrow(() => validateActionOutcome(inspection, facts(), parent))
     value.deliveryRelation.mode = 'REPLACE'
     assert.throws(() => validateActionOutcome(value, facts(), parent), /ACTION_DELIVERY_PARENT_INVALID/)
   }
@@ -158,7 +158,7 @@ test('media basis advertises exact retained outputs without treating them as tex
   const text = { outcomeId: 'original-text', finalDigest: `sha256:${'a'.repeat(64)}`, text: '原文' }
   const outputs = ['bird', 'tree'].map(outputId => ({ ...parent, outputSource: { requestId: 'media-child', stepId: 'original-step', outputId, sha256: 'c'.repeat(64) } }))
   const targets = [text, ...outputs]
-  const value = { schemaVersion: 3, kind: 'ANSWER', text: '改稿', clarification: null, action: null, deliverable: true,
+  const value = { schemaVersion: 4, kind: 'ANSWER', text: '改稿', clarification: null, action: null, deliverable: true,
     deliveryRelation: { mode: 'REPLACE', parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest,
       targetOutcomeId: text.outcomeId, targetFinalDigest: text.finalDigest } }
   assert.deepEqual(validateActionOutcome(value, facts(), parent, targets), value)
@@ -170,4 +170,14 @@ test('media basis advertises exact retained outputs without treating them as tex
   }
   const reversed = { ...outputs[0], outputSource: { sha256: outputs[0].outputSource.sha256, outputId: 'bird', stepId: 'original-step', requestId: 'media-child' } }
   assert.throws(() => validateActionOutcome(value, facts(), parent, [...targets, reversed]), /ACTION_DELIVERY_TARGET_INVALID/)
+})
+
+ test('parameters use the advertised standard schema without coercion; old writes fail closed', () => {
+  const a = action(); a.action.parameters = { title: '报告' }
+  assert.equal(validateActionOutcome(a, facts()).action.parameters.title, '报告')
+  for (const parameters of [{ title: 9 }, { path: '/root/key' }, null]) {
+    a.action.parameters = parameters; assert.throws(() => validateActionOutcome(a, facts()), /ACTION_PARAMETERS_INVALID/)
+  }
+  a.action.parameters = {}; a.schemaVersion = 3; assert.throws(() => validateActionOutcome(a, facts()), /ACTION_OUTCOME_INVALID/)
+  a.schemaVersion = 4; delete a.deliverable; assert.throws(() => validateActionOutcome(a, facts()), /ACTION_OUTCOME_INVALID/)
 })

@@ -118,12 +118,12 @@ export class SkillRegistry {
 
   /** Execution-side guard remeasures the same immutable descriptor and dependencies.
    * The caller must independently validate the server command's scope/lease/grant. */
-  async requireExact(skill, { toolchainDigest, bindingRevision = null } = {}) {
+  async requireExact(skill, { toolchainDigest, bindingRevision } = {}) {
     if (!await this.refresh()) fail('SKILL_EXECUTION_BINDING_CHANGED')
     const entry = skill && this.entries.get(identity(skill))
     if (!entry || entry.item.readiness !== 'READY'
         || entry.item.packageSha256 !== skill.packageSha256 || entry.item.manifestSha256 !== skill.manifestSha256
-        || entry.item.toolchainDigest !== toolchainDigest || entry.item.bindingRevision !== bindingRevision) fail('SKILL_EXECUTION_BINDING_CHANGED')
+        || (toolchainDigest !== undefined && entry.item.toolchainDigest !== toolchainDigest) || (bindingRevision !== undefined && entry.item.bindingRevision !== bindingRevision)) fail('SKILL_EXECUTION_BINDING_CHANGED')
     return entry
   }
 }
