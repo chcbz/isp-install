@@ -90,6 +90,10 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             const proofMismatch = layer => {
               // Canonical skill command installationId is the PRODUCT binding.
               // It never substitutes for the authenticated Runtime installation.
+              // Platform installation identity belongs exclusively to the business payload,
+              // even when an injected top-level value equals the current Runtime proof.
+              if (layer.messageType === 'command.dispatch' && layer.commandType === 'PLATFORM_SKILL_INSTALL'
+                  && Object.hasOwn(layer, 'installationId')) return true;
               const productInstall = layer.messageType === 'command.dispatch' && layer.commandType === 'SKILL_INSTALL';
               if (layer.messageType === 'command.dispatch' && (layer.tenantId !== session.tenantId || layer.clientId !== session.clientId
                   || layer.targetAgentId !== session.canonicalAgentId || productInstall && layer.installationId === session.installationId)) return true;

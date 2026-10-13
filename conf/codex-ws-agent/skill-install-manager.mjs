@@ -841,6 +841,12 @@ export const extractSkillArchive = async (buffer, stagingPath, command, limits) 
   if (!identity || identity.name !== command.skillKey || identity.version !== command.skillVersion) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.IDENTITY_MISMATCH, 'SKILL.md name/version does not match the command identity')
   }
+  fsyncDirectory(stagingPath)
+}
+
+// Shared extraction enforces ZIP safety and SKILL.md identity only. The platform
+// archive package has its own sealed manifest contract, not this marketplace schema.
+const validateExtractedExecutableManifest = (stagingPath, command) => {
   let manifest = null
   const manifestPath = resolve(stagingPath, 'manifest.json')
   if (existsSync(manifestPath)) {
@@ -851,7 +857,6 @@ export const extractSkillArchive = async (buffer, stagingPath, command, limits) 
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'executable manifest or local entrypoint is invalid')
     }
   }
-  fsyncDirectory(stagingPath)
   return manifest
 }
 
@@ -1783,11 +1788,12 @@ export class SkillInstallManager {
         chmodSync(stagingPath, 0o700)
         fsyncDirectory(this.stagingDir)
         try {
-          const manifest = await extractSkillArchive(packageBytes, stagingPath, command, {
+          await extractSkillArchive(packageBytes, stagingPath, command, {
             maxEntries: this.maxEntries,
             maxEntryBytes: this.maxEntryBytes,
             maxExtractedBytes: this.maxExtractedBytes
           })
+          const manifest = validateExtractedExecutableManifest(stagingPath, command)
           const installedAt = String(this.now())
           const resultEnvelope = buildSkillInstallResultEnvelope({
             profile: this.profile,
