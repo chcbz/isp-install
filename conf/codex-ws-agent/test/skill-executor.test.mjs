@@ -4,11 +4,11 @@ import { executeSkill, parseSkillCommand } from '../skill-executor.mjs'
 const schema = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false }
 const command = () => ({ executionProtocolVersion: 4, executionId: 'pwe_1', taskId: 't1', runId: 'r1', conversationId: 'c1', conversationGeneration: '1',
   skill: { key: 'text-file', version: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64) },
-  snapshotDigest: 'c'.repeat(64), parameters: { title: '内容' }, instruction: '生成文本', inputRefs: [], outputs: [] })
+  commandId: 'cmd1', messageId: 'msg1', snapshotDigest: 'c'.repeat(64), parameters: { title: '内容' }, instruction: '生成文本', inputRefs: [], outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } })
 const fixture = () => {
   const events = []; const c = command()
   const manifest = { schemaVersion: 1, executionId: c.executionId, snapshotDigest: c.snapshotDigest, result: { data: '真实结果', artifacts: [], inputReceipts: [] } }
-  const descriptor = { manifest: { parametersSchema: schema, runner: 'native-model', inputs: { minItems: 0, maxItems: 32, acceptedMimeTypes: ['text/plain'] }, outputs: { mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } } }
+  const descriptor = { manifest: { parametersSchema: schema, runner: 'native-model', inputs: { minItems: 0, maxItems: 32, acceptedMimeTypes: ['text/plain'] }, outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } } }
   const ctx = { registry: { requireExact: async skill => { assert.equal(skill.skillKey, 'text-file'); return { descriptor, binding: null } } },
     runners: new Map([['native-model', { run: async () => { events.push('run'); return manifest.result } }]]),
     claimOrResume: async () => { events.push('claim'); return {} }, loadResult: async () => null,

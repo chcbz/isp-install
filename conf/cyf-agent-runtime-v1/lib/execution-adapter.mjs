@@ -259,6 +259,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "report-outbox.mjs",
   "skill-install-manager.mjs",
   "skill-executor.mjs",
+  "skill-execution-store.mjs",
   "skill-manifest.mjs",
   "skill-registry.mjs",
   "schemas/skill-manifest-v1.schema.json",

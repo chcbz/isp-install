@@ -16,15 +16,15 @@ const exact = (value, keys) => object(value) && keys.length === Object.keys(valu
 export function parseSkillCommand(raw) {
   const value = typeof raw === 'string' || Buffer.isBuffer(raw) ? parseSkillJson(raw) : structuredClone(raw)
   const fields = ['executionProtocolVersion', 'executionId', 'taskId', 'runId', 'conversationId', 'conversationGeneration',
-    'skill', 'snapshotDigest', 'parameters', 'instruction', 'inputRefs', 'outputs']
-  if (!exact(value, fields) || value.executionProtocolVersion !== 4 || !['executionId', 'taskId', 'runId', 'conversationId'].every(key => skillId(value[key]))
+    'commandId', 'messageId', 'skill', 'snapshotDigest', 'parameters', 'instruction', 'inputRefs', 'outputs']
+  if (!exact(value, fields) || value.executionProtocolVersion !== 4 || !['executionId', 'taskId', 'runId', 'conversationId', 'commandId', 'messageId'].every(key => skillId(value[key]))
       || typeof value.conversationGeneration !== 'string' || !/^[1-9][0-9]*$/.test(value.conversationGeneration)
       || !exact(value.skill, ['key', 'version', 'packageSha256', 'manifestSha256']) || !skillId(value.skill.key) || !skillId(value.skill.version)
       || !skillSha(value.skill.packageSha256) || !skillSha(value.skill.manifestSha256) || !skillSha(value.snapshotDigest)
       || !object(value.parameters) || typeof value.instruction !== 'string' || !value.instruction.trim()
       || !Array.isArray(value.inputRefs) || value.inputRefs.length > 32 || !value.inputRefs.every(skillId) || new Set(value.inputRefs).size !== value.inputRefs.length
-      || !Array.isArray(value.outputs) || new Set(value.outputs.map(item => item?.outputId)).size !== value.outputs.length
-      || !value.outputs.every(item => exact(item, ['outputId', 'contentMimeType']) && skillId(item.outputId) && mime(item.contentMimeType))) fail('SKILL_COMMAND_INVALID')
+      || !exact(value.outputs, ['dataSchema', 'mimeTypes', 'multiple', 'artifactsRequired']) || !Array.isArray(value.outputs.mimeTypes)
+      || !value.outputs.mimeTypes.every(mime) || typeof value.outputs.multiple !== 'boolean' || typeof value.outputs.artifactsRequired !== 'boolean') fail('SKILL_COMMAND_INVALID')
   return value
 }
 
@@ -37,8 +37,7 @@ export async function executeSkill(raw, ctx) {
   const descriptor = entry.descriptor
   const parameters = validateSkillParameters(descriptor.manifest.parametersSchema, command.parameters)
   const outputs = descriptor.manifest.outputs
-  if ((outputs.artifactsRequired && command.outputs.length === 0) || (!outputs.multiple && command.outputs.length > 1)
-      || command.outputs.some(item => !outputs.mimeTypes.includes(item.contentMimeType))) fail('SKILL_OUTPUT_CONTRACT_INVALID')
+  if (skillDigest(command.outputs) !== skillDigest(outputs)) fail('SKILL_OUTPUT_CONTRACT_INVALID')
   const runner = ctx.runners.get(descriptor.manifest.runner)
   if (typeof runner?.run !== 'function') fail('SKILL_RUNNER_MISSING')
   const claim = await ctx.claimOrResume(command)
