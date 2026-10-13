@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { SkillExecutionStore, SkillEffects } from '../skill-execution-store.mjs'
 import { skillHash } from '../skill-executor.mjs'
-const command = { executionId: 'pwe_1', snapshotDigest: 'a'.repeat(64), inputRefs: ['input_1'] }
+const command = { executionId: 'pwe_1', snapshotDigest: 'a'.repeat(64), inputRefs: [] }
 const descriptor = { manifest: { outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: true } } }
 const setup = t => {
   const rootDirectory = mkdtempSync(resolve(tmpdir(), 'skill-store-')); t.after(() => rmSync(rootDirectory, { recursive: true, force: true }))
@@ -14,11 +14,11 @@ const setup = t => {
 }
 const effect = (store, overrides = {}) => new SkillEffects({ store, bindingRevision: '1', checkLease() {},
   start: async () => ({ schemaVersion: 1, disposition: 'NEW', status: 'START_RECORDED', providerRequestId: null, resultDigest: null }),
-  report: async () => {}, ...overrides })
+  report: async (_id, body) => ({ schemaVersion: 1, disposition: 'KNOWN', status: body.status, providerRequestId: body.providerRequestId, resultDigest: body.resultDigest }), ...overrides })
 test('result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected', t => {
   const { store, options } = setup(t)
   const bytes = Buffer.from('实际文本内容')
-  const result = { data: {}, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', bytes }], inputReceipts: [] }
+  const result = { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', bytes }], inputReceipts: [] }
   const manifest = store.persistResult(descriptor, result)
   assert.equal(manifest.result.artifacts[0].sha256, skillHash(bytes))
   assert.deepEqual(new SkillExecutionStore(options).loadResult(), manifest)
@@ -29,7 +29,7 @@ test('result bytes and immutable manifest persist across reconstruction; mismatc
 })
 test('effect START is on disk before request; real result bytes saved before remote report', async t => {
   const { store } = setup(t); let calls = 0
-  const effects = effect(store, { report: async (_id, body) => { assert.equal(body.status, 'SUCCEEDED'); assert.ok(store.read('effect-generate-5f5') === null) } })
+  const effects = effect(store, { report: async (_id, body) => { assert.equal(body.status, 'SUCCEEDED'); assert.ok(store.read('effect-generate-5f5') === null); return { schemaVersion: 1, disposition: 'KNOWN', status: body.status, providerRequestId: body.providerRequestId, resultDigest: body.resultDigest } } })
   const output = await effects.invoke('generate', { prompt: 'x' }, async () => {
     calls++; assert.match(readFileSync(resolve(store.directory, 'effect-generate-' + skillHash('generate').slice(0, 12) + '.json'), 'utf8'), /START_RECORDED/)
     return { bytes: Buffer.from('result'), providerRequestId: 'provider_1' }
@@ -40,7 +40,7 @@ test('report response loss recovers existing result; never repeats provider invo
   const { store, options } = setup(t); let calls = 0, reports = 0
   const invoke = async () => { calls++; return { bytes: Buffer.from('real'), providerRequestId: 'p1' } }
   await assert.rejects(effect(store, { report: async () => { throw new Error('ECONNRESET') } }).invoke('generate', { prompt: 'x' }, invoke), /ECONNRESET/)
-  const recovered = await effect(new SkillExecutionStore(options), { start: async () => { throw new Error('MUST_NOT_START') }, report: async () => { reports++ } }).invoke('generate', { prompt: 'x' }, invoke)
+  const recovered = await effect(new SkillExecutionStore(options), { start: async () => { throw new Error('MUST_NOT_START') }, report: async (_id, body) => { reports++; return { schemaVersion: 1, disposition: 'KNOWN', status: body.status, providerRequestId: body.providerRequestId, resultDigest: body.resultDigest } } }).invoke('generate', { prompt: 'x' }, invoke)
   assert.equal(recovered.bytes.toString(), 'real'); assert.equal(calls, 1); assert.equal(reports, 1)
 })
 test('uncertain network effect is UNKNOWN forever until real query, never resent', async t => {
@@ -68,4 +68,36 @@ test('effect request/binding changes do not reuse old effect; symlink/private-mo
   chmodSync(store.directory, 0o700)
   const linked = resolve(options.rootDirectory, 'alias'); symlinkSync(store.directory, linked)
   assert.throws(() => new SkillExecutionStore({ ...options, rootDirectory: linked }), /UNSAFE/)
+})
+
+test('effect result ACK must exactly confirm actual local digest/request id; no second invocation', async t => {
+  const { store } = setup(t); let calls = 0
+  const invoke = async () => { calls++; return { bytes: Buffer.from('real'), providerRequestId: 'p1' } }
+  await assert.rejects(effect(store, { report: async () => ({ schemaVersion: 1, disposition: 'KNOWN', status: 'SUCCEEDED', resultDigest: 'a'.repeat(64), providerRequestId: 'p1' }) }).invoke('generate', {}, invoke), /REPORT_UNCONFIRMED/)
+  await effect(store).invoke('generate', {}, invoke); assert.equal(calls, 1)
+})
+test('resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect', async t => {
+  const { store } = setup(t); let starts = 0
+  await assert.rejects(effect(store, { mayStart: () => false, start: async () => { starts++ } }).invoke('generate', {}, async () => ({})), /RESULT_UNKNOWN/)
+  assert.equal(starts, 0)
+})
+
+test('all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions', t => {
+  const { options } = setup(t)
+  const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: 'pwe_materials', inputRefs: ['input_1'] } })
+  store.write('inputs-snapshot', { inputs: [{ inputRef: 'input_1', sha256: 'a'.repeat(64) }] })
+  const result = { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', bytes: Buffer.from('真实正文') }], inputReceipts: [] }
+  assert.throws(() => store.persistResult(descriptor, result), /INPUT_RECEIPT_INVALID/)
+  const receipt = { inputRef: 'input_1', sha256: 'a'.repeat(64), carrier: 'native-text', delivery: 'DELIVERED' }
+  for (const patch of [{ sha256: 'b'.repeat(64) }, { carrier: 'imaginary-vision' }, { understood: true }, { delivery: 'ASSUMED' }])
+    assert.throws(() => store.persistResult(descriptor, { ...result, inputReceipts: [{ ...receipt, ...patch }] }), /INPUT_RECEIPT_INVALID/)
+  assert.deepEqual(store.persistResult(descriptor, { ...result, inputReceipts: [receipt] }).result.inputReceipts, [receipt])
+})
+test('result data is schema-validated JSON, including scalar/array/null without reparsing a string', t => {
+  const { options } = setup(t)
+  for (const [index, data] of ['actual result string', [1, 'x'], null].entries()) {
+    const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: `pwe_data_${index}` } })
+    const spec = { manifest: { outputs: { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: ['string', 'array', 'null'] }, mimeTypes: [], multiple: false, artifactsRequired: false } } }
+    assert.deepEqual(store.persistResult(spec, { data, artifacts: [], inputReceipts: [] }).result.data, data)
+  }
 })

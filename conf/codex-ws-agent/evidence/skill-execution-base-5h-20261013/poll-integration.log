@@ -1,0 +1,75 @@
+TAP version 13
+# Subtest: one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+ok 1 - one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+  ---
+  duration_ms: 99.578151
+  ...
+# Subtest: lost final response reads result back and replays identical commit without rerunning model
+ok 2 - lost final response reads result back and replays identical commit without rerunning model
+  ---
+  duration_ms: 50.318573
+  ...
+# Subtest: stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+ok 3 - stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+  ---
+  duration_ms: 47.513534
+  ...
+# Subtest: a recorded/unknown effect can never be issued by a successor claimant
+ok 4 - a recorded/unknown effect can never be issued by a successor claimant
+  ---
+  duration_ms: 16.71626
+  ...
+# Subtest: exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+ok 5 - exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+  ---
+  duration_ms: 1.851288
+  ...
+# Subtest: authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+ok 6 - authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+  ---
+  duration_ms: 2.459352
+  ...
+# Subtest: every scope/fence field must match current validated session; owner cannot come from profile
+ok 7 - every scope/fence field must match current validated session; owner cannot come from profile
+  ---
+  duration_ms: 0.431862
+  ...
+# Subtest: ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+ok 8 - ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+  ---
+  duration_ms: 11.857984
+  ...
+# Subtest: cached registration is IO free, unavailable before measurement and omitted offline
+ok 9 - cached registration is IO free, unavailable before measurement and omitted offline
+  ---
+  duration_ms: 8.020493
+  ...
+# Subtest: owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+ok 10 - owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+  ---
+  duration_ms: 1.465939
+  ...
+# Subtest: old asynchronous measurement never re-registers after disconnect or a new generation
+ok 11 - old asynchronous measurement never re-registers after disconnect or a new generation
+  ---
+  duration_ms: 1.075422
+  ...
+# Subtest: install lifecycle preserves durable success and failure even when catalog callbacks fail
+ok 12 - install lifecycle preserves durable success and failure even when catalog callbacks fail
+  ---
+  duration_ms: 1.882693
+  ...
+# Subtest: refresh errors remove catalog and publication failure does not change measurement
+ok 13 - refresh errors remove catalog and publication failure does not change measurement
+  ---
+  duration_ms: 1.649761
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 13
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 888.433738

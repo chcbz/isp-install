@@ -33,17 +33,23 @@ export function parseSkillCommand(raw) {
 export async function executeSkill(raw, ctx) {
   const command = parseSkillCommand(raw)
   const entry = await ctx.registry.requireExact({ skillKey: command.skill.key, skillVersion: command.skill.version,
-    packageSha256: command.skill.packageSha256, manifestSha256: command.skill.manifestSha256 })
+    packageSha256: command.skill.packageSha256, manifestSha256: command.skill.manifestSha256 }, { allowUnavailable: true })
   const descriptor = entry.descriptor
   const parameters = validateSkillParameters(descriptor.manifest.parametersSchema, command.parameters)
   const outputs = descriptor.manifest.outputs
   if (skillDigest(command.outputs) !== skillDigest(outputs)) fail('SKILL_OUTPUT_CONTRACT_INVALID')
-  const runner = ctx.runners.get(descriptor.manifest.runner)
-  if (typeof runner?.run !== 'function') fail('SKILL_RUNNER_MISSING')
   const claim = await ctx.claimOrResume(command)
   // Recovery consumes the actual persisted result, never invokes the runner again.
-  let manifest = claim.resultManifest || await ctx.loadResult(command)
+  if (claim.resultManifest) {
+    const receipt = await ctx.recoverCommittedResult(command, descriptor, claim.resultManifest)
+    await ctx.persistReceipt(command, claim.resultManifest, receipt)
+    return receipt
+  }
+  let manifest = await ctx.loadResult(command)
   if (!manifest) {
+    if (entry.item && entry.item.readiness !== 'READY') fail('SKILL_EXECUTION_BINDING_CHANGED')
+    const runner = ctx.runners.get(descriptor.manifest.runner)
+    if (typeof runner?.run !== 'function') fail('SKILL_RUNNER_MISSING')
     const inputs = await ctx.materializeAuthorizedInputs(command, descriptor)
     if (inputs.length < descriptor.manifest.inputs.minItems || inputs.length > descriptor.manifest.inputs.maxItems
         || inputs.some(input => !descriptor.manifest.inputs.acceptedMimeTypes.includes(input.contentMimeType))) fail('SKILL_INPUT_CONTRACT_INVALID')

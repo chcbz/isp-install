@@ -1,0 +1,274 @@
+TAP version 13
+# Subtest: one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+not ok 1 - one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+  ---
+  duration_ms: 99.33231
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:61:1'
+  failureType: 'testCodeFailure'
+  error: 'SKILL_SCHEMA_DIALECT'
+  code: 'SKILL_SCHEMA_DIALECT'
+  stack: |-
+    fail (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:8:38)
+    compileSkillSchema (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:48:67)
+    validateSkillParameters (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:55:8)
+    SkillExecutionStore.persistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-execution-store.mjs:88:29)
+    Object.validateAndPersistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:217:79)
+    executeSkill (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-executor.mjs:58:26)
+    async SkillConversationLane.process (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:266:18)
+    async SkillConversationLane.poll (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:148:50)
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:62:42)
+    async Test.run (node:internal/test_runner/test:797:9)
+  ...
+# Subtest: lost final response reads result back and replays identical commit without rerunning model
+not ok 2 - lost final response reads result back and replays identical commit without rerunning model
+  ---
+  duration_ms: 35.679125
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:66:1'
+  failureType: 'testCodeFailure'
+  error: 'SKILL_SCHEMA_DIALECT'
+  code: 'SKILL_SCHEMA_DIALECT'
+  stack: |-
+    fail (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:8:38)
+    compileSkillSchema (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:48:67)
+    validateSkillParameters (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:55:8)
+    SkillExecutionStore.persistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-execution-store.mjs:88:29)
+    Object.validateAndPersistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:217:79)
+    executeSkill (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-executor.mjs:58:26)
+    async SkillConversationLane.process (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:266:18)
+    async SkillConversationLane.poll (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:148:50)
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:67:41)
+    async Test.run (node:internal/test_runner/test:797:9)
+  ...
+# Subtest: stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+not ok 3 - stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+  ---
+  duration_ms: 33.095286
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:71:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /SKILL_TRANSPORT_UNKNOWN/. Input:
+    
+    'Error: SKILL_SCHEMA_DIALECT'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'SKILL_SCHEMA_DIALECT'
+  stack: |-
+    fail (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:8:38)
+    compileSkillSchema (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:48:67)
+    validateSkillParameters (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:55:8)
+    SkillExecutionStore.persistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-execution-store.mjs:88:29)
+    Object.validateAndPersistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:217:79)
+    executeSkill (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-executor.mjs:58:26)
+    async SkillConversationLane.process (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:266:18)
+    async SkillConversationLane.poll (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:148:50)
+    async waitForActual (node:assert:533:5)
+    async Function.rejects (node:assert:654:25)
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:73:3)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: a recorded/unknown effect can never be issued by a successor claimant
+ok 4 - a recorded/unknown effect can never be issued by a successor claimant
+  ---
+  duration_ms: 23.629639
+  ...
+# Subtest: exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+ok 5 - exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+  ---
+  duration_ms: 1.156576
+  ...
+# Subtest: committed server envelope resumes without local blob/staging or a runnable dependency
+not ok 6 - committed server envelope resumes without local blob/staging or a runnable dependency
+  ---
+  duration_ms: 29.734635
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:91:1'
+  failureType: 'testCodeFailure'
+  error: 'SKILL_SCHEMA_DIALECT'
+  code: 'SKILL_SCHEMA_DIALECT'
+  stack: |-
+    fail (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:8:38)
+    compileSkillSchema (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:48:67)
+    validateSkillParameters (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:55:8)
+    SkillExecutionStore.persistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-execution-store.mjs:88:29)
+    Object.validateAndPersistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:217:79)
+    executeSkill (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-executor.mjs:58:26)
+    async SkillConversationLane.process (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:266:18)
+    async SkillConversationLane.poll (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:148:50)
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:92:63)
+    async Test.run (node:internal/test_runner/test:797:9)
+  ...
+# Subtest: reconstruction resumes saved command even when server inbox only lists QUEUED work
+not ok 7 - reconstruction resumes saved command even when server inbox only lists QUEUED work
+  ---
+  duration_ms: 33.807647
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:100:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /SKILL_TRANSPORT_UNKNOWN/. Input:
+    
+    'Error: SKILL_SCHEMA_DIALECT'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'SKILL_SCHEMA_DIALECT'
+  stack: |-
+    fail (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:8:38)
+    compileSkillSchema (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:48:67)
+    validateSkillParameters (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:55:8)
+    SkillExecutionStore.persistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-execution-store.mjs:88:29)
+    Object.validateAndPersistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:217:79)
+    executeSkill (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-executor.mjs:58:26)
+    async SkillConversationLane.process (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:266:18)
+    async SkillConversationLane.poll (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:148:50)
+    async waitForActual (node:assert:533:5)
+    async Function.rejects (node:assert:654:25)
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:102:3)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: syntactically valid but incorrect result digest is not a commit receipt
+not ok 8 - syntactically valid but incorrect result digest is not a commit receipt
+  ---
+  duration_ms: 29.25896
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:107:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /SKILL_COMMIT_UNCONFIRMED/. Input:
+    
+    'Error: SKILL_SCHEMA_DIALECT'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'SKILL_SCHEMA_DIALECT'
+  stack: |-
+    fail (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:8:38)
+    compileSkillSchema (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:48:67)
+    validateSkillParameters (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:55:8)
+    SkillExecutionStore.persistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-execution-store.mjs:88:29)
+    Object.validateAndPersistResult (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:217:79)
+    executeSkill (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-executor.mjs:58:26)
+    async SkillConversationLane.process (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:266:18)
+    async SkillConversationLane.poll (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-conversation.mjs:148:50)
+    async waitForActual (node:assert:533:5)
+    async Function.rejects (node:assert:654:25)
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-conversation.test.mjs:109:3)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+ok 9 - frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+  ---
+  duration_ms: 1.975181
+  ...
+# Subtest: result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+ok 10 - result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+  ---
+  duration_ms: 30.164495
+  ...
+# Subtest: effect START is on disk before request; real result bytes saved before remote report
+ok 11 - effect START is on disk before request; real result bytes saved before remote report
+  ---
+  duration_ms: 25.819312
+  ...
+# Subtest: report response loss recovers existing result; never repeats provider invocation
+ok 12 - report response loss recovers existing result; never repeats provider invocation
+  ---
+  duration_ms: 25.937733
+  ...
+# Subtest: uncertain network effect is UNKNOWN forever until real query, never resent
+ok 13 - uncertain network effect is UNKNOWN forever until real query, never resent
+  ---
+  duration_ms: 22.000663
+  ...
+# Subtest: lost START reply and competing claimant cannot emit side effects
+ok 14 - lost START reply and competing claimant cannot emit side effects
+  ---
+  duration_ms: 13.146177
+  ...
+# Subtest: effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+ok 15 - effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+  ---
+  duration_ms: 23.459733
+  ...
+# Subtest: effect result ACK must exactly confirm actual local digest/request id; no second invocation
+ok 16 - effect result ACK must exactly confirm actual local digest/request id; no second invocation
+  ---
+  duration_ms: 26.383633
+  ...
+# Subtest: resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+ok 17 - resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+  ---
+  duration_ms: 10.887892
+  ...
+# Subtest: strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+ok 18 - strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+  ---
+  duration_ms: 6.033772
+  ...
+# Subtest: one executor persists result before stage/commit; data-only still has real commit
+ok 19 - one executor persists result before stage/commit; data-only still has real commit
+  ---
+  duration_ms: 3.504608
+  ...
+# Subtest: recovered persistent result never runs a model/provider again
+ok 20 - recovered persistent result never runs a model/provider again
+  ---
+  duration_ms: 0.707484
+  ...
+# Subtest: invalid parameters, missing runner, wrong result identity and required empty output fail closed
+ok 21 - invalid parameters, missing runner, wrong result identity and required empty output fail closed
+  ---
+  duration_ms: 2.002228
+  ...
+# Subtest: one shared bindings config never substitutes another subject or process.env credential
+ok 22 - one shared bindings config never substitutes another subject or process.env credential
+  ---
+  duration_ms: 4.166125
+  ...
+# Subtest: fee metadata changes do not alter binding digest/revision; no approval or charge step
+ok 23 - fee metadata changes do not alter binding digest/revision; no approval or charge step
+  ---
+  duration_ms: 0.671011
+  ...
+# Subtest: generic image broker reuses exact codec and controlled endpoint without consent
+ok 24 - generic image broker reuses exact codec and controlled endpoint without consent
+  ---
+  duration_ms: 27.072416
+  ...
+# Subtest: image edits actually transmit verified reference bytes; real errors/redirects are not faked
+ok 25 - image edits actually transmit verified reference bytes; real errors/redirects are not faked
+  ---
+  duration_ms: 2.053607
+  ...
+# Subtest: native text file contains actual model result and can use authorized input material
+ok 26 - native text file contains actual model result and can use authorized input material
+  ---
+  duration_ms: 1.494711
+  ...
+# Subtest: missing native carrier is unavailable, never imaginary image understanding
+ok 27 - missing native carrier is unavailable, never imaginary image understanding
+  ---
+  duration_ms: 0.44205
+  ...
+1..27
+# tests 27
+# suites 0
+# pass 21
+# fail 6
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1744.762967

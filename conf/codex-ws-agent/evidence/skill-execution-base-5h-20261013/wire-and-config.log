@@ -1,0 +1,1559 @@
+TAP version 13
+# Subtest: pure candidate maps one shared binding and real carrier config, preserves identity/HOME and evidence bytes reference
+ok 1 - pure candidate maps one shared binding and real carrier config, preserves identity/HOME and evidence bytes reference
+  ---
+  duration_ms: 7.839728
+  ...
+# Subtest: binding collisions fail instead of quietly changing another subject; no operator writes/restarts
+ok 2 - binding collisions fail instead of quietly changing another subject; no operator writes/restarts
+  ---
+  duration_ms: 1.031849
+  ...
+# Subtest: one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+ok 3 - one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+  ---
+  duration_ms: 116.743942
+  ...
+# Subtest: lost final response reads back the identical committed result without a second write or model call
+ok 4 - lost final response reads back the identical committed result without a second write or model call
+  ---
+  duration_ms: 53.754609
+  ...
+# Subtest: stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+ok 5 - stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+  ---
+  duration_ms: 57.6808
+  ...
+# Subtest: a recorded/unknown effect can never be issued by a successor claimant
+ok 6 - a recorded/unknown effect can never be issued by a successor claimant
+  ---
+  duration_ms: 32.74235
+  ...
+# Subtest: exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+ok 7 - exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+  ---
+  duration_ms: 1.534441
+  ...
+# Subtest: committed server envelope resumes without local blob/staging or a runnable dependency
+ok 8 - committed server envelope resumes without local blob/staging or a runnable dependency
+  ---
+  duration_ms: 57.410475
+  ...
+# Subtest: reconstruction resumes saved command even when server inbox only lists QUEUED work
+ok 9 - reconstruction resumes saved command even when server inbox only lists QUEUED work
+  ---
+  duration_ms: 55.144493
+  ...
+# Subtest: syntactically valid but incorrect result digest is not a commit receipt
+ok 10 - syntactically valid but incorrect result digest is not a commit receipt
+  ---
+  duration_ms: 40.513052
+  ...
+# Subtest: frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+ok 11 - frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+  ---
+  duration_ms: 1.326623
+  ...
+# Subtest: result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+ok 12 - result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+  ---
+  duration_ms: 35.372708
+  ...
+# Subtest: effect START is on disk before request; real result bytes saved before remote report
+ok 13 - effect START is on disk before request; real result bytes saved before remote report
+  ---
+  duration_ms: 26.393333
+  ...
+# Subtest: report response loss recovers existing result; never repeats provider invocation
+ok 14 - report response loss recovers existing result; never repeats provider invocation
+  ---
+  duration_ms: 27.633367
+  ...
+# Subtest: uncertain network effect is UNKNOWN forever until real query, never resent
+ok 15 - uncertain network effect is UNKNOWN forever until real query, never resent
+  ---
+  duration_ms: 20.682832
+  ...
+# Subtest: lost START reply and competing claimant cannot emit side effects
+ok 16 - lost START reply and competing claimant cannot emit side effects
+  ---
+  duration_ms: 11.838152
+  ...
+# Subtest: effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+ok 17 - effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+  ---
+  duration_ms: 24.335702
+  ...
+# Subtest: effect result ACK must exactly confirm actual local digest/request id; no second invocation
+ok 18 - effect result ACK must exactly confirm actual local digest/request id; no second invocation
+  ---
+  duration_ms: 23.795499
+  ...
+# Subtest: resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+ok 19 - resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+  ---
+  duration_ms: 11.360445
+  ...
+# Subtest: all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions
+ok 20 - all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions
+  ---
+  duration_ms: 33.668178
+  ...
+# Subtest: result data is schema-validated JSON, including scalar/array/null without reparsing a string
+ok 21 - result data is schema-validated JSON, including scalar/array/null without reparsing a string
+  ---
+  duration_ms: 57.563057
+  ...
+# Subtest: strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+ok 22 - strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+  ---
+  duration_ms: 4.861382
+  ...
+# Subtest: one executor persists result before stage/commit; data-only still has real commit
+ok 23 - one executor persists result before stage/commit; data-only still has real commit
+  ---
+  duration_ms: 3.329873
+  ...
+# Subtest: recovered persistent result never runs a model/provider again
+ok 24 - recovered persistent result never runs a model/provider again
+  ---
+  duration_ms: 0.578852
+  ...
+# Subtest: invalid parameters, missing runner, wrong result identity and required empty output fail closed
+ok 25 - invalid parameters, missing runner, wrong result identity and required empty output fail closed
+  ---
+  duration_ms: 1.243393
+  ...
+# Subtest: SKILL_INSTALL is default-off and performs no download or activation
+ok 26 - SKILL_INSTALL is default-off and performs no download or activation
+  ---
+  duration_ms: 93.373856
+  ...
+# Subtest: failure-result persistence loss stays non-terminal for startup reconciliation
+ok 27 - failure-result persistence loss stays non-terminal for startup reconciliation
+  ---
+  duration_ms: 48.489446
+  ...
+# Subtest: strict command, target, path, and declared-size validation perform no download
+    # Subtest: command type
+    ok 1 - command type
+      ---
+      duration_ms: 53.636481
+      ...
+    # Subtest: target Agent
+    ok 2 - target Agent
+      ---
+      duration_ms: 56.373041
+      ...
+    # Subtest: download path
+    ok 3 - download path
+      ---
+      duration_ms: 56.223997
+      ...
+    # Subtest: declared size
+    ok 4 - declared size
+      ---
+      duration_ms: 61.154765
+      ...
+    1..4
+ok 28 - strict command, target, path, and declared-size validation perform no download
+  ---
+  duration_ms: 229.276377
+  ...
+# Subtest: same-origin download uses only installation-derived session proof and digest mismatch fails before extraction
+ok 29 - same-origin download uses only installation-derived session proof and digest mismatch fails before extraction
+  ---
+  duration_ms: 78.246116
+  ...
+# Subtest: malicious ZIP entries and skill identity mismatches fail closed
+    # Subtest: traversal
+    ok 1 - traversal
+      ---
+      duration_ms: 96.17169
+      ...
+    # Subtest: absolute
+    ok 2 - absolute
+      ---
+      duration_ms: 72.370457
+      ...
+    # Subtest: backslash
+    ok 3 - backslash
+      ---
+      duration_ms: 62.030325
+      ...
+    # Subtest: control character
+    ok 4 - control character
+      ---
+      duration_ms: 73.442987
+      ...
+    # Subtest: trailing dot alias
+    ok 5 - trailing dot alias
+      ---
+      duration_ms: 71.040539
+      ...
+    # Subtest: trailing space alias
+    ok 6 - trailing space alias
+      ---
+      duration_ms: 62.463413
+      ...
+    # Subtest: reserved marker
+    ok 7 - reserved marker
+      ---
+      duration_ms: 71.819544
+      ...
+    # Subtest: duplicate
+    ok 8 - duplicate
+      ---
+      duration_ms: 70.225172
+      ...
+    # Subtest: symlink
+    ok 9 - symlink
+      ---
+      duration_ms: 71.875895
+      ...
+    # Subtest: missing manifest
+    ok 10 - missing manifest
+      ---
+      duration_ms: 88.228538
+      ...
+    # Subtest: identity mismatch
+    ok 11 - identity mismatch
+      ---
+      duration_ms: 81.557515
+      ...
+    1..11
+ok 30 - malicious ZIP entries and skill identity mismatches fail closed
+  ---
+  duration_ms: 825.724813
+  ...
+# Subtest: metadata.version frontmatter accepts the bounded string mapping format
+    # Subtest: plain version
+    ok 1 - plain version
+      ---
+      duration_ms: 83.524178
+      ...
+    # Subtest: quoted strings and comments
+    ok 2 - quoted strings and comments
+      ---
+      duration_ms: 79.129034
+      ...
+    # Subtest: additional supported fields
+    ok 3 - additional supported fields
+      ---
+      duration_ms: 80.655141
+      ...
+    # Subtest: metadata first with CRLF
+    ok 4 - metadata first with CRLF
+      ---
+      duration_ms: 77.958079
+      ...
+    1..4
+ok 31 - metadata.version frontmatter accepts the bounded string mapping format
+  ---
+  duration_ms: 322.658629
+  ...
+# Subtest: metadata.version frontmatter rejects missing, duplicate, conflicting, or unsupported identities
+    # Subtest: missing description
+    ok 1 - missing description
+      ---
+      duration_ms: 66.436467
+      ...
+    # Subtest: empty description
+    ok 2 - empty description
+      ---
+      duration_ms: 65.580813
+      ...
+    # Subtest: whitespace description
+    ok 3 - whitespace description
+      ---
+      duration_ms: 71.456338
+      ...
+    # Subtest: non-string description
+    ok 4 - non-string description
+      ---
+      duration_ms: 85.84482
+      ...
+    # Subtest: missing name
+    ok 5 - missing name
+      ---
+      duration_ms: 72.816368
+      ...
+    # Subtest: missing metadata version
+    ok 6 - missing metadata version
+      ---
+      duration_ms: 94.742476
+      ...
+    # Subtest: legacy top-level version
+    ok 7 - legacy top-level version
+      ---
+      duration_ms: 75.142083
+      ...
+    # Subtest: top-level version even when matching
+    ok 8 - top-level version even when matching
+      ---
+      duration_ms: 77.310744
+      ...
+    # Subtest: conflicting top-level version
+    ok 9 - conflicting top-level version
+      ---
+      duration_ms: 74.917359
+      ...
+    # Subtest: same duplicate name
+    ok 10 - same duplicate name
+      ---
+      duration_ms: 66.051581
+      ...
+    # Subtest: conflicting duplicate name
+    ok 11 - conflicting duplicate name
+      ---
+      duration_ms: 67.728419
+      ...
+    # Subtest: duplicate description
+    ok 12 - duplicate description
+      ---
+      duration_ms: 68.978863
+      ...
+    # Subtest: same duplicate metadata version
+    ok 13 - same duplicate metadata version
+      ---
+      duration_ms: 68.816681
+      ...
+    # Subtest: conflicting duplicate metadata version
+    ok 14 - conflicting duplicate metadata version
+      ---
+      duration_ms: 70.06766
+      ...
+    # Subtest: duplicate metadata mapping
+    ok 15 - duplicate metadata mapping
+      ---
+      duration_ms: 71.490552
+      ...
+    # Subtest: version identity mismatch
+    ok 16 - version identity mismatch
+      ---
+      duration_ms: 73.550458
+      ...
+    # Subtest: name identity mismatch
+    ok 17 - name identity mismatch
+      ---
+      duration_ms: 70.882114
+      ...
+    # Subtest: numeric metadata version
+    ok 18 - numeric metadata version
+      ---
+      duration_ms: 74.900825
+      ...
+    # Subtest: nested version is not metadata.version
+    ok 19 - nested version is not metadata.version
+      ---
+      duration_ms: 101.295164
+      ...
+    # Subtest: wrong version indentation
+    ok 20 - wrong version indentation
+      ---
+      duration_ms: 79.588574
+      ...
+    # Subtest: version after unrelated top-level field
+    ok 21 - version after unrelated top-level field
+      ---
+      duration_ms: 101.827194
+      ...
+    # Subtest: tagged name
+    ok 22 - tagged name
+      ---
+      duration_ms: 84.685082
+      ...
+    # Subtest: alias version
+    ok 23 - alias version
+      ---
+      duration_ms: 81.674257
+      ...
+    # Subtest: anchor metadata
+    ok 24 - anchor metadata
+      ---
+      duration_ms: 68.207165
+      ...
+    # Subtest: merge key
+    ok 25 - merge key
+      ---
+      duration_ms: 72.57178
+      ...
+    # Subtest: flow mapping is outside preview subset
+    ok 26 - flow mapping is outside preview subset
+      ---
+      duration_ms: 76.150111
+      ...
+    # Subtest: quoted duplicate key cannot bypass detection
+    ok 27 - quoted duplicate key cannot bypass detection
+      ---
+      duration_ms: 69.100811
+      ...
+    # Subtest: folded scalar is outside preview subset
+    ok 28 - folded scalar is outside preview subset
+      ---
+      duration_ms: 69.089141
+      ...
+    # Subtest: control character
+    ok 29 - control character
+      ---
+      duration_ms: 69.181921
+      ...
+    # Subtest: unknown top-level property
+    ok 30 - unknown top-level property
+      ---
+      duration_ms: 66.661673
+      ...
+    # Subtest: unterminated quote
+    ok 31 - unterminated quote
+      ---
+      duration_ms: 99.066113
+      ...
+    # Subtest: trailing scalar content
+    ok 32 - trailing scalar content
+      ---
+      duration_ms: 74.690221
+      ...
+    1..32
+ok 32 - metadata.version frontmatter rejects missing, duplicate, conflicting, or unsupported identities
+  ---
+  duration_ms: 2439.314699
+  ...
+# Subtest: six exact W08 metadata.version ZIP packages install with digest and marker identity preserved
+    # Subtest: code-editor
+    ok 1 - code-editor
+      ---
+      duration_ms: 154.525288
+      ...
+    # Subtest: code-reviewer
+    ok 2 - code-reviewer
+      ---
+      duration_ms: 128.765196
+      ...
+    # Subtest: deploy-runner
+    ok 3 - deploy-runner
+      ---
+      duration_ms: 117.114151
+      ...
+    # Subtest: repo-inspector
+    ok 4 - repo-inspector
+      ---
+      duration_ms: 123.491327
+      ...
+    # Subtest: repo-test
+    ok 5 - repo-test
+      ---
+      duration_ms: 130.848878
+      ...
+    # Subtest: web-builder
+    ok 6 - web-builder
+      ---
+      duration_ms: 119.763398
+      ...
+    1..6
+ok 33 - six exact W08 metadata.version ZIP packages install with digest and marker identity preserved
+  ---
+  duration_ms: 778.287249
+  ...
+# Subtest: verified package activates atomically, records identity, and routes outside Codex/worktrees
+ok 34 - verified package activates atomically, records identity, and routes outside Codex/worktrees
+  ---
+  duration_ms: 102.991772
+  ...
+# Subtest: processor preserves ACK order and persists work.result before terminal success
+ok 35 - processor preserves ACK order and persists work.result before terminal success
+  ---
+  duration_ms: 854.301446
+  ...
+# Subtest: restart reuses an exact installation and conflicting installationId/fence fails without download
+ok 36 - restart reuses an exact installation and conflicting installationId/fence fails without download
+  ---
+  duration_ms: 808.92174
+  ...
+# Subtest: durable work.result survives restart and replays the identical envelope
+ok 37 - durable work.result survives restart and replays the identical envelope
+  ---
+  duration_ms: 932.367822
+  ...
+# Subtest: receipt retirement crash duplicates reconcile, while tampered acknowledged evidence fails closed
+ok 38 - receipt retirement crash duplicates reconcile, while tampered acknowledged evidence fails closed
+  ---
+  duration_ms: 185.843607
+  ...
+# Subtest: credentialed package URLs require TLS except exact loopback development origins
+ok 39 - credentialed package URLs require TLS except exact loopback development origins
+  ---
+  duration_ms: 1.539864
+  ...
+# Subtest: archive rejects Unicode normalization and case-folded path collisions
+    # Subtest: ASCII case
+    ok 1 - ASCII case
+      ---
+      duration_ms: 66.868444
+      ...
+    # Subtest: Unicode normalization
+    ok 2 - Unicode normalization
+      ---
+      duration_ms: 85.929295
+      ...
+    # Subtest: Unicode case folding
+    ok 3 - Unicode case folding
+      ---
+      duration_ms: 77.367247
+      ...
+    # Subtest: case-folded ancestor
+    ok 4 - case-folded ancestor
+      ---
+      duration_ms: 86.970613
+      ...
+    # Subtest: case-folded prefix
+    ok 5 - case-folded prefix
+      ---
+      duration_ms: 79.603869
+      ...
+    1..5
+ok 40 - archive rejects Unicode normalization and case-folded path collisions
+  ---
+  duration_ms: 398.77686
+  ...
+# Subtest: installer lock rejects live owners and durably reclaims dead or stale incomplete owners
+ok 41 - installer lock rejects live owners and durably reclaims dead or stale incomplete owners
+  ---
+  duration_ms: 417.980744
+  ...
+# Subtest: lock release binds the exact owner bytes and never removes a mutated generation
+ok 42 - lock release binds the exact owner bytes and never removes a mutated generation
+  ---
+  duration_ms: 36.883642
+  ...
+# Subtest: concurrent stale reclaimers bind exchange to inspected owner generation and never move the winner
+ok 43 - concurrent stale reclaimers bind exchange to inspected owner generation and never move the winner
+  ---
+  duration_ms: 242.386976
+  ...
+# Subtest: target and parent races fail closed without replacing foreign or replacement-parent content
+    # Subtest: target appears at commit
+    ok 1 - target appears at commit
+      ---
+      duration_ms: 90.721629
+      ...
+    # Subtest: skills parent inode changes immediately before commit
+    ok 2 - skills parent inode changes immediately before commit
+      ---
+      duration_ms: 94.168463
+      ...
+    1..2
+ok 44 - target and parent races fail closed without replacing foreign or replacement-parent content
+  ---
+  duration_ms: 185.896672
+  ...
+# Subtest: durable installer state is bound to canonical API origin and profile scope
+ok 45 - durable installer state is bound to canonical API origin and profile scope
+  ---
+  duration_ms: 145.583653
+  ...
+# Subtest: ACTIVE plus durable FAILED reconciles to quarantined failure and inbox terminal FAILED only
+ok 46 - ACTIVE plus durable FAILED reconciles to quarantined failure and inbox terminal FAILED only
+  ---
+  duration_ms: 323.902674
+  ...
+# Subtest: stable connection drains 33+ results in bounded batches and receipts retire only exact records
+ok 47 - stable connection drains 33+ results in bounded batches and receipts retire only exact records
+  ---
+  duration_ms: 473.881906
+  ...
+# Subtest: durable PREPARED and activation-boundary persistence faults reconcile forward without false failure
+    # Subtest: PREPARED
+    ok 1 - PREPARED
+      ---
+      duration_ms: 132.960472
+      ...
+    # Subtest: ACTIVE
+    ok 2 - ACTIVE
+      ---
+      duration_ms: 97.67774
+      ...
+    1..2
+ok 48 - durable PREPARED and activation-boundary persistence faults reconcile forward without false failure
+  ---
+  duration_ms: 232.329274
+  ...
+# Subtest: PREPARED recovery completes both pre-publication and post-publication crash states
+ok 49 - PREPARED recovery completes both pre-publication and post-publication crash states
+  ---
+  duration_ms: 155.737586
+  ...
+# Subtest: startup reconciles committed installer evidence with a recovery-required inbox without re-execution
+ok 50 - startup reconciles committed installer evidence with a recovery-required inbox without re-execution
+  ---
+  duration_ms: 620.37332
+  ...
+# Subtest: profile validation rejects equal, nested, and symlink-aliased CODEX_HOME paths
+ok 51 - profile validation rejects equal, nested, and symlink-aliased CODEX_HOME paths
+  ---
+  duration_ms: 7.948045
+  ...
+# Subtest: legacy API key cannot authorize a skill download; incomplete session proof fails before fetch
+ok 52 - legacy API key cannot authorize a skill download; incomplete session proof fails before fetch
+  ---
+  duration_ms: 402.317443
+  ...
+# Subtest: SE2 executable installation binds manifest bytes to marker, durable receipt and replay
+ok 53 - SE2 executable installation binds manifest bytes to marker, durable receipt and replay
+  ---
+  duration_ms: 115.406173
+  ...
+# Subtest: SE2 ordinary package has no fabricated executable receipt
+ok 54 - SE2 ordinary package has no fabricated executable receipt
+  ---
+  duration_ms: 80.890903
+  ...
+# Subtest: SE2 malformed executable package does not activate
+ok 55 - SE2 malformed executable package does not activate
+  ---
+  duration_ms: 73.141269
+  ...
+# Subtest: SE2 local-script package requires an actual package-local entrypoint
+ok 56 - SE2 local-script package requires an actual package-local entrypoint
+  ---
+  duration_ms: 172.905086
+  ...
+# Subtest: SE2 changed manifest and forged marker cannot bypass the original registry digest
+ok 57 - SE2 changed manifest and forged marker cannot bypass the original registry digest
+  ---
+  duration_ms: 129.50747
+  ...
+# Subtest: SE2 installed descriptor source reads only scoped ACTIVE registry and exact published marker
+ok 58 - SE2 installed descriptor source reads only scoped ACTIVE registry and exact published marker
+  ---
+  duration_ms: 172.715559
+  ...
+# Subtest: SE2 ordinary installed descriptor remains non-executable and arbitrary HOME skills are ignored
+ok 59 - SE2 ordinary installed descriptor remains non-executable and arbitrary HOME skills are ignored
+  ---
+  duration_ms: 109.047533
+  ...
+# Subtest: shared fixture: image-edit
+ok 60 - shared fixture: image-edit
+  ---
+  duration_ms: 6.429521
+  ...
+# Subtest: shared fixture: absent-cost
+ok 61 - shared fixture: absent-cost
+  ---
+  duration_ms: 1.819947
+  ...
+# Subtest: shared fixture: bad-cost-only
+ok 62 - shared fixture: bad-cost-only
+  ---
+  duration_ms: 1.383872
+  ...
+# Subtest: shared fixture: unknown-field
+ok 63 - shared fixture: unknown-field
+  ---
+  duration_ms: 0.802073
+  ...
+# Subtest: shared fixture: wrong-identity
+ok 64 - shared fixture: wrong-identity
+  ---
+  duration_ms: 0.530005
+  ...
+# Subtest: shared fixture: entry-absolute
+ok 65 - shared fixture: entry-absolute
+  ---
+  duration_ms: 0.488995
+  ...
+# Subtest: shared fixture: entry-parent
+ok 66 - shared fixture: entry-parent
+  ---
+  duration_ms: 0.441807
+  ...
+# Subtest: shared fixture: entry-nested-parent
+ok 67 - shared fixture: entry-nested-parent
+  ---
+  duration_ms: 0.698484
+  ...
+# Subtest: shared fixture: entry-backslash
+ok 68 - shared fixture: entry-backslash
+  ---
+  duration_ms: 0.652005
+  ...
+# Subtest: shared fixture: entry-drive
+ok 69 - shared fixture: entry-drive
+  ---
+  duration_ms: 0.679213
+  ...
+# Subtest: shared fixture: entry-url
+ok 70 - shared fixture: entry-url
+  ---
+  duration_ms: 0.6798
+  ...
+# Subtest: shared fixture: entry-encoded-parent
+ok 71 - shared fixture: entry-encoded-parent
+  ---
+  duration_ms: 0.520183
+  ...
+# Subtest: shared fixture: entry-empty-segment
+ok 72 - shared fixture: entry-empty-segment
+  ---
+  duration_ms: 0.512494
+  ...
+# Subtest: shared fixture: unknown-runner
+ok 73 - shared fixture: unknown-runner
+  ---
+  duration_ms: 0.590263
+  ...
+# Subtest: shared fixture: source-count
+ok 74 - shared fixture: source-count
+  ---
+  duration_ms: 0.613572
+  ...
+# Subtest: shared fixture: source-bound
+ok 75 - shared fixture: source-bound
+  ---
+  duration_ms: 0.52509
+  ...
+# Subtest: shared fixture: empty-output
+ok 76 - shared fixture: empty-output
+  ---
+  duration_ms: 0.719855
+  ...
+# Subtest: shared fixture: remote-ref
+ok 77 - shared fixture: remote-ref
+  ---
+  duration_ms: 0.699428
+  ...
+# Subtest: shared fixture: file-ref
+ok 78 - shared fixture: file-ref
+  ---
+  duration_ms: 0.444311
+  ...
+# Subtest: shared fixture: wrong-draft
+ok 79 - shared fixture: wrong-draft
+  ---
+  duration_ms: 0.403123
+  ...
+# Subtest: shared fixture: missing-draft
+ok 80 - shared fixture: missing-draft
+  ---
+  duration_ms: 0.37508
+  ...
+# Subtest: shared fixture: invalid-schema
+ok 81 - shared fixture: invalid-schema
+  ---
+  duration_ms: 0.698109
+  ...
+# Subtest: shared fixture: unknown-schema-key
+ok 82 - shared fixture: unknown-schema-key
+  ---
+  duration_ms: 0.365689
+  ...
+# Subtest: shared fixture: unresolved-ref
+ok 83 - shared fixture: unresolved-ref
+  ---
+  duration_ms: 2.484797
+  ...
+# Subtest: shared fixture: duplicate-key
+ok 84 - shared fixture: duplicate-key
+  ---
+  duration_ms: 0.357855
+  ...
+# Subtest: shared fixture: trailing-json
+ok 85 - shared fixture: trailing-json
+  ---
+  duration_ms: 0.55486
+  ...
+# Subtest: shared fixture: entry-newline
+ok 86 - shared fixture: entry-newline
+  ---
+  duration_ms: 0.344142
+  ...
+# Subtest: shared fixture: key-newline
+ok 87 - shared fixture: key-newline
+  ---
+  duration_ms: 0.355272
+  ...
+# Subtest: shared fixture: utf8-bom
+ok 88 - shared fixture: utf8-bom
+  ---
+  duration_ms: 0.195362
+  ...
+# Subtest: shared fixture: data-only
+ok 89 - shared fixture: data-only
+  ---
+  duration_ms: 2.299534
+  ...
+# Subtest: shared fixture: valid-chinese
+ok 90 - shared fixture: valid-chinese
+  ---
+  duration_ms: 3.421609
+  ...
+# Subtest: shared fixture: missing-required
+ok 91 - shared fixture: missing-required
+  ---
+  duration_ms: 3.42434
+  ...
+# Subtest: shared fixture: no-coercion
+ok 92 - shared fixture: no-coercion
+  ---
+  duration_ms: 3.244616
+  ...
+# Subtest: shared fixture: extra-not-deleted
+ok 93 - shared fixture: extra-not-deleted
+  ---
+  duration_ms: 2.986394
+  ...
+# Subtest: shared fixture: fractional-integer
+ok 94 - shared fixture: fractional-integer
+  ---
+  duration_ms: 3.392513
+  ...
+# Subtest: shared fixture: safe-integer
+ok 95 - shared fixture: safe-integer
+  ---
+  duration_ms: 3.366367
+  ...
+# Subtest: shared fixture: unsafe-integer
+ok 96 - shared fixture: unsafe-integer
+  ---
+  duration_ms: 0.244905
+  ...
+# Subtest: shared fixture: unsafe-rounded
+ok 97 - shared fixture: unsafe-rounded
+  ---
+  duration_ms: 0.211871
+  ...
+# Subtest: shared fixture: duplicate-parameter
+ok 98 - shared fixture: duplicate-parameter
+  ---
+  duration_ms: 0.167787
+  ...
+# Subtest: shared fixture: empty-name
+ok 99 - shared fixture: empty-name
+  ---
+  duration_ms: 2.926959
+  ...
+# Subtest: shared fixture: unicode-codepoints
+ok 100 - shared fixture: unicode-codepoints
+  ---
+  duration_ms: 4.60311
+  ...
+# Subtest: shared fixture: enum-rejected
+ok 101 - shared fixture: enum-rejected
+  ---
+  duration_ms: 2.757022
+  ...
+# Subtest: shared fixture: unique-items
+ok 102 - shared fixture: unique-items
+  ---
+  duration_ms: 3.190572
+  ...
+# Subtest: shared fixture: no-default-insertion
+ok 103 - shared fixture: no-default-insertion
+  ---
+  duration_ms: 2.901661
+  ...
+# Subtest: shared fixture: defs-valid
+ok 104 - shared fixture: defs-valid
+  ---
+  duration_ms: 1.606415
+  ...
+# Subtest: shared fixture: defs-invalid
+ok 105 - shared fixture: defs-invalid
+  ---
+  duration_ms: 1.404934
+  ...
+# Subtest: shared fixture: unpaired-unicode
+ok 106 - shared fixture: unpaired-unicode
+  ---
+  duration_ms: 0.173392
+  ...
+# Subtest: shared fixture: format-annotation
+ok 107 - shared fixture: format-annotation
+  ---
+  duration_ms: 0.984753
+  ...
+# Subtest: shared fixture: const-data-ref-is-not-schema
+ok 108 - shared fixture: const-data-ref-is-not-schema
+  ---
+  duration_ms: 0.751456
+  ...
+# Subtest: shared fixture: one-of
+ok 109 - shared fixture: one-of
+  ---
+  duration_ms: 1.787641
+  ...
+# Subtest: shared fixture: one-of-reject
+ok 110 - shared fixture: one-of-reject
+  ---
+  duration_ms: 1.167276
+  ...
+# Subtest: shared fixture: dependent-required
+ok 111 - shared fixture: dependent-required
+  ---
+  duration_ms: 1.186256
+  ...
+# Subtest: shared fixture: unevaluated-properties
+ok 112 - shared fixture: unevaluated-properties
+  ---
+  duration_ms: 4.567824
+  ...
+# Subtest: instruction-only package is allowed but not executable
+ok 113 - instruction-only package is allowed but not executable
+  ---
+  duration_ms: 0.197248
+  ...
+# Subtest: hash is original bytes and fees never change them
+ok 114 - hash is original bytes and fees never change them
+  ---
+  duration_ms: 2.039062
+  ...
+# Subtest: parameters not modified by validation
+ok 115 - parameters not modified by validation
+  ---
+  duration_ms: 0.269997
+  ...
+# Subtest: package local script cannot escape by symlink
+ok 116 - package local script cannot escape by symlink
+  ---
+  duration_ms: 3.544039
+  ...
+# Subtest: host uses real AppServerAdapter finishReason and delivers actual authorized material in that model turn
+ok 117 - host uses real AppServerAdapter finishReason and delivers actual authorized material in that model turn
+  ---
+  duration_ms: 4.82423
+  ...
+# Subtest: non-completed native turn or missing actual image carrier cannot produce a success result
+ok 118 - non-completed native turn or missing actual image carrier cannot produce a success result
+  ---
+  duration_ms: 1.150181
+  ...
+# Subtest: authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+ok 119 - authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+  ---
+  duration_ms: 2.554823
+  ...
+# Subtest: every scope/fence field must match current validated session; owner cannot come from profile
+ok 120 - every scope/fence field must match current validated session; owner cannot come from profile
+  ---
+  duration_ms: 0.497893
+  ...
+# Subtest: ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+ok 121 - ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+  ---
+  duration_ms: 9.819533
+  ...
+# Subtest: cached registration is IO free, unavailable before measurement and omitted offline
+ok 122 - cached registration is IO free, unavailable before measurement and omitted offline
+  ---
+  duration_ms: 8.134929
+  ...
+# Subtest: owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+ok 123 - owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+  ---
+  duration_ms: 1.626989
+  ...
+# Subtest: old asynchronous measurement never re-registers after disconnect or a new generation
+ok 124 - old asynchronous measurement never re-registers after disconnect or a new generation
+  ---
+  duration_ms: 1.185115
+  ...
+# Subtest: install lifecycle preserves durable success and failure even when catalog callbacks fail
+ok 125 - install lifecycle preserves durable success and failure even when catalog callbacks fail
+  ---
+  duration_ms: 2.194956
+  ...
+# Subtest: refresh errors remove catalog and publication failure does not change measurement
+ok 126 - refresh errors remove catalog and publication failure does not change measurement
+  ---
+  duration_ms: 1.870219
+  ...
+# Subtest: unregistered runners never become READY, even with a valid installed descriptor
+ok 127 - unregistered runners never become READY, even with a valid installed descriptor
+  ---
+  duration_ms: 11.566691
+  ...
+# Subtest: local scripts require actual measured tools, not tool names or booleans
+ok 128 - local scripts require actual measured tools, not tool names or booleans
+  ---
+  duration_ms: 3.853119
+  ...
+# Subtest: provider runner requires an explicit current-subject binding and revision
+ok 129 - provider runner requires an explicit current-subject binding and revision
+  ---
+  duration_ms: 6.900588
+  ...
+# Subtest: ordinary SKILL.md packages coexist without fabricated executable capability
+ok 130 - ordinary SKILL.md packages coexist without fabricated executable capability
+  ---
+  duration_ms: 1.906626
+  ...
+# Subtest: heartbeat is cached; tool probes run once per refresh for a shared tool
+ok 131 - heartbeat is cached; tool probes run once per refresh for a shared tool
+  ---
+  duration_ms: 8.578374
+  ...
+# Subtest: full session and configuration invalidation removes cached readiness immediately
+ok 132 - full session and configuration invalidation removes cached readiness immediately
+  ---
+  duration_ms: 3.785996
+  ...
+# Subtest: refresh from an old session cannot resurrect a catalog after disconnect
+ok 133 - refresh from an old session cannot resurrect a catalog after disconnect
+  ---
+  duration_ms: 4.12962
+  ...
+# Subtest: concurrent refresh only commits the latest installation measurement
+ok 134 - concurrent refresh only commits the latest installation measurement
+  ---
+  duration_ms: 6.08137
+  ...
+# Subtest: execution lookup rechecks immutable hashes, tool measurement and binding revision
+ok 135 - execution lookup rechecks immutable hashes, tool measurement and binding revision
+  ---
+  duration_ms: 3.884638
+  ...
+# Subtest: fee-only deployment information does not change readiness or cache identity
+ok 136 - fee-only deployment information does not change readiness or cache identity
+  ---
+  duration_ms: 3.290882
+  ...
+# Subtest: duplicate installations do not pick a callable winner
+ok 137 - duplicate installations do not pick a callable winner
+  ---
+  duration_ms: 1.622678
+  ...
+# Subtest: invalid digest or corrupt source clears the last successful directory without leaking error details
+ok 138 - invalid digest or corrupt source clears the last successful directory without leaking error details
+  ---
+  duration_ms: 2.850413
+  ...
+# Subtest: public directory and descriptor snapshots cannot be mutated after refresh
+ok 139 - public directory and descriptor snapshots cannot be mutated after refresh
+  ---
+  duration_ms: 1.979066
+  ...
+# Subtest: probe hashes and reason codes reject newline suffixes
+ok 140 - probe hashes and reason codes reject newline suffixes
+  ---
+  duration_ms: 1.646596
+  ...
+# Subtest: one shared bindings config never substitutes another subject or process.env credential
+ok 141 - one shared bindings config never substitutes another subject or process.env credential
+  ---
+  duration_ms: 5.477873
+  ...
+# Subtest: fee metadata changes do not alter binding digest/revision; no approval or charge step
+ok 142 - fee metadata changes do not alter binding digest/revision; no approval or charge step
+  ---
+  duration_ms: 0.935119
+  ...
+# Subtest: generic image broker reuses exact codec and controlled endpoint without consent
+ok 143 - generic image broker reuses exact codec and controlled endpoint without consent
+  ---
+  duration_ms: 33.547669
+  ...
+# Subtest: image edits actually transmit verified reference bytes; real errors/redirects are not faked
+ok 144 - image edits actually transmit verified reference bytes; real errors/redirects are not faked
+  ---
+  duration_ms: 2.785502
+  ...
+# Subtest: native text file contains actual model result and can use authorized input material
+ok 145 - native text file contains actual model result and can use authorized input material
+  ---
+  duration_ms: 1.851755
+  ...
+# Subtest: missing native carrier is unavailable, never imaginary image understanding
+ok 146 - missing native carrier is unavailable, never imaginary image understanding
+  ---
+  duration_ms: 0.496781
+  ...
+# Subtest: disabled profiles need no Provider file or process environment fallback
+ok 147 - disabled profiles need no Provider file or process environment fallback
+  ---
+  duration_ms: 2.92555
+  ...
+# Subtest: explicit environments remain isolated by full subject and immutable
+ok 148 - explicit environments remain isolated by full subject and immutable
+  ---
+  duration_ms: 13.590809
+  ...
+# Subtest: unknown or disabled subjects and missing enabled subject are rejected
+ok 149 - unknown or disabled subjects and missing enabled subject are rejected
+  ---
+  duration_ms: 4.904778
+  ...
+# Subtest: canonical private files required; errors never echo file/credential
+ok 150 - canonical private files required; errors never echo file/credential
+  ---
+  duration_ms: 8.155988
+  ...
+# Subtest: exact schema and image-only key reject arbitrary environment injection
+ok 151 - exact schema and image-only key reject arbitrary environment injection
+  ---
+  duration_ms: 25.107209
+  ...
+# Subtest: known provider values are removed from logger message text
+ok 152 - known provider values are removed from logger message text
+  ---
+  duration_ms: 1.258953
+  ...
+# Subtest: unified run passes exact explicit mapping into existing adapters
+ok 153 - unified run passes exact explicit mapping into existing adapters
+  ---
+  duration_ms: 38.293247
+  ...
+# Subtest: systemd canonical configuration templates match and preserve /etc systemd boundary
+ok 154 - systemd canonical configuration templates match and preserve /etc systemd boundary
+  ---
+  duration_ms: 5.735886
+  ...
+# Subtest: actual CLI validate consumes file and validates enabled image credential without execution
+ok 155 - actual CLI validate consumes file and validates enabled image credential without execution
+  ---
+  duration_ms: 196.98063
+  ...
+# Subtest: shared skill binding references reuse only existing private full-subject credentials; missing new binding is UNAVAILABLE
+ok 156 - shared skill binding references reuse only existing private full-subject credentials; missing new binding is UNAVAILABLE
+  ---
+  duration_ms: 189.546289
+  ...
+# Subtest: three complete subjects initialize immutable config without writing any state
+ok 157 - three complete subjects initialize immutable config without writing any state
+  ---
+  duration_ms: 141.968552
+  ...
+# Subtest: duplicate complete subjects and installation authorization are rejected independently
+ok 158 - duplicate complete subjects and installation authorization are rejected independently
+  ---
+  duration_ms: 46.697788
+  ...
+# Subtest: reject equal writable root collision without adopting state
+ok 159 - reject equal writable root collision without adopting state
+  ---
+  duration_ms: 14.051365
+  ...
+# Subtest: reject nested writable root collision without adopting state
+ok 160 - reject nested writable root collision without adopting state
+  ---
+  duration_ms: 13.13092
+  ...
+# Subtest: reject state writable root collision without adopting state
+ok 161 - reject state writable root collision without adopting state
+  ---
+  duration_ms: 12.583725
+  ...
+# Subtest: reject host writable root collision without adopting state
+ok 162 - reject host writable root collision without adopting state
+  ---
+  duration_ms: 12.743939
+  ...
+# Subtest: reject alias writable root collision without adopting state
+ok 163 - reject alias writable root collision without adopting state
+  ---
+  duration_ms: 14.518249
+  ...
+# Subtest: reject ancestor-alias writable root collision without adopting state
+ok 164 - reject ancestor-alias writable root collision without adopting state
+  ---
+  duration_ms: 21.338343
+  ...
+# Subtest: identity substitution, legacy credentials and injected runtime keys fail closed
+ok 165 - identity substitution, legacy credentials and injected runtime keys fail closed
+  ---
+  duration_ms: 48.36233
+  ...
+# Subtest: sealed/config file mutations and symlink replacement are rejected
+ok 166 - sealed/config file mutations and symlink replacement are rejected
+  ---
+  duration_ms: 17.898623
+  ...
+# Subtest: one host boots three isolated executors; initialization never means READY and revoke is per Agent
+ok 167 - one host boots three isolated executors; initialization never means READY and revoke is per Agent
+  ---
+  duration_ms: 72.800807
+  ...
+# Subtest: one initialization failure is redacted and does not tear down other Agents
+ok 168 - one initialization failure is redacted and does not tear down other Agents
+  ---
+  duration_ms: 42.173506
+  ...
+# Subtest: stop during initialization waits and never opens a late execution channel
+ok 169 - stop during initialization waits and never opens a late execution channel
+  ---
+  duration_ms: 72.322443
+  ...
+# Subtest: unconfirmed executor shutdown retains both Agent and host writer ownership
+ok 170 - unconfirmed executor shutdown retains both Agent and host writer ownership
+  ---
+  duration_ms: 28.215354
+  ...
+# Subtest: existing stale or replaced writer locks are never stolen/deleted
+ok 171 - existing stale or replaced writer locks are never stolen/deleted
+  ---
+  duration_ms: 10.499326
+  ...
+# Subtest: replaced private root cannot make an old owner delete a new root lock
+ok 172 - replaced private root cannot make an old owner delete a new root lock
+  ---
+  duration_ms: 18.933273
+  ...
+# Subtest: writer ownership persists identity and boot IDs independently and releases only once
+ok 173 - writer ownership persists identity and boot IDs independently and releases only once
+  ---
+  duration_ms: 19.149456
+  ...
+# Subtest: unprotected/symlink state roots are not repaired or adopted
+ok 174 - unprotected/symlink state roots are not repaired or adopted
+  ---
+  duration_ms: 4.068426
+  ...
+# Subtest: injected adapter refuses guessed sessions and never imports legacy environment
+ok 175 - injected adapter refuses guessed sessions and never imports legacy environment
+  ---
+  duration_ms: 1031.736815
+  ...
+# Subtest: mature executor retains isolated subjects/session namespaces and allowlisted child environment
+ok 176 - mature executor retains isolated subjects/session namespaces and allowlisted child environment
+  ---
+  duration_ms: 1245.314224
+  ...
+# Subtest: unified library catalog closes actual engine imports without retired provisioning or host state
+ok 177 - unified library catalog closes actual engine imports without retired provisioning or host state
+  ---
+  duration_ms: 369.978596
+  ...
+# Subtest: unified library rejects reintroduced legacy auth/provisioning assets, symlinks and executable package entries
+ok 178 - unified library rejects reintroduced legacy auth/provisioning assets, symlinks and executable package entries
+  ---
+  duration_ms: 291.515584
+  ...
+# Subtest: packaged engine literal import tampering or linked source fails closed
+ok 179 - packaged engine literal import tampering or linked source fails closed
+  ---
+  duration_ms: 332.737178
+  ...
+# Subtest: owned child cleanup escalates after signal-sent and awaits close, without leaking host secrets
+ok 180 - owned child cleanup escalates after signal-sent and awaits close, without leaking host secrets
+  ---
+  duration_ms: 71.921196
+  ...
+# Subtest: multi-Agent validate CLI reads config without engine effects; run fails closed until wire is bound
+ok 181 - multi-Agent validate CLI reads config without engine effects; run fails closed until wire is bound
+  ---
+  duration_ms: 139.260821
+  ...
+# Subtest: installer refuses existing targets, unavailable Node and unprepared parents before dependencies
+ok 182 - installer refuses existing targets, unavailable Node and unprepared parents before dependencies
+  ---
+  duration_ms: 49.378696
+  ...
+# Subtest: dependency preparation failure never publishes or leaves its stage; does not invoke Python
+ok 183 - dependency preparation failure never publishes or leaves its stage; does not invoke Python
+  ---
+  duration_ms: 618.050527
+  ...
+# Subtest: validator checks full artifact-local dependency/toolchain graph instead of accepting payload-only collation
+ok 184 - validator checks full artifact-local dependency/toolchain graph instead of accepting payload-only collation
+  ---
+  duration_ms: 1986.464347
+  ...
+# Subtest: validator artifact import loads the real engine without invoking its retired CLI
+ok 185 - validator artifact import loads the real engine without invoking its retired CLI
+  ---
+  duration_ms: 975.424584
+  ...
+# Subtest: validator artifact import regression reproduces eval ambiguity and keeps direct engine CLI retired
+ok 186 - validator artifact import regression reproduces eval ambiguity and keeps direct engine CLI retired
+  ---
+  duration_ms: 1538.055424
+  ...
+# Subtest: validator artifact import fails closed for a missing local module or execution host export
+ok 187 - validator artifact import fails closed for a missing local module or execution host export
+  ---
+  duration_ms: 731.210017
+  ...
+# Subtest: single-artifact units pin local Node and shared host config; shell entry has no activation/reload
+ok 188 - single-artifact units pin local Node and shared host config; shell entry has no activation/reload
+  ---
+  duration_ms: 5.90349
+  ...
+# Subtest: toolchain validation refuses a host-global interpreter alias instead of falsely claiming release closure
+ok 189 - toolchain validation refuses a host-global interpreter alias instead of falsely claiming release closure
+  ---
+  duration_ms: 301.665243
+  ...
+# Subtest: presence receipt control stays out of business, never re-registers or mutates readiness
+ok 190 - presence receipt control stays out of business, never re-registers or mutates readiness
+  ---
+  duration_ms: 27.619641
+  ...
+# Subtest: presence receipt control cannot grant registration; explicit business types cannot spoof ACK
+ok 191 - presence receipt control cannot grant registration; explicit business types cannot spoof ACK
+  ---
+  duration_ms: 20.725988
+  ...
+# Subtest: presence receipt control rejects wrong subject/session and malformed trace without logging secrets
+ok 192 - presence receipt control rejects wrong subject/session and malformed trace without logging secrets
+  ---
+  duration_ms: 35.944006
+  ...
+# Subtest: presence receipt control does not swallow explicit business declarations or normal ping
+ok 193 - presence receipt control does not swallow explicit business declarations or normal ping
+  ---
+  duration_ms: 18.496464
+  ...
+# Subtest: presence receipt control keeps genuine correlated registration errors and session fencing
+    # Subtest: error
+    ok 1 - error
+      ---
+      duration_ms: 12.900395
+      ...
+    # Subtest: protocol_error
+    ok 2 - protocol_error
+      ---
+      duration_ms: 21.631876
+      ...
+    # Subtest: protocol.error
+    ok 3 - protocol.error
+      ---
+      duration_ms: 14.276585
+      ...
+    # Subtest: typed-error
+    ok 4 - typed-error
+      ---
+      duration_ms: 22.132363
+      ...
+    1..4
+ok 194 - presence receipt control keeps genuine correlated registration errors and session fencing
+  ---
+  duration_ms: 72.101177
+  ...
+# Subtest: presence receipt control preserves unknown/error rejection and canonical CHAT/command/persistence ingress
+ok 195 - presence receipt control preserves unknown/error rejection and canonical CHAT/command/persistence ingress
+  ---
+  duration_ms: 27.407857
+  ...
+# Subtest: two independent session channels activate only exact receipt; health revocation keeps terminal reporting
+ok 196 - two independent session channels activate only exact receipt; health revocation keeps terminal reporting
+  ---
+  duration_ms: 48.386797
+  ...
+# Subtest: zero real adapters authenticate channel but never advertise or become execution-ready
+ok 197 - zero real adapters authenticate channel but never advertise or become execution-ready
+  ---
+  duration_ms: 10.471018
+  ...
+# Subtest: stale generation or outer/nested proof mismatch cannot activate/enter engine; CHAT/result keep their own channel
+ok 198 - stale generation or outer/nested proof mismatch cannot activate/enter engine; CHAT/result keep their own channel
+  ---
+  duration_ms: 11.366046
+  ...
+# Subtest: CHAT-only registration rejects durable ACK disagreement even with empty command types
+ok 199 - CHAT-only registration rejects durable ACK disagreement even with empty command types
+  ---
+  duration_ms: 12.677349
+  ...
+# Subtest: closing pending registration releases activation and only owned executor, no shutdown deadlock
+ok 200 - closing pending registration releases activation and only owned executor, no shutdown deadlock
+  ---
+  duration_ms: 16.250827
+  ...
+# Subtest: policy revocation isolates one subject while peer channel remains ready
+ok 201 - policy revocation isolates one subject while peer channel remains ready
+  ---
+  duration_ms: 17.193695
+  ...
+# Subtest: unified SIGTERM while registration activation waits closes transports before host lifecycle gate
+ok 202 - unified SIGTERM while registration activation waits closes transports before host lifecycle gate
+  ---
+  duration_ms: 60.10195
+  ...
+# Subtest: unified runtime heartbeat stops after SIGTERM and does not create a second ACK authority
+ok 203 - unified runtime heartbeat stops after SIGTERM and does not create a second ACK authority
+  ---
+  duration_ms: 37.936017
+  ...
+# Subtest: normal reconnect rotates only owned session; old socket, old generation and peer stop never reach cancel adapter
+ok 204 - normal reconnect rotates only owned session; old socket, old generation and peer stop never reach cancel adapter
+  ---
+  duration_ms: 1018.201418
+  ...
+# Subtest: canonical skill product installation is data; wrong raw scope/Runtime-product confusion never reaches engine
+ok 205 - canonical skill product installation is data; wrong raw scope/Runtime-product confusion never reaches engine
+  ---
+  duration_ms: 14.971661
+  ...
+# Subtest: venv generated launchers preserve direct CLI, argv, modes and RECORD integrity across stage deletion
+ok 206 - venv generated launchers preserve direct CLI, argv, modes and RECORD integrity across stage deletion
+  ---
+  duration_ms: 589.460632
+  ...
+# Subtest: venv publication fails closed for unknown stage references, launcher bodies and stale links
+ok 207 - venv publication fails closed for unknown stage references, launcher bodies and stale links
+  ---
+  duration_ms: 174.585188
+  ...
+# Subtest: venv validator rejects stale shell trampolines and activation even when imports could pass
+ok 208 - venv validator rejects stale shell trampolines and activation even when imports could pass
+  ---
+  duration_ms: 268.317752
+  ...
+# Subtest: Python 3.11 cfg command audit maps only its exact venv operand preserving every base field, quotes, modes and stage-to-target bytes
+ok 209 - Python 3.11 cfg command audit maps only its exact venv operand preserving every base field, quotes, modes and stage-to-target bytes
+  ---
+  duration_ms: 742.874294
+  ...
+# Subtest: Python 3.11 cfg relocation rejects unknown command, stale home/base/body/foreign stage and duplicate fields without deleting audit metadata
+ok 210 - Python 3.11 cfg relocation rejects unknown command, stale home/base/body/foreign stage and duplicate fields without deleting audit metadata
+  ---
+  duration_ms: 438.499408
+  ...
+# Subtest: Python 3.11 cfg command remains subject to the ORIGINAL strict stale validator after successful preparation
+ok 211 - Python 3.11 cfg command remains subject to the ORIGINAL strict stale validator after successful preparation
+  ---
+  duration_ms: 106.784085
+  ...
+# Subtest: PPTX semantic reopen reconstructs original producer wrapping and rejects lost/reordered/extra text
+ok 212 - PPTX semantic reopen reconstructs original producer wrapping and rejects lost/reordered/extra text
+  ---
+  duration_ms: 73.164859
+  ...
+# Subtest: current delivery dependency candidate keeps six exact pins and one fixed payload source
+ok 213 - current delivery dependency candidate keeps six exact pins and one fixed payload source
+  ---
+  duration_ms: 7.757464
+  ...
+# Subtest: local fixture identity and origin schema reject retired inputs before any acceptance IO
+ok 214 - local fixture identity and origin schema reject retired inputs before any acceptance IO
+  ---
+  duration_ms: 9.211583
+  ...
+# Subtest: artifact consumer callback type rejection precedes every acceptance side effect
+ok 215 - artifact consumer callback type rejection precedes every acceptance side effect
+  ---
+  duration_ms: 3.629339
+  ...
+# Subtest: artifact consumer all-checks gate makes zero callback calls and original tail still cleans
+ok 216 - artifact consumer all-checks gate makes zero callback calls and original tail still cleans
+  ---
+  duration_ms: 1029.616461
+  ...
+# Subtest: artifact consumer deep-freezes exact ordered projection and one-shot await preserves borrowed target
+ok 217 - artifact consumer deep-freezes exact ordered projection and one-shot await preserves borrowed target
+  ---
+  duration_ms: 2372.370892
+  ...
+# Subtest: artifact consumer invalid/throwing/explicit failure results preserve C gates and cleanup without leaking errors
+ok 218 - artifact consumer invalid/throwing/explicit failure results preserve C gates and cleanup without leaking errors
+  ---
+  duration_ms: 5454.521578
+  ...
+# Subtest: artifact consumer pre-gates reject changed fixed source, archive, target identity, Node and original payload
+ok 219 - artifact consumer pre-gates reject changed fixed source, archive, target identity, Node and original payload
+  ---
+  duration_ms: 5080.037441
+  ...
+# Subtest: artifact consumer post-readback catches original members, dependencies, modes, links, source and Node tampering
+ok 220 - artifact consumer post-readback catches original members, dependencies, modes, links, source and Node tampering
+  ---
+  duration_ms: 7622.612849
+  ...
+# Subtest: artifact consumer absent callback retains original standalone tail/cleanup and no consumer receipt
+ok 221 - artifact consumer absent callback retains original standalone tail/cleanup and no consumer receipt
+  ---
+  duration_ms: 673.197134
+  ...
+# Subtest: artifact consumer return schema is exact plain data with only the declared failure code whitelist
+ok 222 - artifact consumer return schema is exact plain data with only the declared failure code whitelist
+  ---
+  duration_ms: 0.880178
+  ...
+# Subtest: S01 workspace CLI: explicit file reproduces old string empty Map and passes real loaded policy to Runtime boundary
+ok 223 - S01 workspace CLI: explicit file reproduces old string empty Map and passes real loaded policy to Runtime boundary
+  ---
+  duration_ms: 12.830361
+  ...
+# Subtest: S01 workspace CLI: CYF file input reaches original loader without inheriting legacy inline/file keys
+ok 224 - S01 workspace CLI: CYF file input reaches original loader without inheriting legacy inline/file keys
+  ---
+  duration_ms: 12.873693
+  ...
+# Subtest: S01 workspace CLI: CLI file has priority over CYF file rather than merging either scope
+ok 225 - S01 workspace CLI: CLI file has priority over CYF file rather than merging either scope
+  ---
+  duration_ms: 9.01253
+  ...
+# Subtest: S01 workspace CLI: invalid selected CLI file never falls back to a valid CYF file
+ok 226 - S01 workspace CLI: invalid selected CLI file never falls back to a valid CYF file
+  ---
+  duration_ms: 11.370554
+  ...
+# Subtest: S01 workspace CLI: absent or empty CYF file defaults to an empty Map and ignores old-only policy inputs
+ok 227 - S01 workspace CLI: absent or empty CYF file defaults to an empty Map and ignores old-only policy inputs
+  ---
+  duration_ms: 22.677708
+  ...
+# Subtest: S01 workspace CLI: original loader rejects relative before any Runtime execution
+ok 228 - S01 workspace CLI: original loader rejects relative before any Runtime execution
+  ---
+  duration_ms: 22.47239
+  ...
+# Subtest: S01 workspace CLI: original loader rejects missing before any Runtime execution
+ok 229 - S01 workspace CLI: original loader rejects missing before any Runtime execution
+  ---
+  duration_ms: 25.900871
+  ...
+# Subtest: S01 workspace CLI: original loader rejects file-symlink before any Runtime execution
+ok 230 - S01 workspace CLI: original loader rejects file-symlink before any Runtime execution
+  ---
+  duration_ms: 36.558579
+  ...
+# Subtest: S01 workspace CLI: original loader rejects ancestor-symlink before any Runtime execution
+ok 231 - S01 workspace CLI: original loader rejects ancestor-symlink before any Runtime execution
+  ---
+  duration_ms: 44.772941
+  ...
+# Subtest: S01 workspace CLI: original loader rejects invalid-json before any Runtime execution
+ok 232 - S01 workspace CLI: original loader rejects invalid-json before any Runtime execution
+  ---
+  duration_ms: 17.651029
+  ...
+# Subtest: S01 workspace CLI: original loader rejects invalid-shape before any Runtime execution
+ok 233 - S01 workspace CLI: original loader rejects invalid-shape before any Runtime execution
+  ---
+  duration_ms: 18.253029
+  ...
+# Subtest: S01 workspace CLI: original loader rejects relative-resource before any Runtime execution
+ok 234 - S01 workspace CLI: original loader rejects relative-resource before any Runtime execution
+  ---
+  duration_ms: 25.811029
+  ...
+# Subtest: S01 workspace CLI: original loader rejects overlapping-resources before any Runtime execution
+ok 235 - S01 workspace CLI: original loader rejects overlapping-resources before any Runtime execution
+  ---
+  duration_ms: 26.249226
+  ...
+# Subtest: S01 workspace CLI: original loader rejects remote-credentials before any Runtime execution
+ok 236 - S01 workspace CLI: original loader rejects remote-credentials before any Runtime execution
+  ---
+  duration_ms: 22.070879
+  ...
+# Subtest: skill measurement activation waits for its follow-up registration and never loops on heartbeat
+ok 237 - skill measurement activation waits for its follow-up registration and never loops on heartbeat
+  ---
+  duration_ms: 14.436924
+  ...
+# Subtest: unmatched ACK and presence cannot supply a skill subject to the executor
+ok 238 - unmatched ACK and presence cannot supply a skill subject to the executor
+  ---
+  duration_ms: 16.23029
+  ...
+1..238
+# tests 308
+# suites 0
+# pass 308
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 54237.314645

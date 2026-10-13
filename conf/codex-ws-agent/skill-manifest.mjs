@@ -49,11 +49,15 @@ export function compileSkillSchema(schema) {
   requirePortableJson(schema); checkSchemaPolicy(schema)
   try { return ajv.compile(schema) } catch { fail('SKILL_SCHEMA_INVALID') }
 }
+export function validateSkillData(schema, value) {
+  const detached = structuredClone(value)
+  requirePortableJson(detached)
+  if (!compileSkillSchema(schema)(detached)) fail('SKILL_PARAMETERS_INVALID')
+  return freeze(detached)
+}
 export function validateSkillParameters(schema, raw) {
-  const value = typeof raw === 'string' || Buffer.isBuffer(raw) ? parseSkillJson(raw) : structuredClone(raw)
-  requirePortableJson(value)
-  if (!compileSkillSchema(schema)(value)) fail('SKILL_PARAMETERS_INVALID')
-  return freeze(value)
+  const value = typeof raw === 'string' || Buffer.isBuffer(raw) ? parseSkillJson(raw) : raw
+  return validateSkillData(schema, value)
 }
 function validEntrypoint(value) {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._/-]*(?![\s\S])/.test(value)

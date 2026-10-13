@@ -1,0 +1,190 @@
+TAP version 13
+# Subtest: v4 supports answer, clarification and schema-bound material skills, not top-level inspection
+ok 1 - v4 supports answer, clarification and schema-bound material skills, not top-level inspection
+  ---
+  duration_ms: 130.097947
+  ...
+# Subtest: 32 selected sources are complete, 33 is invalid; no-source execution needs no reference-image branch
+ok 2 - 32 selected sources are complete, 33 is invalid; no-source execution needs no reference-image branch
+  ---
+  duration_ms: 9.204638
+  ...
+# Subtest: rejects unadvertised action, injected grant/path, wrong branch, source, duplicates and old protocol
+ok 3 - rejects unadvertised action, injected grant/path, wrong branch, source, duplicates and old protocol
+  ---
+  duration_ms: 26.016326
+  ...
+# Subtest: capability and read facts are exact; previous reading does not add an unsupported rejection gate
+ok 4 - capability and read facts are exact; previous reading does not add an unsupported rejection gate
+  ---
+  duration_ms: 36.813269
+  ...
+# Subtest: v4 CHAT dispatch binds exact task/conversation/generation/target; unknown versions never downgrade to v3
+ok 5 - v4 CHAT dispatch binds exact task/conversation/generation/target; unknown versions never downgrade to v3
+  ---
+  duration_ms: 3.30825
+  ...
+# Subtest: explicit text deliverable marker is durable Boolean data, not inferred from ANSWER or permission
+ok 6 - explicit text deliverable marker is durable Boolean data, not inferred from ANSWER or permission
+  ---
+  duration_ms: 32.996649
+  ...
+# Subtest: explicit text relations require the exact advertised durable parent and never infer from linkage
+ok 7 - explicit text relations require the exact advertised durable parent and never infer from linkage
+  ---
+  duration_ms: 37.246874
+  ...
+# Subtest: actual API read fixture preserves identical explicit parent identity across all text relation modes
+ok 8 - actual API read fixture preserves identical explicit parent identity across all text relation modes
+  ---
+  duration_ms: 17.921511
+  ...
+# Subtest: earlier retained replacement requires the exact advertised target while keeping its causal basis
+ok 9 - earlier retained replacement requires the exact advertised target while keeping its causal basis
+  ---
+  duration_ms: 23.90815
+  ...
+# Subtest: only exact advertised EXECUTE may append or reset its future batch; planning prose stays false
+ok 10 - only exact advertised EXECUTE may append or reset its future batch; planning prose stays false
+  ---
+  duration_ms: 25.737194
+  ...
+# Subtest: media basis advertises exact retained outputs without treating them as textual replacement targets
+ok 11 - media basis advertises exact retained outputs without treating them as textual replacement targets
+  ---
+  duration_ms: 22.982099
+  ...
+# Subtest: parameters use the advertised standard schema without coercion; old writes fail closed
+ok 12 - parameters use the advertised standard schema without coercion; old writes fail closed
+  ---
+  duration_ms: 17.601416
+  ...
+# Subtest: result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+ok 13 - result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+  ---
+  duration_ms: 30.445543
+  ...
+# Subtest: effect START is on disk before request; real result bytes saved before remote report
+ok 14 - effect START is on disk before request; real result bytes saved before remote report
+  ---
+  duration_ms: 22.736015
+  ...
+# Subtest: report response loss recovers existing result; never repeats provider invocation
+ok 15 - report response loss recovers existing result; never repeats provider invocation
+  ---
+  duration_ms: 25.525133
+  ...
+# Subtest: uncertain network effect is UNKNOWN forever until real query, never resent
+ok 16 - uncertain network effect is UNKNOWN forever until real query, never resent
+  ---
+  duration_ms: 24.993426
+  ...
+# Subtest: lost START reply and competing claimant cannot emit side effects
+ok 17 - lost START reply and competing claimant cannot emit side effects
+  ---
+  duration_ms: 8.591067
+  ...
+# Subtest: effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+ok 18 - effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+  ---
+  duration_ms: 18.386268
+  ...
+# Subtest: strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+ok 19 - strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+  ---
+  duration_ms: 5.544473
+  ...
+# Subtest: one executor persists result before stage/commit; data-only still has real commit
+ok 20 - one executor persists result before stage/commit; data-only still has real commit
+  ---
+  duration_ms: 3.360725
+  ...
+# Subtest: recovered persistent result never runs a model/provider again
+ok 21 - recovered persistent result never runs a model/provider again
+  ---
+  duration_ms: 0.573788
+  ...
+# Subtest: invalid parameters, missing runner, wrong result identity and required empty output fail closed
+ok 22 - invalid parameters, missing runner, wrong result identity and required empty output fail closed
+  ---
+  duration_ms: 1.238595
+  ...
+# Subtest: unregistered runners never become READY, even with a valid installed descriptor
+ok 23 - unregistered runners never become READY, even with a valid installed descriptor
+  ---
+  duration_ms: 10.265478
+  ...
+# Subtest: local scripts require actual measured tools, not tool names or booleans
+ok 24 - local scripts require actual measured tools, not tool names or booleans
+  ---
+  duration_ms: 3.413916
+  ...
+# Subtest: provider runner requires an explicit current-subject binding and revision
+ok 25 - provider runner requires an explicit current-subject binding and revision
+  ---
+  duration_ms: 6.157027
+  ...
+# Subtest: ordinary SKILL.md packages coexist without fabricated executable capability
+ok 26 - ordinary SKILL.md packages coexist without fabricated executable capability
+  ---
+  duration_ms: 2.051265
+  ...
+# Subtest: heartbeat is cached; tool probes run once per refresh for a shared tool
+ok 27 - heartbeat is cached; tool probes run once per refresh for a shared tool
+  ---
+  duration_ms: 5.998255
+  ...
+# Subtest: full session and configuration invalidation removes cached readiness immediately
+ok 28 - full session and configuration invalidation removes cached readiness immediately
+  ---
+  duration_ms: 2.257093
+  ...
+# Subtest: refresh from an old session cannot resurrect a catalog after disconnect
+ok 29 - refresh from an old session cannot resurrect a catalog after disconnect
+  ---
+  duration_ms: 2.829474
+  ...
+# Subtest: concurrent refresh only commits the latest installation measurement
+ok 30 - concurrent refresh only commits the latest installation measurement
+  ---
+  duration_ms: 3.819537
+  ...
+# Subtest: execution lookup rechecks immutable hashes, tool measurement and binding revision
+ok 31 - execution lookup rechecks immutable hashes, tool measurement and binding revision
+  ---
+  duration_ms: 3.200533
+  ...
+# Subtest: fee-only deployment information does not change readiness or cache identity
+ok 32 - fee-only deployment information does not change readiness or cache identity
+  ---
+  duration_ms: 2.882767
+  ...
+# Subtest: duplicate installations do not pick a callable winner
+ok 33 - duplicate installations do not pick a callable winner
+  ---
+  duration_ms: 1.356784
+  ...
+# Subtest: invalid digest or corrupt source clears the last successful directory without leaking error details
+ok 34 - invalid digest or corrupt source clears the last successful directory without leaking error details
+  ---
+  duration_ms: 2.515311
+  ...
+# Subtest: public directory and descriptor snapshots cannot be mutated after refresh
+ok 35 - public directory and descriptor snapshots cannot be mutated after refresh
+  ---
+  duration_ms: 1.810118
+  ...
+# Subtest: probe hashes and reason codes reject newline suffixes
+ok 36 - probe hashes and reason codes reject newline suffixes
+  ---
+  duration_ms: 1.538532
+  ...
+1..36
+# tests 36
+# suites 0
+# pass 36
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1774.912089

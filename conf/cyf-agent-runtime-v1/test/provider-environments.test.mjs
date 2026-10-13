@@ -90,3 +90,20 @@ test('actual CLI validate consumes file and validates enabled image credential w
   assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).valid, true);
   assert.ok(!result.stdout.includes('synthetic-secret'));
 });
+
+test('shared skill binding references reuse only existing private full-subject credentials; missing new binding is UNAVAILABLE', async t => {
+  const a = { subjectKey: 'a'.repeat(64), manifest: { canonicalAgentId: 'agent-a' }, profile: { agentId: 'agent-a' } }
+  const b = { subjectKey: 'b'.repeat(64), manifest: { canonicalAgentId: 'agent-b' }, profile: { agentId: 'agent-b' } }
+  const { root, path } = await fixture(t, { [a.subjectKey]: { IMAGE_TOKEN: 'synthetic-a' } })
+  const bindings = join(root, 'skill-bindings.json')
+  await writeFile(bindings, JSON.stringify({ schemaVersion: 1, providers: { shared: { adapter: 'image-http', endpoint: 'https://images.example.invalid', model: 'gpt-image-1', credentialEnv: 'IMAGE_TOKEN', revision: '1' } }, subjects: { 'agent-a': { providerAliases: { image: 'shared' } }, 'agent-b': { providerAliases: { image: 'shared' } } }, costInfoOverrides: {} }), { mode: 0o600 })
+  a.profile.skillBindingsFile = bindings; b.profile.skillBindingsFile = bindings
+  const environments = await readRuntimeProviderEnvironments(path, [a, b])
+  assert.equal(environments.get(a.subjectKey).IMAGE_TOKEN, 'synthetic-a')
+  assert.equal(environments.get(b.subjectKey), undefined)
+  const { SkillBindings } = await import('../../codex-ws-agent/skill-bindings.mjs')
+  const missing = new SkillBindings({ file: bindings, credentialEnvironment: environments.get(b.subjectKey) })
+  assert.equal((await missing.resolve({ scope: { agentId: 'agent-b' }, alias: 'image' })).ready, false)
+  await writeFile(path, JSON.stringify({ configVersion: 1, subjects: { [a.subjectKey]: { IMAGE_TOKEN: 'synthetic-a', HOME: 'injection' } } }))
+  await assert.rejects(readRuntimeProviderEnvironments(path, [a, b]), /RUNTIME_PROVIDER_CONFIG_INVALID/)
+})

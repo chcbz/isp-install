@@ -111,15 +111,35 @@ export async function readRuntimeProviderEnvironments(path, agents) {
   if (!object(document) || Object.keys(document).sort().join(',') !== 'configVersion,subjects'
       || document.configVersion !== 1 || !object(document.subjects)) fail();
   const known = new Map(agents.map(agent => [agent.subjectKey, agent]));
+  const allowed = new Map();
+  // Shared public binding config supplies only credential names. Preserve the
+  // existing private full-subject secret source; never read process.env.
+  const configs = new Map();
+  for (const agent of agents) {
+    const keys = new Set();
+    if (required.includes(agent)) keys.add(agent.profile.controlledImageHttpApiKeyEnv);
+    const file = agent.profile.skillBindingsFile;
+    if (file) {
+      if (!configs.has(file)) {
+        try {
+          const { parseSkillBindings } = await import('../../codex-ws-agent/skill-bindings.mjs');
+          configs.set(file, parseSkillBindings(await readPrivateJson(file, null)));
+        } catch { fail(); }
+      }
+      const bindings = configs.get(file);
+      for (const bindingId of Object.values(bindings.subjects[agent.manifest?.canonicalAgentId || agent.profile.agentId]?.providerAliases || {}))
+        keys.add(bindings.providers[bindingId].credentialEnv);
+    }
+    allowed.set(agent.subjectKey, keys);
+  }
   const result = new Map();
   for (const [subject, values] of Object.entries(document.subjects)) {
-    const agent = known.get(subject);
-    const key = agent?.profile.controlledImageHttpApiKeyEnv;
-    if (!agent || !required.includes(agent) || !/^CYF_PROVIDER_[A-Z][A-Z0-9_]*$/.test(key || '')
-        || !object(values) || Object.keys(values).length !== 1 || !Object.hasOwn(values, key)) fail();
-    const value = values[key];
-    if (typeof value !== 'string' || !value || value !== value.trim() || /[\x00-\x1f\x7f]/u.test(value)) fail();
-    result.set(subject, Object.freeze({ [key]: value }));
+    const agent = known.get(subject), keys = allowed.get(subject);
+    if (!agent || !object(values) || Object.keys(values).length === 0
+        || Object.keys(values).some(key => !/^[A-Z][A-Z0-9_]*$/.test(key) || !keys.has(key))) fail();
+    for (const value of Object.values(values))
+      if (typeof value !== 'string' || !value || value !== value.trim() || /[\x00-\x1f\x7f]/u.test(value)) fail();
+    result.set(subject, Object.freeze({ ...values }));
   }
   if (required.some(agent => !result.has(agent.subjectKey))) fail();
   return result;

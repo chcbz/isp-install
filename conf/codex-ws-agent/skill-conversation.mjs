@@ -1,11 +1,11 @@
 /** Protocol4 shares the existing conversation inbox/session/lease/output transport.
  * This lane never consumes v1/v2/v3 commands or grants authority from model prose. */
-import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, readdirSync, writeFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { executeSkill, parseSkillCommand, skillDigest, skillHash, skillId, skillSha } from './skill-executor.mjs'
-import { SkillExecutionStore, SkillEffects } from './skill-execution-store.mjs'
+import { SkillExecutionStore, SkillEffects, validateSkillInputReceipts } from './skill-execution-store.mjs'
 import { nativeSessionHeaders } from './conversation-native.mjs'
-import { parseSkillJson } from './skill-manifest.mjs'
+import { parseSkillJson, validateSkillData } from './skill-manifest.mjs'
 const BASE = '/internal/agent/tasks'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const fail = (code, cause = null) => { throw Object.assign(new Error(code), { code, ...(cause ? { cause } : {}) }) }
@@ -17,17 +17,49 @@ const originOf = value => {
       || (url.protocol === 'http:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))) fail('SKILL_API_ORIGIN_INVALID')
   return url.origin
 }
+const sourceKinds = new Set(['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT'])
+const byteLength = value => {
+  if (typeof value === 'number') { if (!Number.isSafeInteger(value) || value < 0) fail('SKILL_INPUT_SNAPSHOT_INVALID'); return String(value) }
+  if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(value) || BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
+  return value
+}
 export function parseSkillInputSnapshot(snapshot, command, fence) {
   if (!object(snapshot) || snapshot.schemaVersion !== 4 || snapshot.executionId !== command.executionId || snapshot.leaseVersion !== fence.version
-      || snapshot.snapshotDigest !== command.snapshotDigest || !Array.isArray(snapshot.inputs) || snapshot.inputs.length !== command.inputRefs.length) fail('SKILL_INPUT_SNAPSHOT_INVALID')
+      || snapshot.snapshotDigest !== command.snapshotDigest || !Array.isArray(snapshot.inputs) || snapshot.inputs.length !== command.inputRefs.length
+      || snapshot.noReferencedMaterials !== (snapshot.inputs.length === 0)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
   const seen = new Set()
   return snapshot.inputs.map(input => {
     if (!object(input) || !command.inputRefs.includes(input.inputRef) || seen.has(input.inputRef) || !skillSha(input.sha256)
-        || typeof input.byteLength !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(input.byteLength) || BigInt(input.byteLength) > BigInt(Number.MAX_SAFE_INTEGER)
-        || typeof input.contentMimeType !== 'string' || !object(input.source)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
+        || typeof input.contentMimeType !== 'string' || !sourceKinds.has(input.sourceKind) || !object(input.sourceIdentity)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
     seen.add(input.inputRef)
-    return { inputRef: input.inputRef, source: structuredClone(input.source), contentMimeType: input.contentMimeType, byteLength: input.byteLength, sha256: input.sha256 }
+    return { inputRef: input.inputRef, sourceKind: input.sourceKind, sourceIdentity: structuredClone(input.sourceIdentity),
+      contentMimeType: input.contentMimeType, byteLength: byteLength(input.byteLength), sha256: input.sha256 }
   })
+}
+// Result digest is the server's canonical preimage, not the local checkpoint envelope.
+export function skillResultPayload(manifest) {
+  return { schemaVersion: 1, data: manifest.result.data, artifacts: manifest.result.artifacts.map(item => ({
+    outputId: item.outputId, sha256: item.sha256, byteLength: Number(item.byteLength) })), inputReceipts: manifest.result.inputReceipts }
+}
+export function validateCommittedSkillResult(manifest, command, descriptor, phase, local = null) {
+  const fields = ['schemaVersion', 'data', 'artifacts', 'inputReceipts', 'resultDigest', 'manifestId']
+  if (!object(manifest) || Object.keys(manifest).length !== fields.length || !fields.every(key => Object.hasOwn(manifest, key))
+      || manifest.schemaVersion !== 1 || !skillId(manifest.manifestId) || !skillSha(manifest.resultDigest)
+      || !Array.isArray(manifest.artifacts) || !['ARCHIVING', 'COMPLETE'].includes(phase)) fail('SKILL_COMMIT_UNCONFIRMED')
+  const ids = new Set()
+  for (const artifact of manifest.artifacts) {
+    if (!object(artifact) || Object.keys(artifact).length !== 3 || !skillId(artifact.outputId) || ids.has(artifact.outputId)
+        || !skillSha(artifact.sha256) || !Number.isSafeInteger(artifact.byteLength) || artifact.byteLength < 1) fail('SKILL_COMMIT_UNCONFIRMED')
+    ids.add(artifact.outputId)
+  }
+  const outputs = descriptor.manifest.outputs
+  if ((outputs.artifactsRequired && !manifest.artifacts.length) || (!outputs.multiple && manifest.artifacts.length > 1)
+      || (!outputs.dataSchema && manifest.data !== null)) fail('SKILL_COMMIT_UNCONFIRMED')
+  if (outputs.dataSchema) validateSkillData(outputs.dataSchema, manifest.data)
+  validateSkillInputReceipts(manifest.inputReceipts, command.inputRefs)
+  const preimage = { schemaVersion: 1, data: manifest.data, artifacts: manifest.artifacts, inputReceipts: manifest.inputReceipts }
+  if (skillDigest(preimage) !== manifest.resultDigest || (local && skillDigest(skillResultPayload(local)) !== manifest.resultDigest)) fail('SKILL_COMMIT_UNCONFIRMED')
+  return { manifestId: manifest.manifestId, state: 'RESULT_COMMITTED', phase, resultDigest: manifest.resultDigest }
 }
 
 export class SkillConversationLane {
@@ -79,14 +111,42 @@ export class SkillConversationLane {
     if (String(bytes.length) !== input.byteLength || skillHash(bytes) !== input.sha256) fail('SKILL_INPUT_BYTES_INVALID')
     return bytes
   }
+  pendingCommands() {
+    const subject = resolve(this.root, skillDigest({ ...this.scope, apiOrigin: this.origin }))
+    if (!existsSync(subject)) return []
+    if (realpathSync(subject) !== subject || !lstatSync(subject).isDirectory()) fail('SKILL_STORE_UNSAFE')
+    const pending = []
+    for (const id of readdirSync(subject)) {
+      if (!skillId(id)) fail('SKILL_STORE_UNSAFE')
+      const directory = resolve(subject, id)
+      if (realpathSync(directory) !== directory || !lstatSync(directory).isDirectory()) fail('SKILL_STORE_UNSAFE')
+      const fd = openSync(resolve(directory, 'command.json'), constants.O_RDONLY | constants.O_NOFOLLOW)
+      let command
+      try {
+        const stat = fstatSync(fd)
+        if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.geteuid() || (stat.mode & 0o077)) fail('SKILL_STORE_UNSAFE')
+        command = parseSkillCommand(readFileSync(fd))
+      } finally { closeSync(fd) }
+      if (command.executionId !== id) fail('SKILL_STORE_IDENTITY_CONFLICT')
+      const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
+      if (store.read('attempt') && !store.read('receipt')) pending.push(command)
+    }
+    return pending
+  }
   async poll() {
     if (this.active) return { processed: 0, busy: true }
     this.active = true
     try {
       const page = await this.request(`${BASE}/conversation-executions/commands`, 'GET')
       if (!object(page) || !Array.isArray(page.items) || page.items.length > 16) fail('SKILL_INBOX_INVALID')
+      const commands = new Map(this.pendingCommands().map(command => [command.executionId, command]))
+      for (const raw of page.items) {
+        const command = parseSkillCommand(raw), previous = commands.get(command.executionId)
+        if (previous && skillDigest(previous) !== skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
+        commands.set(command.executionId, command)
+      }
       let processed = 0
-      for (const raw of page.items) { await this.process(parseSkillCommand(raw)); processed++ }
+      for (const command of commands.values()) { await this.process(command); processed++ }
       return { processed }
     } finally { this.active = false }
   }
@@ -128,9 +188,12 @@ export class SkillConversationLane {
       loadResult: async () => store.loadResult(),
       materializeAuthorizedInputs: async (_command, descriptor) => {
         checkLease()
-        if (resume && !resume.allowedWork.includes('EXECUTE')) fail('SKILL_RESULT_UNKNOWN')
+        if (resume && !resume.allowedWork.includes('EXECUTE') && !resume.allowedWork.includes('RECOVER_LOCAL_RESULT')) fail('SKILL_RESULT_UNKNOWN')
         const snapshot = await this.request(`${path}/inputs`, 'POST', fence)
         const inputs = parseSkillInputSnapshot(snapshot, command, fence)
+        const savedInputs = store.read('inputs-snapshot')
+        if (savedInputs && skillDigest(savedInputs.inputs) !== skillDigest(inputs)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
+        if (!savedInputs) store.write('inputs-snapshot', { schemaVersion: 1, inputs })
         if (inputs.some(input => !descriptor.manifest.inputs.acceptedMimeTypes.includes(input.contentMimeType))) fail('SKILL_INPUT_CONTRACT_INVALID')
         const materialized = []
         for (const input of inputs) {
@@ -139,12 +202,18 @@ export class SkillConversationLane {
           let fd
           try {
             if (existsSync(target)) {
-              if (realpathSync(target) !== target || !lstatSync(target).isFile() || !readFileSync(target).equals(bytes)) fail('SKILL_INPUT_BYTES_INVALID')
+              if (realpathSync(target) !== target) fail('SKILL_INPUT_BYTES_INVALID')
+              fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW)
+              const before = fstatSync(fd, { bigint: true }), cached = readFileSync(fd), after = fstatSync(fd, { bigint: true })
+              if (!before.isFile() || before.nlink !== 1n || before.uid !== BigInt(process.geteuid()) || (before.mode & 0o077n)
+                  || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs || !cached.equals(bytes)) fail('SKILL_INPUT_BYTES_INVALID')
             } else {
               fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o400)
               writeFileSync(fd, bytes); fsyncSync(fd)
             }
           } finally { if (fd !== undefined) closeSync(fd) }
+          const inputDir = openSync(resolve(store.directory, 'inputs'), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+          try { fsyncSync(inputDir) } finally { closeSync(inputDir) }
           materialized.push({ ...input, path: target, bytes })
         }
         return materialized
@@ -161,23 +230,28 @@ export class SkillConversationLane {
               || !['STAGED', 'COMMITTED'].includes(staged.state)) fail('SKILL_STAGE_UNCONFIRMED')
         }
       },
+      recoverCommittedResult: async (_command, descriptor, manifest) => {
+        checkLease()
+        const local = store.read('result') // committed bytes need not remain on this host
+        return validateCommittedSkillResult(manifest, command, descriptor, resume?.phase, local)
+      },
       commitResult: async (_command, manifest) => {
         checkLease()
-        const artifacts = manifest.result.artifacts.map(item => ({ outputId: item.outputId, sha256: item.sha256, length: Number(item.byteLength) }))
-        const payload = { snapshotDigest: command.snapshotDigest, data: manifest.result.data, artifacts, inputReceipts: manifest.result.inputReceipts }
-        const manifestId = `manifest_${skillDigest(payload)}`
-        const submit = () => this.request(`${path}/result-commits/${manifestId}`, 'POST', { fence, ...payload })
+        const preimage = skillResultPayload(manifest), digest = skillDigest(preimage)
+        const manifestId = `manifest_${digest}`
+        const payload = { fence, snapshotDigest: command.snapshotDigest, data: preimage.data, artifacts: preimage.artifacts, inputReceipts: preimage.inputReceipts }
         let receipt
-        try { receipt = await submit() } catch (original) {
-          // No blind write retry: read back via current-session resume first.
+        try { receipt = await this.request(`${path}/result-commits/${manifestId}`, 'POST', payload) } catch (original) {
+          // Read back persistent server truth. Never restage or regenerate a committed result.
           let recovered
           try { recovered = await this.request(`${path}/resume`, 'POST', { executionId: command.executionId, snapshotDigest: command.snapshotDigest }) } catch { throw original }
-          if (!recovered.resultManifest || skillDigest(recovered.resultManifest) !== skillDigest(manifest)) throw original
-          if (!leaseValid(recovered.lease, command)) fail('SKILL_LEASE_UNCERTAIN')
-          fence = { version: recovered.lease.version, token: recovered.lease.token }; expiry = recovered.lease.expiresAt
-          receipt = await submit() // same persisted payload/id, never reruns generation
+          if (!recovered.resultManifest) throw original
+          const descriptor = (await this.registry.requireExact({ skillKey: command.skill.key, skillVersion: command.skill.version,
+            packageSha256: command.skill.packageSha256, manifestSha256: command.skill.manifestSha256 }, { allowUnavailable: true })).descriptor
+          receipt = validateCommittedSkillResult(recovered.resultManifest, command, descriptor, recovered.phase, manifest)
         }
-        if (receipt?.manifestId !== manifestId || receipt.state !== 'RESULT_COMMITTED' || !skillSha(receipt.resultDigest)) fail('SKILL_COMMIT_UNCONFIRMED')
+        if (receipt?.manifestId !== manifestId || receipt.state !== 'RESULT_COMMITTED' || receipt.resultDigest !== digest
+            || !['ARCHIVING', 'COMPLETE'].includes(receipt.phase)) fail('SKILL_COMMIT_UNCONFIRMED')
         return receipt
       },
       persistReceipt: async (_command, manifest, receipt) => {
@@ -187,12 +261,12 @@ export class SkillConversationLane {
         // Leave checkpoint retention explicit. A receipt never clears another execution's tree.
       }
     }
-    ctx.effects = new SkillEffects({ store, bindingRevision: null, checkLease,
+    ctx.effects = new SkillEffects({ store, bindingRevision: null, checkLease, mayStart: () => !resume || resume.allowedWork.includes('EXECUTE'),
       start: (id, body) => this.request(`${path}/effects/${id}/start`, 'POST', { ...common(), ...body }),
       report: (id, body) => this.request(`${path}/effects/${id}/result`, 'POST', { ...common(), ...body }) })
     // Current immutable binding revision is refreshed by the registry before run.
     const originalRequire = ctx.registry.requireExact.bind(ctx.registry)
-    ctx.registry = { requireExact: async skill => { const entry = await originalRequire(skill); ctx.effects.bindingRevision = entry.binding?.revision ?? null; return entry } }
+    ctx.registry = { requireExact: async (skill, options) => { const entry = await originalRequire(skill, options); ctx.effects.bindingRevision = entry.binding?.revision ?? null; return entry } }
     try { return await executeSkill(command, ctx) }
     finally { running = false; clearTimeout(timer); await renewalPromise }
   }

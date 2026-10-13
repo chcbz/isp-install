@@ -1,0 +1,40 @@
+TAP version 13
+# Subtest: result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+ok 1 - result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+  ---
+  duration_ms: 27.404489
+  ...
+# Subtest: effect START is on disk before request; real result bytes saved before remote report
+ok 2 - effect START is on disk before request; real result bytes saved before remote report
+  ---
+  duration_ms: 19.056182
+  ...
+# Subtest: report response loss recovers existing result; never repeats provider invocation
+ok 3 - report response loss recovers existing result; never repeats provider invocation
+  ---
+  duration_ms: 19.320283
+  ...
+# Subtest: uncertain network effect is UNKNOWN forever until real query, never resent
+ok 4 - uncertain network effect is UNKNOWN forever until real query, never resent
+  ---
+  duration_ms: 20.000416
+  ...
+# Subtest: lost START reply and competing claimant cannot emit side effects
+ok 5 - lost START reply and competing claimant cannot emit side effects
+  ---
+  duration_ms: 7.055834
+  ...
+# Subtest: effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+ok 6 - effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+  ---
+  duration_ms: 15.80281
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 588.344157

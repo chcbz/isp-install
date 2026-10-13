@@ -30,6 +30,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
+import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
 import { SkillBindings } from './skill-bindings.mjs'
 import { createImageProviderRunner } from './skill-runners/image-provider.mjs'
@@ -549,6 +550,8 @@ const parseOptionalPositiveInteger = value => {
 export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated = false } = {}) => {
   if (Object.hasOwn(profile, 'typedInspectionApiOrigin') || Object.hasOwn(fallback, 'typedInspectionApiOrigin') || (!isolated && process.env.CODEX_TYPED_INSPECTION_API_ORIGIN))
     throw new Error('Separate typedInspectionApiOrigin is not supported; configure workspaceFileApiOrigin for all native lanes')
+  profile = materialProfileFromInputCarriers(profile)
+  fallback = materialProfileFromInputCarriers(fallback)
   const agentId = profile.agentId || fallback.agentId || `local-codex-${index + 1}`
   const status = String(profile.status || fallback.status || '').trim().toLowerCase()
   return {
@@ -4257,7 +4260,7 @@ export const runSkillNativeModel = async (state, { command, inputs, instruction,
   const result = await adapter.runTurn({ threadId: thread.threadId, clientUserMessageId: command.messageId,
     input: [{ type: 'text', text: JSON.stringify({ instruction, parameters }) }, ...prepared.nativeInputs],
     policy: { cwd, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, outputSchema } })
-  if (result.status !== 'completed') throw new AgentProtocolError('SKILL_NATIVE_RESULT_UNKNOWN', 'Native model did not confirm a completed result')
+  if (result.finishReason !== 'completed') throw new AgentProtocolError('SKILL_NATIVE_RESULT_UNKNOWN', 'Native model did not confirm a completed result')
   const data = parseSkillJson(result.content)
   // Release is deliberately not performed here: output must be durable before state can retire.
   return { data, inputReceipts: prepared.inputReceipts }
@@ -6108,7 +6111,7 @@ const createProfileState = (profile, profileConfig = config) => {
       forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
     })
     : null
-  const typedInspectionProfileRuntime = profile.typedInspectionEnabled && typedInspectionMaterializer
+  const typedInspectionProfileRuntime = profile.inputCarriers && typedInspectionMaterializer
     ? new TypedInspectionProfileRuntime({
       profile, materializerRoot: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
       stateRoot: resolve(profile.typedInspectionStateRoot, safeProfileDirectory(profile)), bwrapBin: profile.typedInspectionBwrapBin,

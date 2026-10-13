@@ -26,7 +26,7 @@ export function createNativeModelRunner({ probeModel, runModel }) {
       if (typeof result.data?.text !== 'string') fail('SKILL_NATIVE_TEXT_RESULT_INVALID')
       const bytes = Buffer.from(result.data.text, 'utf8')
       if (!validateNativeConversationOutput('text/plain', bytes)) fail('SKILL_NATIVE_TEXT_RESULT_INVALID')
-      return { data: {}, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', bytes }], inputReceipts: result.inputReceipts }
+      return { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', bytes }], inputReceipts: result.inputReceipts }
     }
   }
 }

@@ -1,0 +1,179 @@
+TAP version 13
+# Subtest: one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+ok 1 - one protocol4 inbox gives genuine data-only commit, authenticated effects and no consent/output-commit
+  ---
+  duration_ms: 110.846697
+  ...
+# Subtest: lost final response reads back the identical committed result without a second write or model call
+ok 2 - lost final response reads back the identical committed result without a second write or model call
+  ---
+  duration_ms: 73.535298
+  ...
+# Subtest: stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+ok 3 - stage uncertainty resumes from saved manifest after reconstruction, same output/hash and no model repeat
+  ---
+  duration_ms: 74.783712
+  ...
+# Subtest: a recorded/unknown effect can never be issued by a successor claimant
+ok 4 - a recorded/unknown effect can never be issued by a successor claimant
+  ---
+  duration_ms: 30.477909
+  ...
+# Subtest: exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+ok 5 - exact native conversation routes reject legacy writes, wildcard routes and encoded aliases
+  ---
+  duration_ms: 1.267395
+  ...
+# Subtest: committed server envelope resumes without local blob/staging or a runnable dependency
+ok 6 - committed server envelope resumes without local blob/staging or a runnable dependency
+  ---
+  duration_ms: 130.007798
+  ...
+# Subtest: reconstruction resumes saved command even when server inbox only lists QUEUED work
+ok 7 - reconstruction resumes saved command even when server inbox only lists QUEUED work
+  ---
+  duration_ms: 81.139037
+  ...
+# Subtest: syntactically valid but incorrect result digest is not a commit receipt
+ok 8 - syntactically valid but incorrect result digest is not a commit receipt
+  ---
+  duration_ms: 111.190715
+  ...
+# Subtest: frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+ok 9 - frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit
+  ---
+  duration_ms: 3.003015
+  ...
+# Subtest: result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+ok 10 - result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+  ---
+  duration_ms: 60.901264
+  ...
+# Subtest: effect START is on disk before request; real result bytes saved before remote report
+ok 11 - effect START is on disk before request; real result bytes saved before remote report
+  ---
+  duration_ms: 31.074855
+  ...
+# Subtest: report response loss recovers existing result; never repeats provider invocation
+ok 12 - report response loss recovers existing result; never repeats provider invocation
+  ---
+  duration_ms: 30.237047
+  ...
+# Subtest: uncertain network effect is UNKNOWN forever until real query, never resent
+ok 13 - uncertain network effect is UNKNOWN forever until real query, never resent
+  ---
+  duration_ms: 30.5368
+  ...
+# Subtest: lost START reply and competing claimant cannot emit side effects
+ok 14 - lost START reply and competing claimant cannot emit side effects
+  ---
+  duration_ms: 12.492471
+  ...
+# Subtest: effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+ok 15 - effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+  ---
+  duration_ms: 26.954
+  ...
+# Subtest: effect result ACK must exactly confirm actual local digest/request id; no second invocation
+ok 16 - effect result ACK must exactly confirm actual local digest/request id; no second invocation
+  ---
+  duration_ms: 24.492713
+  ...
+# Subtest: resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+ok 17 - resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+  ---
+  duration_ms: 15.594534
+  ...
+# Subtest: strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+ok 18 - strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+  ---
+  duration_ms: 10.789545
+  ...
+# Subtest: one executor persists result before stage/commit; data-only still has real commit
+ok 19 - one executor persists result before stage/commit; data-only still has real commit
+  ---
+  duration_ms: 10.265127
+  ...
+# Subtest: recovered persistent result never runs a model/provider again
+ok 20 - recovered persistent result never runs a model/provider again
+  ---
+  duration_ms: 0.776571
+  ...
+# Subtest: invalid parameters, missing runner, wrong result identity and required empty output fail closed
+ok 21 - invalid parameters, missing runner, wrong result identity and required empty output fail closed
+  ---
+  duration_ms: 1.382112
+  ...
+# Subtest: host uses real AppServerAdapter finishReason and delivers actual authorized material in that model turn
+ok 22 - host uses real AppServerAdapter finishReason and delivers actual authorized material in that model turn
+  ---
+  duration_ms: 4.394223
+  ...
+# Subtest: non-completed native turn or missing actual image carrier cannot produce a success result
+not ok 23 - non-completed native turn or missing actual image carrier cannot produce a success result
+  ---
+  duration_ms: 3.349446
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-native-host.test.mjs:24:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /SKILL_NATIVE_RESULT_UNKNOWN/. Input:
+    
+    'AgentProtocolError: Native model did not confirm a completed result'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'Native model did not confirm a completed result'
+  stack: |-
+    runSkillNativeModel (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/agent-client.mjs:4263:50)
+    async waitForActual (node:assert:533:5)
+    async Function.rejects (node:assert:654:25)
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-native-host.test.mjs:25:30)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-native-host.test.mjs:25:30)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: one shared bindings config never substitutes another subject or process.env credential
+ok 24 - one shared bindings config never substitutes another subject or process.env credential
+  ---
+  duration_ms: 4.38671
+  ...
+# Subtest: fee metadata changes do not alter binding digest/revision; no approval or charge step
+ok 25 - fee metadata changes do not alter binding digest/revision; no approval or charge step
+  ---
+  duration_ms: 0.634686
+  ...
+# Subtest: generic image broker reuses exact codec and controlled endpoint without consent
+ok 26 - generic image broker reuses exact codec and controlled endpoint without consent
+  ---
+  duration_ms: 46.92424
+  ...
+# Subtest: image edits actually transmit verified reference bytes; real errors/redirects are not faked
+ok 27 - image edits actually transmit verified reference bytes; real errors/redirects are not faked
+  ---
+  duration_ms: 2.326056
+  ...
+# Subtest: native text file contains actual model result and can use authorized input material
+ok 28 - native text file contains actual model result and can use authorized input material
+  ---
+  duration_ms: 1.597174
+  ...
+# Subtest: missing native carrier is unavailable, never imaginary image understanding
+ok 29 - missing native carrier is unavailable, never imaginary image understanding
+  ---
+  duration_ms: 0.500973
+  ...
+1..29
+# tests 29
+# suites 0
+# pass 28
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3901.921865

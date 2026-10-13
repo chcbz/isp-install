@@ -1,0 +1,142 @@
+TAP version 13
+# Subtest: v3 empty generation durably claims before one exact generations request
+ok 1 - v3 empty generation durably claims before one exact generations request
+  ---
+  duration_ms: 48.365266
+  ...
+# Subtest: workspace GENERATE and exact current-conversation EDIT route to JSON edits with source-aware claims
+    # Subtest: workspace
+    ok 1 - workspace
+      ---
+      duration_ms: 24.81403
+      ...
+    # Subtest: asset
+    ok 2 - asset
+      ---
+      duration_ms: 25.535268
+      ...
+    # Subtest: workspace_input_edit
+    ok 3 - workspace_input_edit
+      ---
+      duration_ms: 19.005922
+      ...
+    # Subtest: asset_generate
+    ok 4 - asset_generate
+      ---
+      duration_ms: 16.66868
+      ...
+    1..4
+ok 2 - workspace GENERATE and exact current-conversation EDIT route to JSON edits with source-aware claims
+  ---
+  duration_ms: 88.147245
+  ...
+# Subtest: same command with changed operation or source revision is blocked by the original durable claim
+ok 3 - same command with changed operation or source revision is blocked by the original durable claim
+  ---
+  duration_ms: 24.346393
+  ...
+# Subtest: malformed source, wrong cardinality, and symlink fail before claim and Provider fetch
+ok 4 - malformed source, wrong cardinality, and symlink fail before claim and Provider fetch
+  ---
+  duration_ms: 22.353846
+  ...
+# Subtest: unknown network outcome retains the v3 claim and restart attempt never fetches twice
+ok 5 - unknown network outcome retains the v3 claim and restart attempt never fetches twice
+  ---
+  duration_ms: 19.065191
+  ...
+# Subtest: provider generation_id metadata preserves exact output bytes and never authorizes a second call
+ok 6 - provider generation_id metadata preserves exact output bytes and never authorizes a second call
+  ---
+  duration_ms: 25.434361
+  ...
+# Subtest: generation metadata cannot replace image bytes or introduce alternative output/authority fields
+    # Subtest: 0
+    ok 1 - 0
+      ---
+      duration_ms: 18.407022
+      ...
+    # Subtest: 1
+    ok 2 - 1
+      ---
+      duration_ms: 18.056897
+      ...
+    # Subtest: 2
+    ok 3 - 2
+      ---
+      duration_ms: 18.290957
+      ...
+    # Subtest: 3
+    ok 4 - 3
+      ---
+      duration_ms: 15.196222
+      ...
+    # Subtest: 4
+    ok 5 - 4
+      ---
+      duration_ms: 14.387174
+      ...
+    # Subtest: 5
+    ok 6 - 5
+      ---
+      duration_ms: 15.650222
+      ...
+    # Subtest: 6
+    ok 7 - 6
+      ---
+      duration_ms: 14.891045
+      ...
+    # Subtest: 7
+    ok 8 - 7
+      ---
+      duration_ms: 14.864642
+      ...
+    # Subtest: 8
+    ok 9 - 8
+      ---
+      duration_ms: 18.956655
+      ...
+    1..9
+ok 7 - generation metadata cannot replace image bytes or introduce alternative output/authority fields
+  ---
+  duration_ms: 152.469075
+  ...
+# Subtest: one shared bindings config never substitutes another subject or process.env credential
+ok 8 - one shared bindings config never substitutes another subject or process.env credential
+  ---
+  duration_ms: 5.128262
+  ...
+# Subtest: fee metadata changes do not alter binding digest/revision; no approval or charge step
+ok 9 - fee metadata changes do not alter binding digest/revision; no approval or charge step
+  ---
+  duration_ms: 0.838551
+  ...
+# Subtest: generic image broker reuses exact codec and controlled endpoint without consent
+ok 10 - generic image broker reuses exact codec and controlled endpoint without consent
+  ---
+  duration_ms: 48.447426
+  ...
+# Subtest: image edits actually transmit verified reference bytes; real errors/redirects are not faked
+ok 11 - image edits actually transmit verified reference bytes; real errors/redirects are not faked
+  ---
+  duration_ms: 2.462978
+  ...
+# Subtest: native text file contains actual model result and can use authorized input material
+ok 12 - native text file contains actual model result and can use authorized input material
+  ---
+  duration_ms: 1.72011
+  ...
+# Subtest: missing native carrier is unavailable, never imaginary image understanding
+ok 13 - missing native carrier is unavailable, never imaginary image understanding
+  ---
+  duration_ms: 0.476369
+  ...
+1..13
+# tests 26
+# suites 0
+# pass 26
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 997.513832

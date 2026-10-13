@@ -4,7 +4,7 @@ import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdi
   openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { parseSkillJson, validateSkillParameters } from './skill-manifest.mjs'
+import { parseSkillJson, validateSkillData } from './skill-manifest.mjs'
 import { skillCanonicalJson, skillDigest, skillHash, skillId, skillSha } from './skill-executor.mjs'
 import { validateNativeConversationOutput } from './conversation-native.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
@@ -31,6 +31,18 @@ const writePrivate = (path, bytes) => {
   try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
 }
 
+export const SKILL_INPUT_CARRIERS = Object.freeze(['native-text', 'native-image', 'native-audio', 'parsed-text', 'provider-image'])
+export function validateSkillInputReceipts(receipts, inputRefs, frozenInputs = null) {
+  if (!Array.isArray(receipts) || receipts.length !== inputRefs.length) fail('SKILL_RESULT_INPUT_RECEIPT_INVALID')
+  const seen = new Set()
+  for (const receipt of receipts) {
+    if (!receipt || Object.keys(receipt).sort().join(',') !== 'carrier,delivery,inputRef,sha256' || !inputRefs.includes(receipt.inputRef)
+        || seen.has(receipt.inputRef) || !skillSha(receipt.sha256) || !SKILL_INPUT_CARRIERS.includes(receipt.carrier) || receipt.delivery !== 'DELIVERED'
+        || (frozenInputs && frozenInputs.find(input => input.inputRef === receipt.inputRef)?.sha256 !== receipt.sha256)) fail('SKILL_RESULT_INPUT_RECEIPT_INVALID')
+    seen.add(receipt.inputRef)
+  }
+}
+
 export class SkillExecutionStore {
   constructor({ rootDirectory, scope, command }) {
     if (!isAbsolute(rootDirectory || '') || !scope || !skillId(command?.executionId)) fail('SKILL_STORE_CONFIG_INVALID')
@@ -46,6 +58,7 @@ export class SkillExecutionStore {
       executionId: command.executionId, snapshotDigest: command.snapshotDigest }
     if (previous && skillDigest(previous) !== skillDigest(identity)) fail('SKILL_STORE_IDENTITY_CONFLICT')
     if (!previous) this.write('identity', identity)
+    if (!this.read('command')) this.write('command', command)
   }
   path(name) { if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) fail('SKILL_STORE_KEY_INVALID'); return resolve(this.directory, `${name}.json`) }
   read(name) { privateDirectory(this.directory); const path = this.path(name); return existsSync(path) ? parseSkillJson(readPrivate(path)) : null }
@@ -82,8 +95,9 @@ export class SkillExecutionStore {
     if (!result || !Array.isArray(result.artifacts) || !Array.isArray(result.inputReceipts)) fail('SKILL_RESULT_INVALID')
     const outputs = descriptor.manifest.outputs
     if ((outputs.artifactsRequired && result.artifacts.length === 0) || (!outputs.multiple && result.artifacts.length > 1)) fail('SKILL_RESULT_ARTIFACTS_INVALID')
-    const data = result.data ?? {}
-    if (outputs.dataSchema) validateSkillParameters(outputs.dataSchema, data)
+    const data = result.data ?? null
+    if (!outputs.dataSchema && data !== null) fail('SKILL_RESULT_DATA_INVALID')
+    if (outputs.dataSchema) validateSkillData(outputs.dataSchema, data)
     const ids = new Set()
     const artifacts = result.artifacts.map(artifact => {
       if (!skillId(artifact?.outputId) || ids.has(artifact.outputId) || !outputs.mimeTypes.includes(artifact.contentMimeType)
@@ -92,12 +106,7 @@ export class SkillExecutionStore {
       this.writeBlob(artifact.outputId, artifact.bytes)
       return { outputId: artifact.outputId, contentMimeType: artifact.contentMimeType, sha256: skillHash(artifact.bytes), byteLength: String(artifact.bytes.length) }
     })
-    const refs = new Set()
-    for (const receipt of result.inputReceipts) {
-      if (!this.command.inputRefs.includes(receipt?.inputRef) || refs.has(receipt.inputRef) || !skillSha(receipt.sha256)
-          || typeof receipt.carrier !== 'string' || receipt.delivery !== 'DELIVERED') fail('SKILL_RESULT_INPUT_RECEIPT_INVALID')
-      refs.add(receipt.inputRef)
-    }
+    validateSkillInputReceipts(result.inputReceipts, this.command.inputRefs, this.read('inputs-snapshot')?.inputs || null)
     const manifest = { schemaVersion: 1, executionId: this.command.executionId, snapshotDigest: this.command.snapshotDigest,
       result: { data, artifacts, inputReceipts: result.inputReceipts } }
     const previous = this.loadResult()
@@ -108,8 +117,8 @@ export class SkillExecutionStore {
 }
 
 export class SkillEffects {
-  constructor({ store, start, report, checkLease, bindingRevision = null }) {
-    this.store = store; this.start = start; this.report = report; this.checkLease = checkLease; this.bindingRevision = bindingRevision
+  constructor({ store, start, report, checkLease, bindingRevision = null, mayStart = () => true }) {
+    this.store = store; this.start = start; this.report = report; this.checkLease = checkLease; this.bindingRevision = bindingRevision; this.mayStart = mayStart
   }
   async invoke(effectId, request, invoke) {
     if (!skillId(effectId) || typeof invoke !== 'function') fail('SKILL_EFFECT_INVALID')
@@ -120,12 +129,14 @@ export class SkillEffects {
     if (local?.status === 'SUCCEEDED') {
       // Reconfirm persistent server status; never trust a local record as admission.
       this.checkLease()
-      await this.report(effectId, { effectDigest, providerBindingRevision: this.bindingRevision, status: 'SUCCEEDED', providerRequestId: local.providerRequestId, resultDigest: local.resultDigest })
+      const confirmation = await this.report(effectId, { effectDigest, providerBindingRevision: this.bindingRevision, status: 'SUCCEEDED', providerRequestId: local.providerRequestId, resultDigest: local.resultDigest })
+      this.confirm(confirmation, local)
       return this.restore(local)
     }
     this.checkLease()
+    if (!this.mayStart()) fail('SKILL_RESULT_UNKNOWN')
     const receipt = await this.start(effectId, { effectDigest, providerBindingRevision: this.bindingRevision })
-    if (receipt?.schemaVersion !== 1 || receipt.disposition !== 'NEW' || local) fail('SKILL_RESULT_UNKNOWN')
+    if (receipt?.schemaVersion !== 1 || receipt.disposition !== 'NEW' || receipt.status !== 'START_RECORDED' || receipt.providerRequestId !== null || receipt.resultDigest !== null || local) fail('SKILL_RESULT_UNKNOWN')
     local = { schemaVersion: 1, effectDigest, bindingRevision: this.bindingRevision, status: 'START_RECORDED', providerRequestId: null, resultDigest: null }
     // This durable write must finish BEFORE any external effect. A crash leaves unknown.
     this.store.write(name, local)
@@ -147,8 +158,13 @@ export class SkillEffects {
     local = { ...local, status: 'SUCCEEDED', providerRequestId: value?.providerRequestId ?? null, resultDigest, value: encoded }
     this.store.write(name, local)
     this.checkLease()
-    await this.report(effectId, { effectDigest, providerBindingRevision: this.bindingRevision, status: 'SUCCEEDED', providerRequestId: local.providerRequestId, resultDigest })
+    const confirmation = await this.report(effectId, { effectDigest, providerBindingRevision: this.bindingRevision, status: 'SUCCEEDED', providerRequestId: local.providerRequestId, resultDigest })
+    this.confirm(confirmation, local)
     return this.restore(local)
+  }
+  confirm(receipt, local) {
+    if (receipt?.schemaVersion !== 1 || !['KNOWN', 'RECORDED'].includes(receipt.disposition) || receipt.status !== 'SUCCEEDED'
+        || receipt.providerRequestId !== local.providerRequestId || receipt.resultDigest !== local.resultDigest) fail('SKILL_EFFECT_REPORT_UNCONFIRMED')
   }
   restore(local) {
     if (!local.value || skillDigest(local.value) !== local.resultDigest) fail('SKILL_EFFECT_RESULT_CHANGED')

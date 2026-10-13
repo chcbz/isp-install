@@ -37,7 +37,7 @@ export function createImageProviderRunner({ bindings, scope, fetchFn = globalThi
         const bytes = await responsePng(response, endpoint)
         return { bytes, providerRequestId: response.headers?.get?.('x-request-id') || null }
       })
-      return { data: {}, artifacts: [{ outputId: 'output_1', contentMimeType: 'image/png', bytes: produced.bytes }],
+      return { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'image/png', bytes: produced.bytes }],
         inputReceipts: inputs.map(input => ({ inputRef: input.inputRef, sha256: input.sha256, carrier: 'provider-image', delivery: 'DELIVERED' })) }
     }
   }
