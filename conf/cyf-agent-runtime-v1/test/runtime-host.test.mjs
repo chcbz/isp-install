@@ -228,6 +228,12 @@ test('mature executor retains isolated subjects/session namespaces and allowlist
     assert.equal(state.profile.runtimeIdentity.installationId, agent.manifest.installationId);
     assert.equal(state.profile.runtimeInstanceId, 'boot-one'); assert.equal(executor.ready(), false);
     assert.equal(state.processor.paused, true);
+    executor.bindSkillSession({ scope: { tenantId: agent.manifest.tenantId, clientId: agent.manifest.clientId,
+      ownerJiacn: 'fixture-owner', agentId: agent.manifest.canonicalAgentId }, fence: {
+      installationId: agent.manifest.installationId, hostId: 'host-fixture', runtimeInstanceId: 'boot-one', sessionGeneration: 1 } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(executor.registrationPayload().skillExecution.skills, []);
+    executor.disconnected(); assert.equal(executor.registrationPayload().skillExecution, undefined);
     assert.throws(() => buildRuntimeExecutionEnvironment(state.profile, { OPENAI_API_KEY: 'foreign' }), code('RUNTIME_EXECUTION_ENV_FORBIDDEN'));
     const env = buildRuntimeExecutionEnvironment(state.profile);
     assert.equal(env.HOME, agent.profile.codexHome); assert.equal(env.CODEX_HOME, agent.profile.codexHome);
@@ -441,7 +447,7 @@ test('toolchain validation refuses a host-global interpreter alias instead of fa
 
 // M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
 // lifecycle. Synthetic socket/HTTP only; no server/production claim.
-async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {} } = {}) {
+async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false } = {}) {
   const { EventEmitter } = await import('node:events');
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
   const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
@@ -458,7 +464,10 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
       if (frame.messageType === 'agent.register' && ackRegistration) queueMicrotask(() => this.receive({ type: 'agent_registered',
         messageId: frame.messageId, agentId: frame.agentId, runtimeInstanceId: frame.runtimeInstanceId,
         installationId: frame.installationId, hostId: frame.hostId, sessionGeneration: frame.sessionGeneration,
-        status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes }));
+        status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes,
+        ...(measureSkills ? { runtimeAuth: { scheme: 'native-runtime-v1', tenantId: frame.tenantId, clientId: frame.clientId,
+          ownerJiacn: 'fixture-owner', agentId: frame.agentId, installationId: frame.installationId, hostId: frame.hostId,
+          runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration, contextPackEnabled: true } } : {}) }));
     }
     receive(frame) { this.emit('message', Buffer.from(JSON.stringify(frame))); }
     close(code = 1000) { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.emit('close', code)); }
@@ -473,6 +482,12 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
         engines.set(subjectKey, state);
         return {
           initialize: async () => {}, bindTransport: transport => { state.transport = transport; }, attachSocket: socket => { state.socket = socket; },
+          bindSkillSession: binding => {
+            state.skillBinding = binding;
+            if (!measureSkills || !binding || state.catalogMeasured) return false;
+            queueMicrotask(() => { state.catalogMeasured = true; state.transport.refreshCapabilities(); });
+            return true;
+          },
           durableStateHealthy: () => state.healthy, readyCommandTypes: () => state.types, chatReady: () => chatReady,
           registrationPayload: () => ({ runtimeCapabilities: { profiles: { EXECUTE: { available: false } } } }),
           acceptFrame: async frame => { state.accepted.push(frame); if (normalize && !(frame.type === 'agent_message_saved' && !Object.hasOwn(frame, 'messageType'))) state.normalized.push(normalize(frame)); }, resume: async () => { state.resumed++; },
@@ -1396,3 +1411,31 @@ for (const kind of ['relative', 'missing', 'file-symlink', 'ancestor-symlink', '
     }
   });
 }
+
+// I10: the initial authenticated ACK is the owner source; a follow-up catalog ACK
+// must settle activation so host phase never freezes on transient re-registration.
+test('skill measurement activation waits for its follow-up registration and never loops on heartbeat', async t => {
+  const c = await channelFixture(t, { measureSkills: true });
+  await c.executors[0].activate();
+  assert.equal(c.executors[0].ready(), true);
+  assert.equal(c.states()[0].skillBinding.scope.ownerJiacn, 'fixture-owner');
+  const registrations = () => c.sockets[0].sent.filter(frame => frame.messageType === 'agent.register').length;
+  assert.equal(registrations(), 2);
+  await c.adapters.heartbeat(); await c.tick(); assert.equal(registrations(), 2);
+  assert.equal(JSON.stringify(c.states()[0].skillBinding).includes('sessionToken'), false);
+});
+
+test('unmatched ACK and presence cannot supply a skill subject to the executor', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0], registration = socket.sent[0];
+  const auth = { scheme: 'native-runtime-v1', tenantId: registration.tenantId, clientId: registration.clientId,
+    ownerJiacn: 'fixture-owner', agentId: registration.agentId, installationId: registration.installationId,
+    hostId: registration.hostId, runtimeInstanceId: registration.runtimeInstanceId, sessionGeneration: registration.sessionGeneration };
+  socket.receive({ ...registrationReceipt(registration), messageId: 'foreign', runtimeAuth: auth });
+  await c.tick(); assert.equal(c.states()[0].skillBinding, undefined);
+  socket.receive({ ...registrationReceipt(registration), runtimeAuth: auth }); await activating;
+  const bound = c.states()[0].skillBinding; assert.equal(bound.scope.ownerJiacn, 'fixture-owner');
+  socket.receive({ ...presenceReceipt(registration), runtimeAuth: { ...auth, ownerJiacn: 'foreign' } });
+  await c.tick(); assert.equal(c.states()[0].skillBinding, bound);
+});

@@ -9,6 +9,23 @@ const wait = (ms, signal) => new Promise(resolve => {
   const timer = setTimeout(done, ms); signal.addEventListener('abort', done, { once: true });
 });
 
+// Called only after the exact correlated authenticated registration ACK. The session
+// response intentionally has no owner; take it from the server's installation-derived
+// runtimeAuth receipt, never profile/model/presence. Return no credentials.
+export function skillSessionBinding(receipt, session) {
+  const auth = receipt?.runtimeAuth;
+  if (!session || !auth || typeof auth !== 'object' || Array.isArray(auth) || auth.scheme !== 'native-runtime-v1'
+      || typeof auth.ownerJiacn !== 'string' || !auth.ownerJiacn || auth.ownerJiacn !== auth.ownerJiacn.trim()
+      || [...auth.ownerJiacn].length > 50 || /[\x00-\x1f\x7f]/u.test(auth.ownerJiacn)
+      || auth.agentId !== session.canonicalAgentId
+      || ['tenantId', 'clientId', 'installationId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
+        .some(key => auth[key] !== session[key])) return null;
+  return Object.freeze({ scope: Object.freeze({ tenantId: session.tenantId, clientId: session.clientId,
+    ownerJiacn: auth.ownerJiacn, agentId: session.canonicalAgentId }), fence: Object.freeze({
+    installationId: session.installationId, hostId: session.hostId,
+    runtimeInstanceId: session.runtimeInstanceId, sessionGeneration: session.sessionGeneration }) });
+}
+
 export async function createExecutionAdapterFactory({ config, instanceId, apiOrigin, workspacePolicies,
   providerEnvironments, loadEngine, socketFactory, clientFactory, logger = () => {} } = {}) {
   const module = await (loadEngine || (() => import('../../codex-ws-agent/agent-client.mjs')))();
@@ -108,7 +125,13 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               if (payload.readyCommandTypes.length !== requestTypes.length || payload.readyCommandTypes.some(type => !requestTypes.includes(type)) || payload.durableStateHealthy !== declaredHealthy) {
                 channelConfirmed = false; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
               }
-              channelConfirmed = true; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null; resolveActivated?.(); resume(); return;
+              channelConfirmed = true; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null;
+              // The first ACK supplies owner scope. If it starts a catalog measurement,
+              // activation waits for the follow-up catalog registration ACK; otherwise the
+              // shared host could freeze INITIALIZED while re-registration is in flight.
+              const measuring = executor.bindSkillSession?.(skillSessionBinding(payload, session)) === true;
+              if (!measuring) { resolveActivated?.(); resume(); }
+              return;
             }
             if (observed === 'rejected') { rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 })); current.close(1008); return; }
             if (typeOnlyControl && (frame.type === 'connected' || frame.type === 'agent_registered')) return;

@@ -30,6 +30,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError } from './workspace-manager.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
+import { SkillRegistry } from './skill-registry.mjs'
 import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
 import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
@@ -4168,7 +4169,7 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => {
 }
 
 export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null,
-  typedInspectionProfileRuntime = null, controlledImageV3Runtime = null) => {
+  typedInspectionProfileRuntime = null, controlledImageV3Runtime = null, skillRegistry = null) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, appServerAdapter)
   const typedInspection = typedInspectionProfileRuntime?.declaration?.() || null
   const providerRuntime = controlledImageProviderRuntime(nativeRuntime, controlledImageV3Runtime)
@@ -4186,7 +4187,8 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
     }),
     nativeProviderCredentialBinding: buildNativeProviderCredentialBinding({ profile, runtime: providerRuntime, online }),
     ...(typedDeliberation ? { typedDeliberation } : {}),
-    ...(typedInspection ? { typedInspection } : {})
+    ...(typedInspection ? { typedInspection } : {}),
+    ...(online && skillRegistry?.declaration?.() ? { skillExecution: skillRegistry.declaration() } : {})
   }
 }
 
@@ -4217,13 +4219,44 @@ export const publishTypedInspectionReadiness = (profile, state, { registerFn = r
   return sendStatusFn(profile, busyFn(profile) ? 'busy' : 'online') === true
 }
 
+// Skill catalog refresh is lifecycle work, not heartbeat work or installation outcome.
+// Failures remove readiness; they must never rewrite an already durable install receipt.
+export const refreshMeasuredSkills = async state => {
+  const registry = state?.skillRegistry
+  if (!registry || state.disposed) return null
+  const epoch = registry.epoch, fence = registry.fence, pending = registry.refresh(), ticket = registry.ticket
+  const result = await pending
+  if (state.skillRegistry === registry && registry.epoch === epoch && registry.fence === fence && registry.ticket === ticket
+      && !state.disposed && state.runtimeTransport?.reportReady?.()) {
+    try { state.runtimeTransport.refreshCapabilities() } catch { /* transport will reconnect */ }
+  }
+  return result
+}
+
+export const bindMeasuredSkillSession = (state, binding) => {
+  if (!state || state.disposed) return false
+  if (!binding) { state.skillRegistry?.setSession(null); return false }
+  const identity = state.profile.runtimeIdentity
+  if (!identity || binding.scope.tenantId !== identity.tenantId || binding.scope.clientId !== identity.clientId
+      || binding.scope.agentId !== identity.canonicalAgentId || binding.fence.installationId !== identity.installationId
+      || binding.fence.runtimeInstanceId !== state.profile.runtimeInstanceId) throw new AgentProtocolError('SKILL_SESSION_SCOPE_MISMATCH', 'Authenticated skill subject mismatch')
+  if (!state.skillRegistry || JSON.stringify(state.skillRegistry.scope) !== JSON.stringify(binding.scope)) {
+    state.skillRegistry?.setSession(null)
+    state.skillRegistry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => state.skillInstallManager.listInstalledSkills() })
+  }
+  if (!state.skillRegistry.setSession(binding.fence)) return false
+  // No speculative runner registration. I22/I36 supply trusted execution adapters later.
+  void refreshMeasuredSkills(state)
+  return true
+}
+
 const registerAgent = profile => {
   const state = getProfileState(profile)
   if (profile?.runtimeIdentity) return state?.runtimeTransport?.refreshCapabilities?.() === true
   const envelope = buildProtocolEnvelope(
     MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(
       profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN,
-      state.appServerAdapter, state.typedInspectionProfileRuntime, state.controlledImageV3SourceRuntime
+      state.appServerAdapter, state.typedInspectionProfileRuntime, state.controlledImageV3SourceRuntime, state.skillRegistry
     ), profile
   )
   return sendRegistrationWithAckObservation({
@@ -5383,7 +5416,7 @@ const runE05Command = async ({ profile, message, binding, workspaceManager, runC
 export const runManagedCommand = async ({
   profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
   materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus,
-  nativeFetch, apiOrigin, commandCheckpoint, now = Date.now, signal, sessionCurrent
+  nativeFetch, apiOrigin, commandCheckpoint, now = Date.now, signal, sessionCurrent, onSkillInstallChanged = null
 }) => {
   const binding = e05ReassignmentBinding(profile, message)
   if (binding) return runE05Command({ profile, message, binding, workspaceManager, runCodexFn,
@@ -5396,9 +5429,11 @@ export const runManagedCommand = async ({
     // manifest is their only completion fact; sending legacy task reports would target a fake task.
     return workspaceFileResult
   }
-  return message.commandType === 'SKILL_INSTALL'
-    ? skillInstallManager.execute(message)
-    : runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
+  if (message.commandType !== 'SKILL_INSTALL') return runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
+  const changed = phase => { try { onSkillInstallChanged?.(phase) } catch { /* catalog failure is not installation failure */ } }
+  changed('changing')
+  try { return await skillInstallManager.execute(message) }
+  finally { changed('changed') }
 }
 
 const WORKSPACE_FILE_QUEUE_PATH = '/internal/agent/tasks/workspace-executions/commands'
@@ -6109,6 +6144,7 @@ const createProfileState = (profile, profileConfig = config) => {
     legacyExecutionGate,
     executionReportOutbox,
     skillInstallManager,
+    skillRegistry: null,
     workspaceManager,
     workspaceFileBridge,
     conversationNativeLane,
@@ -6224,6 +6260,7 @@ const createProfileState = (profile, profileConfig = config) => {
       return legacyExecutionGate.run(() => runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge,
         workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader, commandCheckpoint, apiOrigin: profile.runtimeApiOrigin,
         nativeFetch: transport?.nativeFetch, signal: controller.signal,
+        onSkillInstallChanged: phase => { if (phase === 'changing') state.skillRegistry?.invalidate(); else void refreshMeasuredSkills(state) },
         sessionCurrent: () => state.runtimeTransport === transport && transport?.ready?.()
           && transport.headers()['X-Agent-Session-Generation'] === generation }))
         .finally(() => { if (state.e05CommandAbort === controller) state.e05CommandAbort = null })
@@ -6387,7 +6424,7 @@ const disposeProfileStateOnce = async (state, reason) => {
   state.processor.pause()
   state.processor.stop()
   // Disable ingress and auth before awaiting an engine shutdown.
-  if (profile.runtimeIdentity) { state.runtimeTransport = null; state.workspaceFileRuntimeAuthHeader = '' }
+  if (profile.runtimeIdentity) { state.skillRegistry?.setSession(null); state.runtimeTransport = null; state.workspaceFileRuntimeAuthHeader = '' }
   await disposeAppServerState(state, { timeoutMs: 5000 })
   await state.typedInspectionProfileRuntime?.dispose()
   state.processor.pause()
@@ -6511,6 +6548,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           if (!entry.state || entry.closed || !transport || typeof transport.ready !== 'function' || typeof transport.send !== 'function') throw new AgentProtocolError('RUNTIME_TRANSPORT_REQUIRED', 'A bound Runtime transport is required')
           entry.state.runtimeTransport = transport
         },
+        bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
         attachSocket: socket => { entry.state.ws = socket },
         durableStateHealthy: () => {
           const state = entry.state
@@ -6518,7 +6556,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           try { state.ackOutbox.pendingEnvelopes(); return true } catch { return false }
         },
         registrationPayload: () => buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
-          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime),
+          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry),
         readyCommandTypes: () => {
           const state = entry.state
           if (!state || state.disposed || state.processor.failClosedError) return []
@@ -6546,10 +6584,10 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
             startControlledImageV3ConversationPoller(entry.profile, state)
           }
         },
-        suspendAdmission: () => { const state = entry.state; state.processor.pause(); stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state) },
-        disconnected: () => { const state = entry.state; state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
+        suspendAdmission: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.processor.pause(); stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state) },
+        disconnected: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
         ready: () => Boolean(!entry.closed && entry.state && !entry.state.disposed && !entry.state.processor.failClosedError && entry.state.runtimeTransport?.ready?.()),
-        pause: async () => { entry.state?.e05CommandAbort?.abort(); entry.state?.processor.pause(); if (entry.state) { entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
+        pause: async () => { entry.state?.e05CommandAbort?.abort(); entry.state?.processor.pause(); if (entry.state) { entry.state.skillRegistry?.setSession(null); entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
         close: () => closeEntry(entry),
         // This read-only structure exposes state only to the trusted adapter, not
         // to the UI, logs, profile file or engine environment.
