@@ -1,0 +1,120 @@
+TAP version 13
+# Subtest: pure candidate maps one shared binding and real carrier config, preserves identity/HOME and evidence bytes reference
+ok 1 - pure candidate maps one shared binding and real carrier config, preserves identity/HOME and evidence bytes reference
+  ---
+  duration_ms: 6.474663
+  ...
+# Subtest: binding collisions fail instead of quietly changing another subject; no operator writes/restarts
+ok 2 - binding collisions fail instead of quietly changing another subject; no operator writes/restarts
+  ---
+  duration_ms: 0.868076
+  ...
+# Subtest: one shared bindings config never substitutes another subject or process.env credential
+ok 3 - one shared bindings config never substitutes another subject or process.env credential
+  ---
+  duration_ms: 4.220709
+  ...
+# Subtest: fee metadata changes do not alter binding digest/revision; no approval or charge step
+ok 4 - fee metadata changes do not alter binding digest/revision; no approval or charge step
+  ---
+  duration_ms: 0.672352
+  ...
+# Subtest: generic image broker reuses exact codec and controlled endpoint without consent
+ok 5 - generic image broker reuses exact codec and controlled endpoint without consent
+  ---
+  duration_ms: 28.035087
+  ...
+# Subtest: image edits actually transmit verified reference bytes; real errors/redirects are not faked
+ok 6 - image edits actually transmit verified reference bytes; real errors/redirects are not faked
+  ---
+  duration_ms: 2.142177
+  ...
+# Subtest: native text file contains actual model result and can use authorized input material
+ok 7 - native text file contains actual model result and can use authorized input material
+  ---
+  duration_ms: 1.609168
+  ...
+# Subtest: missing native carrier is unavailable, never imaginary image understanding
+ok 8 - missing native carrier is unavailable, never imaginary image understanding
+  ---
+  duration_ms: 0.455193
+  ...
+# Subtest: native skill admitting media is unavailable until that exact MIME has a measured real carrier
+ok 9 - native skill admitting media is unavailable until that exact MIME has a measured real carrier
+  ---
+  duration_ms: 0.651068
+  ...
+# Subtest: shared costInfoOverrides accepts revisioned skill/version/binding metadata without changing readiness or binding digest
+ok 10 - shared costInfoOverrides accepts revisioned skill/version/binding metadata without changing readiness or binding digest
+  ---
+  duration_ms: 1.020811
+  ...
+# Subtest: skill native carrier structurally decodes genuine PNG/WAV bytes and rejects forged media before model delivery
+ok 11 - skill native carrier structurally decodes genuine PNG/WAV bytes and rejects forged media before model delivery
+  ---
+  duration_ms: 9.989332
+  ...
+# Subtest: missing/malformed price container never removes valid provider binding readiness
+ok 12 - missing/malformed price container never removes valid provider binding readiness
+  ---
+  duration_ms: 1.193847
+  ...
+# Subtest: disabled profiles need no Provider file or process environment fallback
+ok 13 - disabled profiles need no Provider file or process environment fallback
+  ---
+  duration_ms: 2.923021
+  ...
+# Subtest: explicit environments remain isolated by full subject and immutable
+ok 14 - explicit environments remain isolated by full subject and immutable
+  ---
+  duration_ms: 13.484426
+  ...
+# Subtest: unknown or disabled subjects and missing enabled subject are rejected
+ok 15 - unknown or disabled subjects and missing enabled subject are rejected
+  ---
+  duration_ms: 6.436178
+  ...
+# Subtest: canonical private files required; errors never echo file/credential
+ok 16 - canonical private files required; errors never echo file/credential
+  ---
+  duration_ms: 11.902346
+  ...
+# Subtest: exact schema and image-only key reject arbitrary environment injection
+ok 17 - exact schema and image-only key reject arbitrary environment injection
+  ---
+  duration_ms: 24.779504
+  ...
+# Subtest: known provider values are removed from logger message text
+ok 18 - known provider values are removed from logger message text
+  ---
+  duration_ms: 1.155874
+  ...
+# Subtest: unified run passes exact explicit mapping into existing adapters
+ok 19 - unified run passes exact explicit mapping into existing adapters
+  ---
+  duration_ms: 54.5174
+  ...
+# Subtest: systemd canonical configuration templates match and preserve /etc systemd boundary
+ok 20 - systemd canonical configuration templates match and preserve /etc systemd boundary
+  ---
+  duration_ms: 6.688089
+  ...
+# Subtest: actual CLI validate consumes file and validates enabled image credential without execution
+ok 21 - actual CLI validate consumes file and validates enabled image credential without execution
+  ---
+  duration_ms: 228.646271
+  ...
+# Subtest: shared skill binding references reuse only existing private full-subject credentials; missing new binding is UNAVAILABLE
+ok 22 - shared skill binding references reuse only existing private full-subject credentials; missing new binding is UNAVAILABLE
+  ---
+  duration_ms: 172.619869
+  ...
+1..22
+# tests 22
+# suites 0
+# pass 22
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1320.610449

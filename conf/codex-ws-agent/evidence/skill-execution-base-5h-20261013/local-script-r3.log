@@ -1,0 +1,120 @@
+TAP version 13
+# Subtest: missing isolation/interpreter or invalid package entry never advertises READY
+ok 1 - missing isolation/interpreter or invalid package entry never advertises READY
+  ---
+  duration_ms: 216.046511
+  ...
+# Subtest: real local script receives actual readonly bytes, no shell/token/HOME or routable network, and emits UTF8 artifact
+ok 2 - real local script receives actual readonly bytes, no shell/token/HOME or routable network, and emits UTF8 artifact
+  ---
+  duration_ms: 832.379361
+  ...
+# Subtest: invalid hash, nonprivate input or symlink fails before package process launch
+ok 3 - invalid hash, nonprivate input or symlink fails before package process launch
+  ---
+  duration_ms: 923.89442
+  ...
+# Subtest: script cannot forge input receipts, declare escaping/symlink outputs or report invalid data
+ok 4 - script cannot forge input receipts, declare escaping/symlink outputs or report invalid data
+  ---
+  duration_ms: 3395.81104
+  ...
+# Subtest: local effect result/data/actual artifact bytes recover durably without reexecuting the script
+ok 5 - local effect result/data/actual artifact bytes recover durably without reexecuting the script
+  ---
+  duration_ms: 1064.500344
+  ...
+# Subtest: nonzero process error is retained as UNKNOWN; a second attempt does not start the script again
+ok 6 - nonzero process error is retained as UNKNOWN; a second attempt does not start the script again
+  ---
+  duration_ms: 1099.474253
+  ...
+# Subtest: authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+ok 7 - authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+  ---
+  duration_ms: 2.429111
+  ...
+# Subtest: every scope/fence field must match current validated session; owner cannot come from profile
+ok 8 - every scope/fence field must match current validated session; owner cannot come from profile
+  ---
+  duration_ms: 0.412888
+  ...
+# Subtest: ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+ok 9 - ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+  ---
+  duration_ms: 11.642908
+  ...
+# Subtest: cached registration is IO free, unavailable before measurement and omitted offline
+ok 10 - cached registration is IO free, unavailable before measurement and omitted offline
+  ---
+  duration_ms: 7.616238
+  ...
+# Subtest: owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+ok 11 - owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+  ---
+  duration_ms: 1.443611
+  ...
+# Subtest: old asynchronous measurement never re-registers after disconnect or a new generation
+ok 12 - old asynchronous measurement never re-registers after disconnect or a new generation
+  ---
+  duration_ms: 1.027463
+  ...
+# Subtest: install lifecycle preserves durable success and failure even when catalog callbacks fail
+ok 13 - install lifecycle preserves durable success and failure even when catalog callbacks fail
+  ---
+  duration_ms: 1.943635
+  ...
+# Subtest: refresh errors remove catalog and publication failure does not change measurement
+ok 14 - refresh errors remove catalog and publication failure does not change measurement
+  ---
+  duration_ms: 1.511401
+  ...
+# Subtest: one shared bindings config never substitutes another subject or process.env credential
+ok 15 - one shared bindings config never substitutes another subject or process.env credential
+  ---
+  duration_ms: 4.920527
+  ...
+# Subtest: fee metadata changes do not alter binding digest/revision; no approval or charge step
+ok 16 - fee metadata changes do not alter binding digest/revision; no approval or charge step
+  ---
+  duration_ms: 1.623116
+  ...
+# Subtest: generic image broker reuses exact codec and controlled endpoint without consent
+ok 17 - generic image broker reuses exact codec and controlled endpoint without consent
+  ---
+  duration_ms: 31.82181
+  ...
+# Subtest: image edits actually transmit verified reference bytes; real errors/redirects are not faked
+ok 18 - image edits actually transmit verified reference bytes; real errors/redirects are not faked
+  ---
+  duration_ms: 2.132529
+  ...
+# Subtest: native text file contains actual model result and can use authorized input material
+ok 19 - native text file contains actual model result and can use authorized input material
+  ---
+  duration_ms: 2.012073
+  ...
+# Subtest: missing native carrier is unavailable, never imaginary image understanding
+ok 20 - missing native carrier is unavailable, never imaginary image understanding
+  ---
+  duration_ms: 0.480647
+  ...
+# Subtest: native skill admitting media is unavailable until that exact MIME has a measured real carrier
+ok 21 - native skill admitting media is unavailable until that exact MIME has a measured real carrier
+  ---
+  duration_ms: 0.789668
+  ...
+# Subtest: shared costInfoOverrides accepts revisioned skill/version/binding metadata without changing readiness or binding digest
+ok 22 - shared costInfoOverrides accepts revisioned skill/version/binding metadata without changing readiness or binding digest
+  ---
+  duration_ms: 3.995179
+  ...
+1..22
+# tests 22
+# suites 0
+# pass 22
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 8552.179418

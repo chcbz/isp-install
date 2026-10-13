@@ -4,7 +4,8 @@
 import { readFileSync, realpathSync } from 'node:fs'
 import { skillHash, skillId } from './skill-executor.mjs'
 import { buildTypedInspectionNativeInputs } from './typed-inspection-input-carriers.mjs'
-const fail = code => { throw Object.assign(new Error(code), { code }) }
+import { BUILTIN_TYPED_INSPECTION_DECODERS } from './typed-inspection-runtime.mjs'
+const fail = (code, cause) => { throw Object.assign(new Error(code), { code, ...(cause ? { cause } : {}) }) }
 const textMimes = new Set(['text/plain', 'text/markdown', 'application/json'])
 export function buildMaterialsInputs({ inputs, supportedInputs = [], adapters = {}, mapPath = path => path,
   authorizationId, snapshotDigest }) {
@@ -32,6 +33,9 @@ export function buildMaterialsInputs({ inputs, supportedInputs = [], adapters = 
       if (!input.parser || typeof input.parsedText !== 'string') fail('MATERIALS_PARSER_UNAVAILABLE')
       Object.assign(source, { parser: input.parser, parsedText: input.parsedText })
     } else {
+      const decoder = BUILTIN_TYPED_INSPECTION_DECODERS[input.contentMimeType]
+      if (!decoder) fail('MATERIALS_CARRIER_UNAVAILABLE')
+      try { decoder.validate({ bytes: input.bytes }) } catch (cause) { fail('MATERIALS_BYTES_INVALID', cause) }
       if (typeof input.path !== 'string' || realpathSync(input.path) !== input.path || !readFileSync(input.path).equals(input.bytes)) fail('MATERIALS_PATH_INVALID')
       source.path = mapPath(input.path)
     }

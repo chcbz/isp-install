@@ -1,0 +1,91 @@
+TAP version 13
+# Subtest: missing isolation/interpreter or invalid package entry never advertises READY
+ok 1 - missing isolation/interpreter or invalid package entry never advertises READY
+  ---
+  duration_ms: 213.963398
+  ...
+# Subtest: real local script receives actual readonly bytes, no shell/token/HOME or routable network, and emits UTF8 artifact
+not ok 2 - real local script receives actual readonly bytes, no shell/token/HOME or routable network, and emits UTF8 artifact
+  ---
+  duration_ms: 843.696123
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-local-script.test.mjs:42:1'
+  failureType: 'testCodeFailure'
+  error: 'SKILL_SCHEMA_DIALECT'
+  code: 'SKILL_SCHEMA_DIALECT'
+  stack: |-
+    fail (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:8:38)
+    compileSkillSchema (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:48:67)
+    validateSkillData (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:55:8)
+    file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-runners/local-script.mjs:143:32
+    async Object.run (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-runners/local-script.mjs:137:22)
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-local-script.test.mjs:57:20)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: invalid hash, nonprivate input or symlink fails before package process launch
+ok 3 - invalid hash, nonprivate input or symlink fails before package process launch
+  ---
+  duration_ms: 889.374395
+  ...
+# Subtest: script cannot forge input receipts, declare escaping/symlink outputs or report invalid data
+not ok 4 - script cannot forge input receipts, declare escaping/symlink outputs or report invalid data
+  ---
+  duration_ms: 1596.348052
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-local-script.test.mjs:84:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /SKILL_(?:LOCAL|PARAMETERS)/. Input:
+    
+    'Error: SKILL_SCHEMA_DIALECT'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'SKILL_SCHEMA_DIALECT'
+  stack: |-
+    fail (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:8:38)
+    compileSkillSchema (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:48:67)
+    validateSkillData (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-manifest.mjs:55:8)
+    file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-runners/local-script.mjs:143:32
+    async Object.run (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-runners/local-script.mjs:137:22)
+    async waitForActual (node:assert:533:5)
+    async Function.rejects (node:assert:654:25)
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-local-script.test.mjs:93:5)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-local-script.test.mjs:93:5)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: local effect result/data/actual artifact bytes recover durably without reexecuting the script
+not ok 5 - local effect result/data/actual artifact bytes recover durably without reexecuting the script
+  ---
+  duration_ms: 798.390679
+  location: '/home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-local-script.test.mjs:97:1'
+  failureType: 'testCodeFailure'
+  error: 'SKILL_RESULT_UNKNOWN'
+  code: 'SKILL_RESULT_UNKNOWN'
+  stack: |-
+    SkillEffects.invoke (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-execution-store.mjs:148:27)
+    async Object.run (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/skill-runners/local-script.mjs:137:22)
+    async TestContext.<anonymous> (file:///home/isp/wsps/worktrees/skill-execution-20261013/runtime/conf/codex-ws-agent/test/skill-local-script.test.mjs:105:17)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: nonzero process error is retained as UNKNOWN; a second attempt does not start the script again
+ok 6 - nonzero process error is retained as UNKNOWN; a second attempt does not start the script again
+  ---
+  duration_ms: 1028.506669
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 3
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5659.743274

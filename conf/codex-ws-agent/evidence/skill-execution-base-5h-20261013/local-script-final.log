@@ -1,0 +1,210 @@
+TAP version 13
+# Subtest: result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+ok 1 - result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected
+  ---
+  duration_ms: 257.069257
+  ...
+# Subtest: effect START is on disk before request; real result bytes saved before remote report
+ok 2 - effect START is on disk before request; real result bytes saved before remote report
+  ---
+  duration_ms: 270.365303
+  ...
+# Subtest: report response loss recovers existing result; never repeats provider invocation
+ok 3 - report response loss recovers existing result; never repeats provider invocation
+  ---
+  duration_ms: 259.551736
+  ...
+# Subtest: uncertain network effect is UNKNOWN forever until real query, never resent
+ok 4 - uncertain network effect is UNKNOWN forever until real query, never resent
+  ---
+  duration_ms: 187.797652
+  ...
+# Subtest: lost START reply and competing claimant cannot emit side effects
+ok 5 - lost START reply and competing claimant cannot emit side effects
+  ---
+  duration_ms: 82.322685
+  ...
+# Subtest: effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+ok 6 - effect request/binding changes do not reuse old effect; symlink/private-mode stores rejected
+  ---
+  duration_ms: 258.807905
+  ...
+# Subtest: effect result ACK must exactly confirm actual local digest/request id; no second invocation
+ok 7 - effect result ACK must exactly confirm actual local digest/request id; no second invocation
+  ---
+  duration_ms: 135.919594
+  ...
+# Subtest: resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+ok 8 - resume RECOVER_LOCAL_RESULT cannot start any unrecorded effect
+  ---
+  duration_ms: 68.892259
+  ...
+# Subtest: all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions
+ok 9 - all frozen inputs require exact host-delivered receipts with real matching SHA, not model assertions
+  ---
+  duration_ms: 289.052555
+  ...
+# Subtest: result data is schema-validated JSON, including scalar/array/null without reparsing a string
+ok 10 - result data is schema-validated JSON, including scalar/array/null without reparsing a string
+  ---
+  duration_ms: 629.23552
+  ...
+# Subtest: strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+ok 11 - strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys
+  ---
+  duration_ms: 4.770889
+  ...
+# Subtest: one executor persists result before stage/commit; data-only still has real commit
+ok 12 - one executor persists result before stage/commit; data-only still has real commit
+  ---
+  duration_ms: 38.674674
+  ...
+# Subtest: recovered persistent result never runs a model/provider again
+ok 13 - recovered persistent result never runs a model/provider again
+  ---
+  duration_ms: 0.709173
+  ...
+# Subtest: invalid parameters, missing runner, wrong result identity and required empty output fail closed
+ok 14 - invalid parameters, missing runner, wrong result identity and required empty output fail closed
+  ---
+  duration_ms: 1.315837
+  ...
+# Subtest: portable IEEE754 shortest canonical JSON matches shared Java fixture, including subnormal and negative zero
+ok 15 - portable IEEE754 shortest canonical JSON matches shared Java fixture, including subnormal and negative zero
+  ---
+  duration_ms: 0.97456
+  ...
+# Subtest: canonical object keys are UTF16 lexical, never JS integer-property enumeration order
+ok 16 - canonical object keys are UTF16 lexical, never JS integer-property enumeration order
+  ---
+  duration_ms: 0.439723
+  ...
+# Subtest: missing isolation/interpreter or invalid package entry never advertises READY
+ok 17 - missing isolation/interpreter or invalid package entry never advertises READY
+  ---
+  duration_ms: 242.355474
+  ...
+# Subtest: real local script receives actual readonly bytes, no shell/token/HOME or routable network, and emits UTF8 artifact
+ok 18 - real local script receives actual readonly bytes, no shell/token/HOME or routable network, and emits UTF8 artifact
+  ---
+  duration_ms: 1827.544786
+  ...
+# Subtest: invalid hash, nonprivate input or symlink fails before package process launch
+ok 19 - invalid hash, nonprivate input or symlink fails before package process launch
+  ---
+  duration_ms: 2075.574927
+  ...
+# Subtest: script cannot forge input receipts, declare escaping/symlink outputs or report invalid data
+ok 20 - script cannot forge input receipts, declare escaping/symlink outputs or report invalid data
+  ---
+  duration_ms: 6614.133283
+  ...
+# Subtest: local effect result/data/actual artifact bytes recover durably without reexecuting the script
+ok 21 - local effect result/data/actual artifact bytes recover durably without reexecuting the script
+  ---
+  duration_ms: 2292.212655
+  ...
+# Subtest: nonzero process error is retained as UNKNOWN; a second attempt does not start the script again
+ok 22 - nonzero process error is retained as UNKNOWN; a second attempt does not start the script again
+  ---
+  duration_ms: 2260.720247
+  ...
+# Subtest: zero-material local script persists a real result envelope without invented input receipts
+ok 23 - zero-material local script persists a real result envelope without invented input receipts
+  ---
+  duration_ms: 1360.740827
+  ...
+# Subtest: authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+ok 24 - authenticated receipt yields only frozen scope/fence, never session secret or endpoint
+  ---
+  duration_ms: 2.494814
+  ...
+# Subtest: every scope/fence field must match current validated session; owner cannot come from profile
+ok 25 - every scope/fence field must match current validated session; owner cannot come from profile
+  ---
+  duration_ms: 0.793788
+  ...
+# Subtest: ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+ok 26 - ACK bootstraps the catalog once; repeated refresh ACK never starts a registration loop
+  ---
+  duration_ms: 9.575789
+  ...
+# Subtest: cached registration is IO free, unavailable before measurement and omitted offline
+ok 27 - cached registration is IO free, unavailable before measurement and omitted offline
+  ---
+  duration_ms: 13.154815
+  ...
+# Subtest: owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+ok 28 - owner/session replacement invalidates old snapshot; missing receipt cannot retain directory
+  ---
+  duration_ms: 1.753875
+  ...
+# Subtest: old asynchronous measurement never re-registers after disconnect or a new generation
+ok 29 - old asynchronous measurement never re-registers after disconnect or a new generation
+  ---
+  duration_ms: 2.568931
+  ...
+# Subtest: install lifecycle preserves durable success and failure even when catalog callbacks fail
+ok 30 - install lifecycle preserves durable success and failure even when catalog callbacks fail
+  ---
+  duration_ms: 1.995885
+  ...
+# Subtest: refresh errors remove catalog and publication failure does not change measurement
+ok 31 - refresh errors remove catalog and publication failure does not change measurement
+  ---
+  duration_ms: 1.602121
+  ...
+# Subtest: one shared bindings config never substitutes another subject or process.env credential
+ok 32 - one shared bindings config never substitutes another subject or process.env credential
+  ---
+  duration_ms: 4.221626
+  ...
+# Subtest: fee metadata changes do not alter binding digest/revision; no approval or charge step
+ok 33 - fee metadata changes do not alter binding digest/revision; no approval or charge step
+  ---
+  duration_ms: 0.637233
+  ...
+# Subtest: generic image broker reuses exact codec and controlled endpoint without consent
+ok 34 - generic image broker reuses exact codec and controlled endpoint without consent
+  ---
+  duration_ms: 29.891849
+  ...
+# Subtest: image edits actually transmit verified reference bytes; real errors/redirects are not faked
+ok 35 - image edits actually transmit verified reference bytes; real errors/redirects are not faked
+  ---
+  duration_ms: 1.968619
+  ...
+# Subtest: native text file contains actual model result and can use authorized input material
+ok 36 - native text file contains actual model result and can use authorized input material
+  ---
+  duration_ms: 4.792222
+  ...
+# Subtest: missing native carrier is unavailable, never imaginary image understanding
+ok 37 - missing native carrier is unavailable, never imaginary image understanding
+  ---
+  duration_ms: 0.579481
+  ...
+# Subtest: native skill admitting media is unavailable until that exact MIME has a measured real carrier
+ok 38 - native skill admitting media is unavailable until that exact MIME has a measured real carrier
+  ---
+  duration_ms: 0.696016
+  ...
+# Subtest: shared costInfoOverrides accepts revisioned skill/version/binding metadata without changing readiness or binding digest
+ok 39 - shared costInfoOverrides accepts revisioned skill/version/binding metadata without changing readiness or binding digest
+  ---
+  duration_ms: 1.245863
+  ...
+# Subtest: skill native carrier structurally decodes genuine PNG/WAV bytes and rejects forged media before model delivery
+ok 40 - skill native carrier structurally decodes genuine PNG/WAV bytes and rejects forged media before model delivery
+  ---
+  duration_ms: 18.683774
+  ...
+1..40
+# tests 40
+# suites 0
+# pass 40
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 23740.76813

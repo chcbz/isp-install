@@ -362,3 +362,37 @@ logging file contents. `validate` and `run` use the same loader. Runtime injects
 only the matching subject's values through the existing providerEnvironments
 seam; no inherited process Provider environment or other Agent HOME fallback.
 Managed-host templates retain their existing independent credential mechanism.
+
+### Skill execution candidate (2026-10-13)
+
+Protocol 4 uses the existing conversation poll, lease and authenticated output
+transport. Public CHAT materials stay in the original native turn; delivery
+receipts record verified bytes/carriers, not the correctness of model understanding.
+The retired top-level INSPECT route does not admit new executions. Runner/tool/
+binding/carrier absence is UNAVAILABLE, never inferred from an installed skill name.
+
+The registered `local-script` adapter runs installed `.mjs`/`.js` entrypoints with
+the artifact's existing Node interpreter and actual bubblewrap isolation. It does
+not run a shell, install dependencies or support an arbitrary interpreter/argv.
+Its readiness probe actually checks read-only package/input mounts, hidden host
+HOME/canary, isolated network namespace, absent routes and a credential-free
+environment. A missing tool or failed probe remains UNAVAILABLE; there is no
+unsandboxed fallback. The only host ABI mounts are read-only library directories;
+`/etc`, host HOME, runtime state and transport/provider credentials are not mounted.
+
+The script receives one JSON value on stdin:
+`{schemaVersion:1,executionId,instruction,parameters,inputs,outputDirectory:"/outputs"}`.
+Each input has `inputRef,sha256,byteLength,contentMimeType,path` with the host-owned
+path `/inputs/{inputRef}`. User text/parameters never become shell code, argv or
+environment. Input bytes are SHA-checked and individually read-only mounted. Only
+this execution's `/outputs` directory is writable; `/tmp` is private temporary
+storage. The trusted launcher sets umask 077 before importing the entrypoint.
+
+Stdout must contain exactly one JSON value `{data,artifacts}`; each artifact is
+`{outputId,contentMimeType,path}` with a nonempty relative path under `/outputs`.
+The host rejects traversal, symlinks, hardlinks, nonprivate files, undeclared MIME
+and invalid declared output data/bytes. Scripts cannot supply input receipts.
+Actual data/artifact bytes are persisted through the existing NEW-only effect
+mechanism before stage/commit. A lost/unknown process result is never relaunched.
+No PDF/XLSX/video package is added by this adapter; new tool names still require
+separate genuine probes rather than speculative readiness.

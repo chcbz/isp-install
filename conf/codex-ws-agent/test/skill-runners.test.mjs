@@ -5,6 +5,9 @@ import { createImageProviderRunner } from '../skill-runners/image-provider.mjs'
 import { createNativeModelRunner } from '../skill-runners/native-model.mjs'
 import { buildMaterialsInputs } from '../materials-input.mjs'
 import { skillHash } from '../skill-executor.mjs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 const scope = { tenantId: 't', clientId: 'c', ownerJiacn: 'o', agentId: 'a' }
 const configuration = () => ({ schemaVersion: 1, providers: { imageDefault: { adapter: 'image-http', endpoint: 'https://images.example.test', model: 'gpt-image-1', credentialEnv: 'IMAGE_TOKEN', revision: '1' } }, subjects: { a: { providerAliases: { image: 'imageDefault' } } }, costInfoOverrides: {} })
 const bindingFixture = () => new SkillBindings({ load: () => configuration(), credentialEnvironment: { IMAGE_TOKEN: 'fixture-not-real-secret' } })
@@ -69,4 +72,46 @@ test('native skill admitting media is unavailable until that exact MIME has a me
   const measured = createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png'] }), runModel() {} })
   assert.equal((await measured.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['image/png'] })).ready, true)
   assert.equal((await measured.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['audio/wav'] })).ready, false)
+})
+
+
+test('shared costInfoOverrides accepts revisioned skill/version/binding metadata without changing readiness or binding digest', async () => {
+  const config = configuration(), bindings = new SkillBindings({ load: () => config, credentialEnvironment: { IMAGE_TOKEN: 'fixture' } })
+  const first = await bindings.resolve({ scope, alias: 'image' })
+  config.costInfoOverrides['image-edit@1.0.0#imageDefault'] = { mode: 'METERED', amount: '1.25', currency: 'USD', unit: 'image', description: 'display only', source: 'operator', updatedAt: '2026-10-13T23:45:00+08:00', informationRevision: '7' }
+  assert.equal(parseSkillBindings(config).costInfoOverrides['image-edit@1.0.0#imageDefault'].informationRevision, '7')
+  for (const override of [config.costInfoOverrides['image-edit@1.0.0#imageDefault'], { informationRevision: '-1', mode: 'INVALID' }, null]) {
+    config.costInfoOverrides['image-edit@1.0.0#imageDefault'] = override
+    const next = await bindings.resolve({ scope, alias: 'image' }); assert.equal(next.ready, true); assert.equal(next.digest, first.digest); assert.equal(next.revision, first.revision)
+  }
+})
+
+
+test('skill native carrier structurally decodes genuine PNG/WAV bytes and rejects forged media before model delivery', t => {
+  const root = mkdtempSync(resolve(tmpdir(), 'skill-material-bytes-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/mixed-material-api-wire-v3.json', import.meta.url)))
+  const sources = fixture.inspection.payload.contextSnapshot.facts.typedInspection.manifest.sources
+  for (const mimeType of ['image/png', 'audio/wav']) {
+    const source = sources.find(source => source.mimeType === mimeType), bytes = Buffer.from(fixture.materials.find(item => item.sourceRefId === source.sourceRefId).bytesBase64, 'base64')
+    const input = material(bytes, mimeType); input.path = resolve(root, mimeType.replace('/', '-')); writeFileSync(input.path, bytes, { mode: 0o400 })
+    const config = { mediaKind: source.mediaKind, mimeType, carrier: source.carrier, carrierContractDigest: source.carrierContractDigest }
+    const adapters = { localImage: { supportedMimeTypes: ['image/png'], toNativeInput: ({ path }) => ({ type: 'localImage', path }) },
+      localAudio: { supportedMimeTypes: ['audio/wav'], toNativeInput: ({ path }) => ({ type: 'localAudio', path }) } }
+    const request = { inputs: [input], supportedInputs: [config], adapters, authorizationId: 'pwe_1', snapshotDigest: 'b'.repeat(64) }
+    const prepared = buildMaterialsInputs(request); assert.equal(prepared.nativeInputs.length, 1); assert.equal(prepared.inputReceipts[0].delivery, 'DELIVERED')
+    const forged = material('not real image/audio bytes', mimeType); forged.path = input.path
+    assert.throws(() => buildMaterialsInputs({ ...request, inputs: [forged] }), error => error.code === 'MATERIALS_BYTES_INVALID' && error.cause.code.includes('DECODER_REJECTED'))
+  }
+})
+
+
+test('missing/malformed price container never removes valid provider binding readiness', async () => {
+  const config = configuration(), bindings = new SkillBindings({ load: () => config, credentialEnvironment: { IMAGE_TOKEN: 'fixture' } })
+  const first = await bindings.resolve({ scope, alias: 'image' })
+  for (const value of [undefined, null, 'malformed', [], 1]) {
+    if (value === undefined) delete config.costInfoOverrides; else config.costInfoOverrides = value
+    assert.deepEqual(parseSkillBindings(config).costInfoOverrides, {})
+    const result = await bindings.resolve({ scope, alias: 'image' })
+    assert.equal(result.ready, true); assert.equal(result.digest, first.digest); assert.equal(result.revision, first.revision)
+  }
 })

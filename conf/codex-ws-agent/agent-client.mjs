@@ -36,6 +36,7 @@ import { SkillBindings } from './skill-bindings.mjs'
 import { createImageProviderRunner } from './skill-runners/image-provider.mjs'
 import { createNativeModelRunner } from './skill-runners/native-model.mjs'
 import { buildMaterialsInputs } from './materials-input.mjs'
+import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
 import { resolveChatMaterials, prepareChatMaterials, materialsEngineBinding, buildMaterialsChatFinal, publishMaterialsChatFinal } from './materials-chat.mjs'
 import { parseSkillJson } from './skill-manifest.mjs'
 import { skillDigest } from './skill-executor.mjs'
@@ -4279,12 +4280,14 @@ export const bindMeasuredSkillSession = (state, binding) => {
       },
       runModel: request => runSkillNativeModel(state, request)
     })
+    const localRunner = createLocalScriptRunner({ bwrapBin: state.profile.typedInspectionBwrapBin || '/usr/bin/bwrap' })
     state.skillRunners = new Map([
       ['provider-operation', createImageProviderRunner({ bindings, scope: binding.scope })],
-      ['native-model', nativeRunner]
+      ['native-model', nativeRunner],
+      ['local-script', localRunner]
     ])
     state.skillRegistry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => state.skillInstallManager.listInstalledSkills(),
-      runnerRegistry: state.skillRunners, resolveBinding: request => bindings.resolve(request) })
+      runnerRegistry: state.skillRunners, toolProbes: new Map([['node', () => localRunner.probeTool()]]), resolveBinding: request => bindings.resolve(request) })
     if (state.profile.workspaceFileApiOrigin && state.profile.workspaceFileRootDir) {
       state.conversationNativeLane = new SkillConversationLane({ apiOrigin: state.profile.workspaceFileApiOrigin,
         rootDir: state.profile.workspaceFileRootDir, agentId: state.profile.agentId, runtimeInstanceId: state.profile.runtimeInstanceId,

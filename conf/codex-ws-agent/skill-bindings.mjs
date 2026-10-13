@@ -8,8 +8,12 @@ const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,
 const fields = (value, keys) => object(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 export function parseSkillBindings(raw) {
   const value = typeof raw === 'string' || Buffer.isBuffer(raw) ? parseSkillJson(raw) : structuredClone(raw)
-  if (!fields(value, ['schemaVersion', 'providers', 'subjects', 'costInfoOverrides']) || value.schemaVersion !== 1
-      || !object(value.providers) || !object(value.subjects) || !object(value.costInfoOverrides)) fail('SKILL_BINDINGS_INVALID')
+  if (!object(value) || !['schemaVersion', 'providers', 'subjects'].every(key => Object.hasOwn(value, key))
+      || Object.keys(value).some(key => !['schemaVersion', 'providers', 'subjects', 'costInfoOverrides'].includes(key))
+      || value.schemaVersion !== 1 || !object(value.providers) || !object(value.subjects)) fail('SKILL_BINDINGS_INVALID')
+  // Price metadata is not a readiness gate. API owns display/fallback semantics;
+  // missing or malformed overrides cannot disable otherwise valid bindings.
+  value.costInfoOverrides = object(value.costInfoOverrides) ? value.costInfoOverrides : {}
   for (const [bindingId, binding] of Object.entries(value.providers)) {
     if (!id(bindingId) || !fields(binding, ['adapter', 'endpoint', 'model', 'credentialEnv', 'revision']) || binding.adapter !== 'image-http'
         || !id(binding.model) || typeof binding.credentialEnv !== 'string' || !/^[A-Z][A-Z0-9_]*$/.test(binding.credentialEnv)
