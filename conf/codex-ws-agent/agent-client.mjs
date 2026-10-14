@@ -2583,7 +2583,10 @@ export class AgentMessageProcessor {
       targetAgentId: message.targetAgentId || '',
       taskId: message.taskId || '',
       workItemId: message.workItemId || '',
-      expiresAt: message.expiresAt,
+      // Native skill installation is authorized by the live original order on every
+      // ACK/download/result. Keep the original hint in the fingerprint and HTTP context,
+      // but do not impose the unrelated task-invitation timeout on its durable queue.
+      expiresAt: this.profile.runtimeIdentity && message.commandType === 'SKILL_INSTALL' ? null : message.expiresAt,
       ...(this.profile.runtimeIdentity ? { runtimeCommand: runtimeCommandContext(this.profile, message) } : {})
     }
   }

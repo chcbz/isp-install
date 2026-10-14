@@ -4905,3 +4905,21 @@ test('runtime ACK completion race: stop during postcommit cleanup await cannot c
     assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
   } finally { release.resolve(); runtime.processor.stop() }
 })
+
+
+test('native SKILL_INSTALL retains original wire expiry but defers lifetime to live order authorization', async () => {
+  let runs = 0
+  const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } } })
+  const raw = unifiedCommand(9009, { commandType: 'SKILL_INSTALL', issuedAt: 1, expiresAt: 2, payload: {} })
+  const normalized = normalizeInboundMessage(raw)
+  const meta = runtime.processor._commandMeta(normalized)
+  assert.equal(meta.expiresAt, null)
+  assert.equal(meta.runtimeCommand.expiresAt, new Date(2).toISOString())
+  assert.equal(runtime.processor._commandMeta(normalizeInboundMessage(unifiedCommand(9010, { expiresAt: 2 }))).expiresAt, 2)
+  const result = await runtime.processor.handle(raw)
+  assert.equal(result.kind, 'command')
+  runtime.processor.resume()
+  await runtime.processor.waitForIdle()
+  assert.equal(runs, 1)
+  assert.equal(runtime.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+})
