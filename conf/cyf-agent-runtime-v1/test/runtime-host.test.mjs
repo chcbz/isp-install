@@ -488,6 +488,8 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
             queueMicrotask(() => { state.catalogMeasured = true; state.transport.refreshCapabilities(); });
             return true;
           },
+          matchesSkillInstallResult: envelope => state.skillInstallManager?.matchesDurableResultEnvelope(envelope) === true,
+          matchesSkillInstallReceipt: receipt => state.skillInstallManager?.matchesDurableResultReceipt(receipt) === true,
           durableStateHealthy: () => state.healthy, readyCommandTypes: () => state.types, chatReady: () => chatReady,
           registrationPayload: () => ({ runtimeCapabilities: { profiles: { EXECUTE: { available: false } } } }),
           acceptFrame: async frame => { state.accepted.push(frame); if (normalize && !(frame.type === 'agent_message_saved' && !Object.hasOwn(frame, 'messageType'))) state.normalized.push(normalize(frame)); }, resume: async () => { state.resumed++; },
@@ -1438,4 +1440,49 @@ test('unmatched ACK and presence cannot supply a skill subject to the executor',
   const bound = c.states()[0].skillBinding; assert.equal(bound.scope.ownerJiacn, 'fixture-owner');
   socket.receive({ ...presenceReceipt(registration), runtimeAuth: { ...auth, ownerJiacn: 'foreign' } });
   await c.tick(); assert.equal(c.states()[0].skillBinding, bound);
+});
+
+
+test('real API typed skill receipt binds durable product evidence; transport keeps current Runtime proof', async t => {
+  const c = await channelFixture(t, { validateBusiness: true, types: ['SKILL_INSTALL'] });
+  await c.executors[0].activate();
+  const { SkillInstallManager, buildSkillInstallResultEnvelope } = await import('../../codex-ws-agent/skill-install-manager.mjs');
+  const state = c.states()[0], identity = c.config.agents[0].manifest;
+  const manager = new SkillInstallManager({ profile: state.profile, stateRoot: resolve(c.f.root, 'skill-result-test'),
+    wsUrl: 'wss://api.example.test/ws', enabled: false }); manager.initialize(); state.skillInstallManager = manager;
+  const envelope = buildSkillInstallResultEnvelope({ profile: state.profile, runtimeInstanceId: 'original-executing-boot',
+    messageId: 'result-original-1', status: 'SUCCEEDED', command: { commandId: 'cmd-original-1', attempt: 1,
+      fencingToken: '1', deliveryEpoch: '1', installationId: 'si_product1', targetAgentId: identity.canonicalAgentId,
+      orderId: 'so_original1', productVersionId: 'spv_original1', packageDigest: 'sha256:' + 'a'.repeat(64),
+      skillKey: 'analysis', skillVersion: '1.0.1' } });
+  manager._ensureResultRecord('record-original1', envelope);
+  const socket = c.sockets[0], sentBefore = socket.sent.length;
+  assert.equal(state.transport.send({ ...envelope, installationId: 'si_foreign' }), false);
+  assert.equal(state.transport.send({ ...envelope, runtimeInstanceId: 'forged-boot' }), false);
+  assert.equal(socket.sent.length, sentBefore);
+  assert.equal(state.transport.send(envelope), true);
+  const resultWire = socket.sent.at(-1);
+  assert.equal(resultWire.installationId, 'si_product1'); assert.equal(resultWire.runtimeInstallationId, identity.installationId);
+  assert.equal(resultWire.runtimeInstanceId, 'original-executing-boot'); assert.equal(resultWire.sessionGeneration, 7);
+  // Exact SkillInstallResultService.receipt() field shape, not a Runtime registration fixture.
+  const receipt = { schemaVersion: 1, messageType: 'work.result.receipt', messageId: 'sr_' + 'b'.repeat(64),
+    correlationId: envelope.messageId, resultType: 'SKILL_INSTALL_RESULT', receiptStatus: 'ACCEPTED',
+    commandId: envelope.commandId, attempt: 1, fencingToken: '1', deliveryEpoch: '1',
+    installationId: 'si_product1', targetAgentId: identity.canonicalAgentId };
+  const invalid = [ { ...receipt, installationId: 'si_foreign' }, { ...receipt, installationId: identity.installationId },
+    { ...receipt, correlationId: 'other-result' }, { ...receipt, attempt: 2 }, { ...receipt, fencingToken: '2' },
+    { ...receipt, deliveryEpoch: '2' }, { ...receipt, targetAgentId: 'foreign' }, { ...receipt, schemaVersion: '1' },
+    { ...receipt, sessionGeneration: 6 }, { ...receipt, hostId: 'foreign' },
+    { ...receipt, runtimeInstallationId: 'foreign' }, { ...receipt, runtimeInstanceId: 'foreign' },
+    { ...receipt, tenantId: 'foreign' }, { ...receipt, clientId: 'foreign' } ];
+  for (const bad of invalid) socket.receive(bad);
+  await c.tick(); assert.deepEqual(state.accepted, []); assert.equal(manager.pendingResults().length, 1);
+  socket.receive(receipt); await c.tick(); assert.deepEqual(state.accepted, [receipt]);
+  assert.equal(manager.acknowledgeResultReceipt(receipt).status, 'acknowledged');
+  socket.receive(receipt); await c.tick(); assert.equal(state.accepted.length, 2);
+  assert.equal(manager.acknowledgeResultReceipt(receipt).idempotent, true);
+  assert.equal(manager.pendingResults().length, 0); assert.equal(manager.acknowledgedResults().length, 1);
+  assert.equal(state.transport.send(envelope), false); // acknowledged records cannot invent a fresh result send.
+  socket.receive({ ...receipt, messageType: 'chat.final.receipt' }); await c.tick(); assert.equal(state.accepted.length, 2);
+  assert.ok(c.logs.some(row => row.code === 'RUNTIME_FRAME_GENERATION_MISMATCH' && row.field === 'sessionGeneration'));
 });

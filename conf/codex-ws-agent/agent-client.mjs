@@ -6638,6 +6638,8 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           entry.state.runtimeTransport = transport
         },
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
+        matchesSkillInstallResult: envelope => entry.state?.skillInstallManager.matchesDurableResultEnvelope(envelope) === true,
+        matchesSkillInstallReceipt: receipt => entry.state?.skillInstallManager.matchesDurableResultReceipt(receipt) === true,
         attachSocket: socket => { entry.state.ws = socket },
         durableStateHealthy: () => {
           const state = entry.state

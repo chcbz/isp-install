@@ -2005,6 +2005,26 @@ export class SkillInstallManager {
       && receipt.targetAgentId === envelope.targetAgentId
   }
 
+  // Transport identity is separate from the PRODUCT installation in typed results.
+  // Read-only correlation gate; normal acknowledgeResultReceipt still owns the
+  // locked durable transition and rejects any race/conflict on the actual ingress.
+  matchesDurableResultReceipt(message) {
+    if (this.healthError || message?.schemaVersion !== 1) return false
+    try {
+      const receipt = this._receiptFields(message)
+      return [...this.pendingResults(), ...this.acknowledgedResults()]
+        .some(record => this._receiptMatchesEnvelope(receipt, record.envelope))
+    } catch { return false }
+  }
+
+  matchesDurableResultEnvelope(envelope) {
+    if (this.healthError || envelope?.schemaVersion !== 1 || envelope.messageType !== 'work.result'
+        || envelope.resultType !== RESULT_TYPE || envelope.targetAgentId !== this.profile.agentId) return false
+    try {
+      return this.pendingResults().some(record => JSON.stringify(record.envelope) === JSON.stringify(envelope))
+    } catch { return false }
+  }
+
   acknowledgeResultReceipt(message) {
     const receipt = this._receiptFields(message)
     return this._withLockSync(`work-result-receipt:${receipt.correlationId}`, () => (

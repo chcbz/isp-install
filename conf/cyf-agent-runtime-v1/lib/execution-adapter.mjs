@@ -55,6 +55,15 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         const current = { ...envelope, tenantId: session.tenantId, clientId: session.clientId, agentId: session.canonicalAgentId,
           sourceAgentId: session.canonicalAgentId, installationId: session.installationId, hostId: session.hostId,
           runtimeInstanceId: session.runtimeInstanceId, sessionGeneration: session.sessionGeneration };
+        if (envelope.messageType === 'work.result' && envelope.resultType === 'SKILL_INSTALL_RESULT') {
+          // The durable result is business evidence. Never rewrite its product ID
+          // or original executing boot on reconnect; proof is the current socket,
+          // headers and explicit runtimeInstallationId, not that business field.
+          if (executor.matchesSkillInstallResult?.(envelope) !== true) return false;
+          current.installationId = envelope.installationId;
+          current.runtimeInstanceId = envelope.runtimeInstanceId;
+          current.runtimeInstallationId = session.installationId;
+        }
         socket.send(JSON.stringify(current)); return true;
       };
       const register = () => {
@@ -100,16 +109,28 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             try { frame = JSON.parse(bytes.toString()); } catch { logger('runtime-frame-rejected', { code: 'INVALID_JSON' }); return; }
             if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
             const payload = frame.data && typeof frame.data === 'object' && !Array.isArray(frame.data) ? frame.data : frame;
+            if ([frame, payload].some(layer => layer.messageType === 'work.result.receipt'
+                && layer.resultType === 'SKILL_INSTALL_RESULT' && executor.matchesSkillInstallReceipt?.(layer) !== true)) {
+              logger('runtime-frame-rejected', { code: 'RUNTIME_SKILL_RECEIPT_UNCORRELATED' }); return;
+            }
             const proofMismatch = layer => {
               // Canonical skill command installationId is the PRODUCT binding.
               // It never substitutes for the authenticated Runtime installation.
               const productInstall = layer.messageType === 'command.dispatch' && layer.commandType === 'SKILL_INSTALL';
-              if (layer.messageType === 'command.dispatch' && (layer.tenantId !== session.tenantId || layer.clientId !== session.clientId
-                  || layer.targetAgentId !== session.canonicalAgentId || productInstall && layer.installationId === session.installationId)) return true;
+              const productReceipt = layer.schemaVersion === 1 && layer.messageType === 'work.result.receipt'
+                && layer.resultType === 'SKILL_INSTALL_RESULT' && executor.matchesSkillInstallReceipt?.(layer) === true;
+              if (Object.hasOwn(layer, 'runtimeInstallationId') && layer.runtimeInstallationId !== session.installationId) return 'runtimeInstallationId';
+              if (layer.messageType === 'command.dispatch') {
+                if (layer.tenantId !== session.tenantId) return 'tenantId';
+                if (layer.clientId !== session.clientId) return 'clientId';
+                if (layer.targetAgentId !== session.canonicalAgentId) return 'targetAgentId';
+                if (productInstall && layer.installationId === session.installationId) return 'installationId';
+              }
               return ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
-                .some(key => !(productInstall && key === 'installationId') && Object.hasOwn(layer, key) && layer[key] !== session[key]);
+                .find(key => !((productInstall || productReceipt) && key === 'installationId') && Object.hasOwn(layer, key) && layer[key] !== session[key]);
             };
-            if (proofMismatch(frame) || proofMismatch(payload)) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH' }); return; }
+            const mismatchField = proofMismatch(frame) || proofMismatch(payload);
+            if (mismatchField) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH', field: mismatchField }); return; }
             // A type-only control event is not a business envelope. Check both
             // supported wrapper shapes: even null/invalid explicit messageType
             // must reach the original strict business validator, never be eaten

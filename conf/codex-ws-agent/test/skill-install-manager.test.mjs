@@ -1321,3 +1321,26 @@ for (const mutation of ['script', 'dependency', 'forged-marker']) {
     assert.notEqual(replay.status, 'completed'); assert.equal(replay.failureCode, SKILL_INSTALL_FAILURE.CONFLICT)
   })
 }
+
+
+test('typed receipt product identity requires exact durable pending or acknowledged scope without mutation', async () => {
+  const bytes = validPackage(), runtime = managerRuntime({ packageBytes: bytes, sendResultFn: () => false });
+  assert.equal((await runtime.manager.execute(dispatch(bytes))).status, 'completed');
+  const envelope = runtime.manager.pendingResults()[0].envelope, receipt = receiptFor(envelope);
+  assert.equal(runtime.manager.matchesDurableResultEnvelope(envelope), true);
+  assert.equal(runtime.manager.matchesDurableResultEnvelope({ ...envelope, runtimeInstanceId: 'foreign' }), false);
+  assert.equal(runtime.manager.matchesDurableResultEnvelope({ ...envelope, messageId: 'foreign' }), false);
+  assert.equal(runtime.manager.matchesDurableResultReceipt(receipt), true);
+  for (const field of ['correlationId', 'commandId', 'fencingToken', 'deliveryEpoch', 'installationId', 'targetAgentId']) {
+    assert.equal(runtime.manager.matchesDurableResultReceipt({ ...receipt, [field]: 'foreign' }), false, field);
+  }
+  assert.equal(runtime.manager.matchesDurableResultReceipt({ ...receipt, schemaVersion: 2 }), false);
+  assert.equal(runtime.manager.matchesDurableResultReceipt({ ...receipt, attempt: 2 }), false);
+  assert.equal(runtime.manager.matchesDurableResultReceipt({ ...receipt, receiptStatus: 'REJECTED' }), false);
+  assert.equal(runtime.manager.pendingResults().length, 1); assert.equal(runtime.manager.acknowledgedResults().length, 0);
+  assert.equal(runtime.manager.acknowledgeResultReceipt(receipt).idempotent, false);
+  assert.equal(runtime.manager.matchesDurableResultReceipt(receipt), true);
+  assert.equal(runtime.manager.matchesDurableResultEnvelope(envelope), false);
+  runtime.manager.healthError = new Error('fixture corruption');
+  assert.equal(runtime.manager.matchesDurableResultReceipt(receipt), false);
+});
