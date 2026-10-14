@@ -115,6 +115,6 @@ test('Runtime installer payload closure ships the text executor and advances the
   assert.ok(EXECUTION_PAYLOAD_FILES.includes('conversation-native.mjs'))
   assert.ok(EXECUTION_PAYLOAD_FILES.includes('workspace-file-bridge.mjs'))
   const runtimePackage = JSON.parse(readFileSync(new URL('../../cyf-agent-runtime-v1/package.json', import.meta.url), 'utf8'))
-  assert.equal(runtimePackage.version, '1.1.0')
+  assert.equal(runtimePackage.version, '1.1.1')
   for (const path of ['materials-chat.mjs', 'skill-conversation.mjs', 'skill-runners/local-script.mjs', 'skill-runners/native-model.mjs', 'skill-runners/image-provider.mjs']) assert.ok(EXECUTION_PAYLOAD_FILES.includes(path), path)
 })
