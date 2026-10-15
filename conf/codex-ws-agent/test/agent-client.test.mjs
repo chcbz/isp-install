@@ -1251,7 +1251,7 @@ test('real ws upgrade uses memory session proof, no API key or URL credential', 
       try {
         const implementation = await loadWebSocketClient()
         const runtime = new RuntimeV1Client({ manifest: {}, apiBaseUrl: `http://127.0.0.1:${server.address().port}`, fetchFn() {} })
-        runtime.currentSession = { sessionToken: 'rts1_' + 'a'.repeat(64), canonicalAgentId: 'agent-a', installationId: 'installation-a', hostId: 'host-a', runtimeInstanceId: 'boot-a', sessionGeneration: 7, websocketPath: '/ws/agent/channel' }
+        runtime.currentSession = { sessionToken: 'rts1_' + 'a'.repeat(64), canonicalAgentId: 'agent-a', installationId: 'installation-a', hostId: 'host-a', runtimeInstanceId: 'boot-a', sessionGeneration: '7', websocketPath: '/ws/agent/channel' }
         const client = new implementation(runtime.websocketUrl(), runtime.websocketOptions()); client.on('error', () => {})
       } catch (error) { server.close(() => rejectPromise(error)) }
     })
@@ -3077,6 +3077,13 @@ const workspaceFilePayload = (inputBytes = Buffer.from('workspace input\n')) => 
   }]
 })
 
+const nativeJsonFixture = (url, data, status = 200) => {
+  const response = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'native-fixture',
+    code: status >= 400 ? 'TEST_REJECTED' : 'E0', msg: status >= 400 ? 'denied' : 'ok', data: status >= 400 ? null : data }),
+    { status, headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'native-fixture' } })
+  Object.defineProperty(response, 'url', { value: String(url) })
+  return response
+}
 const workspaceFileResponse = (bytes, url, status = 200) => ({
   status,
   redirected: false,
@@ -3084,7 +3091,8 @@ const workspaceFileResponse = (bytes, url, status = 200) => ({
   json: async () => url.endsWith('/start')
     ? { executionId: 'pwe_exact', taskId: 'task-1', runId: 'run-1', state: 'STARTED' }
     : JSON.parse(bytes.toString()),
-  headers: { get: name => name.toLowerCase() === 'content-length' ? String(bytes.length) : null },
+  text: async () => JSON.stringify({ protocolVersion: 1, requestId: 'native-fixture', code: status >= 400 ? 'TEST_REJECTED' : 'E0', msg: 'fixture', data: status >= 400 ? null : url.endsWith('/start') ? { executionId: 'pwe_exact', taskId: 'task-1', runId: 'run-1', state: 'STARTED' } : JSON.parse(bytes.toString()) }),
+  headers: { get: name => name.toLowerCase() === 'content-length' ? String(bytes.length) : name.toLowerCase() === 'x-request-id' ? 'native-fixture' : null },
   body: (async function * () { yield bytes })()
 })
 
@@ -3298,13 +3306,7 @@ test('workspace command polling accepts only exact native queue envelopes and di
     state,
     fetchFn: async (url, options) => {
       fetchCalls.push({ url: url.toString(), options })
-      return {
-        status: 200,
-        redirected: false,
-        url: url.toString(),
-        headers: { get: name => name.toLowerCase() === 'content-type' ? 'application/json; charset=utf-8' : null },
-        json: async () => ({ items: [valid, { ...valid, messageId: 'bad', commandId: 'bad', targetAgentId: 'other-agent' }] })
-      }
+      return nativeJsonFixture(url, { items: [valid, { ...valid, messageId: 'bad', commandId: 'bad', targetAgentId: 'other-agent' }] })
     }
   })
   assert.deepEqual(result, { dispatched: 1, rejected: 1 })
@@ -3351,13 +3353,7 @@ test('workspace command polling retries one stale undici socket before dispatchi
         error.cause = { code: 'UND_ERR_SOCKET' }
         throw error
       }
-      return {
-        status: 200,
-        redirected: false,
-        url: nativeUrl,
-        headers: { get: () => 'application/json' },
-        json: async () => ({ items: [] })
-      }
+      return nativeJsonFixture(nativeUrl, { items: [] })
     }
   })
   assert.deepEqual(result, { dispatched: 0, rejected: 0 })
@@ -3383,7 +3379,7 @@ test('workspace command polling exposes safe failure categories while failing cl
     ['wrong path', async () => ({ status: 200, redirected: false, url: `${nativeUrl}/extra`, headers: { get: () => 'application/json' }, json: async () => ({ items: [] }) }), 'WORKSPACE_FILE_QUEUE_URL'],
     ['wrong content type', async () => ({ status: 200, redirected: false, url: nativeUrl, headers: { get: () => 'text/html' }, json: async () => ({ items: [] }) }), 'WORKSPACE_FILE_QUEUE_CONTENT_TYPE'],
     ['invalid JSON', async () => ({ status: 200, redirected: false, url: nativeUrl, headers: { get: () => 'application/json' }, json: async () => { throw new Error('not json') } }), 'WORKSPACE_FILE_QUEUE_JSON'],
-    ['invalid body', async () => ({ status: 200, redirected: false, url: nativeUrl, headers: { get: () => 'application/json' }, json: async () => ({ items: 'no' }) }), 'WORKSPACE_FILE_QUEUE_ENVELOPE']
+    ['invalid body', async () => nativeJsonFixture(nativeUrl, { items: 'no' }), 'WORKSPACE_FILE_QUEUE_ENVELOPE']
   ]) {
     await t.test(name, async () => {
       await assert.rejects(
@@ -3674,8 +3670,7 @@ test('late correlated registration ACK restores native queue pickup without repe
     queueCalls++
     assert.equal(options.method, 'GET')
     assert.equal(options.headers.Authorization, `AgentRuntime rts1_${'a'.repeat(64)}`)
-    return { status: 200, redirected: false, url: url.toString(),
-      headers: { get: () => 'application/json' }, json: async () => ({ items: [valid] }) }
+    return nativeJsonFixture(url, { items: [valid] })
   }
   await assert.rejects(() => pollWorkspaceFileCommands({ profile, state, fetchFn }),
     error => error.code === 'WORKSPACE_FILE_RUNTIME_UNAVAILABLE')
@@ -3701,7 +3696,7 @@ for (const startCase of ['transport', 'wrong-run', 'server-error', 'rejected']) 
         if (url.pathname.endsWith('/start')) {
           if (startCase === 'transport') throw new Error('opaque transport error')
           const response = workspaceFileResponse(Buffer.from('{}'), url.toString(), startCase === 'server-error' ? 500 : startCase === 'rejected' ? 409 : 200)
-          if (startCase === 'wrong-run') response.json = async () => ({ executionId: 'pwe_other', taskId: 'task-1', runId: 'other-run', state: 'STARTED' })
+          if (startCase === 'wrong-run') response.text = () => nativeJsonFixture(url, { executionId: 'pwe_other', taskId: 'task-1', runId: 'other-run', state: 'STARTED' }).text()
           return response
         }
         return workspaceFileResponse(Buffer.from('{}'), url.toString())
@@ -3794,7 +3789,7 @@ test('pre-engine recovery claim checks fingerprint and durable key under the inb
 const unifiedProfile = () => ({ ...profile, runtimeIdentity: { installationId: 'installation-a', tenantId: 'tenant-a', clientId: 'client-a', canonicalAgentId: profile.agentId } })
 const unifiedCommand = (number = 7001, patch = {}) => ({ ...command(number), tenantId: 'tenant-a', clientId: 'client-a',
   correlationId: `correlation-${number}`, ...patch })
-function unifiedCheckpoint({ root = temporaryDirectory(), selectedProfile = unifiedProfile(), cleanup = null, run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }) } = {}) {
+function unifiedCheckpoint({ root = temporaryDirectory(), selectedProfile = unifiedProfile(), cleanup = null, run = async () => ({ status: 'completed' }), ack = async (_command, status, version) => ({ kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }) } = {}) {
   const selected = selectedProfile
   const inbox = new PersistentCommandInbox({ rootDir: root, profile: selected }); inbox.initialize()
   const store = resolve(root, Buffer.from(selected.agentId).toString('hex'))
@@ -3813,21 +3808,21 @@ test('unified command confirms RECEIVED/STARTED before side effects; checkpoints
     // Calling pending scan inside HTTP callback proves no checkpoint lock held.
     assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, status)
     assert.deepEqual(Object.keys(context).sort(), ['installationId','tenantId','clientId','canonicalAgentId','messageId','correlationId','commandId','taskId','workItemId','payloadReference','expiresAt'].sort())
-    calls.push({ status, version }); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 10 }
+    calls.push({ status, version }); return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 10n).toString() }
   }, run: async () => {
     assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'STARTED'); calls.push({ status: 'EXECUTE' }); return { status: 'completed' }
   } })
   await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
-  assert.deepEqual(calls, [{ status: 'RECEIVED', version: null }, { status: 'STARTED', version: 10 }, { status: 'EXECUTE' }, { status: 'SUCCEEDED', version: 20 }])
+  assert.deepEqual(calls, [{ status: 'RECEIVED', version: null }, { status: 'STARTED', version: '10' }, { status: 'EXECUTE' }, { status: 'SUCCEEDED', version: '20' }])
   assert.equal(runtime.outbox.pendingEnvelopes().length, 0)
-  assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 30)
+  assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, '30')
   const checkpoint = runtime.ledger.getEntry('command-7001')
   assert.equal(JSON.stringify(checkpoint).includes('sessionGeneration'), false); assert.equal(JSON.stringify(checkpoint).includes('sessionToken'), false)
   runtime.processor.stop()
 })
 
 test('wrong status/version HTTP result cannot dequeue ACK or run command even with injected client', async () => {
-  for (const wrong of [{ kind: 'ADVANCED', status: 'SUCCEEDED', deliveryVersion: 1 }, { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: 0 }]) {
+  for (const wrong of [{ kind: 'ADVANCED', status: 'SUCCEEDED', deliveryVersion: '1' }, { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: '0' }]) {
     let runs = 0; const runtime = unifiedCheckpoint({ ack: async () => wrong, run: async () => { runs++; return { status: 'completed' } } })
     await runtime.processor.handle(unifiedCommand()); await runtime.processor.runtimeAckTail
     runtime.processor.resume(); await runtime.processor.waitForIdle()
@@ -3841,7 +3836,7 @@ test('unknown STARTED HTTP response becomes recovery-required; restart never re-
   let runs = 0; let confirmations = 0
   const runtime = unifiedCheckpoint({ ack: async (_context, status, version) => {
     if (status === 'STARTED') throw Object.assign(Error('synthetic transport loss'), { code: 'ECONNRESET' })
-    confirmations++; return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+    confirmations++; return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }
   }, run: async () => { runs++; return { status: 'completed' } } })
   await runtime.processor.handle(unifiedCommand()); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
   assert.equal(runs, 0); assert.equal(confirmations, 1)
@@ -3866,16 +3861,16 @@ test('completed terminal checkpoint replays after restart with last confirmed ve
   let runs = 0; let failed = false
   const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } }, ack: async (_context, status, version) => {
     if (status === 'SUCCEEDED') { failed = true; throw Object.assign(Error('synthetic'), { code: 'ECONNRESET' }) }
-    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+    return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }
   } })
   await runtime.processor.handle(unifiedCommand(7001, { expiresAt: Date.now() + 100000 })); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
   assert.equal(runs, 1); assert.equal(failed, true); assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'SUCCEEDED')
   runtime.processor.stop()
   const replay = []; const restarted = unifiedCheckpoint({ root: runtime.root, run: async () => { runs++; return { status: 'completed' } }, ack: async (context, status, version) => {
-    replay.push({ context, status, version }); return { kind: 'ADVANCED', status, deliveryVersion: version + 1 }
+    replay.push({ context, status, version }); return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version) + 1n).toString() }
   } })
   await restarted.processor.replayAcks(); restarted.processor.resume(); await restarted.processor.waitForIdle()
-  assert.equal(runs, 1); assert.equal(replay[0].status, 'SUCCEEDED'); assert.equal(replay[0].version, 2)
+  assert.equal(runs, 1); assert.equal(replay[0].status, 'SUCCEEDED'); assert.equal(replay[0].version, '2')
   assert.equal(restarted.outbox.pendingEnvelopes().length, 0); restarted.processor.stop()
 })
 
@@ -3894,7 +3889,7 @@ const syntheticCleanupProof = () => ({ fingerprint: 'a'.repeat(64), runDirectory
 test('runtime terminal cleanup waits for native proof and durable HTTP terminal, never WS send or uncertain ACK', async () => {
   let blocked = true; let cleaned = 0; let runtime
   runtime = unifiedCheckpoint({ run: async () => ({ status: 'completed', workspaceCleanup: syntheticCleanupProof() }),
-    ack: async (_context, status, version) => { if (status === 'SUCCEEDED' && blocked) throw Error('response unknown'); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } },
+    ack: async (_context, status, version) => { if (status === 'SUCCEEDED' && blocked) throw Error('response unknown'); return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() } },
     cleanup: async (message, proof) => {
       assert.equal(message.commandId, 'command-7001'); assert.deepEqual(proof, syntheticCleanupProof())
       assert.equal(runtime.ledger.runtimeAckCommit(message.commandId, message.messageId).status, 'SUCCEEDED')
@@ -4028,7 +4023,7 @@ test('real E05 fixture through unique durable processor and guarded executor can
   const raw = e05Fixture(); const selected = e05Profile(); const statuses = []
   const runtime = unifiedCheckpoint({ selectedProfile: selected,
     run: message => runManagedCommand({ ...noE05SideEffects(selected), message }),
-    ack: async (_context, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+    ack: async (_context, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() } } })
   try {
     await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
     assert.deepEqual(statuses, ['RECEIVED', 'STARTED', 'FAILED'])
@@ -4044,7 +4039,7 @@ const e05Wire = () => JSON.parse(readFileSync(new URL('../../cyf-agent-runtime-v
 const e05BusinessToken = 'synthetic_business_lease_original' // never redacted fixture authorization
 const e05Binding = () => e05ReassignmentBinding(e05Profile(), normalizeInboundMessage(e05Fixture()))
 const e05Dto = (patch = {}) => ({ ...e05Wire().getLease.response, leaseToken: e05BusinessToken, ...patch })
-const e05Response = (url, dto, status = 200) => ({ status, redirected: false, url: String(url), headers: new Headers({ 'Content-Type': 'application/json' }), json: async () => structuredClone(dto) })
+const e05Response = nativeJsonFixture
 const e05Digest = value => {
   const sort = v => Array.isArray(v) ? v.map(sort) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sort(v[k])])) : v
   return 'sha256:' + createHash('sha256').update(JSON.stringify(sort(value))).digest('hex')
@@ -4168,7 +4163,7 @@ test('E05 original executor after lease, sole checkpoint BEFORE commit, business
       assert.deepEqual(native.requests.map(r => r.body.expectedWorkItemVersion), [5, 5])
       opts.sendLegacyFn('task.report', { status: 'completed' }); // explicitly intercepted; no uncommitted report
       return { status: 'completed', output: 'E05 fixture result', exitCode: 0 }
-    } }), ack: async (_context, status, version) => { order.push(status); if (status === 'SUCCEEDED') assert.ok(native.result()); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+    } }), ack: async (_context, status, version) => { order.push(status); if (status === 'SUCCEEDED') assert.ok(native.result()); return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() } } })
   try {
     await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
     assert.deepEqual(order, ['RECEIVED', 'STARTED', 'executor', 'result', 'SUCCEEDED']); assert.equal(runs, 1)
@@ -4206,7 +4201,7 @@ test('E05 restart reads original result WITHOUT old token, closes checkpoint/ACK
   assert.equal(JSON.stringify(durable).includes(e05BusinessToken), false); runtime.processor.stop()
   const statuses = []; const restarted = unifiedCheckpoint({ root: runtime.root, selectedProfile: selected,
     run: () => assert.fail('restarting E05 must never re-execute'),
-    ack: async (_context, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+    ack: async (_context, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() } } })
   try {
     assert.equal(restarted.processor.failClosedError, null)
     for (const status of [404, 409]) {
@@ -4307,7 +4302,7 @@ test('E05 recovery does not convert duplicate dispatch to terminal REJECTED or b
     if (!e05ReassignmentBinding(selected, message)) { runs++; return { status: 'completed' } }
     return runManagedCommand({ profile: selected, message, commandCheckpoint, nativeFetch: native.fetch, apiOrigin: 'https://api.example.test',
       runCodexFn: async () => { runs++; return { status: 'completed', output: 'original' } } })
-  }, ack: async (_c, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 } } })
+  }, ack: async (_c, status, version) => { statuses.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() } } })
   try {
     await runtime.processor.handle(raw); runtime.processor.resume(); await runtime.processor.waitForIdle()
     const duplicate = await runtime.processor.handle(raw)
@@ -4340,20 +4335,20 @@ test('E05 crash after confirmed GET completion marker before ledger update recon
 
 test('E05 actual Node fetch HTTP→session/lease/original executor/result lostresponse→HTTP ACK→unique checkpoint, JavaDB NOT_RUN', async t => {
   t.mock.method(Date, 'now', () => 2000)
-  const { RuntimeV1Client } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
+  const { RuntimeV1Client, runtimeAckWireContext } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
   const raw = e05Fixture(); const selected = e05Profile(); const root = temporaryDirectory()
   const syntheticSession = 'rts1_' + 'a'.repeat(64); const syntheticAuthorization = 'rta1_' + 'b'.repeat(64)
   const calls = []; const results = new Map(); let version = 5; let leaseStatus = 'claimed'; let lostOnce = false; let generation = 7; let runs = 0; let runtime
   const server = createServer(async (request, response) => {
     let bytes = ''; for await (const part of request) bytes += part
-    const url = new URL(request.url, 'http://127.0.0.1'); const body = bytes ? JSON.parse(bytes) : null
+    const url = new URL(request.url, 'http://127.0.0.1'); const envelope = bytes ? JSON.parse(bytes) : null; const body = envelope ? envelope.data : null; const requestId = request.headers['x-request-id']; if (envelope) { assert.equal(envelope.requestId, requestId); assert.equal(envelope.protocolVersion, 1) }
     calls.push({ method: request.method, path: url.pathname, query: url.search, body })
-    const send = data => { response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' }); response.end(JSON.stringify(data)) }
+    const send = data => { response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store', 'X-Request-Id': requestId }); response.end(JSON.stringify({ protocolVersion: 1, requestId, code: 'E0', msg: 'ok', data })) }
     try {
       if (url.pathname === '/agent/runtime/v1/session') {
         assert.equal(request.headers.authorization, `Bearer ${syntheticAuthorization}`)
-        return send({ data: { ...selected.runtimeIdentity, hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: generation,
-          scheme: 'AgentRuntime', sessionToken: syntheticSession, websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' } })
+        return send({ tenantId: selected.runtimeIdentity.tenantId, clientId: selected.runtimeIdentity.clientId, canonicalAgentId: selected.runtimeIdentity.canonicalAgentId, runtimeInstallationId: selected.runtimeIdentity.installationId, hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: String(generation),
+          scheme: 'AgentRuntime', sessionToken: syntheticSession, websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' })
       }
       assert.equal(request.headers.authorization, `AgentRuntime ${syntheticSession}`)
       assert.equal(request.headers['x-agent-id'], selected.runtimeIdentity.canonicalAgentId)
@@ -4362,8 +4357,8 @@ test('E05 actual Node fetch HTTP→session/lease/original executor/result lostre
       assert.equal(request.headers['x-agent-session-generation'], String(generation)); assert.equal(request.headers['x-api-key'], undefined)
       if (url.pathname.endsWith('/acks')) {
         if (body.status === 'SUCCEEDED') assert.ok(results.get(raw.commandId))
-        assert.equal(body.deliveryVersion, { RECEIVED: null, STARTED: 1, SUCCEEDED: 2 }[body.status])
-        return send({ data: { kind: 'ADVANCED', status: body.status, deliveryVersion: (body.deliveryVersion ?? 0) + 1 } })
+        assert.equal(body.deliveryVersion, { RECEIVED: null, STARTED: '1', SUCCEEDED: '2' }[body.status])
+        return send({ kind: 'ADVANCED', status: body.status, deliveryVersion: (BigInt(body.deliveryVersion ?? '0') + 1n).toString() })
       }
       if (url.pathname.endsWith('/result-commit')) {
         assert.equal(url.search, '')
@@ -4388,7 +4383,7 @@ test('E05 actual Node fetch HTTP→session/lease/original executor/result lostre
   const client = new RuntimeV1Client({ manifest: { ...selected.runtimeIdentity, manifestVersion: '1', manifestSha256: 'sha256:' + 'd'.repeat(64) }, apiBaseUrl: apiOrigin, stateDir: root, hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture' })
   writeFileSync(client.authorizationPath(), JSON.stringify({ installationId: selected.runtimeIdentity.installationId, runtimeAuthorization: syntheticAuthorization }), { mode: 0o600 })
   await client.session()
-  runtime = unifiedCheckpoint({ root, selectedProfile: selected, ack: (...args) => client.acknowledge(...args),
+  runtime = unifiedCheckpoint({ root, selectedProfile: selected, ack: (command, status, version) => client.acknowledge(runtimeAckWireContext(command), status, version),
     run: (message, _record, commandCheckpoint) => runManagedCommand({ profile: selected, message, commandCheckpoint, apiOrigin,
       nativeFetch: (url, options) => client.nativeFetch(url, options), runCodexFn: async () => { runs++; return { status: 'completed', output: 'E05 fixture result' } } }) })
   try {
@@ -4399,7 +4394,7 @@ test('E05 actual Node fetch HTTP→session/lease/original executor/result lostre
     const record = runtime.inbox.commandStateIndex().get(raw.commandId)[0].record
     assert.equal(record.state, 'completed'); assert.equal(JSON.stringify(record).includes(e05BusinessToken), false)
     assert.equal(JSON.stringify(record).includes(syntheticSession), false)
-    assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).deliveryVersion, 3)
+    assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).deliveryVersion, '3')
     client.invalidateSession(); generation = 8; await client.session()
     const recovered = await recoverE05Result({ profile: selected, message: normalizeInboundMessage(raw), record,
       nativeFetch: (url, options) => client.nativeFetch(url, options), apiOrigin })
@@ -4464,7 +4459,7 @@ test('E05 crash after terminal ledger before HTTP ACK enqueue reconstructs from 
   assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'STARTED')
   const statuses = []
   const restarted = unifiedCheckpoint({ root: runtime.root, selectedProfile: selected, run: () => assert.fail('no model rerun'),
-    ack: async (_c, status, version) => { statuses.push(status); assert.equal(version, 2); return { kind: 'ADVANCED', status, deliveryVersion: 3 } } })
+    ack: async (_c, status, version) => { statuses.push(status); assert.equal(version, '2'); return { kind: 'ADVANCED', status, deliveryVersion: '3' } } })
   try {
     await restarted.processor.runtimeAckTail
     assert.deepEqual(statuses, ['SUCCEEDED']); assert.equal(restarted.processor.failClosedError, null)
@@ -4504,7 +4499,7 @@ for (const mode of ['untargeted', 'replay', 'heartbeat']) test(`runtime ACK comp
     assert.equal(existsSync(runtime.outbox.lockPath), false, 'no file lock over HTTP')
     assert.equal(context.commandId, 'command-7001'); assert.equal(context.messageId, 'message-7001')
     calls.push({ status, version })
-    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+    return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }
   }, run: async () => {
     runs++
     const entry = runtime.ledger.getEntry('command-7001')
@@ -4519,7 +4514,7 @@ for (const mode of ['untargeted', 'replay', 'heartbeat']) test(`runtime ACK comp
     await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
     await Promise.all(race.competitors)
     assert.equal(runs, 1); assert.equal(runtime.processor.failClosedError, null)
-    assert.deepEqual(calls, [{ status: 'RECEIVED', version: null }, { status: 'STARTED', version: 1 }, { status: 'SUCCEEDED', version: 2 }])
+    assert.deepEqual(calls, [{ status: 'RECEIVED', version: null }, { status: 'STARTED', version: '1' }, { status: 'SUCCEEDED', version: '2' }])
     const started = race.deliveries.find(item => item.status === 'STARTED').delivery
     assert.equal(await started.confirmation, true)
     assert.deepEqual([started.persisted, started.sent, started.markerPersisted, started.dequeued], [true, true, true, true])
@@ -4540,15 +4535,15 @@ test('runtime ACK completion race: suspended HTTP with repeated heartbeat/replay
       // Original persisted marker/FIFO must still be unconfirmed during callback.
       assert.equal(runtime.ledger.getEntry(context.commandId).ackStartedEmitted, false)
       startedCommitted = true
-      return { kind: 'ADVANCED', status, deliveryVersion: version + 1 }
+      return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version) + 1n).toString() }
     }
     return { kind: status === 'STARTED' ? 'PRIOR' : 'ADVANCED', status,
-      deliveryVersion: status === 'STARTED' ? version : (version ?? 0) + 1 }
+      deliveryVersion: status === 'STARTED' ? version : (BigInt(version ?? '0') + 1n).toString() }
   }, run: async () => {
     assert.equal(startedCommitted, true); runs++
     const entry = runtime.ledger.getEntry('command-7001')
     assert.equal(entry.ackStartedEmitted, true)
-    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 2)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, '2')
     return { status: 'completed' }
   } })
   const race = ackRaceInstall(runtime, 'heartbeat')
@@ -4601,7 +4596,7 @@ for (const [label, change] of [
 ]) test(`runtime ACK completion race: changed ${label} cannot certify or dequeue immutable target`, async () => {
   const calls = []
   const { runtime, meta } = await ackRacePrepared({ ack: async (_context, status, version) => {
-    calls.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+    calls.push(status); return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }
   } })
   ackRaceInstall(runtime, 'untargeted')
   let dequeues = 0
@@ -4631,7 +4626,7 @@ test('runtime ACK completion race: callback cannot change expected context while
   const entered = ackRaceDeferred(); const release = ackRaceDeferred(); let passedContext
   const { runtime, meta } = await ackRacePrepared({ ack: async (context, status, version) => {
     if (status === 'STARTED') { passedContext = context; entered.resolve(); await release.promise }
-    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+    return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }
   } })
   try {
     const delivery = runtime.processor._emitAck('STARTED', meta)
@@ -4671,10 +4666,10 @@ test('runtime ACK completion race: certified record remains exact after older fl
       assert.equal(Object.isFrozen(proof), true)
       assert.deepEqual(Object.keys(proof).sort(), ['recordDigest', 'contextDigest', 'kind', 'status', 'deliveryVersion'].sort())
       assert.equal(proof.contextDigest, runtime.ledger.runtimeAckCommit(context.commandId, context.messageId).contextDigest)
-      assert.equal(proof.kind, 'ADVANCED'); assert.equal(proof.deliveryVersion, 2)
+      assert.equal(proof.kind, 'ADVANCED'); assert.equal(proof.deliveryVersion, '2')
       assert.throws(() => { proof.deliveryVersion = 900 }, TypeError); proofChecked = true
     }
-    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+    return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }
   }
   try {
     const started = runtime.processor._emitAck('STARTED', meta)
@@ -4682,7 +4677,7 @@ test('runtime ACK completion race: certified record remains exact after older fl
     assert.equal(await started.confirmation, true); assert.equal(await rejected.confirmation, true)
     await Promise.all(race.competitors)
     assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').status, 'REJECTED')
-    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, 3)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, '3')
     assert.equal(proofChecked, true)
     assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, true)
     assert.equal(runtime.processor.runtimeAckCompletions.size, 0)
@@ -4690,16 +4685,16 @@ test('runtime ACK completion race: certified record remains exact after older fl
 })
 
 for (const [label, result] of [
-  ['wrong status', { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: 2 }],
-  ['nonadvancing version', { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: 1 }],
-  ['regressed version', { kind: 'PRIOR', status: 'STARTED', deliveryVersion: 0 }],
+  ['wrong status', { kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: '2' }],
+  ['nonadvancing version', { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: '1' }],
+  ['regressed version', { kind: 'PRIOR', status: 'STARTED', deliveryVersion: '0' }],
   ['unsafe version', { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: Number.MAX_SAFE_INTEGER + 1 }],
-  ['unknown result', { kind: 'UNKNOWN', status: 'STARTED', deliveryVersion: 2 }],
+  ['unknown result', { kind: 'UNKNOWN', status: 'STARTED', deliveryVersion: '2' }],
   ['absent result', null]
 ]) test(`runtime ACK completion race: ${label} retains STARTED outbox without execution or confirmation`, async () => {
   let runs = 0
   const runtime = unifiedCheckpoint({ ack: async (_context, status, version) => status === 'STARTED'
-    ? result : { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 },
+    ? result : { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() },
     run: async () => { runs++; return { status: 'completed' } } })
   const race = ackRaceInstall(runtime, 'heartbeat')
   try {
@@ -4720,8 +4715,8 @@ for (const fault of ['ledger-before', 'ledger-after', 'marker-before', 'marker-a
   test(`runtime ACK completion race: ${fault} fails closed even if latest receipt/marker/FIFO suggests success`, async () => {
     let runs = 0
     const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } },
-      ack: async (_context, status, version) => ({ kind: status === 'STARTED' && version === 2 ? 'PRIOR' : 'ADVANCED',
-        status, deliveryVersion: status === 'STARTED' && version === 2 ? version : (version ?? 0) + 1 }) })
+      ack: async (_context, status, version) => ({ kind: status === 'STARTED' && version === '2' ? 'PRIOR' : 'ADVANCED',
+        status, deliveryVersion: status === 'STARTED' && version === '2' ? version : (BigInt(version ?? '0') + 1n).toString() }) })
     const race = ackRaceInstall(runtime, 'untargeted'); let faultCalls = 0
     const fail = () => { faultCalls++; throw Object.assign(Error('private injected durable ACK failure'), { code: 'EIO' }) }
     if (fault.startsWith('ledger-')) {
@@ -4773,26 +4768,26 @@ for (const fault of ['ledger-before', 'ledger-after', 'marker-before', 'marker-a
 }
 
 for (const failure of ['403', 'unknown-response']) test(`runtime ACK completion race: actual Node HTTP ${failure} never executes, unknown STARTED checkpoint restart never reruns (JavaDB NOT_RUN)`, async t => {
-  const { RuntimeV1Client } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
+  const { RuntimeV1Client, runtimeAckWireContext } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
   const selected = unifiedProfile(); const root = temporaryDirectory(); let runs = 0; const requests = []
   const authorization = 'rta1_' + 'b'.repeat(64); const token = 'rts1_' + 'a'.repeat(64)
   const server = createServer(async (request, response) => {
     let bytes = ''; for await (const part of request) bytes += part
-    const body = JSON.parse(bytes); requests.push(body.status || 'session')
-    const send = data => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ data })) }
+    const envelope = JSON.parse(bytes); assert.deepEqual(Object.keys(envelope).sort(), ['data', 'protocolVersion', 'requestId']); assert.equal(envelope.protocolVersion, 1); assert.equal(envelope.requestId, request.headers['x-request-id']); const body = envelope.data; requests.push(body.status || 'session')
+    const send = (data, status = 200, code = 'E0') => { response.writeHead(status, { 'Content-Type': 'application/json', 'X-Request-Id': envelope.requestId }); response.end(JSON.stringify({ protocolVersion: 1, requestId: envelope.requestId, code, msg: code === 'E0' ? 'ok' : 'denied', data })) }
     if (request.url === '/agent/runtime/v1/session') {
       assert.equal(request.headers.authorization, `Bearer ${authorization}`)
-      return send({ ...selected.runtimeIdentity, hostId: 'race-host', runtimeInstanceId: 'race-boot', sessionGeneration: 1,
+      return send({ tenantId: selected.runtimeIdentity.tenantId, clientId: selected.runtimeIdentity.clientId, canonicalAgentId: selected.runtimeIdentity.canonicalAgentId, runtimeInstallationId: selected.runtimeIdentity.installationId, hostId: 'race-host', runtimeInstanceId: 'race-boot', sessionGeneration: '1',
         scheme: 'AgentRuntime', sessionToken: token, websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' })
     }
     assert.equal(request.headers.authorization, `AgentRuntime ${token}`)
     assert.equal(request.headers['x-api-key'], undefined)
     if (body.status === 'STARTED') {
-      assert.equal(body.deliveryVersion, 1)
-      if (failure === '403') { response.writeHead(403, { 'Content-Type': 'application/json' }); response.end('{"code":"TEST_FORBIDDEN"}'); return }
+      assert.equal(body.deliveryVersion, '1')
+      if (failure === '403') { send(null, 403, 'TEST_FORBIDDEN'); return }
       response.destroy(); return // no known HTTP commit, never inferred from transport loss
     }
-    send({ kind: 'ADVANCED', status: body.status, deliveryVersion: (body.deliveryVersion ?? 0) + 1 })
+    send({ kind: 'ADVANCED', status: body.status, deliveryVersion: (BigInt(body.deliveryVersion ?? '0') + 1n).toString() })
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
@@ -4800,7 +4795,7 @@ for (const failure of ['403', 'unknown-response']) test(`runtime ACK completion 
     apiBaseUrl: `http://127.0.0.1:${server.address().port}`, stateDir: root, hostId: 'race-host', runtimeInstanceId: 'race-boot' })
   writeFileSync(client.authorizationPath(), JSON.stringify({ installationId: selected.runtimeIdentity.installationId, runtimeAuthorization: authorization }), { mode: 0o600 })
   await client.session()
-  const runtime = unifiedCheckpoint({ root, selectedProfile: selected, ack: (...args) => client.acknowledge(...args),
+  const runtime = unifiedCheckpoint({ root, selectedProfile: selected, ack: (command, status, version) => client.acknowledge(runtimeAckWireContext(command), status, version),
     run: async () => { runs++; return { status: 'completed' } } })
   const race = ackRaceInstall(runtime, 'heartbeat')
   try {
@@ -4811,7 +4806,7 @@ for (const failure of ['403', 'unknown-response']) test(`runtime ACK completion 
     assert.equal(runtime.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'STARTED')
     assert.equal(runtime.ledger.getEntry('command-7001').ackStartedEmitted, false)
     if (failure === '403') {
-      assert.equal(runtime.processor.runtimeAckFailure.code, 'RUNTIME_HTTP_REJECTED')
+      assert.equal(runtime.processor.runtimeAckFailure.code, 'TEST_FORBIDDEN')
       assert.equal(runtime.processor.runtimeAckFailure.status, 403)
     }
     assert.equal(runtime.inbox.count('recovery_required'), 1)
@@ -4831,7 +4826,7 @@ test('runtime ACK completion race: stop during old flush confirmation cannot be 
   let runtime; let runs = 0
   runtime = unifiedCheckpoint({ ack: async (_context, status, version) => {
     if (status === 'STARTED') runtime.processor.stop() // only in-memory synthetic processor, no process signal
-    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+    return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }
   }, run: async () => { runs++; return { status: 'completed' } } })
   const race = ackRaceInstall(runtime, 'untargeted')
   try {
@@ -4853,7 +4848,7 @@ test('runtime ACK completion race: later command HTTP rejection retains its own 
   const { runtime, meta } = await ackRacePrepared({ ack: async (context, status, version) => {
     if (context.commandId === 'command-7002') throw Object.assign(Error('private second-command rejection'), { code: 'RUNTIME_HTTP_REJECTED', status: 403 })
     if (status === 'STARTED') { entered.resolve(); await release.promise }
-    return { kind: 'ADVANCED', status, deliveryVersion: (version ?? 0) + 1 }
+    return { kind: 'ADVANCED', status, deliveryVersion: (BigInt(version ?? '0') + 1n).toString() }
   } })
   const emit = runtime.processor._emitRuntimeAck.bind(runtime.processor); const deliveries = []
   runtime.processor._emitRuntimeAck = (status, meta, marker) => {
@@ -4922,4 +4917,23 @@ test('native SKILL_INSTALL retains original wire expiry but defers lifetime to l
   await runtime.processor.waitForIdle()
   assert.equal(runs, 1)
   assert.equal(runtime.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+})
+
+test('Runtime ACK checkpoint preserves Long precision across restart and monotonic comparison', async () => {
+  const first = '9007199254740993'
+  const runtime = unifiedCheckpoint({ ack: async (_command, status, previous) => ({ kind: 'ADVANCED', status,
+    deliveryVersion: previous === null ? first : (BigInt(previous) + 1n).toString() }) })
+  try {
+    await runtime.processor.handle(unifiedCommand()); runtime.processor.resume()
+    await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail
+    assert.equal(runtime.processor.failClosedError, null)
+    assert.equal(runtime.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, '9007199254740995')
+    const entry = runtime.ledger.getEntry('command-7001')
+    assert.throws(() => runtime.ledger.markRuntimeAckCommitted(entry.commandId, entry.runtimeCommand,
+      { kind: 'PRIOR', status: 'SUCCEEDED', deliveryVersion: '9007199254740994' }), { code: 'RUNTIME_ACK_RESULT_INVALID' })
+    runtime.processor.stop()
+    const restarted = unifiedCheckpoint({ root: runtime.root, run: () => assert.fail('No repeated execution') })
+    try { assert.equal(restarted.ledger.runtimeAckCommit('command-7001', 'message-7001').deliveryVersion, '9007199254740995') }
+    finally { restarted.processor.stop() }
+  } finally { runtime.processor.stop() }
 })

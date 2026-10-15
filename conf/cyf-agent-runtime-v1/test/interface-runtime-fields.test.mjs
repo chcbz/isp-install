@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { identityOf, validateRuntimeSession, runtimeSessionHeaders, validateCommandForManifest, validateRuntimeAckResult, validateEnrollmentResult } from '../lib/runtime-client.mjs'
+import { identityOf, runtimeAckWireContext, validateRuntimeSession, runtimeSessionHeaders, validateCommandForManifest, validateRuntimeAckResult, validateEnrollmentResult } from '../lib/runtime-client.mjs'
 const manifest = { installationId: 'rti_test', tenantId: 't', clientId: 'c', canonicalAgentId: 'a', manifestVersion: '1', manifestSha256: `sha256:${'a'.repeat(64)}` }
 const session = () => ({ runtimeInstallationId: manifest.installationId, tenantId: 't', clientId: 'c', canonicalAgentId: 'a', hostId: 'h', runtimeInstanceId: 'r', sessionGeneration: '9007199254740993', scheme: 'AgentRuntime', sessionToken: `rts1_${'b'.repeat(64)}`, websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' })
 test('public identity adapts from unchanged private manifest', () => {
@@ -30,4 +30,16 @@ test('enrollment wire changes do not rename private authorization fields', () =>
   const value = validateEnrollmentResult({ installation: { ...identityOf(manifest), enrollmentExpiresAt: 2000, status: 'ACTIVE', lastHeartbeatAt: null }, runtimeAuthorization: `rta1_${'b'.repeat(64)}` }, manifest)
   assert.equal(value.installationId, manifest.installationId)
   assert.equal(Object.hasOwn(value, 'runtimeInstallationId'), false)
+})
+
+test('ACK boundary projects original private command without changing immutable bytes', () => {
+  const command = Object.freeze({ installationId: 'rti_test', tenantId: 't', clientId: 'c', canonicalAgentId: 'a', messageId: 'm', correlationId: 'c', commandId: 'cmd', taskId: 'task', workItemId: null, payloadReference: null, expiresAt: '1970-01-01T00:00:02.000Z' })
+  const bytes = JSON.stringify(command)
+  const wire = runtimeAckWireContext(command)
+  assert.equal(wire.runtimeInstallationId, command.installationId)
+  assert.equal(wire.expiresAt, 2000)
+  assert.equal(JSON.stringify(command), bytes)
+  assert.equal(validateCommandForManifest(wire, manifest, 'RECEIVED', 1000).expiresAt, 2000)
+  for (const expiresAt of [2000, '1970-01-01T00:00:02Z', '1970-01-01', 'not-a-date']) assert.throws(() => runtimeAckWireContext({ ...command, expiresAt }))
+  assert.throws(() => runtimeAckWireContext({ ...command, runtimeInstallationId: 'other' }))
 })

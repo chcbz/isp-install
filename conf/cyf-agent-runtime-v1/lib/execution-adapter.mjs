@@ -1,7 +1,7 @@
 // Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
 // Session credentials live only here; outbound work checkpoints hold no proof.
 import { randomUUID } from 'node:crypto';
-import { RuntimeV1Client, classifyRuntimeError } from './runtime-client.mjs';
+import { RuntimeV1Client, classifyRuntimeError, runtimeAckWireContext } from './runtime-client.mjs';
 const adapterError = code => Object.assign(new Error(code), { code });
 const wait = (ms, signal) => new Promise(resolve => {
   if (signal.aborted) return resolve();
@@ -77,7 +77,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       };
       const transport = {
         ready, reportReady: () => admitted && channelConfirmed && !!client.currentSession && socket?.readyState === 1, send, readyCommandTypes: () => ready() ? executor.readyCommandTypes().filter(type => requestTypes.includes(type)) : [], headers: () => client.sessionHeaders(),
-        acknowledge: (command, status, version) => client.acknowledge(command, status, version, { signal: abort?.signal }), nativeFetch: (url, opts) => client.nativeFetch(url, opts),
+        acknowledge: (command, status, version) => client.acknowledge(runtimeAckWireContext(command), status, version, { signal: abort?.signal }), nativeFetch: (url, opts) => client.nativeFetch(url, opts),
         refreshCapabilities: register
       };
       // Resume can await this subject's durable/native reconciliation. Never let

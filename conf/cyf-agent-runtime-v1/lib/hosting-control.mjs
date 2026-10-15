@@ -5,11 +5,19 @@ import { constants, mkdir, open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { digestManifest, runtimeSubjectKey, stableJson, validateManifest } from './manifest.mjs';
 import { acquireRuntimeOwnership, requireOwnedPrivateRoot } from './runtime-host.mjs';
-import { RuntimeV1Client } from './runtime-client.mjs';
+import { RuntimeV1Client, canonicalVersion } from './runtime-client.mjs';
 import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './security.mjs';
 import { hostingError, validateHostingConfig } from './hosting-config.mjs';
 import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validateHostingAssociation } from './hosting-wire.mjs';
 
+// Existing private journals may contain exact safe integers. Preserve their bytes on load;
+// new mutable counters are decimal strings. Public session proofs accept strings only.
+const journalGeneration = value => canonicalVersion(value) ? value
+  : Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+const maxGeneration = (left, right) => {
+  if (!canonicalVersion(left) || !canonicalVersion(right)) throw hostingError('HOSTING_JOURNAL_INVALID');
+  return BigInt(left) >= BigInt(right) ? left : right;
+};
 const sha = value => createHash('sha256').update(value).digest('hex');
 const opKey = request => sha(stableJson({ tenantId: request.tenantId, clientId: request.clientId, operationId: request.operationId }));
 const same = (a, b) => stableJson(a) === stableJson(b);
@@ -64,7 +72,7 @@ export class HostingControl {
           || !/^rti_[0-9a-f]{32}$/.test(subject.manifest.installationId) || !/^[0-9a-f]{64}$/.test(subject.enrollmentSecret)
           || sha(subject.enrollmentSecret) !== subject.enrollmentSecretSha256 || !positiveEpoch(subject.enrollmentExpiresAt)
           || !Number.isSafeInteger(subject.latestGeneration) || subject.latestGeneration < 1
-          || !Number.isSafeInteger(subject.lastSessionGeneration) || subject.lastSessionGeneration < 0
+          || journalGeneration(subject.lastSessionGeneration) === null
           || installations.has(subject.manifest.installationId)
           || ['tenantId', 'clientId', 'canonicalAgentId'].some(field => subject.manifest[field] !== subject.initialAssociation[field])) throw hostingError('HOSTING_JOURNAL_INVALID');
       installations.add(subject.manifest.installationId);
@@ -142,7 +150,7 @@ export class HostingControl {
           if (!positiveEpoch(enrollmentExpiresAt)) throw hostingError('HOSTING_GENERATION_EXHAUSTED');
           subject = { manifest: { ...unsigned, manifestSha256: digestManifest(unsigned) }, enrollmentSecret,
             enrollmentSecretSha256: sha(enrollmentSecret), enrollmentExpiresAt, initialAssociation: hostingAssociation(request),
-            template: structuredClone(this.config.template), latestGeneration: 1, activeOperationKey: null, lastSessionGeneration: 0 };
+            template: structuredClone(this.config.template), latestGeneration: 1, activeOperationKey: null, lastSessionGeneration: '0' };
           state.subjects[subjectKey] = subject;
         } else {
           if (!subject || initialFields.some(field => request[field] !== subject.initialAssociation[field])) throw hostingError('HOSTING_ASSOCIATION_REJECTED');
@@ -182,7 +190,7 @@ export class HostingControl {
     const active = this.live.get(operation.subjectKey); const proof = this.host.agentEvidence(operation.subjectKey);
     if (!active || !active.confirmed || active.key !== key || !proof || ['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].some(field => proof[field] !== subject.manifest[field])
         || proof.hostId !== response.hostId || proof.runtimeInstanceId !== this.host.instanceId
-        || !Number.isSafeInteger(proof.sessionGeneration) || proof.sessionGeneration <= active.sessionFloor
+        || !canonicalVersion(proof.sessionGeneration) || BigInt(proof.sessionGeneration) <= BigInt(active.sessionFloor)
         || proof.executorReady !== true || proof.durableReady !== true || !positiveEpoch(proof.registeredAt) || !positiveEpoch(proof.serviceReadyAt)
         || proof.registeredAt < Math.max(operation.association.requestedAt, operation.admittedAt, active.startedAt)
         || proof.serviceReadyAt < proof.registeredAt) return response;
@@ -253,7 +261,7 @@ export class HostingControl {
     // Never reenroll during free reprovision or after a possibly consumed secret.
     if (!authorization && operation.association.operationKind === 'REPROVISION') throw hostingError('HOSTING_AUTHORIZATION_REQUIRED');
     const prior = this.host.agents.get(operation.subjectKey);
-    const floor = Math.max(subject.lastSessionGeneration, prior?.executor?.sessionGeneration?.() || 0);
+    const floor = maxGeneration(journalGeneration(subject.lastSessionGeneration), prior?.executor?.sessionGeneration?.() ?? '0');
     if (prior) await this.host.reprovisionAgent(agent); else await this.host.ensureAgent(agent);
     if (!authorization) {
       if (this.closing) return;
@@ -264,8 +272,8 @@ export class HostingControl {
     this.live.set(operation.subjectKey, { key, startedAt: this.now(), sessionFloor: floor, confirmed: false });
     await this.host.activate(operation.subjectKey);
     const proof = this.host.agentEvidence(operation.subjectKey);
-    if (proof && Number.isSafeInteger(proof.sessionGeneration)) await this.mutate(state => {
-      state.subjects[operation.subjectKey].lastSessionGeneration = Math.max(state.subjects[operation.subjectKey].lastSessionGeneration, proof.sessionGeneration);
+    if (proof && canonicalVersion(proof.sessionGeneration)) await this.mutate(state => {
+      state.subjects[operation.subjectKey].lastSessionGeneration = maxGeneration(journalGeneration(state.subjects[operation.subjectKey].lastSessionGeneration), proof.sessionGeneration);
       return { value: null };
     });
     const live = this.live.get(operation.subjectKey); if (live?.key === key && !this.closing) live.confirmed = true;

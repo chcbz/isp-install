@@ -1417,7 +1417,7 @@ export class DurableDedupeLedger {
       for (const receipt of Object.values(entry.runtimeAckCommits)) {
         if (!isObject(receipt) || Object.keys(receipt).sort().join(',') !== 'contextDigest,deliveryVersion,kind,status'
             || !['ADVANCED', 'PRIOR'].includes(receipt.kind) || !ACK_STATUS_VALUES.has(receipt.status)
-            || !Number.isSafeInteger(receipt.deliveryVersion) || receipt.deliveryVersion < 1
+            || !positiveRuntimeVersion(receipt.deliveryVersion)
             || receipt.contextDigest !== canonicalSha256(entry.runtimeCommand)) throw new Error('invalid Runtime D06 commit evidence')
       }
     }
@@ -1717,8 +1717,8 @@ export class DurableDedupeLedger {
     const key = Buffer.from(command.messageId).toString('hex')
     const previous = entry.runtimeAckCommits?.[key]
     if (!['ADVANCED', 'PRIOR'].includes(result.kind) || !ACK_STATUS_VALUES.has(result.status)
-        || !Number.isSafeInteger(result.deliveryVersion) || result.deliveryVersion < 1
-        || previous && result.deliveryVersion < previous.deliveryVersion) throw new AgentProtocolError('RUNTIME_ACK_RESULT_INVALID', 'HTTP ACK result is not a monotonic D06 commit')
+        || !positiveRuntimeVersion(result.deliveryVersion)
+        || previous && BigInt(result.deliveryVersion) < BigInt(previous.deliveryVersion)) throw new AgentProtocolError('RUNTIME_ACK_RESULT_INVALID', 'HTTP ACK result is not a monotonic D06 commit')
     this._writeEntry(commandId, { ...entry, runtimeAckCommits: { ...(entry.runtimeAckCommits || {}),
       [key]: { kind: result.kind, status: result.status, deliveryVersion: result.deliveryVersion, contextDigest: canonicalSha256(command) } } })
   }
@@ -2407,9 +2407,9 @@ export class AckOutbox {
       if (!head || head.fileName !== expected.fileName || canonicalSha256(head.record) !== canonicalSha256(expected.record)) throw new AgentProtocolError('RUNTIME_ACK_FIFO_CHANGED', 'ACK FIFO changed during HTTP confirmation')
       const previous = ledger.runtimeAckCommit(head.envelope.commandId, head.envelope.runtimeCommand.messageId)
       if (!result || result.status !== head.envelope.ackStatus || !['ADVANCED', 'PRIOR'].includes(result.kind)
-          || !Number.isSafeInteger(result.deliveryVersion) || result.deliveryVersion < 1
-          || previous && (result.deliveryVersion < previous.deliveryVersion
-            || result.kind === 'ADVANCED' && result.deliveryVersion <= previous.deliveryVersion)) throw new AgentProtocolError('RUNTIME_ACK_COMMIT_UNCONFIRMED', 'HTTP result does not confirm the queued status/version')
+          || !positiveRuntimeVersion(result.deliveryVersion)
+          || previous && (BigInt(result.deliveryVersion) < BigInt(previous.deliveryVersion)
+            || result.kind === 'ADVANCED' && BigInt(result.deliveryVersion) <= BigInt(previous.deliveryVersion))) throw new AgentProtocolError('RUNTIME_ACK_COMMIT_UNCONFIRMED', 'HTTP result does not confirm the queued status/version')
       ledger.markRuntimeAckCommitted(head.envelope.commandId, head.envelope.runtimeCommand, result)
       if (head.marker.kind !== 'none') ledger.markAckEmitted(head.envelope.commandId, head.envelope.ackStatus, head.marker)
       this.dequeue(head.fileName)
@@ -2472,6 +2472,10 @@ export const buildAckEnvelope = (profile, ackStatus, meta, runtimeInstanceId = p
   return envelope
 }
 
+
+// Receipt versions are public int64 decimal strings; never compare lexically or round through Number.
+const positiveRuntimeVersion = value => typeof value === 'string' && /^[1-9][0-9]*$/.test(value)
+  && BigInt(value) <= 9223372036854775807n
 
 const exactRuntimeCommandField = value => typeof value === 'string' && value.length > 0
   && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value)

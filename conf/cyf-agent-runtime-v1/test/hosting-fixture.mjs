@@ -58,10 +58,10 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
           if (state.closed) return;
         } else state.session = 1;
         state.ready = true; state.proof = { ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].map(key => [key, agent.manifest[key]])),
-          hostId: hostConfig.hostId, runtimeInstanceId: instanceId, sessionGeneration: state.session,
+          hostId: hostConfig.hostId, runtimeInstanceId: instanceId, sessionGeneration: String(state.session),
           registeredAt: now, serviceReadyAt: now, executorReady: true, durableReady: true };
       },
-      evidence: () => state.ready && !state.closed ? state.proof : null, sessionGeneration: () => state.session,
+      evidence: () => state.ready && !state.closed ? state.proof : null, sessionGeneration: () => String(state.session),
       ready: () => state.ready && !state.closed, pause: async () => { state.ready = false; },
       cancelActivation: () => { state.release?.(); },
       close: async () => { state.closed++; state.ready = false; state.release?.(); }

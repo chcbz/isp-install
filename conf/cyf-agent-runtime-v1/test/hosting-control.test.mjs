@@ -103,7 +103,7 @@ test('free reprovision allocates once, same install/manifest/secret expiry; clos
   for (const field of ['installationId', 'manifestSha256', 'enrollmentSecretSha256', 'enrollmentExpiresAt']) assert.equal(candidate[field], initial[field]);
   const repro = candidateRequest(reprepare, candidate, 'ensure'); await f.control().handle(repro); await f.settle();
   const after = await f.control().handle({ ...repro, method: 'observe' }); assert.equal(after.outcome, 'SERVICE_READY'); assert.equal(after.provisionGeneration, 2);
-  assert.ok(after.sessionGeneration > before.sessionGeneration); assert.ok(after.registeredAt >= reprepare.requestedAt); assert.equal(f.enrollmentCount(), 1);
+  assert.ok(BigInt(after.sessionGeneration) > BigInt(before.sessionGeneration)); assert.ok(after.registeredAt >= reprepare.requestedAt); assert.equal(f.enrollmentCount(), 1);
   assert.equal(f.sessionCount(), 2); assert.equal((await f.control().handle({ ...ensure, method: 'observe' })).outcome, 'UNKNOWN');
   await f.control().handle(repro); await f.settle(); assert.equal(f.sessionCount(), 2);
   for (const peer of f.peers) { assert.equal(f.states.get(peer.subjectKey).length, 1); assert.equal(f.states.get(peer.subjectKey)[0].closed, 0); }
@@ -135,7 +135,7 @@ test('restart reloads admitted dynamic subjects only and rejects stale persisted
   await f.control().handle(otherPrepare); await f.stop(); f.advance(); await f.start();
   assert.equal(f.host().agents.size, 3); assert.equal((await f.control().handle({ ...ensure, method: 'observe' })).outcome, 'UNKNOWN');
   f.control().resumeAdmitted(); await f.settle(); const fresh = await f.control().handle({ ...ensure, method: 'observe' });
-  assert.equal(fresh.outcome, 'SERVICE_READY'); assert.notEqual(fresh.runtimeInstanceId, prior.runtimeInstanceId); assert.ok(fresh.sessionGeneration > prior.sessionGeneration);
+  assert.equal(fresh.outcome, 'SERVICE_READY'); assert.notEqual(fresh.runtimeInstanceId, prior.runtimeInstanceId); assert.ok(BigInt(fresh.sessionGeneration) > BigInt(prior.sessionGeneration));
   assert.equal(f.host().agents.size, 4); assert.equal(f.enrollmentCount(), 1); assert.equal((await f.control().handle(prepare)).installationId, candidate.installationId);
 });
 
@@ -251,7 +251,7 @@ test('clean shutdown while registration pending reloads admission without markin
   assert.equal(Object.values((await readPrivateJson(f.control().path)).operations)[0].recoveryRequired, false);
   f.advance(); await f.start(); f.control().resumeAdmitted(); await until(() => f.pending() !== old); f.pending().release(); await f.settle();
   const ready = await f.control().handle({ ...ensure, method: 'observe' }); assert.equal(ready.outcome, 'SERVICE_READY');
-  assert.equal(ready.sessionGeneration, 2); assert.equal(f.enrollmentCount(), 1);
+  assert.equal(ready.sessionGeneration, '2'); assert.equal(f.enrollmentCount(), 1);
 });
 
 test('journal write uncertainty closes admission and every queued mutation, preserving unknown durable result', async t => {

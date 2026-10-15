@@ -76,6 +76,16 @@ export function validateCommandForManifest(command, manifest, status, now = Date
   if (expiry <= now && ['RECEIVED', 'STARTED'].includes(status)) throw fail('RUNTIME_COMMAND_EXPIRED');
   return Object.freeze({ ...command });
 }
+// Private durable command bytes remain unchanged; project only at the HTTP boundary.
+export function runtimeAckWireContext(command) {
+  if (!command || typeof command !== 'object' || Array.isArray(command)
+      || Object.keys(command).sort().join(',') !== ['installationId', 'tenantId', 'clientId', 'canonicalAgentId',
+        'messageId', 'correlationId', 'commandId', 'taskId', 'workItemId', 'payloadReference', 'expiresAt'].sort().join(',')) throw fail('RUNTIME_ACK_FIELD_FORBIDDEN');
+  const expiry = typeof command.expiresAt === 'string' ? Date.parse(command.expiresAt) : NaN;
+  if (!safeEpoch(expiry) || new Date(expiry).toISOString() !== command.expiresAt) throw fail('RUNTIME_COMMAND_EXPIRY_INVALID');
+  const { installationId, expiresAt, ...facts } = command;
+  return Object.freeze({ ...facts, runtimeInstallationId: installationId, expiresAt: expiry });
+}
 export function validateRuntimeAckResult(result, status, lastConfirmedVersion = null) {
   if (!result || !['ADVANCED', 'PRIOR'].includes(result.kind) || result.status !== status
       || !positiveVersion(result.deliveryVersion)
