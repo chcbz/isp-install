@@ -13,7 +13,7 @@ const current = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures',
 const fixture = { dispatchFacts: current.facts, outcomes: current.outcomes }
 // Historical delivery fixtures supply lineage only; the tested execution contract is exclusively v4.
 const currentFacts = historical => ({ schemaVersion: 4, inspectedSourceRefIds: [],
-  availableSources: historical.availableSources.map(source => ({ ...source, mimeType: source.mediaType === 'image' ? 'image/png' : source.mediaType === 'audio' ? 'audio/wav' : source.mediaType === 'file' ? 'application/pdf' : 'text/plain' })),
+  availableSources: historical.availableSources.map(source => ({ ...source, contentMimeType: source.mediaType === 'image' ? 'image/png' : source.mediaType === 'audio' ? 'audio/wav' : source.mediaType === 'file' ? 'application/pdf' : 'text/plain' })),
   availableActions: historical.availableActions.map(action => ({ ...current.facts.availableActions[1], actionId: action.actionId, minSources: action.minSources, maxSources: action.maxSources })) })
 const hosted = JSON.parse(readFileSync(resolve(import.meta.dirname, '..', 'contracts', 'api-hosted-wire-v1.json'), 'utf8'))
 const legacyContract = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4']

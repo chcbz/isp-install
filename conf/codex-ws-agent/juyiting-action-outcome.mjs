@@ -62,8 +62,8 @@ export const validateActionFacts = raw => {
   if (!Array.isArray(raw.availableSources) || raw.availableSources.length > 32) fail('ACTION_SOURCES_INVALID')
   const ids = new Set()
   const sources = raw.availableSources.map(source => {
-    if (!exact(source, ['sourceRefId', 'kind', 'mediaType', 'mimeType']) || !scalar(source.sourceRefId, true) || ids.has(source.sourceRefId) ||
-        !['TASK_WORKSPACE_FILE', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT'].includes(source.kind) || !mediaKinds.has(source.mediaType) || !mime(source.mimeType)) fail('ACTION_SOURCES_INVALID')
+    if (!exact(source, ['sourceRefId', 'kind', 'mediaType', 'contentMimeType']) || !scalar(source.sourceRefId, true) || ids.has(source.sourceRefId) ||
+        !['TASK_WORKSPACE_FILE', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT'].includes(source.kind) || !mediaKinds.has(source.mediaType) || !mime(source.contentMimeType)) fail('ACTION_SOURCES_INVALID')
     ids.add(source.sourceRefId)
     return { ...source }
   })
@@ -128,7 +128,7 @@ export const validateActionOutcome = (raw, dispatchFacts, deliveryParent = null,
     if (!descriptor) fail('ACTION_NOT_ADVERTISED')
     const catalog = new Map(facts.availableSources.map(item => [item.sourceRefId, item]))
     const selected = value.action.sourceRefIds
-    if (!uniqueStrings(selected, id => typeof id === 'string' && catalog.has(id) && descriptor.inputMimeTypes.includes(catalog.get(id).mimeType)) ||
+    if (!uniqueStrings(selected, id => typeof id === 'string' && catalog.has(id) && descriptor.inputMimeTypes.includes(catalog.get(id).contentMimeType)) ||
         selected.length < descriptor.minSources || selected.length > descriptor.maxSources) fail('ACTION_SELECTION_INVALID')
     let parameters
     try { parameters = validateSkillParameters(descriptor.parametersSchema, value.action.parameters) } catch { fail('ACTION_PARAMETERS_INVALID') }

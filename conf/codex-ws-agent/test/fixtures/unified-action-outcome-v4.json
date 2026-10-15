@@ -75,25 +75,25 @@
         "sourceRefId": "source-text",
         "kind": "TASK_WORKSPACE_FILE",
         "mediaType": "text",
-        "mimeType": "text/plain"
+        "contentMimeType": "text/plain"
       },
       {
         "sourceRefId": "source-image",
         "kind": "TASK_WORKSPACE_FILE",
         "mediaType": "image",
-        "mimeType": "image/png"
+        "contentMimeType": "image/png"
       },
       {
         "sourceRefId": "source-audio",
         "kind": "TASK_WORKSPACE_FILE",
         "mediaType": "audio",
-        "mimeType": "audio/wav"
+        "contentMimeType": "audio/wav"
       },
       {
         "sourceRefId": "source-file",
         "kind": "TASK_WORKSPACE_FILE",
         "mediaType": "file",
-        "mimeType": "application/pdf"
+        "contentMimeType": "application/pdf"
       }
     ],
     "inspectedSourceRefIds": []

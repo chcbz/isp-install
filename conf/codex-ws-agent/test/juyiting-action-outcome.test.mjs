@@ -13,7 +13,7 @@ test('v4 supports answer, clarification and schema-bound material skills, not to
 })
 
 test('32 selected sources are complete, 33 is invalid; no-source execution needs no reference-image branch', () => {
-  const f = facts(); f.availableSources = Array.from({ length: 32 }, (_, i) => ({ sourceRefId: `s${i}`, kind: 'TASK_WORKSPACE_FILE', mediaType: ['text', 'image', 'audio', 'file'][i % 4], mimeType: ['text/plain', 'image/png', 'audio/wav', 'application/pdf'][i % 4] }))
+  const f = facts(); f.availableSources = Array.from({ length: 32 }, (_, i) => ({ sourceRefId: `s${i}`, kind: 'TASK_WORKSPACE_FILE', mediaType: ['text', 'image', 'audio', 'file'][i % 4], contentMimeType: ['text/plain', 'image/png', 'audio/wav', 'application/pdf'][i % 4] }))
   const a = action(); a.action.sourceRefIds = f.availableSources.map(s => s.sourceRefId)
   assert.equal(validateActionOutcome(a, f).action.sourceRefIds.length, 32)
   f.availableSources.push({ ...f.availableSources[0], sourceRefId: 's32' })
@@ -180,4 +180,15 @@ test('media basis advertises exact retained outputs without treating them as tex
   }
   a.action.parameters = {}; a.schemaVersion = 3; assert.throws(() => validateActionOutcome(a, facts()), /ACTION_OUTCOME_INVALID/)
   a.schemaVersion = 4; delete a.deliverable; assert.throws(() => validateActionOutcome(a, facts()), /ACTION_OUTCOME_INVALID/)
+})
+
+
+test('action source uses exact API contentMimeType; legacy alias and mixed fields are rejected', () => {
+  const f = facts()
+  assert.equal(validateActionFacts(f).availableSources[1].contentMimeType, 'image/png')
+  const source = f.availableSources[1]
+  source.mimeType = source.contentMimeType
+  assert.throws(() => validateActionFacts(f), /ACTION_SOURCES_INVALID/)
+  delete source.contentMimeType
+  assert.throws(() => validateActionFacts(f), /ACTION_SOURCES_INVALID/)
 })
