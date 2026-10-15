@@ -6104,7 +6104,7 @@ export const createNativeBountyExecutionRuntime = ({
 }
 
 
-const createProfileState = (profile, profileConfig = config) => {
+const createProfileState = (profile, profileConfig = config, { deferNativeStartup = false } = {}) => {
   const runtimeInstanceId = profile.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
   const workspacePolicy = profile.workspacePolicyId
     ? profileConfig.workspacePolicies.get(profile.workspacePolicyId)
@@ -6283,7 +6283,7 @@ const createProfileState = (profile, profileConfig = config) => {
     await state.typedInspectionProfilePromise
     return state.typedInspectionProfileRuntime
   }
-  if (state.typedInspectionProfileRuntime) void state.ensureTypedInspectionProfile()
+  if (state.typedInspectionProfileRuntime && !deferNativeStartup) void state.ensureTypedInspectionProfile()
   if (profile.fastChatEnabled && profile.appServerEnabled) {
     const isCurrent = () => !state.disposed && (!profileStates.has(profileStateKey(profile)) || getProfileState(profile) === state)
     const scheduleRestart = () => {
@@ -6340,7 +6340,7 @@ const createProfileState = (profile, profileConfig = config) => {
       }).finally(() => { if (!state.appServerAdapter) state.appServerPromise = null })
       return state.appServerPromise
     }
-    state.appServerPromise = state.ensureAppServer()
+    if (!deferNativeStartup) state.appServerPromise = state.ensureAppServer()
   }
 
   state.processor = new AgentMessageProcessor({
@@ -6605,6 +6605,10 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
     skillInstallEnabled: false, skillInstallMaxBytes: 16 * 1024 * 1024, skillInstallMaxExtractedBytes: 64 * 1024 * 1024 }
   runtimeExecutionOwner = owner
   let closing = null
+  // Binary/schema trust measurements are synchronous. Do not let another
+  // subject's measurement block the event loop while a native RPC awaits its
+  // transport response. This gates boot only, never work or authentication.
+  const nativeInitializationGate = new SerialExecutionGate()
   const closeEntry = async entry => {
     if (entry.closed) return
     if (entry.state) await disposeProfileState(entry.state, 'Runtime executor stopped')
@@ -6638,13 +6642,15 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
       const entry = entries.get(subjectKey)
       if (!entry || entry.closed || entry.state) throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Executor subject is unknown or already attached')
       return {
-        initialize: async () => {
+        initialize: () => nativeInitializationGate.run(async () => {
           if (entry.state || entry.closed || runtimeExecutionOwner !== owner) throw new AgentProtocolError('RUNTIME_EXECUTOR_OWNERSHIP_LOST', 'Runtime executor ownership changed')
-          entry.state = createProfileState(entry.profile, { ...config, commandInboxDir: resolve(entry.agent.stateRoot, 'inbox') })
+          entry.state = createProfileState(entry.profile, { ...config, commandInboxDir: resolve(entry.agent.stateRoot, 'inbox') }, { deferNativeStartup: true })
           profileStates.set(profileStateKey(entry.profile), entry.state)
           if (entry.state.processor.failClosedError) throw entry.state.processor.failClosedError
+          await entry.state.ensureTypedInspectionProfile?.()
+          await entry.state.ensureAppServer?.()
           return { initialized: true, authenticated: false }
-        },
+        }),
         // No raw JSON session is trusted here. The wire adapter supplies a bound
         // transport after validating the server fixture and current generation.
         bindTransport: transport => {
