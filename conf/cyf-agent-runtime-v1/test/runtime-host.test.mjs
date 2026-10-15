@@ -690,7 +690,7 @@ test('stale generation or outer/nested proof mismatch cannot activate/enter engi
   socket.receive({ messageType: 'chat.message', sessionGeneration: 6 });
   socket.receive({ messageType: 'chat.message', tenantId: 'foreign', data: {} });
   socket.receive({ messageType: 'command.ack' });
-  socket.receive({ type: 'agent_message_saved', turnId: 'chat-own-turn' });
+  socket.receive({ type: 'agent_message_saved', turnId: 'chat-own-turn', messageId: '123', eventId: 'saved-event', duplicate: false });
   socket.receive({ messageType: 'work.result.receipt', commandId: 'result-own-command' });
   await c.tick(); assert.deepEqual(c.states()[0].accepted.map(frame => frame.messageType || frame.type), ['agent_message_saved','work.result.receipt']);
   assert.equal(c.states()[0].transport.send({ messageType: 'command.ack' }), false);
