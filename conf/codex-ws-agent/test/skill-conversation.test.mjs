@@ -3,13 +3,15 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { SkillConversationLane, parseSkillInputSnapshot, validateCommittedSkillResult } from '../skill-conversation.mjs'
-import { skillDigest, skillHash } from '../skill-executor.mjs'
+import { SkillConversationLane, parseSkillInputSnapshot, validateCommittedSkillResult, skillCommandFromWire } from '../skill-conversation.mjs'
+import { skillDigest, skillHash, skillCanonicalJson } from '../skill-executor.mjs'
+import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { skillConversationHttpScope } from '../../cyf-agent-runtime-v1/lib/runtime-client.mjs'
 const scope = { tenantId: 'tenant', clientId: 'client', ownerJiacn: 'owner', agentId: 'agent' }
 const command = () => ({ executionProtocolVersion: 4, executionId: 'pwe_1', taskId: 'task', runId: 'run', conversationId: 'conversation', conversationGeneration: '1', commandId: 'cmd', messageId: 'msg',
   skill: { key: 'analysis', version: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64) },
   snapshotDigest: 'c'.repeat(64), parameters: {}, instruction: '分析资料', inputRefs: [], outputs: { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'], additionalProperties: false }, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } })
+const wireCommand = ({ snapshotDigest, ...command }) => ({ ...command, snapshotSha256: snapshotDigest })
 const headers = () => ({ Authorization: `AgentRuntime rts1_${'0'.repeat(64)}`, 'X-Agent-Id': 'agent', 'X-Agent-Installation-Id': 'installation', 'X-Agent-Host-Id': 'host', 'X-Agent-Runtime-Id': 'runtime', 'X-Agent-Session-Generation': '1' })
 const response = (url, value, status = 200, headers = {}) => {
   const reply = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'skill-test', code: 'E0', msg: 'ok', data: value }), { status, headers: { 'content-type': 'application/json', 'x-request-id': 'skill-test', ...headers } }); Object.defineProperty(reply, 'url', { value: url.href }); return reply
@@ -26,29 +28,29 @@ const fixture = t => {
   const fetchFn = async (url, opts) => {
     assert.equal(opts.redirect, 'error'); assert.equal(opts.headers['X-Agent-Id'], 'agent'); assert.equal(Object.hasOwn(opts.headers, 'x-api-key'), false)
     calls.push(url.pathname); const body = opts.body instanceof FormData ? opts.body : opts.body ? JSON.parse(opts.body) : null
-    if (url.pathname.endsWith('/commands')) return response(url, { items: inboxEmpty ? [] : [c] })
+    if (url.pathname.endsWith('/commands')) return response(url, { items: inboxEmpty ? [] : [wireCommand(c)] })
     if (url.pathname.endsWith('/lease') || url.pathname.endsWith('/lease/renew')) return response(url, lease())
     if (url.pathname.endsWith('/resume')) return response(url, { lease: lease(), resultManifest: serverManifest, phase: serverManifest ? 'ARCHIVING' : 'RUNNING', allowedWork: serverManifest ? ['STAGE_OUTPUTS', 'COMMIT_RESULT', 'PROJECT_RESULT'] : ['EXECUTE'] })
-    if (url.pathname.endsWith('/inputs')) return response(url, { schemaVersion: 4, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotDigest: c.snapshotDigest, noReferencedMaterials: true, inputs: [] })
+    if (url.pathname.endsWith('/inputs')) return response(url, { schemaVersion: 4, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotSha256: c.snapshotDigest, noReferencedMaterials: true, inputs: [] })
     if (url.pathname.endsWith('/start')) {
-      assert.ok(body.fence.version === '9007199254740993' && body.fence.token); assert.equal(body.snapshotDigest, c.snapshotDigest)
+      assert.ok(body.fence.version === '9007199254740993' && body.fence.token); assert.equal(body.snapshotSha256, c.snapshotDigest)
       const key = url.pathname.split('/').at(-2), prior = effects.get(key)
-      if (!prior) effects.set(key, { status: 'START_RECORDED', effectDigest: body.effectDigest })
-      return response(url, { schemaVersion: 1, disposition: prior ? 'RECORDED' : 'NEW', status: prior?.status || 'START_RECORDED', providerRequestId: null, resultDigest: null })
+      if (!prior) effects.set(key, { status: 'START_RECORDED', effectDigest: body.effectSha256 })
+      return response(url, { schemaVersion: 1, disposition: prior ? 'RECORDED' : 'NEW', status: prior?.status || 'START_RECORDED', providerRequestId: null, resultSha256: null })
     }
-    if (url.pathname.endsWith('/result')) { effects.set(url.pathname.split('/').at(-2), body); return response(url, { schemaVersion: 1, disposition: 'KNOWN', status: body.status, providerRequestId: body.providerRequestId, resultDigest: body.resultDigest }) }
+    if (url.pathname.endsWith('/result')) { effects.set(url.pathname.split('/').at(-2), body); return response(url, { schemaVersion: 1, disposition: 'KNOWN', status: body.status, providerRequestId: body.providerRequestId, resultSha256: body.resultSha256 }) }
     if (/\/outputs\/[^/]+\/content$/.test(url.pathname)) {
       const bytes = Buffer.from(await body.get('file').arrayBuffer()); assert.equal(body.get('sha256'), skillHash(bytes))
       if (loseStage) { loseStage = false; throw Object.assign(new Error('stage reply lost'), { code: 'ECONNRESET' }) }
       return response(url, { outputId: 'output_1', sha256: skillHash(bytes), byteLength: bytes.length, state: 'STAGED' }, 201)
     }
     if (url.pathname.includes('/result-commits/')) {
-      assert.deepEqual(Object.keys(body).sort(), ['artifacts', 'data', 'fence', 'inputReceipts', 'snapshotDigest'])
-      for (const artifact of body.artifacts) { assert.deepEqual(Object.keys(artifact).sort(), ['byteLength', 'outputId', 'sha256']); assert.equal(typeof artifact.byteLength, 'number') }
-      const preimage = { schemaVersion: 1, data: body.data, artifacts: body.artifacts, inputReceipts: body.inputReceipts }
+      assert.deepEqual(Object.keys(body).sort(), ['artifacts', 'data', 'fence', 'inputReceipts', 'snapshotSha256'])
+      for (const artifact of body.artifacts) { assert.deepEqual(Object.keys(artifact).sort(), ['byteLength', 'outputId', 'sha256']); assert.equal(typeof artifact.byteLength, 'string') }
+      const preimage = { schemaVersion: 1, data: body.data, artifacts: body.artifacts.map(item => ({ ...item, byteLength: Number(item.byteLength) })), inputReceipts: body.inputReceipts }
       serverManifest = { ...preimage, resultDigest: skillDigest(preimage), manifestId: url.pathname.split('/').at(-1) }
       if (loseCommit) { loseCommit = false; throw Object.assign(new Error('commit response lost'), { code: 'ECONNRESET' }) }
-      return response(url, { manifestId: url.pathname.split('/').at(-1), state: 'RESULT_COMMITTED', phase: 'ARCHIVING', resultDigest: corruptDigest ? '0'.repeat(64) : serverManifest.resultDigest })
+      return response(url, { manifestId: url.pathname.split('/').at(-1), state: 'RESULT_COMMITTED', phase: 'ARCHIVING', resultSha256: corruptDigest ? '0'.repeat(64) : serverManifest.resultDigest })
     }
     throw new Error(`unexpected path: ${url.pathname}`)
   }
@@ -110,8 +112,8 @@ test('syntactically valid but incorrect result digest is not a commit receipt', 
 })
 test('frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit', () => {
   const c = command(); c.inputRefs = ['input_1']
-  const input = { inputRef: 'input_1', sourceKind: 'TASK_LINKED_WORKSPACE_VERSION', sourceIdentity: { fileId: 'f', version: 1, purpose: 'INPUT' }, contentMimeType: 'text/plain', byteLength: 4, sha256: 'a'.repeat(64) }
-  const envelope = { schemaVersion: 4, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotDigest: c.snapshotDigest, noReferencedMaterials: false, inputs: [input] }
+  const input = { inputRef: 'input_1', sourceKind: 'TASK_LINKED_WORKSPACE_VERSION', sourceIdentity: { fileId: 'f', version: 1, purpose: 'INPUT' }, contentMimeType: 'text/plain', byteLength: '4', sha256: 'a'.repeat(64) }
+  const envelope = { schemaVersion: 4, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotSha256: c.snapshotDigest, noReferencedMaterials: false, inputs: [input] }
   assert.deepEqual(parseSkillInputSnapshot(envelope, c, { version: '9007199254740993' })[0], { ...input, byteLength: '4' })
   for (const patch of [{ sourceKind: 'URL' }, { byteLength: Number.MAX_SAFE_INTEGER + 1 }, { byteLength: '-1' }, { sourceIdentity: null }])
     assert.throws(() => parseSkillInputSnapshot({ ...envelope, inputs: [{ ...input, ...patch }] }, c, { version: '9007199254740993' }), /SNAPSHOT_INVALID/)
@@ -135,7 +137,7 @@ test('a pending UNKNOWN retains its error but does not starve unrelated next inb
   await assert.rejects(first.lane.poll(), /SKILL_RESULT_UNKNOWN/)
   second.c.executionId = 'pwe_2'; second.c.runId = 'run_2'; second.c.commandId = 'cmd_2'; second.c.messageId = 'msg_2'
   const options = { ...first.options, runners: second.options.runners, fetchFn: async (url, opts) => {
-    if (url.pathname.endsWith('/commands')) return response(url, { items: [second.c] })
+    if (url.pathname.endsWith('/commands')) return response(url, { items: [wireCommand(second.c)] })
     return (url.pathname.includes('/runs/run_2/') ? second.options : first.options).fetchFn(url, opts)
   } }
   const lane = new SkillConversationLane(options)
@@ -154,7 +156,7 @@ test('shared store or session failures immediately halt poll instead of crossing
   for (const code of ['SKILL_SESSION_CHANGED', 'SKILL_STORE_UNSAFE', 'SKILL_STORE_IDENTITY_CONFLICT']) {
     const f = fixture(t), calls = [], original = Object.assign(new Error(code), { code, cause: new Error('actual cause') })
     const second = { ...command(), executionId: 'pwe_2', runId: 'run_2' }
-    f.lane.fetch = async url => response(url, { items: [f.c, second] })
+    f.lane.fetch = async url => response(url, { items: [wireCommand(f.c), wireCommand(second)] })
     f.lane.process = async command => { calls.push(command.executionId); throw original }
     await assert.rejects(f.lane.poll(), error => error === original)
     assert.deepEqual(calls, ['pwe_1']); assert.equal(f.lane.active, false)
@@ -203,4 +205,23 @@ test('current native session header generation preserves all positive int64 valu
     assert.equal(nativeSessionHeaders({ ...headers(), 'X-Agent-Session-Generation': generation }, 'agent', 'runtime')['X-Agent-Session-Generation'], generation)
   }
   for (const generation of ['01', '0', '-1', '9223372036854775808', 1, null]) assert.equal(nativePositiveLong(generation), false)
+})
+
+test('public command projection keeps private checkpoint hash preimage byte-for-byte', t => {
+  const original = command(), bytes = JSON.stringify(original), digest = skillDigest(original)
+  const publicCommand = wireCommand(original), publicBytes = JSON.stringify(publicCommand)
+  const projected = skillCommandFromWire(publicCommand)
+  // Check the actual checkpoint encoder, not irrelevant JavaScript insertion order.
+  assert.equal(skillCanonicalJson(projected), skillCanonicalJson(original))
+  assert.equal(JSON.stringify(original), bytes)
+  const root = mkdtempSync(resolve(tmpdir(), 'skill-wire-checkpoint-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const saved = new SkillExecutionStore({ rootDirectory: root, scope, command: original })
+  const prior = readFileSync(saved.path('command'))
+  new SkillExecutionStore({ rootDirectory: root, scope, command: projected })
+  assert.deepEqual(readFileSync(saved.path('command')), prior)
+  assert.equal(skillDigest(projected), digest)
+  assert.equal(JSON.stringify(publicCommand), publicBytes)
+  assert.throws(() => skillCommandFromWire(original), /SKILL_COMMAND_INVALID/)
+  assert.throws(() => skillCommandFromWire({ ...publicCommand, snapshotDigest: original.snapshotDigest }), /SKILL_COMMAND_INVALID/)
 })

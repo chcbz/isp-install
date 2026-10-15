@@ -18,15 +18,36 @@ const originOf = value => {
       || (url.protocol === 'http:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))) fail('SKILL_API_ORIGIN_INVALID')
   return url.origin
 }
+// Public field names are projected once. Saved commands/effects/manifests retain their original hash preimages.
+export function skillCommandFromWire(value) {
+  if (!object(value) || !Object.hasOwn(value, 'snapshotSha256') || Object.hasOwn(value, 'snapshotDigest')) fail('SKILL_COMMAND_INVALID')
+  const { snapshotSha256, ...command } = value
+  return parseSkillCommand({ ...command, snapshotDigest: snapshotSha256 })
+}
+const effectRequest = body => ({ effectSha256: body.effectDigest, providerBindingRevision: body.providerBindingRevision,
+  ...(Object.hasOwn(body, 'status') ? { status: body.status, providerRequestId: body.providerRequestId, resultSha256: body.resultDigest } : {}) })
+const effectReceipt = value => {
+  const keys = ['schemaVersion', 'disposition', 'status', 'providerRequestId', 'resultSha256']
+  if (!object(value) || Object.keys(value).length !== keys.length || !keys.every(key => Object.hasOwn(value, key)) ||
+      value.resultSha256 !== null && !skillSha(value.resultSha256)) fail('SKILL_EFFECT_REPORT_UNCONFIRMED')
+  const { resultSha256, ...receipt } = value
+  return { ...receipt, resultDigest: resultSha256 }
+}
+const resultReceipt = value => {
+  const keys = ['manifestId', 'state', 'phase', 'resultSha256']
+  if (!object(value) || Object.keys(value).length !== keys.length || !keys.every(key => Object.hasOwn(value, key)) ||
+      !skillSha(value.resultSha256)) fail('SKILL_COMMIT_UNCONFIRMED')
+  const { resultSha256, ...receipt } = value
+  return { ...receipt, resultDigest: resultSha256 }
+}
 const sourceKinds = new Set(['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT'])
 const byteLength = value => {
-  if (typeof value === 'number') { if (!Number.isSafeInteger(value) || value < 0) fail('SKILL_INPUT_SNAPSHOT_INVALID'); return String(value) }
   if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(value) || BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
   return value
 }
 export function parseSkillInputSnapshot(snapshot, command, fence) {
   if (!object(snapshot) || snapshot.schemaVersion !== 4 || !nativePositiveLong(snapshot.leaseVersion) || snapshot.executionId !== command.executionId || snapshot.leaseVersion !== fence.version
-      || snapshot.snapshotDigest !== command.snapshotDigest || !Array.isArray(snapshot.inputs) || snapshot.inputs.length !== command.inputRefs.length
+      || snapshot.snapshotSha256 !== command.snapshotDigest || !Array.isArray(snapshot.inputs) || snapshot.inputs.length !== command.inputRefs.length
       || snapshot.noReferencedMaterials !== (snapshot.inputs.length === 0)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
   const seen = new Set()
   return snapshot.inputs.map(input => {
@@ -142,7 +163,7 @@ export class SkillConversationLane {
       if (!object(page) || !Array.isArray(page.items) || page.items.length > 16) fail('SKILL_INBOX_INVALID')
       const commands = new Map(this.pendingCommands().map(command => [command.executionId, command]))
       for (const raw of page.items) {
-        const command = parseSkillCommand(raw), previous = commands.get(command.executionId)
+        const command = skillCommandFromWire(raw), previous = commands.get(command.executionId)
         if (previous && skillDigest(previous) !== skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
         commands.set(command.executionId, command)
       }
@@ -181,7 +202,7 @@ export class SkillConversationLane {
         if (running) timer = setTimeout(() => { renewalPromise = renew() }, Math.max(1, Math.floor((expiry - Date.now()) / 2)))
       } catch (error) { renewalError = error }
     }
-    const common = () => ({ executionId: command.executionId, snapshotDigest: command.snapshotDigest, fence })
+    const common = () => ({ executionId: command.executionId, snapshotSha256: command.snapshotDigest, fence })
     let resume = null
     const ctx = {
       registry: this.registry, runners: this.runners, outputDirectory: resolve(store.directory, 'outputs'),
@@ -191,7 +212,7 @@ export class SkillConversationLane {
         if (!attempted) store.write('attempt', { schemaVersion: 1, executionId: command.executionId })
         proof = this.headers()
         if (attempted) {
-          resume = await this.request(`${path}/resume`, 'POST', { executionId: command.executionId, snapshotDigest: command.snapshotDigest })
+          resume = await this.request(`${path}/resume`, 'POST', { executionId: command.executionId, snapshotSha256: command.snapshotDigest })
           if (!object(resume) || !Array.isArray(resume.allowedWork)) fail('SKILL_RESUME_INVALID')
         }
         const lease = resume?.lease || await this.request(`${path}/lease`, 'POST', { commandId: command.commandId, messageId: command.messageId })
@@ -254,12 +275,12 @@ export class SkillConversationLane {
         checkLease()
         const preimage = skillResultPayload(manifest), digest = skillDigest(preimage)
         const manifestId = `manifest_${digest}`
-        const payload = { fence, snapshotDigest: command.snapshotDigest, data: preimage.data, artifacts: preimage.artifacts, inputReceipts: preimage.inputReceipts }
+        const payload = { fence, snapshotSha256: command.snapshotDigest, data: preimage.data, artifacts: preimage.artifacts.map(item => ({ ...item, byteLength: String(item.byteLength) })), inputReceipts: preimage.inputReceipts }
         let receipt
-        try { receipt = await this.request(`${path}/result-commits/${manifestId}`, 'POST', payload) } catch (original) {
+        try { receipt = resultReceipt(await this.request(`${path}/result-commits/${manifestId}`, 'POST', payload)) } catch (original) {
           // Read back persistent server truth. Never restage or regenerate a committed result.
           let recovered
-          try { recovered = await this.request(`${path}/resume`, 'POST', { executionId: command.executionId, snapshotDigest: command.snapshotDigest }) } catch { throw original }
+          try { recovered = await this.request(`${path}/resume`, 'POST', { executionId: command.executionId, snapshotSha256: command.snapshotDigest }) } catch { throw original }
           if (!recovered.resultManifest) throw original
           const descriptor = (await this.registry.requireExact({ skillKey: command.skill.key, skillVersion: command.skill.version,
             packageSha256: command.skill.packageSha256, manifestSha256: command.skill.manifestSha256 }, { allowUnavailable: true })).descriptor
@@ -278,8 +299,8 @@ export class SkillConversationLane {
       }
     }
     ctx.effects = new SkillEffects({ store, bindingRevision: null, checkLease, mayStart: () => !resume || resume.allowedWork.includes('EXECUTE'),
-      start: (id, body) => this.request(`${path}/effects/${id}/start`, 'POST', { ...common(), ...body }),
-      report: (id, body) => this.request(`${path}/effects/${id}/result`, 'POST', { ...common(), ...body }) })
+      start: async (id, body) => effectReceipt(await this.request(`${path}/effects/${id}/start`, 'POST', { ...common(), ...effectRequest(body) })),
+      report: async (id, body) => effectReceipt(await this.request(`${path}/effects/${id}/result`, 'POST', { ...common(), ...effectRequest(body) })) })
     // Current immutable binding revision is refreshed by the registry before run.
     const originalRequire = ctx.registry.requireExact.bind(ctx.registry)
     ctx.registry = { requireExact: async (skill, options) => { const entry = await originalRequire(skill, options); ctx.effects.bindingRevision = entry.binding?.revision ?? null; return entry } }
