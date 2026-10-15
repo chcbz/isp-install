@@ -5,7 +5,7 @@ export function agentMessageFixture(frame) {
   if (frame.protocolVersion || (!frame.messageType && (frame.data || frame.payload))) return frame
   if (frame.type && Object.hasOwn(frame, 'messageType')) return frame
   const data = { ...frame }, oldType = data.messageType || data.type
-  const messageType = ({ agent_registered: 'agent.registered', agent_status_updated: 'agent.status.updated',
+  const messageType = ({ agent_registered: 'agent.registered', agent_status: 'agent.status', agent_capability_index: 'agent.capability.index', agent_status_updated: 'agent.status.updated',
     agent_message_saved: 'chat.message.receipt', chat_dispatch_acknowledged: 'chat.dispatch.receipt',
     task_reported: 'task.report.receipt', connected: 'connection.established', ping: 'connection.ping', pong: 'connection.pong',
     error: 'protocol.error', protocol_error: 'protocol.error' })[oldType] || oldType
@@ -13,6 +13,7 @@ export function agentMessageFixture(frame) {
   const resultReceipt = messageType === 'work.result.receipt' && data.resultType === 'SKILL_INSTALL_RESULT'
   const correlationId = resultReceipt ? data.correlationId : originalId
   if (resultReceipt) delete data.correlationId
+  if (messageType === 'chat.message.receipt' && Object.hasOwn(data, 'messageId')) data.persistedMessageId = data.messageId
   delete data.type; delete data.messageType; delete data.messageId; delete data.channel
   const skill = data.resultType === 'SKILL_INSTALL_RESULT' || data.commandType === 'SKILL_INSTALL'
   if (Object.hasOwn(data, 'installationId')) { data[skill ? 'skillInstallationId' : 'runtimeInstallationId'] = data.installationId; delete data.installationId }

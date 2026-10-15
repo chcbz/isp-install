@@ -5,7 +5,7 @@ import { decodeMessage, eventMessage, validateMessage } from './message-envelope
 const controlTypes = Object.freeze({
   'connection.established': 'connected', 'connection.ping': 'ping', 'connection.pong': 'pong',
   'agent.registered': 'agent_registered', 'agent.capability.index': 'agent_capability_index',
-  'agent.status.updated': 'agent_status_updated', 'chat.message.receipt': 'agent_message_saved',
+  'agent.status': 'agent_status', 'agent.status.updated': 'agent_status_updated', 'chat.message.receipt': 'agent_message_saved',
   'chat.dispatch.receipt': 'chat_dispatch_acknowledged', 'task.report.receipt': 'task_reported',
   'chat.stream.started': 'started', 'chat.stream.delta': 'delta', 'chat.stream.completed': 'done', 'chat.stream.stopped': 'stopped'
 })
@@ -97,6 +97,12 @@ export function fromAgentWire(text) {
     data.type = controlTypes[message.messageType]
     if (message.correlationId !== undefined) data.messageId = message.correlationId
   } else data.messageType = message.messageType
+  // Restore the private durable inbox shape only after validating the public persistence receipt.
+  if (message.messageType === 'chat.message.receipt') {
+    if (message.code !== 'E0' || !message.correlationId || !decimal(data.persistedMessageId) || data.persistedMessageId === '0') invalid()
+    data.messageId = data.persistedMessageId; delete data.persistedMessageId
+    data.channel = 'agent'
+  }
   // Registration observes only validated transport correlation, never a supplied data.messageId.
   if (message.messageType === 'agent.registered' && (message.code !== 'E0' || !message.correlationId)) invalid()
   if (message.messageType === 'protocol.error') {

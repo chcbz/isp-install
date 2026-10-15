@@ -172,6 +172,13 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               // Do not log the frame, arbitrary trace fields, error text or tokens.
               logger('runtime-control-receipt', { type: 'agent_status_updated' }); return;
             }
+            // Validated informational control events never enter the durable business processor.
+            // Session proof checks above still apply. These events grant no readiness or ACK state.
+            // chat.message.receipt MUST continue below to its persistence receipt handler.
+            if (typeOnlyControl && ['agent_status', 'agent_capability_index', 'pong',
+                'task_reported', 'chat_dispatch_acknowledged', 'protocol_error', 'error'].includes(frame.type)) {
+              logger('runtime-control-receipt', { type: frame.type }); return;
+            }
             // Results/CHAT persistence receipts remain WS business confirmations.
             // Commands go through the existing durable processor, never a new queue.
             if (frame.messageType === 'command.ack') return;

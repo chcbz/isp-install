@@ -551,6 +551,22 @@ test('presence receipt control stays out of business, never re-registers or muta
   assert.ok(c.logs.filter(row => row.event === 'runtime-control-receipt').every(row => Object.keys(row).join(',') === 'event,type'));
 });
 
+test('canonical scoped informational controls never enter business or change readiness', async t => {
+  const c = await channelFixture(t, { validateBusiness: true }); await c.executors[0].activate();
+  const socket = c.sockets[0], before = c.executors[0].evidence();
+  const registration = socket.sent.find(frame => frame.messageType === 'agent.register');
+  const types = ['agent.status', 'agent.capability.index', 'connection.pong', 'task.report.receipt', 'chat.dispatch.receipt'];
+  for (const messageType of types) socket.receive({ protocolVersion: 1, requestId: 'control-request', messageId: 'control-' + messageType,
+    messageType, data: { tenantId: registration.tenantId, clientId: registration.clientId, ownerJiacn: 'owner', agentId: 'another-agent', status: 'online' },
+    ...(messageType.endsWith('.receipt') || messageType === 'connection.pong' ? { correlationId: 'request', code: 'E0', msg: 'ok' } : {}) });
+  socket.receive({ protocolVersion: 1, requestId: 'foreign', messageId: 'foreign', messageType: 'agent.status', data: { tenantId: 'foreign' } });
+  await c.tick();
+  assert.deepEqual(c.states()[0].accepted, []); assert.deepEqual(c.executors[0].evidence(), before);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-control-receipt').length, types.length);
+  assert.equal(c.logs.some(row => row.code === 'MESSAGE_TYPE_REQUIRED'), false);
+  assert.equal(c.logs.filter(row => row.code === 'RUNTIME_FRAME_GENERATION_MISMATCH').length, 1);
+});
+
 test('presence receipt control cannot grant registration; explicit business types cannot spoof ACK', async t => {
   const c = await channelFixture(t, { ackRegistration: false });
   let activated = false; const activating = c.executors[0].activate().then(() => { activated = true; }); await c.opened();

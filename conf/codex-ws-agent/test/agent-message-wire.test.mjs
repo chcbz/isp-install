@@ -45,3 +45,21 @@ test('workspace queue wire lengths are strict strings while private durable inpu
     assert.throws(() => fromAgentWire(wire('command.dispatch', { ...data, payload: { ...payload, inputManifest: [{ length: value }] } })))
   }
 })
+
+test('status broadcast projection is distinct from the correlated presence receipt', () => {
+  const event = fromAgentWire(wire('agent.status', { tenantId: '0', ownerJiacn: 'owner', status: 'online' }));
+  assert.equal(event.type, 'agent_status'); assert.equal(event.messageType, undefined);
+  assert.equal(event.tenantId, '0'); assert.equal(event.ownerJiacn, 'owner');
+  const receipt = fromAgentWire(wire('agent.status.updated', { status: 'online' }, { correlationId: 'presence', code: 'E0', msg: 'ok' }));
+  assert.equal(receipt.type, 'agent_status_updated'); assert.equal(receipt.messageId, 'presence');
+});
+
+test('saved chat receipt restores private inbox identity without confusing transport correlation', () => {
+  const data = { persistedMessageId: '123', turnId: 'turn', duplicate: false, eventId: 'event' };
+  const extra = { correlationId: 'final-message', code: 'E0', msg: 'ok' };
+  const result = fromAgentWire(wire('chat.message.receipt', data, extra));
+  assert.equal(result.messageId, '123'); assert.equal(result.correlationId, 'final-message');
+  assert.equal(result.channel, 'agent'); assert.equal(result.type, 'agent_message_saved');
+  assert.throws(() => fromAgentWire(wire('chat.message.receipt', data)));
+  for (const persistedMessageId of [123, '0', '01']) assert.throws(() => fromAgentWire(wire('chat.message.receipt', { ...data, persistedMessageId }, extra)));
+});
