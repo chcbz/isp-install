@@ -40,9 +40,9 @@ const fixture = t => {
     }
     if (url.pathname.endsWith('/result')) { effects.set(url.pathname.split('/').at(-2), body); return response(url, { schemaVersion: 1, disposition: 'KNOWN', status: body.status, providerRequestId: body.providerRequestId, resultSha256: body.resultSha256 }) }
     if (/\/outputs\/[^/]+\/content$/.test(url.pathname)) {
-      const bytes = Buffer.from(await body.get('file').arrayBuffer()); assert.equal(body.get('sha256'), skillHash(bytes))
+      const bytes = Buffer.from(await body.get('file').arrayBuffer()); assert.equal(body.get('sha256'), skillHash(bytes)); assert.equal(body.get('byteLength'), String(bytes.length)); assert.equal(body.has('length'), false)
       if (loseStage) { loseStage = false; throw Object.assign(new Error('stage reply lost'), { code: 'ECONNRESET' }) }
-      return response(url, { outputId: 'output_1', sha256: skillHash(bytes), byteLength: bytes.length, state: 'STAGED' }, 201)
+      return response(url, { outputId: 'output_1', sha256: skillHash(bytes), byteLength: String(bytes.length), state: 'STAGED' }, 201)
     }
     if (url.pathname.includes('/result-commits/')) {
       assert.deepEqual(Object.keys(body).sort(), ['artifacts', 'data', 'fence', 'inputReceipts', 'snapshotSha256'])

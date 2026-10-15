@@ -219,10 +219,10 @@ export class NativeConversationLane {
       form.set('file', new Blob([output.bytes], { type: output.contentType }),
         `output.${MIME.get(output.contentType)}`)
       for (const [k, v] of Object.entries({ version: String(fence.version), token: fence.token,
-        sha256, length: String(output.bytes.length) })) form.set(k, v)
+        sha256, byteLength: String(output.bytes.length) })) form.set(k, v)
       const staged = await this.#request(`${path}/outputs/${command.outputId}/content`, 'POST', form, 201)
       if (!object(staged) || staged.outputId !== command.outputId || staged.sha256 !== sha256
-          || staged.byteLength !== output.bytes.length || staged.state !== 'STAGED') deny('CONVERSATION_STAGE_UNCERTAIN')
+          || staged.byteLength !== String(output.bytes.length) || staged.state !== 'STAGED') deny('CONVERSATION_STAGE_UNCERTAIN')
       // Reuse the API task/run/output/hash/length manifest; keep conversation fencing.
       const { manifestId } = buildOutputCommit({ taskId: command.taskId, runId: command.runId,
         uploads: [{ outputId: command.outputId, sha256: sha256, length: output.bytes.length }] })

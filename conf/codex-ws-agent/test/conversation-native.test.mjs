@@ -55,7 +55,7 @@ const setup = ({ execute, response, inputSnapshot, renewResponse, referenceBytes
       return json(url, { started: true })
     }
     if (path.endsWith('/failure')) return json(url, { executionId: 'exec-1', state: 'FAILED' })
-    if (path.endsWith('/content')) return json(url, { outputId: 'output_1', state: 'STAGED', sha256: digest, byteLength: bytes.length }, 201)
+    if (path.endsWith('/content')) return json(url, { outputId: 'output_1', state: 'STAGED', sha256: digest, byteLength: String(bytes.length) }, 201)
     if (path.includes('/output-commits/')) {
       const wire = `${command.taskId}\n${command.runId}\noutput_1\n${digest}\n${bytes.length}\n`
       assert.equal(path.split('/').at(-1), `pwe_m_${createHash('sha256').update(wire).digest('hex')}`, 'server manifest contract')
@@ -172,7 +172,7 @@ test('unknown commit outcome is not treated as failed or completed; no unsafe re
       if (url.pathname.endsWith('/conversation/inputs')) return json(url, { executionId: 'exec-1', leaseVersion: 1, noReferencedMaterials: true, inputs: [] })
       if (url.pathname.endsWith('/provider-start')) return json(url, { started: true })
       if (url.pathname.endsWith('/content')) return json(url, { outputId: 'output_1', state: 'STAGED',
-        sha256: digest, byteLength: bytes.length }, 201)
+        sha256: digest, byteLength: String(bytes.length) }, 201)
       if (url.pathname.includes('/output-commits/')) throw new Error('response lost after commit')
       throw new Error('Never report failure after ambiguous commit')
     } })
