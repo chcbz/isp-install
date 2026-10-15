@@ -755,13 +755,13 @@ test('canonical skill product installation is data; wrong raw scope/Runtime-prod
     installationId: 'synthetic-product-installation', commandId: 'skill-command', messageId: 'skill-message',
     correlationId: 'task', taskId: 'task', expiresAt: 3601000, payload: { instruction: 'install original product' } };
   c.sockets[0].receive(raw); await c.tick();
-  assert.deepEqual(c.states()[0].accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))]);
+  assert.deepEqual(c.states()[0].accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))], JSON.stringify(c.logs));
   for (const patch of [{ tenantId: 'foreign' }, { clientId: 'foreign' }, { targetAgentId: 'foreign' },
     { targetAgentId: undefined }, { installationId: identity.installationId }, { canonicalAgentId: 'foreign' }, { sessionGeneration: 6 }]) {
     c.sockets[0].receive({ ...raw, ...patch });
   }
   c.sockets[0].receive({ ...raw, commandType: 'WORK_ITEM_EXECUTE' }); // product field is not a Runtime proof
-  await c.tick(); assert.deepEqual(c.states()[0].accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))]); assert.equal(c.states()[1].accepted.length, 0);
+  await c.tick(); assert.deepEqual(c.states()[0].accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))], JSON.stringify(c.logs)); assert.equal(c.states()[1].accepted.length, 0);
 });
 
 // Run only the install/validate stdlib snippets against hand-written launcher
