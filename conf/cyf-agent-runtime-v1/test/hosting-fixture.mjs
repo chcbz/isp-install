@@ -1,6 +1,6 @@
 // Local-only synthetic scopes, private roots, native API and executor mocks.
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { digestManifest, runtimeSubjectKey } from '../lib/manifest.mjs';
@@ -13,6 +13,9 @@ export const code = expected => cause => cause?.code === expected;
 export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false } = {}) {
   const root = await mkdtemp(resolve(tmpdir(), 'gss-hosting-owned-')); await mkdir(resolve(root, 'host'), { mode: 0o700 });
   await mkdir(resolve(root, 'managed'), { mode: 0o700 }); await mkdir(resolve(root, 'socket'), { mode: 0o750 });
+  // Parent test runners may deliberately use umask 077. The real server requires
+  // this exact group-searchable socket directory; retain all production checks.
+  await chmod(resolve(root, 'socket'), 0o750);
   let now = 1791594000000; let enrollments = 0; let sessions = 0;
   const states = new Map(); const peers = [];
   const template = { profile: { codexBin: '/bin/true', appServerEnabled: false, fastChatEnabled: false },
