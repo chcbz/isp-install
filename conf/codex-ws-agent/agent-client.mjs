@@ -1,3 +1,4 @@
+import { fromAgentWire } from './agent-message-wire.mjs'
 import { readNativeJson } from './native-json.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -5620,14 +5621,16 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
   let rejected = 0
   for (const item of body.items) {
     try {
-      const normalized = normalizeInboundMessage(item)
+      const privateCommand = fromAgentWire(JSON.stringify(item))
+      const normalized = normalizeInboundMessage(privateCommand)
       if (normalized.messageType !== MESSAGE_TYPES.COMMAND_DISPATCH
           || normalized.commandType !== 'WORKSPACE_FILE_EXECUTE'
           || normalized.targetAgentId !== profile.agentId
           || !strictWorkspaceFileCommand(normalized)) {
         throw new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', 'workspace runtime command is not an authorized file execution command')
       }
-      await state.processor.handle(JSON.stringify(item))
+      const result = await state.processor.handle(JSON.stringify(privateCommand))
+      if (result?.kind === 'rejected') throw result.error
       dispatched += 1
     } catch (error) {
       rejected += 1

@@ -1,3 +1,4 @@
+import { toAgentWire } from '../agent-message-wire.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
@@ -3078,6 +3079,14 @@ const workspaceFilePayload = (inputBytes = Buffer.from('workspace input\n')) => 
 })
 
 const nativeJsonFixture = (url, data, status = 200) => {
+  if (Array.isArray(data?.items)) data = { ...data, items: data.items.map(item => {
+    if (item?.messageType !== 'command.dispatch') return item
+    const projected = { ...item, payload: { ...item.payload,
+      inputManifest: item.payload.inputManifest.map(input => ({ ...input, length: String(input.length) })),
+      outputManifest: item.payload.outputManifest.map(output => ({ ...output, maxLength: String(output.maxLength) })) } }
+    return toAgentWire(projected)
+  }) }
+
   const response = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'native-fixture',
     code: status >= 400 ? 'TEST_REJECTED' : 'E0', msg: status >= 400 ? 'denied' : 'ok', data: status >= 400 ? null : data }),
     { status, headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'native-fixture' } })

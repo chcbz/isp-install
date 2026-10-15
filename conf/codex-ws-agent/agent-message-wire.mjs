@@ -77,6 +77,17 @@ export function fromAgentWire(text) {
   }
   // The private durable-chat schema retains exact decimal sentAt in its hash input.
   if (data.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED' && Object.hasOwn(data, 'sentAt')) data.sentAt = String(data.sentAt)
+  // Public decimal strings are projected back only at the private legacy file bridge.
+  if (message.messageType === 'command.dispatch' && data.commandType === 'WORKSPACE_FILE_EXECUTE') {
+    if (!object(data.payload) || !Array.isArray(data.payload.inputManifest) || !Array.isArray(data.payload.outputManifest)) invalid()
+    const length = (value, positive) => {
+      if (!decimal(value) || BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER) || (positive && value === '0')) invalid()
+      return Number(value)
+    }
+    data.payload = { ...data.payload,
+      inputManifest: data.payload.inputManifest.map(input => ({ ...input, length: length(input.length, false) })),
+      outputManifest: data.payload.outputManifest.map(output => ({ ...output, maxLength: length(output.maxLength, true) })) }
+  }
   data.messageId = message.messageId
   if (message.correlationId !== undefined) {
     data.correlationId = message.correlationId

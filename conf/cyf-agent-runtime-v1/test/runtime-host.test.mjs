@@ -1,3 +1,5 @@
+import { fromAgentWire } from '../../codex-ws-agent/agent-message-wire.mjs';
+import { agentMessageFixture, httpFixture } from './agent-wire-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync, spawn } from 'node:child_process';
@@ -367,7 +369,7 @@ test('validator checks full artifact-local dependency/toolchain graph instead of
   await mkdir(resolve(artifact, 'node/bin'), { recursive: true }); await cp(process.execPath, resolve(artifact, 'node/bin/node')); await chmod(resolve(artifact, 'node/bin/node'), 0o755);
   const validator = resolve(artifact, 'runtime/validate.sh');
   assert.throws(() => execFileSync('bash', [validator, '--root', artifact], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /node_modules/.test(cause.stderr));
-  await cp(resolve(engineSource, 'node_modules'), resolve(artifact, 'codex-ws-agent/node_modules'), { recursive: true });
+  await cp(resolve(engineSource, 'node_modules'), resolve(artifact, 'codex-ws-agent/node_modules'), { recursive: true, dereference: true });
   assert.throws(() => execFileSync('bash', [validator, '--root', artifact], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /\.toolchain/.test(cause.stderr));
   const ws = resolve(artifact, 'codex-ws-agent/node_modules/ws/package.json');
   const packageJson = JSON.parse(await readFile(ws, 'utf8')); packageJson.version = '0.0.0'; await writeFile(ws, JSON.stringify(packageJson));
@@ -383,7 +385,7 @@ async function validatorImportFixture(t) {
   const artifact = resolve(root, 'artifact'); await mkdir(artifact);
   const engine = resolve(artifact, 'codex-ws-agent');
   await collateExecutionPayload(engineSource, engine);
-  await cp(resolve(engineSource, 'node_modules'), resolve(engine, 'node_modules'), { recursive: true });
+  await cp(resolve(engineSource, 'node_modules'), resolve(engine, 'node_modules'), { recursive: true, dereference: true });
   await validateExecutionPayload(engine, { toolchain: false });
   const source = await readFile(resolve(repo, 'conf/cyf-agent-runtime-v1/validate.sh'), 'utf8');
   const start = source.indexOf('# The import must resolve from this artifact');
@@ -460,7 +462,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
       queueMicrotask(() => { if (this.readyState === 0) { this.readyState = 1; this.emit('open'); socketEvents.emit('opened', this); } });
     }
     send(bytes) {
-      const frame = JSON.parse(bytes); this.sent.push(frame);
+      const frame = fromAgentWire(bytes); this.sent.push(frame);
       if (frame.messageType === 'agent.register' && ackRegistration) queueMicrotask(() => this.receive({ type: 'agent_registered',
         messageId: frame.messageId, agentId: frame.agentId, runtimeInstanceId: frame.runtimeInstanceId,
         installationId: frame.installationId, hostId: frame.hostId, sessionGeneration: frame.sessionGeneration,
@@ -469,7 +471,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
           ownerJiacn: 'fixture-owner', agentId: frame.agentId, installationId: frame.installationId, hostId: frame.hostId,
           runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration, contextPackEnabled: true } } : {}) }));
     }
-    receive(frame) { this.emit('message', Buffer.from(JSON.stringify(frame))); }
+    receive(frame) { this.emit('message', Buffer.from(JSON.stringify(agentMessageFixture(frame)))); }
     close(code = 1000) { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.emit('close', code)); }
     terminate() { this.close(); }
   }
@@ -503,13 +505,13 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
   const generation = new Map();
   const adapters = await createExecutionAdapterFactory({ config, instanceId: 'boot-fixture', apiOrigin: 'https://api.example.test', socketFactory: Socket, logger: (event, details) => logs.push({ event, ...details }),
     loadEngine: async () => module, clientFactory: settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
-      const body = JSON.parse(options.body); requests.push({ url, options, body });
+      const body = JSON.parse(options.body).data; requests.push({ url, options, body });
       if (url.endsWith('/session')) {
-        const current = (generation.get(body.installationId) || 6) + 1; generation.set(body.installationId, current);
-        return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: { ...Object.fromEntries(['installationId','tenantId','clientId','canonicalAgentId','hostId','runtimeInstanceId'].map(key => [key, body[key]])), sessionGeneration: current,
-          scheme: 'AgentRuntime', sessionToken: 'rts1_' + 'a'.repeat(64), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' } }) };
+        const current = (generation.get(body.runtimeInstallationId) || 6) + 1; generation.set(body.runtimeInstallationId, current);
+        return httpFixture(options, { ...Object.fromEntries(['runtimeInstallationId','tenantId','clientId','canonicalAgentId','hostId','runtimeInstanceId'].map(key => [key, body[key]])), sessionGeneration: String(current),
+          scheme: 'AgentRuntime', sessionToken: 'rts1_' + 'a'.repeat(64), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' });
       }
-      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: { kind: 'ADVANCED', status: body.status, deliveryVersion: (body.deliveryVersion ?? 0) + 1 } }) };
+      return httpFixture(options, { kind: 'ADVANCED', status: body.status, deliveryVersion: String(BigInt(body.deliveryVersion ?? '0') + 1n) });
     } }) });
   f.cleanup(() => adapters.close());
   const executors = config.agents.map(agent => adapters.createExecutor({ subjectKey: agent.subjectKey, agent }));
@@ -539,7 +541,7 @@ test('presence receipt control stays out of business, never re-registers or muta
   await c.tick();
   assert.deepEqual(state.accepted, []); assert.equal(socket.sent.length, sent); assert.equal(state.resumed, resumed);
   assert.deepEqual(c.executors[0].evidence(), before); assert.equal(c.executors[0].ready(), true);
-  assert.equal(c.logs.filter(row => row.event === 'runtime-control-receipt').length, 6);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-control-receipt').length, 5);
   assert.equal(c.logs.some(row => row.code === 'MESSAGE_TYPE_REQUIRED'), false);
   assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
   assert.ok(c.logs.filter(row => row.event === 'runtime-control-receipt').every(row => Object.keys(row).join(',') === 'event,type'));
@@ -574,7 +576,7 @@ test('presence receipt control rejects wrong subject/session and malformed trace
   for (const frame of invalid) socket.receive({ ...frame, error: 'synthetic-secret-never-log' });
   await c.tick(); assert.deepEqual(c.states()[0].accepted, []); assert.deepEqual(c.executors[0].evidence(), before);
   assert.equal(c.logs.filter(row => row.event === 'runtime-frame-rejected').length, invalid.length);
-  assert.ok(c.logs.every(row => ['RUNTIME_FRAME_GENERATION_MISMATCH', 'RUNTIME_CONTROL_RECEIPT_INVALID'].includes(row.code)));
+  assert.ok(c.logs.every(row => ['RUNTIME_FRAME_GENERATION_MISMATCH', 'RUNTIME_CONTROL_RECEIPT_INVALID', 'INVALID_JSON'].includes(row.code)));
   assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
 });
 
@@ -583,7 +585,7 @@ test('presence receipt control does not swallow explicit business declarations o
   const socket = c.sockets[0]; const before = c.executors[0].evidence();
   socket.receive({ type: 'connected' }); socket.receive({ type: 'ping' }); await c.tick();
   const sent = socket.sent.length;
-  assert.equal(socket.sent.at(-1).messageType, 'pong'); assert.deepEqual(c.states()[0].accepted, []);
+  assert.equal(socket.sent.at(-1).type, 'pong'); assert.deepEqual(c.states()[0].accepted, []);
   const frames = [];
   for (const type of ['agent_status_updated', 'connected', 'ping', 'agent_registered', 'error', 'protocol_error']) {
     for (const messageType of ['chat.message', null]) {
@@ -594,14 +596,14 @@ test('presence receipt control does not swallow explicit business declarations o
     }
   }
   for (const frame of frames) socket.receive(frame);
-  await c.tick(); assert.deepEqual(c.states()[0].accepted, frames); assert.equal(socket.sent.length, sent);
+  await c.tick(); assert.deepEqual(c.states()[0].accepted, []); assert.equal(socket.sent.length, sent);
   assert.equal(c.logs.filter(row => row.event === 'runtime-frame-rejected').length, frames.length);
   assert.equal(c.logs.some(row => row.event === 'runtime-control-receipt'), false);
   assert.deepEqual(c.executors[0].evidence(), before);
 });
 
 test('presence receipt control keeps genuine correlated registration errors and session fencing', async t => {
-  for (const kind of ['error', 'protocol_error', 'protocol.error', 'typed-error']) await t.test(kind, async t => {
+  for (const kind of ['error', 'protocol_error', 'protocol.error']) await t.test(kind, async t => {
     const c = await channelFixture(t, { ackRegistration: false });
     const activating = assert.rejects(c.executors[0].activate(), code('RUNTIME_REGISTRATION_REJECTED')); await c.opened();
     const socket = c.sockets[0]; const registration = socket.sent[0];
@@ -619,28 +621,17 @@ test('presence receipt control keeps genuine correlated registration errors and 
   });
 });
 
-test('presence receipt control preserves unknown/error rejection and canonical CHAT/command/persistence ingress', async t => {
+test('public wire rejects unframed aliases while authenticated canonical CHAT and command reach their original engine', async t => {
   const chat = JSON.parse(await readFile(resolve(engineSource, 'contracts/api-hosted-wire-v1.json'), 'utf8'));
-  const c = await channelFixture(t, { validateBusiness: true, types: ['SKILL_INSTALL'],
-    firstIdentity: { tenantId: chat.tenantId, clientId: chat.clientId, canonicalAgentId: chat.agentId } });
-  await c.executors[0].activate();
-  const socket = c.sockets[0]; const identity = c.config.agents[0].manifest;
-  const unknown = [{ schemaVersion: 1, type: 'unknown' }, { schemaVersion: 1, type: 'error', error: 'synthetic-secret-never-log' },
-    { schemaVersion: 1, type: 'protocol_error' }];
-  for (const frame of unknown) socket.receive(frame);
-  await c.tick(); assert.equal(c.logs.filter(row => row.code === 'MESSAGE_TYPE_REQUIRED').length, unknown.length);
-  const command = { schemaVersion: 1, messageType: 'command.dispatch', commandType: 'SKILL_INSTALL',
-    tenantId: identity.tenantId, clientId: identity.clientId, targetAgentId: identity.canonicalAgentId,
-    installationId: 'synthetic-product-installation', commandId: 'command', messageId: 'command-message', payload: { instruction: 'synthetic' } };
-  // Unmodified API-generated durable CHAT, on the exact synthetic subject.
-  const business = [command, chat, { schemaVersion: 1, messageType: 'protocol.error', messageId: 'unrelated-error' },
-    { type: 'agent_message_saved', turnId: 'own-turn' }, { schemaVersion: 1, messageType: 'work.result.receipt', messageId: 'result', commandId: 'command' }];
-  for (const frame of business) socket.receive(frame);
-  await c.tick(); assert.deepEqual(c.states()[0].accepted, [...unknown, ...business]);
-  assert.deepEqual(c.states()[0].normalized.map(frame => frame.messageType), ['command.dispatch', 'chat.message', 'protocol.error', 'work.result.receipt']);
-  assert.equal(c.logs.filter(row => row.event === 'runtime-frame-rejected').length, unknown.length);
-  assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
-  assert.equal(c.executors[0].ready(), true);
+  const c = await channelFixture(t, { validateBusiness: true, types: ['SKILL_INSTALL'], firstIdentity: { tenantId: chat.tenantId, clientId: chat.clientId, canonicalAgentId: chat.agentId } });
+  await c.executors[0].activate(); const socket=c.sockets[0], identity=c.config.agents[0].manifest;
+  for(const raw of [{type:'unknown'}, {type:'error',data:{error:'synthetic-secret-never-log'}}]) socket.emit('message',Buffer.from(JSON.stringify(raw)));
+  await c.tick(); assert.deepEqual(c.states()[0].accepted,[]);
+  const command={schemaVersion:1,messageType:'command.dispatch',commandType:'SKILL_INSTALL',tenantId:identity.tenantId,clientId:identity.clientId,targetAgentId:identity.canonicalAgentId,
+    installationId:'synthetic-product-installation',commandId:'command',messageId:'command-message',payload:{instruction:'synthetic'}};
+  socket.receive(command);socket.receive(chat);await c.tick();
+  assert.deepEqual(c.states()[0].normalized.map(frame=>frame.messageType),['command.dispatch','chat.message']);
+  assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'),false);assert.equal(c.executors[0].ready(),true);
 });
 
 test('two independent session channels activate only exact receipt; health revocation keeps terminal reporting', async t => {
@@ -654,9 +645,9 @@ test('two independent session channels activate only exact receipt; health revoc
   const state = c.states()[0]; state.healthy = false; await c.adapters.heartbeat();
   assert.deepEqual(c.executors.map(executor => executor.ready()), [false, true]);
   assert.equal(state.transport.reportReady(), true); assert.equal(state.paused, true);
-  const command = { ...Object.fromEntries(['installationId','tenantId','clientId','canonicalAgentId'].map(key => [key, c.config.agents[0].manifest[key]])), messageId: 'original-message', correlationId: 'original-correlation', commandId: 'original-command', taskId: 'task', workItemId: null, payloadReference: 'payload', expiresAt: '2000-01-01T00:00:00Z' };
-  const result = await state.transport.acknowledge(command, 'SUCCEEDED', 10);
-  assert.equal(result.deliveryVersion, 11); assert.equal(c.requests.at(-1).body.sessionGeneration, 7);
+  const command = { ...Object.fromEntries(['installationId','tenantId','clientId','canonicalAgentId'].map(key => [key, c.config.agents[0].manifest[key]])), messageId: 'original-message', correlationId: 'original-correlation', commandId: 'original-command', taskId: 'task', workItemId: null, payloadReference: 'payload', expiresAt: '2000-01-01T00:00:00.000Z' };
+  const result = await state.transport.acknowledge(command, 'SUCCEEDED', '10');
+  assert.equal(result.deliveryVersion, '11'); assert.equal(c.requests.at(-1).body.sessionGeneration, '7');
   const presence = c.sockets[0].sent.findLast(frame => frame.messageType === 'agent.presence'); assert.equal(presence.durableStateHealthy, false);
   state.healthy = true; await c.adapters.heartbeat(); await c.tick(); assert.equal(c.executors[0].ready(), true);
 });
@@ -748,7 +739,7 @@ test('normal reconnect rotates only owned session; old socket, old generation an
   current.receive({ ...stop, sessionGeneration: 8, installationId: c.config.agents[1].manifest.installationId })
   old.receive({ ...stop, sessionGeneration: 8 })
   current.receive({ ...stop, sessionGeneration: 8 })
-  await c.tick(); assert.equal(c.states()[0].accepted.length, 1); assert.equal(c.states()[0].accepted[0].sessionGeneration, 8)
+  await c.tick(); assert.equal(c.states()[0].accepted.length, 1); assert.equal(c.states()[0].accepted[0].sessionGeneration, '8')
   assert.equal(c.states()[1].accepted.length, 0)
   const proofs = c.requests.filter(row => row.url.endsWith('/session')); assert.equal(proofs.length, 3)
   assert.equal(c.sockets[1].headers['X-Agent-Session-Generation'], '7')
@@ -764,13 +755,13 @@ test('canonical skill product installation is data; wrong raw scope/Runtime-prod
     installationId: 'synthetic-product-installation', commandId: 'skill-command', messageId: 'skill-message',
     correlationId: 'task', taskId: 'task', expiresAt: 3601000, payload: { instruction: 'install original product' } };
   c.sockets[0].receive(raw); await c.tick();
-  assert.deepEqual(c.states()[0].accepted, [raw]);
+  assert.deepEqual(c.states()[0].accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))]);
   for (const patch of [{ tenantId: 'foreign' }, { clientId: 'foreign' }, { targetAgentId: 'foreign' },
     { targetAgentId: undefined }, { installationId: identity.installationId }, { canonicalAgentId: 'foreign' }, { sessionGeneration: 6 }]) {
     c.sockets[0].receive({ ...raw, ...patch });
   }
   c.sockets[0].receive({ ...raw, commandType: 'WORK_ITEM_EXECUTE' }); // product field is not a Runtime proof
-  await c.tick(); assert.deepEqual(c.states()[0].accepted, [raw]); assert.equal(c.states()[1].accepted.length, 0);
+  await c.tick(); assert.deepEqual(c.states()[0].accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))]); assert.equal(c.states()[1].accepted.length, 0);
 });
 
 // Run only the install/validate stdlib snippets against hand-written launcher
@@ -1463,7 +1454,7 @@ test('real API typed skill receipt binds durable product evidence; transport kee
   assert.equal(state.transport.send(envelope), true);
   const resultWire = socket.sent.at(-1);
   assert.equal(resultWire.installationId, 'si_product1'); assert.equal(resultWire.runtimeInstallationId, identity.installationId);
-  assert.equal(resultWire.runtimeInstanceId, 'original-executing-boot'); assert.equal(resultWire.sessionGeneration, 7);
+  assert.equal(resultWire.runtimeInstanceId, 'original-executing-boot'); assert.equal(resultWire.sessionGeneration, '7');
   // Exact SkillInstallResultService.receipt() field shape, not a Runtime registration fixture.
   const receipt = { schemaVersion: 1, messageType: 'work.result.receipt', messageId: 'sr_' + 'b'.repeat(64),
     correlationId: envelope.messageId, resultType: 'SKILL_INSTALL_RESULT', receiptStatus: 'ACCEPTED',

@@ -1,3 +1,5 @@
+import { fromAgentWire } from '../../codex-ws-agent/agent-message-wire.mjs';
+import { agentMessageFixture, httpFixture } from './agent-wire-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -86,10 +88,10 @@ test('adapter replaces only closed subject/session; stalled durable replay canno
   const f = await hostingFixture(t); const agent = await freshAgent(f); const states = new Map(); const adds = []; const sent = []; let generation = 0;
   class Socket extends EventEmitter {
     constructor() { super(); this.readyState = 0; queueMicrotask(() => { this.readyState = 1; this.emit('open'); }); }
-    send(bytes) { const frame = JSON.parse(bytes); sent.push(frame); if (frame.messageType === 'agent.register') queueMicrotask(() => this.emit('message', Buffer.from(JSON.stringify({
+    send(bytes) { const frame = fromAgentWire(bytes); sent.push(frame); if (frame.messageType === 'agent.register') queueMicrotask(() => this.emit('message', Buffer.from(JSON.stringify(agentMessageFixture({
       type: 'agent_registered', messageId: frame.messageId, agentId: frame.agentId, installationId: frame.installationId,
       hostId: frame.hostId, runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration,
-      status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes })))); }
+      status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes }))))); }
     close() { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.emit('close', 1000)); }
   }
   const module = { buildProtocolEnvelope: (messageType, payload) => ({ messageType, ...payload }), createRuntimeExecutionHost: () => ({
@@ -102,17 +104,17 @@ test('adapter replaces only closed subject/session; stalled durable replay canno
     }, close: async () => {} }) };
   const adapters = await createExecutionAdapterFactory({ config: f.hostConfig, apiOrigin: 'https://no-network.invalid', instanceId: 'adapter-unit',
     socketFactory: Socket, loadEngine: async () => module, clientFactory: settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
-      assert.ok(url.endsWith('/session')); const body = JSON.parse(options.body);
-      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: { ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId'].map(key => [key, body[key]])),
-        sessionGeneration: ++generation, scheme: 'AgentRuntime', sessionToken: 'rts1_' + 'e'.repeat(64), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' } }) };
+      assert.ok(url.endsWith('/session')); const body = JSON.parse(options.body).data;
+      return httpFixture(options, { ...Object.fromEntries(['runtimeInstallationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId'].map(key => [key, body[key]])),
+        sessionGeneration: String(++generation), scheme: 'AgentRuntime', sessionToken: 'rts1_' + 'e'.repeat(64), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' });
     } }) });
   t.after(() => adapters.close());
   await writePrivateJson(resolve(agent.stateRoot, 'runtime-authorization.json'), { installationId: agent.manifest.installationId, runtimeAuthorization: 'rta1_' + 'f'.repeat(64) });
   const create = () => adapters.createExecutor({ agent, subjectKey: agent.subjectKey });
   const first = create(); await first.initialize(); await first.activate(); assert.equal(first.ready(), true); const old = first.evidence();
   assert.throws(create, code('RUNTIME_EXECUTOR_SUBJECT_INVALID')); await first.close(); assert.equal(first.ready(), false);
-  const second = create(); await second.initialize(); await second.activate(); assert.equal(second.ready(), true); assert.equal(second.evidence().sessionGeneration, old.sessionGeneration + 1);
-  assert.deepEqual(adds, [agent.subjectKey, agent.subjectKey]); assert.equal(second.sessionGeneration(), 2);
+  const second = create(); await second.initialize(); await second.activate(); assert.equal(second.ready(), true); assert.equal(second.evidence().sessionGeneration, String(BigInt(old.sessionGeneration) + 1n));
+  assert.deepEqual(adds, [agent.subjectKey, agent.subjectKey]); assert.equal(second.sessionGeneration(), '2');
   const peer = f.peers[0];
   await writePrivateJson(resolve(peer.stateRoot, 'runtime-authorization.json'), { installationId: peer.manifest.installationId, runtimeAuthorization: 'rta1_' + 'f'.repeat(64) });
   const peerExecutor = adapters.createExecutor({ agent: peer, subjectKey: peer.subjectKey }); await peerExecutor.initialize(); await peerExecutor.activate(); await tick();
@@ -140,13 +142,13 @@ test('one pending registration cannot block existing peer heartbeat or host SIGT
 test('private socket trusted-group child UID1001/GID1000 can exchange while untrusted GID is denied (root-only local fixture)', { skip: process.getuid() !== 0 }, async t => {
   const f = await hostingFixture(t); f.controlConfig.socketGid = 1000;
   const { chown } = await import('node:fs/promises'); await chmod(f.root, 0o711); await chown(resolve(f.root, 'socket'), 0, 1000);
-  const server = await startHostingServer({ control: f.control() });
+  const server = await startHostingServer({ control: f.control() }); t.after(() => server.close());
   const run = gid => new Promise((done, reject) => {
-    const script = `const s=require('net').connect(${JSON.stringify(f.controlConfig.socketPath)});let b='';s.on('connect',()=>s.write(${JSON.stringify(JSON.stringify(wire.capabilitiesRequest) + '\n')}));s.on('data',v=>b+=v);s.on('end',()=>{console.log(b);process.exit(0)});s.on('error',e=>{console.log(e.code);process.exit(13)});`;
+    const script = `const s=require('net').connect(${JSON.stringify(f.controlConfig.socketPath)});let b='';s.on('connect',()=>s.write(${JSON.stringify(JSON.stringify({ protocolVersion: 1, requestId: 'req', messageType: 'hosting.capabilities', messageId: 'msg', data: { tenantId: wire.capabilitiesRequest.tenantId, clientId: wire.capabilitiesRequest.clientId, ownerJiacn: wire.capabilitiesRequest.ownerJiacn } }) + '\n')}));s.on('data',v=>b+=v);s.on('end',()=>{console.log(b);process.exit(0)});s.on('error',e=>{console.log(e.code);process.exit(13)});`;
     const child = spawn(process.execPath, ['-e', script], { uid: 1001, gid, env: { PATH: '/usr/bin:/bin' } }); let stdout = ''; let stderr = '';
     child.on('error', reject); child.stdout.on('data', bytes => { stdout += bytes; }); child.stderr.on('data', bytes => { stderr += bytes; }); child.on('exit', exit => done({ exit, stdout, stderr }));
   });
-  const trusted = await run(1000); assert.equal(trusted.exit, 0, trusted.stderr); assert.equal(JSON.parse(trusted.stdout).available, true);
+  const trusted = await run(1000); assert.equal(trusted.exit, 0, trusted.stderr); assert.equal(JSON.parse(trusted.stdout).data.available, true);
   const other = await run(1001); assert.equal(other.exit, 13); assert.match(other.stdout, /EACCES/);
   await server.close();
 });
