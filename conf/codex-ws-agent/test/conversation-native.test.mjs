@@ -285,7 +285,7 @@ test('native session proof requires rts1 and all five exact headers; no old-toke
   for (const patch of [{ Authorization: `AgentRuntime ${'a'.repeat(32)}` },
     { Authorization: `AgentRuntime rts1_${'A'.repeat(64)}` }, { 'X-Agent-Id': 'foreign' },
     { 'X-Agent-Runtime-Id': 'foreign' }, { 'X-Agent-Session-Generation': '07' },
-    { 'X-Agent-Session-Generation': '9007199254740992' }, { 'X-API-Key': 'retired' }, { Cookie: 'foreign' }]) {
+    { 'X-Agent-Session-Generation': '9223372036854775808' }, { 'X-API-Key': 'retired' }, { Cookie: 'foreign' }]) {
     assert.throws(() => nativeSessionHeaders({ ...valid, ...patch }, 'agent-1', 'instance-1'), /CONVERSATION_AUTH_UNAVAILABLE/)
   }
 })
