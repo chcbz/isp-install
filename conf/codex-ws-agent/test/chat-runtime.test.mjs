@@ -360,6 +360,30 @@ test('durable wire preserves negotiated capability declaration types without wea
   }
 })
 
+test('durable wire preserves action skill semver only at declared descriptor paths', () => {
+  const wire = apiWire()
+  const facts = { availableActions: [{ skill: { skillKey: 'image-edit', skillVersion: '1.0.0' } }] }
+  for (const layer of [wire, wire.payload]) {
+    layer.factsManifest.typedDeliberation = structuredClone(facts)
+    layer.contextSnapshot.facts.typedDeliberation = structuredClone(facts)
+    layer.contextHash = layer.contextSnapshot.contextHash = canonicalSha256({ sourceVector: layer.contextSnapshot.sourceVector, facts: layer.contextSnapshot.facts })
+  }
+  for (const source of [wire, JSON.stringify(wire)]) {
+    const normalized = normalizeInboundMessage(source)
+    assert.equal(normalized.factsManifest.typedDeliberation.availableActions[0].skill.skillVersion, '1.0.0')
+    assert.equal(normalized.contextSnapshot.facts.typedDeliberation.availableActions[0].skill.skillVersion, '1.0.0')
+  }
+  for (const field of ['sessionGeneration', 'stateVersion', 'taskRevision']) {
+    const changed = structuredClone(wire)
+    changed.factsManifest.typedDeliberation.availableActions[0].skill[field] = 1
+    assert.throws(() => normalizeInboundMessage(changed), error => error.code === 'INVALID_LONG_WIRE_TYPE')
+    assert.throws(() => normalizeInboundMessage(JSON.stringify(changed)), error => error.code === 'INVALID_LONG_WIRE_TYPE')
+  }
+  const changed = structuredClone(wire)
+  changed.unrelated = { skillVersion: '1.0.0' }
+  assert.throws(() => normalizeInboundMessage(changed), error => error.code === 'INVALID_LONG_WIRE_TYPE')
+})
+
 test('durable inbox applies hard file and byte backpressure before acceptance', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'chat-capacity-'))
   try {

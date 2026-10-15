@@ -310,6 +310,13 @@ const semanticLongPath = (path, parent = null) => {
   // is an opaque identifier and capabilityContractVersion is a JSON schema integer.
   if (normalized.length === 2 && normalized[0] === 'targetCapability' &&
       ['runtimeVersion', 'capabilityContractVersion'].includes(field)) return false
+  // Skill package versions are semantic identifiers, not SQL Long revisions.
+  // Only the declared action descriptor is exempt; its own contract validates it.
+  const actionPath = normalized[0] === 'factsManifest' ? normalized.slice(1)
+    : normalized[0] === 'contextSnapshot' && normalized[1] === 'facts' ? normalized.slice(2) : []
+  if (actionPath.length === 5 && actionPath[0] === 'typedDeliberation' &&
+      actionPath[1] === 'availableActions' && /^(?:0|[1-9][0-9]*)$/.test(actionPath[2]) &&
+      actionPath[3] === 'skill' && actionPath[4] === 'skillVersion') return false
   if (isRawLongPath(path)) return true
   if (['occurredAt', 'createdAt', 'updatedAt', 'stateVersion', 'lastDeltaSeq', 'fencingToken', 'attemptCount'].includes(field)) return true
   if (field && field !== 'schemaVersion' && /(?:Generation|Revision|Version|Sequence|Seq)$/.test(field)) return true
