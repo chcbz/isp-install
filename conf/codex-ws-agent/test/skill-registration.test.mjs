@@ -1,13 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { fromAgentWire } from '../agent-message-wire.mjs'
 import { skillSessionBinding } from '../../cyf-agent-runtime-v1/lib/execution-adapter.mjs'
 import { bindMeasuredSkillSession, refreshMeasuredSkills, buildAgentRegistrationPayload, buildAgentPresencePayload, runManagedCommand } from '../agent-client.mjs'
 
 const session = { tenantId: '0', clientId: 'client', canonicalAgentId: 'agent', installationId: 'rti_1',
-  hostId: 'host', runtimeInstanceId: 'runtime', sessionGeneration: 24, sessionToken: 'NEVER_COPY' }
+  hostId: 'host', runtimeInstanceId: 'runtime', sessionGeneration: '24', sessionToken: 'NEVER_COPY' }
 const receipt = (overrides = {}) => ({ runtimeAuth: { scheme: 'native-runtime-v1', tenantId: '0', clientId: 'client',
   ownerJiacn: 'owner', agentId: 'agent', installationId: 'rti_1', hostId: 'host', runtimeInstanceId: 'runtime',
-  sessionGeneration: 24, contextPackEnabled: true, ...overrides } })
+  sessionGeneration: '24', contextPackEnabled: true, ...overrides } })
 const state = (loadInstalled = () => []) => {
   let publishes = 0
   return { profile: { agentId: 'agent', runtimeIdentity: session, runtimeInstanceId: 'runtime' },
@@ -19,7 +20,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve))
 
 test('authenticated receipt yields only frozen scope/fence, never session secret or endpoint', () => {
   const bound = skillSessionBinding(receipt({ token: 'OTHER_SECRET', endpoint: '/private' }), session)
-  assert.equal(bound.scope.ownerJiacn, 'owner'); assert.equal(bound.fence.sessionGeneration, 24)
+  assert.equal(bound.scope.ownerJiacn, 'owner'); assert.equal(bound.fence.sessionGeneration, '24')
   assert.equal(JSON.stringify(bound).includes('SECRET'), false); assert.equal(JSON.stringify(bound).includes('/private'), false)
   assert.throws(() => { bound.scope.ownerJiacn = 'foreign' }, TypeError)
 })
@@ -68,10 +69,10 @@ test('old asynchronous measurement never re-registers after disconnect or a new 
   const pending = []; const current = state(() => new Promise(resolve => pending.push(resolve)))
   bindMeasuredSkillSession(current, skillSessionBinding(receipt(), session))
   current.skillRegistry.setSession(null)
-  bindMeasuredSkillSession(current, skillSessionBinding(receipt({ sessionGeneration: 25 }), { ...session, sessionGeneration: 25 }))
+  bindMeasuredSkillSession(current, skillSessionBinding(receipt({ sessionGeneration: '25' }), { ...session, sessionGeneration: '25' }))
   pending[1]([]); await tick(); assert.equal(current.publications(), 1)
   pending[0]([]); await tick(); assert.equal(current.publications(), 1)
-  assert.equal(current.skillRegistry.fence.sessionGeneration, 25)
+  assert.equal(current.skillRegistry.fence.sessionGeneration, '25')
 })
 test('install lifecycle preserves durable success and failure even when catalog callbacks fail', async () => {
   const phases = [], output = { status: 'SUCCESS', manifestSha256: 'a'.repeat(64) }
@@ -89,4 +90,22 @@ test('refresh errors remove catalog and publication failure does not change meas
   assert.equal(await refreshMeasuredSkills(current), null); assert.equal(current.publications(), 2)
   current.skillRegistry.loadInstalled = () => []; current.runtimeTransport.refreshCapabilities = () => { throw new Error('disconnected') }
   assert.deepEqual((await refreshMeasuredSkills(current)).skills, [])
+})
+
+// Regression for the actual public r1 ACK -> native binding -> measured catalog chain.
+test('public string session generation reaches measured registration without losing int64 precision', async () => {
+  for (const version of ['38', '9007199254740993', '9223372036854775807']) {
+    const current = state()
+    const nativeSession = { ...session, sessionGeneration: version }
+    const auth = { ...receipt({ sessionGeneration: version }).runtimeAuth }
+    auth.runtimeInstallationId = auth.installationId; delete auth.installationId
+    const decoded = fromAgentWire(JSON.stringify({ protocolVersion: 1, requestId: 'r', messageId: 'reply',
+      messageType: 'agent.registered', correlationId: 'registration', code: 'E0', msg: 'ok',
+      data: { schemaVersion: 1, sessionGeneration: version, runtimeAuth: auth } }))
+    assert.equal(bindMeasuredSkillSession(current, skillSessionBinding(decoded, nativeSession)), true)
+    await tick()
+    assert.equal(current.skillRegistry.fence.sessionGeneration, version)
+    assert.deepEqual(current.skillRegistry.declaration().skills, [])
+    assert.equal(current.publications(), 1)
+  }
 })

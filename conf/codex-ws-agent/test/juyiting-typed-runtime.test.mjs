@@ -7,9 +7,11 @@ import { PassThrough } from 'node:stream'
 import { AppServerAdapter, CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
 import { runFastChat, MESSAGE_TYPES } from '../agent-client.mjs'
 import { canonicalSha256, validateChatDispatch } from '../chat-runtime.mjs'
-import { ACTION_OUTCOME_SCHEMA } from '../juyiting-action-outcome.mjs'
+import { buildActionOutcomeContract } from '../juyiting-action-outcome.mjs'
 
 const current = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'unified-action-outcome-v4.json'), 'utf8'))
+// Native output tests use the shipped closed, parameterless skill contract.
+for (const action of current.facts.availableActions) action.parametersSchema.properties = {}
 const fixture = { dispatchFacts: current.facts, outcomes: current.outcomes }
 // Historical delivery fixtures supply lineage only; the tested execution contract is exclusively v4.
 const currentFacts = historical => ({ schemaVersion: 4, inspectedSourceRefIds: [],
@@ -83,7 +85,7 @@ test('real AppServerAdapter callback boundary passes native outputSchema and ato
   })
   assert.equal(result.status, 'completed')
   const turnStart = rpc.find(frame => frame.method === 'turn/start'); const threadStart = rpc.find(frame => frame.method === 'thread/start')
-  assert.deepEqual(turnStart.params.outputSchema, ACTION_OUTCOME_SCHEMA)
+  assert.deepEqual(turnStart.params.outputSchema, buildActionOutcomeContract(fixture.dispatchFacts).outputSchema)
   assert.equal(Object.hasOwn(threadStart.params, 'outputSchema'), false)
   const deltas = frames.filter(frame => frame.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA)
   assert.equal(deltas.map(frame => frame.payload.content).join(''), outcome.text)
@@ -116,7 +118,7 @@ test('typed and plain CHAT use distinct threads while plain wire/content stays w
   const plain = await runFastChat(profile, plainMessage(), { adapter, bindingStore: store, chatWorkdir: '/chat', sendProtocolFn: (type, payload) => plainFrames.push({ type, payload }) })
   assert.notEqual(typed.threadKey, plain.threadKey)
   const turnCalls = calls.filter(call => call.kind === 'turn')
-  assert.deepEqual(turnCalls[0].options.policy.outputSchema, ACTION_OUTCOME_SCHEMA)
+  assert.deepEqual(turnCalls[0].options.policy.outputSchema, buildActionOutcomeContract(fixture.dispatchFacts).outputSchema)
   assert.equal(Object.hasOwn(turnCalls[1].options.policy, 'outputSchema'), false)
   assert.equal(plainFrames.at(-1).payload.content, 'plain JSON-looking prose {"kind":"EXECUTION_PROPOSAL"}')
   assert.equal(Object.hasOwn(plainFrames.at(-1).payload, 'interactionOutcome'), false)
@@ -207,14 +209,14 @@ test('cancelled typed turn and unknown acceptance publish no success sidecar and
 
 test('v4 runs through native CHAT schema, streams only text and emits action sidecar without tools or v1 downgrade', async () => {
   const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
-  const { ACTION_OUTCOME_SCHEMA } = await import('../juyiting-action-outcome.mjs')
+  for (const action of v3.facts.availableActions) action.parametersSchema.properties = {}
   const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts })
   const calls = []; const frames = []
   const adapter = {
     closed: false, readback: measuredReadback(),
     startOrResumeThread: async (_prior, policy) => { calls.push(policy); return { threadId: 'v3-thread' } },
     runTurn: async options => {
-      assert.deepEqual(options.policy.outputSchema, ACTION_OUTCOME_SCHEMA)
+      assert.deepEqual(options.policy.outputSchema, buildActionOutcomeContract(v3.facts).outputSchema)
       assert.equal(options.policy.cwd, '/empty-chat')
       const raw = JSON.stringify(v3.outcomes[2]); options.onAccepted({ threadId: 'v3-thread', turnId: 'v3-turn' })
       for (const content of [raw.slice(0, 40), raw.slice(40)]) options.onDelta({ content })
@@ -236,6 +238,7 @@ test('v4 runs through native CHAT schema, streams only text and emits action sid
 
 test('v4 native CHAT preserves the explicit text delivery marker in its durable final sidecar', async () => {
   const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
+  for (const action of v3.facts.availableActions) action.parametersSchema.properties = {}
   const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts })
   for (const deliverable of [false, true]) {
     const frames = []; let starts = 0
@@ -265,6 +268,7 @@ test('v4 native CHAT preserves the explicit text delivery marker in its durable 
 
 test('native CHAT preserves parent-bound text append and refuses fabricated parent before final publication', async () => {
   const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
+  for (const action of v3.facts.availableActions) action.parametersSchema.properties = {}
   const parent = { outcomeId: 'parent-text', finalDigest: `sha256:${'a'.repeat(64)}` }
   const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts; facts.typedDeliberationAdmission = { deliveryParent: parent } })
   const outcome = { schemaVersion: 4, kind: 'ANSWER', text: '新增段落\n  ', clarification: null, action: null, deliverable: true,
@@ -282,6 +286,7 @@ test('native CHAT preserves parent-bound text append and refuses fabricated pare
 test('native CHAT retains the original text parent across API-verified clarification replies, never the immediate question', async () => {
   const groups = JSON.parse(readFileSync(new URL('./fixtures/clarified-text-delivery-v3.json', import.meta.url), 'utf8'))
   const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
+  for (const action of v3.facts.availableActions) action.parametersSchema.properties = {}
   for (const group of groups) {
     const admission = group.admissionFacts
     const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts; facts.typedDeliberationAdmission = admission })
@@ -333,6 +338,7 @@ test('native CHAT proposes the existing image edit using exact API-advertised co
 test('native CHAT retains the frozen earlier target through clarification and never substitutes the immediate question or latest text', async () => {
   const group = JSON.parse(readFileSync(new URL('./fixtures/retained-text-delivery-v3.json', import.meta.url), 'utf8'))
   const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
+  for (const action of v3.facts.availableActions) action.parametersSchema.properties = {}
   const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts; facts.typedDeliberationAdmission = group.admissionFacts })
   const view = group.updated.outcome
   const outcome = { schemaVersion: 4, kind: 'ANSWER', text: view.text, clarification: null, action: null, deliverable: true, deliveryRelation: view.deliveryRelation }
@@ -359,6 +365,7 @@ test('native CHAT retains the frozen earlier target through clarification and ne
 test('native CHAT keeps API batch append/reset metadata on EXECUTE sidecar, not action prose as deliverable', async () => {
   const groups = JSON.parse(readFileSync(new URL('./fixtures/execution-batch-delivery-v3.json', import.meta.url), 'utf8'))
   const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
+  for (const action of v3.facts.availableActions) action.parametersSchema.properties = {}
   for (const group of groups) {
     const parent = { outcomeId: group.initial.outcome.outcomeId, finalDigest: group.initial.outcome.finalDigest }
     const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts; facts.typedDeliberationAdmission = { deliveryParent: parent } })
@@ -386,6 +393,7 @@ test('native CHAT keeps API batch append/reset metadata on EXECUTE sidecar, not 
 test('native CHAT uses the actual completed media final as causal basis while replacing only retained earlier text', async () => {
   const group = JSON.parse(readFileSync(new URL('./fixtures/media-basis-delivery-v3.json', import.meta.url), 'utf8'))
   const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
+  for (const action of v3.facts.availableActions) action.parametersSchema.properties = {}
   const basis = { outcomeId: group.mediaTwo.outcome.outcomeId, finalDigest: group.mediaTwo.outcome.finalDigest }
   const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts
     facts.typedDeliberationAdmission = { deliveryParent: basis, deliveryTargets: group.targetsBeforeEdit } })
@@ -418,6 +426,7 @@ test('native CHAT uses the actual completed media final as causal basis while re
 test('native CHAT receives only API retained edited media targets and keeps their terminal causal parent for later text revision', async () => {
   const group = JSON.parse(readFileSync(new URL('./fixtures/mixed-media-edit-v3.json', import.meta.url), 'utf8'))
   const v3 = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
+  for (const action of v3.facts.availableActions) action.parametersSchema.properties = {}
   const basis = { outcomeId: group.editTwo.outcome.outcomeId, finalDigest: group.editTwo.outcome.finalDigest }
   const text = group.targetsFinal.find(target => Object.hasOwn(target, 'text'))
   const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation = v3.facts

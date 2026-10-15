@@ -82,7 +82,7 @@ import {
   AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
   measureCodexAppServerBinary, resolveCodexAppServerSchemaContract
 } from './app-server-adapter.mjs'
-import { ACTION_OUTCOME_SCHEMA, ACTION_OUTCOME_INSTRUCTIONS, ACTION_OUTCOME_CONTRACT_DIGEST, resolveActionChatRequest, validateActionOutcome } from './juyiting-action-outcome.mjs'
+import { buildActionOutcomeContract, resolveActionChatRequest, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import {
   TYPED_DELIBERATION_CONTRACT_DIGEST, TYPED_DELIBERATION_INSTRUCTIONS, TYPED_DELIBERATION_OUTPUT_SCHEMA,
   buildTypedDeliberationDeclaration, resolveTypedDeliberationRequest, typedDeliberationAdapterReady, validateTypedInteractionOutcome
@@ -4744,9 +4744,10 @@ export const runFastChat = async (profile, message, {
   const typedRequest = actionRequest
   const materials = resolveChatMaterials(profile, message)
   if (materials && (!typedRequest || typeof controls.markPrepared !== 'function' || typeof controls.markFinalPrepared !== 'function')) throw new AgentProtocolError('MATERIALS_DURABILITY_REQUIRED', 'Materials CHAT requires a frozen action-v4 turn and durable inbox')
-  const outputSchema = actionRequest ? ACTION_OUTCOME_SCHEMA : TYPED_DELIBERATION_OUTPUT_SCHEMA
-  const outcomeInstructions = actionRequest ? ACTION_OUTCOME_INSTRUCTIONS : TYPED_DELIBERATION_INSTRUCTIONS
-  const outcomeContractDigest = actionRequest ? ACTION_OUTCOME_CONTRACT_DIGEST : TYPED_DELIBERATION_CONTRACT_DIGEST
+  const actionContract = actionRequest ? buildActionOutcomeContract(actionRequest) : null
+  const outputSchema = actionContract ? actionContract.outputSchema : TYPED_DELIBERATION_OUTPUT_SCHEMA
+  const outcomeInstructions = actionContract ? actionContract.instructions : TYPED_DELIBERATION_INSTRUCTIONS
+  const outcomeContractDigest = actionContract ? actionContract.contractDigest : TYPED_DELIBERATION_CONTRACT_DIGEST
   if (!profile.fastChatEnabled || !profile.appServerEnabled) {
     throw new AgentProtocolError('FAST_CHAT_FEATURE_DISABLED', 'Modern durable CHAT is disabled for this profile; legacy workspace execution is forbidden')
   }

@@ -232,7 +232,7 @@ test('mature executor retains isolated subjects/session namespaces and allowlist
     assert.equal(state.processor.paused, true);
     executor.bindSkillSession({ scope: { tenantId: agent.manifest.tenantId, clientId: agent.manifest.clientId,
       ownerJiacn: 'fixture-owner', agentId: agent.manifest.canonicalAgentId }, fence: {
-      installationId: agent.manifest.installationId, hostId: 'host-fixture', runtimeInstanceId: 'boot-one', sessionGeneration: 1 } });
+      installationId: agent.manifest.installationId, hostId: 'host-fixture', runtimeInstanceId: 'boot-one', sessionGeneration: '1' } });
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(executor.registrationPayload().skillExecution.skills, []);
     executor.disconnected(); assert.equal(executor.registrationPayload().skillExecution, undefined);

@@ -5,7 +5,7 @@ import { SkillRegistry } from '../skill-registry.mjs'
 import { parseSkillManifest } from '../skill-manifest.mjs'
 
 const scope = { tenantId: '0', clientId: 'client', ownerJiacn: 'owner', agentId: 'agent' }
-const fence = { installationId: 'rti_a', hostId: 'host', runtimeInstanceId: 'runtime', sessionGeneration: 24 }
+const fence = { installationId: 'rti_a', hostId: 'host', runtimeInstanceId: 'runtime', sessionGeneration: '24' }
 const hash = 'a'.repeat(64)
 const fixtures = JSON.parse(readFileSync(new URL('./fixtures/skill-manifest-contract-v1.json', import.meta.url)))
 const installed = (overrides = {}) => {
@@ -76,7 +76,7 @@ test('heartbeat is cached; tool probes run once per refresh for a shared tool', 
 test('full session and configuration invalidation removes cached readiness immediately', async () => {
   const registry = create(); await registry.refresh()
   registry.setSession(null); assert.equal(registry.declaration(), null); assert.equal(await registry.refresh(), null)
-  registry.setSession({ ...fence, sessionGeneration: 25 }); assert.equal(registry.declaration(), null)
+  registry.setSession({ ...fence, sessionGeneration: '25' }); assert.equal(registry.declaration(), null)
   const result = await registry.refresh(); assert.equal(result.skills[0].readiness, 'READY')
   registry.invalidate(); assert.equal(registry.declaration(), null)
   assert.throws(() => registry.setSession({ ...fence, sessionGeneration: 0 }), /SKILL_SESSION_INVALID/)
@@ -145,4 +145,10 @@ test('probe hashes and reason codes reject newline suffixes', async () => {
     run: runner.run, probe: () => ({ ready: true, digest: hash + '\n', reasonCode: 'FAKE\n' }) }]]) })
   const item = (await registry.refresh()).skills[0]
   assert.equal(item.readiness, 'UNAVAILABLE'); assert.equal(item.reasonCode, 'SKILL_DEPENDENCY_UNAVAILABLE')
+})
+
+test('session generation rejects old numeric, noncanonical and overflowing fences', () => {
+  const registry = new SkillRegistry({ scope, loadInstalled: () => [] })
+  for (const sessionGeneration of [1, 0, '0', '01', '-1', '+1', '1.0', '1\n', '9223372036854775808'])
+    assert.throws(() => registry.setSession({ ...fence, sessionGeneration }), /SKILL_SESSION_INVALID/)
 })

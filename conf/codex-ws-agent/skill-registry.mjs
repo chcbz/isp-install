@@ -30,7 +30,8 @@ export class SkillRegistry {
 
   setSession(fence) {
     if (fence !== null && (!object(fence) || fenceFields.slice(0, 3).some(field => !exact(fence[field]))
-        || !Number.isSafeInteger(fence.sessionGeneration) || fence.sessionGeneration <= 0)) fail('SKILL_SESSION_INVALID')
+        || typeof fence.sessionGeneration !== 'string' || !/^[1-9][0-9]*$/.test(fence.sessionGeneration)
+        || BigInt(fence.sessionGeneration) > 9223372036854775807n)) fail('SKILL_SESSION_INVALID')
     const next = fence === null ? null : Object.freeze(Object.fromEntries(fenceFields.map(field => [field, fence[field]])))
     if (JSON.stringify(next) === JSON.stringify(this.fence)) return false
     this.fence = next; this.invalidate(); return true

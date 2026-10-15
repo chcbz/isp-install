@@ -1279,7 +1279,7 @@ for (const item of preparedPackages.packages) {
     const scope = { tenantId: '0', ownerJiacn: 'owner', clientId: 'client', agentId: 'agent-a' }
     const runners = new Map(), binding = { ready: true, scope, bindingId: 'fixture-image', revision: '1', digest: 'b'.repeat(64) }
     const registry = new SkillRegistry({ scope, loadInstalled: () => rows, runnerRegistry: runners, resolveBinding: async () => binding })
-    registry.setSession({ installationId: 'installation-a', hostId: 'host-a', runtimeInstanceId: 'boot-a', sessionGeneration: 1 })
+    registry.setSession({ installationId: 'installation-a', hostId: 'host-a', runtimeInstanceId: 'boot-a', sessionGeneration: '1' })
     let declaration = await registry.refresh()
     assert.equal(declaration.skills[0].readiness, 'UNAVAILABLE'); assert.equal(declaration.skills[0].reasonCode, 'SKILL_RUNNER_MISSING')
     const noCall = () => assert.fail('Readiness must never invoke provider/model')

@@ -55,6 +55,63 @@ export const ACTION_OUTCOME_INSTRUCTIONS = 'Return one version-4 JSON object mat
 
 export const ACTION_OUTCOME_CONTRACT_DIGEST = `sha256:${createHash('sha256').update(JSON.stringify({ instructions: ACTION_OUTCOME_INSTRUCTIONS, outputSchema: ACTION_OUTCOME_SCHEMA })).digest('hex')}`
 
+// This is a conservative, lossless model-schema subset, not a second manifest
+// validator. Unsupported manifests fail before engine start; never add defaults,
+// nullable fields or required keys that change the advertised parameter contract.
+const modelParameterSchema = schema => {
+  const allowed = new Set(['$schema', 'type', 'properties', 'required', 'additionalProperties',
+    'items', 'enum', 'anyOf', 'description', 'title'])
+  const visit = node => {
+    if (!node || typeof node !== 'object' || Array.isArray(node) ||
+        Object.keys(node).some(key => !allowed.has(key))) fail('ACTION_MODEL_SCHEMA_UNSUPPORTED')
+    const copy = structuredClone(node)
+    delete copy.$schema
+    if (node.anyOf) {
+      if (!Array.isArray(node.anyOf) || !node.anyOf.length) fail('ACTION_MODEL_SCHEMA_UNSUPPORTED')
+      copy.anyOf = node.anyOf.map(visit)
+    }
+    const types = Array.isArray(node.type) ? node.type : [node.type]
+    if (types.includes('object')) {
+      if (node.additionalProperties !== false || !node.properties ||
+          typeof node.properties !== 'object' || Array.isArray(node.properties)) fail('ACTION_MODEL_SCHEMA_UNSUPPORTED')
+      const keys = Object.keys(node.properties)
+      const required = node.required ?? []
+      if (!Array.isArray(required) || required.length !== keys.length ||
+          new Set(required).size !== keys.length || !keys.every(key => required.includes(key))) fail('ACTION_MODEL_SCHEMA_UNSUPPORTED')
+      copy.properties = Object.fromEntries(Object.entries(node.properties).map(([key, value]) => [key, visit(value)]))
+      copy.required = [...required]
+    } else if (node.properties || node.required || Object.hasOwn(node, 'additionalProperties')) fail('ACTION_MODEL_SCHEMA_UNSUPPORTED')
+    if (types.includes('array')) {
+      if (!node.items) fail('ACTION_MODEL_SCHEMA_UNSUPPORTED')
+      copy.items = visit(node.items)
+    } else if (node.items) fail('ACTION_MODEL_SCHEMA_UNSUPPORTED')
+    if (!node.anyOf && types.some(type => !['object', 'array', 'string', 'integer', 'number', 'boolean', 'null'].includes(type))) fail('ACTION_MODEL_SCHEMA_UNSUPPORTED')
+    return copy
+  }
+  return visit(schema)
+}
+
+export const buildActionOutcomeContract = dispatchFacts => {
+  const facts = validateActionFacts(dispatchFacts)
+  const outputSchema = structuredClone(ACTION_OUTCOME_SCHEMA)
+  if (facts.availableActions.length === 0) {
+    outputSchema.properties.kind.enum = ['ANSWER', 'CLARIFY']
+    outputSchema.properties.action = { type: 'null' }
+  } else {
+    const template = ACTION_OUTCOME_SCHEMA.properties.action.anyOf[1]
+    outputSchema.properties.action = { anyOf: [{ type: 'null' }, ...facts.availableActions.map(action => ({
+      ...structuredClone(template), properties: {
+        ...structuredClone(template.properties),
+        actionId: { type: 'string', enum: [action.actionId] },
+        parameters: modelParameterSchema(action.parametersSchema)
+      }
+    }))] }
+  }
+  const instructions = ACTION_OUTCOME_INSTRUCTIONS
+  const contractDigest = `sha256:${createHash('sha256').update(JSON.stringify({ instructions, outputSchema })).digest('hex')}`
+  return frozen({ instructions, outputSchema, contractDigest })
+}
+
 const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const mime = value => typeof value === 'string' && /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(value)
 export const validateActionFacts = raw => {
