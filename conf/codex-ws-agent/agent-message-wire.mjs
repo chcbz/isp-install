@@ -75,8 +75,12 @@ export function fromAgentWire(text) {
   for (const key of ['issuedAt', 'sentAt', 'occurredAt', 'expiresAt']) {
     if (Object.hasOwn(data, key) && (!Number.isSafeInteger(data[key]) || data[key] < 0)) invalid()
   }
-  // The private durable-chat schema retains exact decimal sentAt in its hash input.
-  if (data.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED' && Object.hasOwn(data, 'sentAt')) data.sentAt = String(data.sentAt)
+  // The private durable-chat schema retains exact decimal times in its private validation/hash input.
+  if (data.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED') {
+    for (const key of ['sentAt', 'occurredAt']) {
+      if (Object.hasOwn(data, key)) data[key] = String(data[key])
+    }
+  }
   // Public decimal strings are projected back only at the private legacy file bridge.
   if (message.messageType === 'command.dispatch' && data.commandType === 'WORKSPACE_FILE_EXECUTE') {
     if (!object(data.payload) || !Array.isArray(data.payload.inputManifest) || !Array.isArray(data.payload.outputManifest)) invalid()

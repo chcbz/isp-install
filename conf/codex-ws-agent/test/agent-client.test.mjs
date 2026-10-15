@@ -1,4 +1,4 @@
-import { toAgentWire } from '../agent-message-wire.mjs'
+import { toAgentWire, fromAgentWire } from '../agent-message-wire.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
@@ -4946,3 +4946,18 @@ test('Runtime ACK checkpoint preserves Long precision across restart and monoton
     finally { restarted.processor.stop() }
   } finally { runtime.processor.stop() }
 })
+
+test('public durable dispatch crosses the wire projection and real consumer with numeric public times', () => {
+  const privateDispatch = durableChat(901, { sentAt: '1792065583989', occurredAt: '1792065583989' });
+  const saved = JSON.stringify(privateDispatch);
+  const wire = toAgentWire(privateDispatch);
+  assert.equal(wire.data.occurredAt, 1792065583989);
+  const projected = fromAgentWire(JSON.stringify(wire));
+  assert.equal(projected.sentAt, '1792065583989');
+  assert.equal(projected.occurredAt, '1792065583989');
+  assert.equal(normalizeInboundMessage(projected).durable, true);
+  assert.equal(JSON.stringify(privateDispatch), saved);
+  for (const occurredAt of ['1792065583989', -1, 1.5, 9007199254740992]) {
+    assert.throws(() => fromAgentWire(JSON.stringify({ ...wire, data: { ...wire.data, occurredAt } })));
+  }
+});
