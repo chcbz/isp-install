@@ -83,8 +83,8 @@ test('native text lane performs one irreversible START and commits the exact out
     if (url.pathname.endsWith('/outputs/output_1/content')) {
       const form = init.body
       assert.equal(form.get('file').name, 'output.txt')
-      assert.equal(form.get('sha256'), sha256); assert.equal(form.get('length'), String(bytes.length))
-      return respond(url, { outputId: 'output_1', state: 'STAGED', sha256, byteLength: bytes.length }, 201)
+      assert.equal(form.get('sha256'), sha256); assert.equal(form.get('byteLength'), String(bytes.length))
+      return respond(url, { outputId: 'output_1', state: 'STAGED', sha256, byteLength: String(bytes.length) }, 201)
     }
     if (url.pathname.includes('/output-commits/')) {
       const expected = buildOutputCommit({ taskId: 'task-1', runId: 'run-1', uploads: [{ outputId: 'output_1', sha256, length: bytes.length }] }).manifestId

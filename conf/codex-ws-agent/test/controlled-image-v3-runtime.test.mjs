@@ -108,8 +108,8 @@ const setup = (t, { startMode = 'success' } = {}) => {
     if (url.pathname.endsWith('/outputs/output_1/content')) {
       assert.ok(init.body instanceof FormData)
       assert.equal(init.body.get('sha256'), digest)
-      assert.equal(init.body.get('length'), String(png.length))
-      return json(url, { outputId: 'output_1', state: 'STAGED', sha256: digest, byteLength: png.length }, 201)
+      assert.equal(init.body.get('byteLength'), String(png.length))
+      return json(url, { outputId: 'output_1', state: 'STAGED', sha256: digest, byteLength: String(png.length) }, 201)
     }
     if (url.pathname.includes('/output-commits/')) return json(url, {
       manifestId: url.pathname.split('/').at(-1), state: 'COMMITTED',

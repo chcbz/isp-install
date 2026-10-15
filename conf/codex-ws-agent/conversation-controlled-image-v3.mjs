@@ -270,15 +270,15 @@ export class ControlledImageConversationLaneV3 {
       const form = new FormData()
       form.set('file', new Blob([output.bytes], { type: output.contentType }), 'output.png')
       for (const [key, value] of Object.entries({ version: String(fence.version), token: fence.token,
-        sha256: outputSha, length: String(output.bytes.length) })) form.set(key, value)
+        sha256: outputSha, byteLength: String(output.bytes.length) })) form.set(key, value)
       const staged = await this.#request(`${path}/outputs/output_1/content`, 'POST', form, 201)
       if (!object(staged) || staged.outputId !== 'output_1' || staged.sha256 !== outputSha
-          || staged.byteLength !== output.bytes.length || staged.state !== 'STAGED') deny('CONVERSATION_STAGE_UNCERTAIN')
+          || staged.byteLength !== String(output.bytes.length) || staged.state !== 'STAGED') deny('CONVERSATION_STAGE_UNCERTAIN')
       // Reuse the API task/run/output/hash/length manifest; keep conversation fencing.
       const { manifestId } = buildOutputCommit({ taskId: command.taskId, runId: command.runId,
         uploads: [{ outputId: 'output_1', sha256: outputSha, length: output.bytes.length }] })
       const committed = await this.#request(`${path}/output-commits/${manifestId}`, 'POST', {
-        fence, outputs: [{ outputId: 'output_1', sha256: outputSha, length: output.bytes.length }]
+        fence, outputs: [{ outputId: 'output_1', sha256: outputSha, byteLength: String(output.bytes.length) }]
       })
       if (!object(committed) || committed.state !== 'COMMITTED' || committed.manifestId !== manifestId
           || !Array.isArray(committed.items) || committed.items.length !== 1

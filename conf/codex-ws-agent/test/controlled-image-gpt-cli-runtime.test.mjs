@@ -85,7 +85,7 @@ actual('local CLI profile registers and completes the real v3 poll START input s
     if (url.pathname.endsWith('/provider-start-controlled-image-v3')) { startCalls++; return json(url, receipt) }
     if (url.pathname.endsWith('/outputs/output_1/content')) {
       stagedBytes = Buffer.from(await init.body.get('file').arrayBuffer())
-      return json(url, { outputId: 'output_1', state: 'STAGED', sha256: sha(stagedBytes), byteLength: stagedBytes.length }, 201)
+      return json(url, { outputId: 'output_1', state: 'STAGED', sha256: sha(stagedBytes), byteLength: String(stagedBytes.length) }, 201)
     }
     if (url.pathname.includes('/output-commits/')) {
       committed++

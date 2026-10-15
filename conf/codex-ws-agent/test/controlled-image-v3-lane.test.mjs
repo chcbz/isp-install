@@ -76,7 +76,7 @@ const setup = (t, candidate, { receipt = candidate.receipt, startMode = 'success
       if (stageMode === 'lost') throw Error('upload ACK lost')
       if (stageMode === '404') return json(url, { unavailable: true }, 404)
       return json(url, { outputId: 'output_1', state: 'STAGED',
-        sha256: stageMode === 'drift' ? 'f'.repeat(64) : init.body.get('sha256'), byteLength: Number(init.body.get('length')) }, 201)
+        sha256: stageMode === 'drift' ? 'f'.repeat(64) : init.body.get('sha256'), byteLength: init.body.get('byteLength') }, 201)
     }
     if (url.pathname.includes('/result-commits/')) {
       assert.ok(init.body instanceof FormData)
@@ -100,7 +100,7 @@ const setup = (t, candidate, { receipt = candidate.receipt, startMode = 'success
       const body = JSON.parse(init.body)
       // Match the API manifest wire independently, not the requested URL echoed back.
       const item = body.outputs[0]
-      const expected = `pwe_m_${sha(Buffer.from(`${candidate.command.taskId}\n${candidate.command.runId}\n${item.outputId}\n${item.sha256}\n${item.length}\n`))}`
+      const expected = `pwe_m_${sha(Buffer.from(`${candidate.command.taskId}\n${candidate.command.runId}\n${item.outputId}\n${item.sha256}\n${item.byteLength}\n`))}`
       assert.equal(url.pathname.split('/').at(-1), expected, 'server manifest contract')
       return json(url, { state: 'COMMITTED', manifestId: url.pathname.split('/').at(-1),
         items: [{ outputId: 'output_1', sha256: commitMode === 'drift' ? 'e'.repeat(64) : body.outputs[0].sha256 }] })

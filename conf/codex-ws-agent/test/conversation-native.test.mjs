@@ -99,7 +99,7 @@ test('separately supplied no-charge executor stays inside scoped dirs and only e
     assert.equal(s.calls[3].path.endsWith('/provider-start'), true)
     assert.ok(s.calls[4].body instanceof FormData)
     assert.equal(s.calls[4].body.get('sha256'), digest)
-    assert.deepEqual(JSON.parse(s.calls[5].body).outputs, [{ outputId: 'output_1', sha256: digest, length: bytes.length }])
+    assert.deepEqual(JSON.parse(s.calls[5].body).outputs, [{ outputId: 'output_1', sha256: digest, byteLength: String(bytes.length) }])
     assert.deepEqual(readdirSync(resolve(s.root, 'conversation-runs', 'agent-1')), [])
   } finally { s.cleanup() }
 })

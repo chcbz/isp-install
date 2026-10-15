@@ -228,7 +228,7 @@ export class NativeConversationLane {
         uploads: [{ outputId: command.outputId, sha256: sha256, length: output.bytes.length }] })
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
       const committed = await this.#request(`${path}/output-commits/${manifestId}`, 'POST', {
-        fence, outputs: [{ outputId: command.outputId, sha256, length: output.bytes.length }]
+        fence, outputs: [{ outputId: command.outputId, sha256, byteLength: String(output.bytes.length) }]
       })
       if (!object(committed) || committed.state !== 'COMMITTED' || committed.manifestId !== manifestId
           || !Array.isArray(committed.items) || committed.items.length !== 1

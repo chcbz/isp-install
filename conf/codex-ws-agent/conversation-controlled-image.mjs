@@ -214,14 +214,14 @@ export class ControlledImageConversationLane {
       const sha256 = SHA(output.bytes)
       const form = new FormData()
       form.set('file', new Blob([output.bytes], { type: output.contentType }), 'output.png')
-      for (const [key, value] of Object.entries({ version: String(fence.version), token: fence.token, sha256, length: String(output.bytes.length) })) form.set(key, value)
+      for (const [key, value] of Object.entries({ version: String(fence.version), token: fence.token, sha256, byteLength: String(output.bytes.length) })) form.set(key, value)
       const staged = await this.#request(`${path}/outputs/output_1/content`, 'POST', form, 201)
-      if (!object(staged) || staged.outputId !== 'output_1' || staged.sha256 !== sha256 || staged.byteLength !== output.bytes.length || staged.state !== 'STAGED') deny('CONVERSATION_STAGE_UNCERTAIN')
+      if (!object(staged) || staged.outputId !== 'output_1' || staged.sha256 !== sha256 || staged.byteLength !== String(output.bytes.length) || staged.state !== 'STAGED') deny('CONVERSATION_STAGE_UNCERTAIN')
       // Reuse the API task/run/output/hash/length manifest; keep conversation fencing.
       const { manifestId } = buildOutputCommit({ taskId: command.taskId, runId: command.runId,
         uploads: [{ outputId: 'output_1', sha256: sha256, length: output.bytes.length }] })
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
-      const committed = await this.#request(`${path}/output-commits/${manifestId}`, 'POST', { fence, outputs: [{ outputId: 'output_1', sha256, length: output.bytes.length }] })
+      const committed = await this.#request(`${path}/output-commits/${manifestId}`, 'POST', { fence, outputs: [{ outputId: 'output_1', sha256, byteLength: String(output.bytes.length) }] })
       if (!object(committed) || committed.state !== 'COMMITTED' || committed.manifestId !== manifestId || !Array.isArray(committed.items) || committed.items.length !== 1 || committed.items[0].outputId !== 'output_1' || committed.items[0].sha256 !== sha256) deny('CONVERSATION_COMMIT_UNCERTAIN')
       terminalConfirmed = true
       return { committed: true }

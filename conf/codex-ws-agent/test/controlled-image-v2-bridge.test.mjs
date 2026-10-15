@@ -46,11 +46,11 @@ const run = async ({ queued = command, start = startReceipt(), snapshot, execute
       return json(url, start)
     }
     if (url.pathname.endsWith('/failure')) return json(url, { state: 'FAILED', executionId: receipt.executionId })
-    if (url.pathname.endsWith('/outputs/output_1/content')) return json(url, { outputId: 'output_1', state: 'STAGED', sha256: init.body.get('sha256'), byteLength: Number(init.body.get('length')) }, 201)
+    if (url.pathname.endsWith('/outputs/output_1/content')) return json(url, { outputId: 'output_1', state: 'STAGED', sha256: init.body.get('sha256'), byteLength: init.body.get('byteLength') }, 201)
     if (url.pathname.includes('/output-commits/')) {
       const payload = JSON.parse(init.body)
       const item = payload.outputs[0]
-      const wire = `${queued.taskId}\n${queued.runId}\n${item.outputId}\n${item.sha256}\n${item.length}\n`
+      const wire = `${queued.taskId}\n${queued.runId}\n${item.outputId}\n${item.sha256}\n${item.byteLength}\n`
       assert.equal(url.pathname.split('/').at(-1), `pwe_m_${createHash('sha256').update(wire).digest('hex')}`, 'server manifest contract')
       return json(url, { state: 'COMMITTED', manifestId: url.pathname.split('/').at(-1), items: [{ outputId: 'output_1', sha256: payload.outputs[0].sha256 }] })
     }
