@@ -1,3 +1,4 @@
+import { eventMessage, validateMessage } from '../lib/message-envelope.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
@@ -8,10 +9,15 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const script = fileURLToPath(new URL('./hosting-java-bridge-fixture.mjs', import.meta.url));
 const wire = JSON.parse(await readFile(new URL('./fixtures/gss-hosting-control-v1.json', import.meta.url)));
-const exchange = (path, input) => new Promise((resolve, reject) => {
+const exchange = (path, internal) => new Promise((resolve, reject) => {
+  const { protocol, method, ...data } = internal;
+  if (Object.hasOwn(data, 'validUntil')) { data.validUntilAt = data.validUntil; delete data.validUntil; }
+  if (Object.hasOwn(data, 'installationId')) { data.runtimeInstallationId = data.installationId; delete data.installationId; }
+  if (Object.hasOwn(data, 'provisionGeneration')) data.provisionGeneration = String(data.provisionGeneration);
+  const input = eventMessage('bridge-request', `hosting.${method}`, 'bridge-message', data);
   const socket = connect(path); let response = '';
   socket.on('connect', () => socket.write(JSON.stringify(input) + '\n')); socket.on('error', reject);
-  socket.on('data', chunk => { response += chunk; }); socket.on('end', () => resolve(JSON.parse(response)));
+  socket.on('data', chunk => { response += chunk; }); socket.on('end', () => { try { const reply = validateMessage(JSON.parse(response)); assert.equal(reply.correlationId, input.messageId); assert.equal(reply.requestId, input.requestId); assert.equal(reply.code, 'E0'); resolve(reply.data); } catch (error) { reject(error); } });
 });
 async function bridge(t) {
   const child = spawn(process.execPath, [script], { env: { PATH: process.env.PATH }, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -30,7 +36,7 @@ test('Java bridge entry actual UDS/controller initial/replay/free reprovision an
   const b = await bridge(t); const call = request => exchange(b.metadata.socketPath, request);
   async function ready(request) {
     const candidate = await call(request); assert.equal(candidate.outcome, 'PREPARED'); assert.deepEqual(await call(request), candidate);
-    const operation = { ...request, method: 'ensure', ...Object.fromEntries(['installationId', 'manifestSha256', 'provisionGeneration'].map(key => [key, candidate[key]])) };
+    const operation = { ...request, method: 'ensure', ...{ installationId: candidate.runtimeInstallationId, manifestSha256: candidate.manifestSha256, provisionGeneration: Number(candidate.provisionGeneration) } };
     await call(operation); operation.method = 'observe';
     for (let i = 0; i < 1000; i++) {
       const response = await call(operation); if (response.outcome === 'SERVICE_READY') return { candidate, response };
@@ -39,7 +45,7 @@ test('Java bridge entry actual UDS/controller initial/replay/free reprovision an
     assert.fail('synthetic subject did not become ready');
   }
   const initial = await ready(wire.prepareRequest); const repro = await ready({ ...wire.reprovisionPrepareRequest, requestedAt: wire.reprovisionPrepareRequest.reservedAt });
-  assert.equal(initial.candidate.installationId, repro.candidate.installationId); assert.equal(initial.response.sessionGeneration, 1); assert.equal(repro.response.sessionGeneration, 2);
+  assert.equal(initial.candidate.runtimeInstallationId, repro.candidate.runtimeInstallationId); assert.equal(initial.response.sessionGeneration, '1'); assert.equal(repro.response.sessionGeneration, '2');
   assert.equal(repro.response.hostId, b.metadata.hostId); assert.equal(repro.response.runtimeInstanceId, b.metadata.instanceId);
   b.child.stdin.write('stop\n'); const [exit] = await b.exited; assert.equal(exit, 0, b.stderr());
   await assert.rejects(lstat(dirname(dirname(b.metadata.socketPath))), cause => cause.code === 'ENOENT');

@@ -3690,7 +3690,7 @@ test('late correlated registration ACK restores native queue pickup without repe
   state.workspaceFileRuntimeAuthHeader = `AgentRuntime rts1_${'a'.repeat(64)}` // derived separately, never minted by registration
   assert.deepEqual(await pollWorkspaceFileCommands({ profile, state, fetchFn }), { dispatched: 1, rejected: 0 })
   assert.equal(queueCalls, 1)
-  assert.deepEqual(handled, [valid])
+  assert.deepEqual(handled, [{ ...valid, requestId: valid.messageId }])
 })
 
 for (const startCase of ['transport', 'wrong-run', 'server-error', 'rejected']) {

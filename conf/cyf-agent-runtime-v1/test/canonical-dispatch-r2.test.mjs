@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { once } from 'node:events';
-import { RuntimeV1Client } from '../lib/runtime-client.mjs';
+import { RuntimeV1Client, runtimeAckWireContext } from '../lib/runtime-client.mjs';
 import { digestManifest } from '../lib/manifest.mjs';
 import { canonicalSha256 } from '../../codex-ws-agent/chat-runtime.mjs';
 import { PersistentCommandInbox, DurableDedupeLedger, AckOutbox, AgentMessageProcessor,
@@ -57,15 +57,15 @@ async function httpFixture(t, { loseTerminalUntilRotation = false, command = raw
   const server = createServer((request, response) => {
     void (async () => {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks)); const headers = request.headers;
+      const envelope = JSON.parse(Buffer.concat(chunks)); const body = envelope.data; const headers = request.headers; assert.equal(envelope.protocolVersion, 1); assert.equal(envelope.requestId, headers['x-request-id']);
       requests.push({ path: request.url, headers, body });
-      const send = (data, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ data })); };
+      const send = (data, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'X-Request-Id': envelope.requestId }); response.end(JSON.stringify({ protocolVersion: 1, requestId: envelope.requestId, code: 'E0', msg: 'ok', data })); };
       assert.equal(request.method, 'POST');
       if (request.url === '/agent/runtime/v1/session') {
         assert.equal(headers.authorization, 'Bearer synthetic-install-authorization');
-        for (const key of ['installationId', 'tenantId', 'clientId', 'canonicalAgentId']) assert.equal(body[key], manifest()[key]);
+        for (const key of ['tenantId', 'clientId', 'canonicalAgentId']) assert.equal(body[key], manifest()[key]); assert.equal(body.runtimeInstallationId, manifest().installationId);
         generation++;
-        send({ ...manifest(), hostId, runtimeInstanceId: bootId, sessionGeneration: generation,
+        send({ ...manifest(), runtimeInstallationId: manifest().installationId, hostId, runtimeInstanceId: bootId, sessionGeneration: String(generation),
           scheme: 'AgentRuntime', sessionToken: token(), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' }); return;
       }
       assert.equal(request.url, `/agent/runtime/v1/commands/${encodeURIComponent(raw.messageId)}/acks`);
@@ -74,17 +74,17 @@ async function httpFixture(t, { loseTerminalUntilRotation = false, command = raw
       assert.equal(headers['x-agent-installation-id'], manifest().installationId);
       assert.equal(headers['x-agent-host-id'], hostId); assert.equal(headers['x-agent-runtime-id'], bootId);
       assert.equal(headers['x-agent-session-generation'], String(generation));
-      for (const [key, value] of Object.entries(expected(command))) assert.equal(body[key], value);
-      assert.equal(body.hostId, hostId); assert.equal(body.runtimeInstanceId, bootId); assert.equal(body.sessionGeneration, generation);
+      for (const [key, value] of Object.entries(runtimeAckWireContext(expected(command)))) assert.equal(body[key], value);
+      assert.equal(body.hostId, hostId); assert.equal(body.runtimeInstanceId, bootId); assert.equal(body.sessionGeneration, String(generation));
       assert.equal(headers['x-api-key'], undefined);
       const previous = records.get(body.messageId);
       const prior = previous?.status === body.status;
       const version = prior ? previous.deliveryVersion : (previous?.deliveryVersion ?? 0) + 1;
-      assert.equal(body.deliveryVersion, prior ? version - 1 : (previous?.deliveryVersion ?? null), 'last client-confirmed value, never predicted CAS');
+      assert.equal(body.deliveryVersion, prior ? String(version - 1) : (previous ? String(previous.deliveryVersion) : null), 'last client-confirmed value, never predicted CAS');
       const result = { kind: prior ? 'PRIOR' : 'ADVANCED', status: body.status, deliveryVersion: version };
       records.set(body.messageId, result);
       if (loseTerminalUntilRotation && body.status === 'SUCCEEDED' && generation === 7) { request.socket.destroy(); return; }
-      send(result);
+      send({ ...result, deliveryVersion: String(result.deliveryVersion) });
     })().catch(error => { errors.push(error); response.writeHead(500, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ data: { code: 'SYNTHETIC_HTTP_ASSERTION' } })); });
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -109,7 +109,7 @@ test('byte-pinned E05 r2 at fake clock reaches local real HTTP ACK and unique ma
   assert.deepEqual(raw, wire.canonicalDispatchProjectionR2.raw);
   assert.equal(fixtureSha, wire.canonicalDispatchProjectionR2.rawSha256);
   const h = await httpFixture(t); let runtime; let runs = 0;
-  runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(context, status, version),
+  runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(runtimeAckWireContext(context), status, version),
     run: async message => {
       runs++;
       assert.deepEqual(message.rawPayload, raw); assert.deepEqual(message.payload.context, raw.payload.context);
@@ -124,10 +124,11 @@ test('byte-pinned E05 r2 at fake clock reaches local real HTTP ACK and unique ma
   assert.equal(accepted.item.record.expiresAt, raw.expiresAt);
   runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail;
   assert.equal(runs, 1); assert.deepEqual(h.errors, []);
-  assert.deepEqual(h.acks()[0].body, wire.canonicalDispatchProjectionR2.projectedFirstAck);
-  assert.deepEqual(h.acks().map(row => [row.body.status, row.body.deliveryVersion]), [['RECEIVED', null], ['STARTED', 1], ['SUCCEEDED', 2]]);
+  const { hostId: oldHost, runtimeInstanceId: oldBoot, sessionGeneration: oldGeneration, deliveryVersion: oldVersion, status: oldStatus, ...oldContext } = wire.canonicalDispatchProjectionR2.projectedFirstAck;
+  assert.deepEqual(h.acks()[0].body, { ...runtimeAckWireContext(oldContext), hostId: oldHost, runtimeInstanceId: oldBoot, sessionGeneration: String(oldGeneration), deliveryVersion: oldVersion, status: oldStatus });
+  assert.deepEqual(h.acks().map(row => [row.body.status, row.body.deliveryVersion]), [['RECEIVED', null], ['STARTED', '1'], ['SUCCEEDED', '2']]);
   assert.equal(runtime.ledger.getEntry(raw.commandId).fingerprint, canonicalSha256(raw).slice(7));
-  assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).deliveryVersion, 3);
+  assert.equal(runtime.ledger.runtimeAckCommit(raw.commandId, raw.messageId).deliveryVersion, '3');
   assert.equal(runtime.outbox.pendingEnvelopes().length, 0);
   const persisted = stateJson(h.root).join('\n');
   for (const secret of [h.client.currentSession.sessionToken, 'sessionToken', 'sessionGeneration', 'runtimeAuthorization', bootId]) assert.equal(persisted.includes(secret), false);
@@ -137,25 +138,25 @@ test('byte-pinned E05 r2 at fake clock reaches local real HTTP ACK and unique ma
 test('lost real HTTP terminal receipt replays original r2 checkpoint after expiry and session rotation, without reexecution', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: frozenClock });
   const h = await httpFixture(t, { loseTerminalUntilRotation: true }); let runs = 0;
-  const ack = (context, status, version) => h.client.acknowledge(context, status, version);
+  const ack = (context, status, version) => h.client.acknowledge(runtimeAckWireContext(context), status, version);
   const initial = checkpoint(t, { root: h.root, ack, run: async () => { runs++; return { status: 'completed' }; } });
   await initial.processor.handle(fixtureBytes); initial.processor.resume(); await initial.processor.waitForIdle(); await initial.processor.runtimeAckTail;
   assert.equal(runs, 1); assert.equal(initial.ledger.runtimeAckCommit(raw.commandId, raw.messageId).status, 'STARTED');
   assert.equal(initial.outbox.pendingEnvelopes()[0].envelope.ackStatus, 'SUCCEEDED'); initial.processor.stop();
   const beforeRestart = h.acks().map(row => [row.body.status, row.body.deliveryVersion, row.body.sessionGeneration]);
-  assert.deepEqual(beforeRestart.slice(0, 2), [['RECEIVED', null, 7], ['STARTED', 1, 7]]);
+  assert.deepEqual(beforeRestart.slice(0, 2), [['RECEIVED', null, '7'], ['STARTED', '1', '7']]);
   assert.ok(beforeRestart.length >= 3);
-  for (const attempt of beforeRestart.slice(2)) assert.deepEqual(attempt, ['SUCCEEDED', 2, 7]);
+  for (const attempt of beforeRestart.slice(2)) assert.deepEqual(attempt, ['SUCCEEDED', '2', '7']);
   t.mock.timers.setTime(raw.expiresAt + 1000); await h.client.session();
   const restarted = checkpoint(t, { root: h.root, ack, run: async () => assert.fail('unknown/terminal business is never reexecuted') });
   await restarted.processor.replayAcks(); restarted.processor.resume(); await restarted.processor.waitForIdle(); await restarted.processor.runtimeAckTail;
   assert.deepEqual(h.errors, []); assert.equal(runs, 1); assert.equal(restarted.outbox.pendingEnvelopes().length, 0);
-  assert.equal(restarted.ledger.runtimeAckCommit(raw.commandId, raw.messageId).deliveryVersion, 3);
+  assert.equal(restarted.ledger.runtimeAckCommit(raw.commandId, raw.messageId).deliveryVersion, '3');
   assert.deepEqual(h.acks().map(row => [row.body.status, row.body.deliveryVersion, row.body.sessionGeneration]),
-    [...beforeRestart, ['SUCCEEDED', 2, 8]]);
+    [...beforeRestart, ['SUCCEEDED', '2', '8']]);
   assert.equal(restarted.ledger.runtimeAckCommit(raw.commandId, raw.messageId).kind, 'PRIOR');
   assert.deepEqual(restarted.ledger.getEntry(raw.commandId).runtimeCommand, expected());
-  await assert.rejects(h.client.acknowledge(expected(), 'STARTED', 3), /EXPIRED/);
+  await assert.rejects(h.client.acknowledge(runtimeAckWireContext(expected()), 'STARTED', '3'), /EXPIRED/);
   assert.equal(h.acks().length, beforeRestart.length + 1, 'production expiry is not disabled by the fixture clock');
 });
 
@@ -204,7 +205,7 @@ test('r2 safely normalizes epoch and actual nullable values, never invented refe
 test('raw r2 fingerprint binds epoch/product/source/context; same ID changed payload cannot change original D06 checkpoint', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: frozenClock });
   const h = await httpFixture(t);
-  const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(context, status, version), run: async () => assert.fail('paused command') });
+  const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(runtimeAckWireContext(context), status, version), run: async () => assert.fail('paused command') });
   await runtime.processor.handle(fixtureBytes); await runtime.processor.runtimeAckTail;
   const before = runtime.ledger.getEntry(raw.commandId);
   const variants = [
@@ -228,7 +229,7 @@ test('r2 queued ACK projection and original raw checkpoint are independently che
   for (const mode of ['projection', 'raw-source']) await t.test(mode, async st => {
     const h = await httpFixture(st); let enabled = false;
     const runtime = checkpoint(st, { root: h.root, ack: (...args) => {
-      if (!enabled) throw Error('synthetic pre-send hold'); return h.client.acknowledge(...args);
+      if (!enabled) throw Error('synthetic pre-send hold'); return h.client.acknowledge(runtimeAckWireContext(args[0]), ...args.slice(1));
     } });
     await runtime.processor.handle(fixtureBytes); await runtime.processor.runtimeAckTail;
     assert.equal(h.acks().length, 0);
@@ -254,7 +255,7 @@ test('r2 queued ACK projection and original raw checkpoint are independently che
 test('unchanged E05 is rejected for new admission after expiry; only REJECTED reaches local HTTP and no business runs', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: raw.expiresAt + 1000 });
   const h = await httpFixture(t);
-  const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(context, status, version),
+  const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(runtimeAckWireContext(context), status, version),
     run: async () => assert.fail('expired new work must never execute') });
   const result = await runtime.processor.handle(fixtureBytes);
   assert.equal(result.kind, 'rejected'); assert.equal(result.error.code, 'COMMAND_EXPIRED');
@@ -270,7 +271,7 @@ test('unchanged E05 is rejected for new admission after expiry; only REJECTED re
 test('r2 invalid raw subjects/epochs/contexts cannot create a checkpoint or send any HTTP ACK', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: frozenClock });
   const h = await httpFixture(t);
-  const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(context, status, version),
+  const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(runtimeAckWireContext(context), status, version),
     run: async () => assert.fail('invalid dispatch must never execute') });
   const cases = [
     [{ tenantId: 'foreign' }, 'RUNTIME_COMMAND_SCOPE_MISMATCH'],
@@ -302,7 +303,7 @@ test('r2 invalid raw subjects/epochs/contexts cannot create a checkpoint or send
 test('nullable workItem from canonical DTO reaches HTTP as null, never an empty work key', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: frozenClock });
   const command = { ...fixture(), workItemId: null }; const h = await httpFixture(t, { command }); let runs = 0;
-  const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(context, status, version),
+  const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(runtimeAckWireContext(context), status, version),
     run: async message => { runs++; assert.equal(message.rawPayload.workItemId, null); return { status: 'completed' }; } });
   assert.equal((await runtime.processor.handle(command)).kind, 'command');
   runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail;

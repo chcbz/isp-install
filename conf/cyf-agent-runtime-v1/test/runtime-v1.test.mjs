@@ -12,25 +12,34 @@ import { classifyRuntimeError, RuntimeV1Client, validateCommandForManifest, vali
 // Synthetic credentials only. HTTP mocked here: NOT cross-end/production evidence.
 const token = 'rts1_' + 'a'.repeat(64);
 const installationToken = 'rta1_' + 'b'.repeat(64);
-const enrollment = () => ({ installation: { ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion'].map(k => [k, manifest()[k]])),
+const enrollment = () => ({ installation: { runtimeInstallationId: manifest().installationId, ...Object.fromEntries(['tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion'].map(k => [k, manifest()[k]])),
   manifestSha256: manifest().manifestSha256.slice(7), enrollmentExpiresAt: 3601000, status: 'ACTIVE', lastHeartbeatAt: null }, runtimeAuthorization: installationToken });
 const manifest = () => {
   const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: 'rti_0123456789abcdef0123456789abcdef',
     tenantId: '0', clientId: 'client-fixture', canonicalAgentId: 'agt_0123456789abcdef0123456789abcdef' };
   return { ...unsigned, manifestSha256: digestManifest(unsigned) };
 };
-const command = () => ({ installationId: manifest().installationId, tenantId: '0', clientId: 'client-fixture', canonicalAgentId: manifest().canonicalAgentId,
+const command = () => ({ runtimeInstallationId: manifest().installationId, tenantId: '0', clientId: 'client-fixture', canonicalAgentId: manifest().canonicalAgentId,
   messageId: 'msg-fixture', correlationId: 'correlation-fixture', commandId: 'command-fixture', taskId: 'task-fixture', workItemId: null,
-  payloadReference: null, expiresAt: '2030-01-01T00:00:00Z' });
-const session = generation => ({ ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].map(k => [k, manifest()[k]])),
-  hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: generation, scheme: 'AgentRuntime', sessionToken: token,
+  payloadReference: null, expiresAt: Date.parse('2030-01-01T00:00:00Z') });
+const session = generation => ({ runtimeInstallationId: manifest().installationId, ...Object.fromEntries(['tenantId', 'clientId', 'canonicalAgentId'].map(k => [k, manifest()[k]])),
+  hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: String(generation), scheme: 'AgentRuntime', sessionToken: token,
   websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' });
-const response = data => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ data }) });
+const response = data => ({ ok: true, status: 200, fixtureData: data });
+// Exact current Q/R fixture transport; the business assertions below inspect Q.data.
+const fetchFixture = fetchFn => async (url, options) => {
+  let body = options.body;
+  if (body) { const q = JSON.parse(body); assert.equal(q.protocolVersion, 1); assert.equal(q.requestId, new Headers(options.headers).get('X-Request-Id')); body = JSON.stringify(q.data); }
+  const result = await fetchFn(url, { ...options, body });
+  if (typeof result.text === 'function') return result;
+  const requestId = new Headers(options.headers).get('X-Request-Id');
+  return new Response(JSON.stringify(result.json ? await result.json() : { protocolVersion: 1, requestId, code: result.ok ? 'E0' : 'FORBIDDEN', msg: 'fixture', data: result.fixtureData }), { status: result.status, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } });
+};
 async function setup(t, fetchFn, { authorization = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ur01-wire-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const client = new RuntimeV1Client({ manifest: manifest(), apiBaseUrl: 'https://api.example.test', stateDir: directory,
-    hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', fetchFn });
+    hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', fetchFn: fetchFixture(fetchFn) });
   if (authorization) await writeFile(client.authorizationPath(), JSON.stringify({ installationId: manifest().installationId, runtimeAuthorization: 'synthetic-install-token' }), { mode: 0o600 });
   return { directory, client };
 }
@@ -72,12 +81,12 @@ test('installation Bearer derives memory-only session; WS/ACK use exactly five p
     const body = JSON.parse(options.body); requests.push({ url, options, body });
     if (url.endsWith('/session')) return response(session(7));
     if (url.endsWith('/enroll')) return response(enrollment());
-    return response({ kind: 'ADVANCED', status: body.status, deliveryVersion: ++version });
+    return response({ kind: 'ADVANCED', status: body.status, deliveryVersion: String(++version) });
   }, { authorization: false });
   assert.deepEqual(await client.enroll('synthetic-enroll'), { installationId: manifest().installationId });
   await client.session();
   assert.equal(requests[1].options.headers.Authorization, `Bearer ${installationToken}`);
-  assert.deepEqual(Object.keys(requests[1].body).sort(), ['installationId','tenantId','clientId','canonicalAgentId','manifestVersion','manifestSha256','hostId','runtimeInstanceId'].sort());
+  assert.deepEqual(Object.keys(requests[1].body).sort(), ['runtimeInstallationId','tenantId','clientId','canonicalAgentId','manifestVersion','manifestSha256','hostId','runtimeInstanceId'].sort());
   assert.equal(requests[1].body.manifestSha256, manifest().manifestSha256.slice(7));
   const headers = { Authorization: `AgentRuntime ${token}`, 'X-Agent-Id': manifest().canonicalAgentId, 'X-Agent-Installation-Id': manifest().installationId,
     'X-Agent-Host-Id': 'host-fixture', 'X-Agent-Runtime-Id': 'boot-fixture', 'X-Agent-Session-Generation': '7' };
@@ -86,10 +95,10 @@ test('installation Bearer derives memory-only session; WS/ACK use exactly five p
   assert.equal(new URL(client.websocketUrl()).search, '');
   const first = await client.acknowledge(command(), 'RECEIVED', null);
   const second = await client.acknowledge(command(), 'STARTED', first.deliveryVersion);
-  assert.equal(second.deliveryVersion, 2);
-  assert.equal(requests[2].body.deliveryVersion, null); assert.equal(requests[3].body.deliveryVersion, 1);
-  assert.deepEqual(requests[2].body, { ...command(), hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: 7, deliveryVersion: null, status: 'RECEIVED' });
-  assert.deepEqual(requests[2].options.headers, { 'content-type': 'application/json', ...headers });
+  assert.equal(second.deliveryVersion, '2');
+  assert.equal(requests[2].body.deliveryVersion, null); assert.equal(requests[3].body.deliveryVersion, '1');
+  assert.deepEqual(requests[2].body, { ...command(), hostId: 'host-fixture', runtimeInstanceId: 'boot-fixture', sessionGeneration: '7', deliveryVersion: null, status: 'RECEIVED' });
+  assert.deepEqual(requests[2].options.headers, { 'content-type': 'application/json', ...headers, 'X-Request-Id': requests[2].options.headers['X-Request-Id'] });
   assert.equal(requests[2].options.redirect, 'error');
   assert.deepEqual((await readdir(directory)).sort(), ['runtime-authorization.json', 'runtime-enrollment-attempt.json']); // no pending-acks state
   assert.equal((await readFile(client.authorizationPath(), 'utf8')).includes(token), false);
@@ -100,20 +109,20 @@ test('malformed or foreign session, old native token, and nonmonotonic generatio
   let next = session(7);
   const { client } = await setup(t, async () => response(next));
   for (const patch of [{ tenantId: 'foreign' }, { hostId: 'foreign' }, { runtimeInstanceId: 'foreign' },
-    { sessionToken: 'a'.repeat(32) }, { sessionGeneration: 0 }, { sessionGeneration: '7' }, { websocketPath: '/other' }]) {
+    { sessionToken: 'a'.repeat(32) }, { sessionGeneration: 0 }, { sessionGeneration: 7 }, { websocketPath: '/other' }]) {
     next = { ...session(7), ...patch }; await assert.rejects(client.session(), /RUNTIME_SESSION_/); assert.equal(client.currentSession, null);
   }
   next = session(7); await client.session();
   await assert.rejects(client.session(), /RUNTIME_SESSION_PROOF_INVALID/);
-  next = session(8); await client.session(); assert.equal(client.lastGeneration, 8);
+  next = session(8); await client.session(); assert.equal(client.lastGeneration, '8');
 });
 
 test('response must match status, kind, valid monotonic confirmed version (never predicted CAS)', () => {
-  assert.deepEqual(validateRuntimeAckResult({ kind: 'PRIOR', status: 'STARTED', deliveryVersion: 12 }, 'STARTED', 12), { kind: 'PRIOR', status: 'STARTED', deliveryVersion: 12 });
-  for (const result of [{ kind: 'PRIOR', status: 'RECEIVED', deliveryVersion: 12 }, { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: 11 },
-    { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: 12 }, { kind: 'PRIOR', status: 'STARTED', deliveryVersion: 11 },
-    { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: '13' }, { kind: 'IGNORED', status: 'STARTED', deliveryVersion: 13 }]) {
-    assert.throws(() => validateRuntimeAckResult(result, 'STARTED', 12), /UNCONFIRMED/);
+  assert.deepEqual(validateRuntimeAckResult({ kind: 'PRIOR', status: 'STARTED', deliveryVersion: '12' }, 'STARTED', '12'), { kind: 'PRIOR', status: 'STARTED', deliveryVersion: '12' });
+  for (const result of [{ kind: 'PRIOR', status: 'RECEIVED', deliveryVersion: '12' }, { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: '11' },
+    { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: '12' }, { kind: 'PRIOR', status: 'STARTED', deliveryVersion: '11' },
+    { kind: 'ADVANCED', status: 'STARTED', deliveryVersion: 13 }, { kind: 'IGNORED', status: 'STARTED', deliveryVersion: '13' }]) {
+    assert.throws(() => validateRuntimeAckResult(result, 'STARTED', '12'), /UNCONFIRMED/);
   }
 });
 
@@ -123,7 +132,7 @@ test('ACK transport failure and session rotation racing response cannot confirm 
     if (url.endsWith('/session')) return response(session(mode === 'new-session' ? 8 : 7));
     if (mode === 'network') throw Object.assign(Error('synthetic'), { code: 'ECONNRESET' });
     if (mode === 'auth') return { ...response({}), ok: false, status: 403 };
-    return new Promise(resolve => { release = () => resolve(response({ kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: 1 })); });
+    return new Promise(resolve => { release = () => resolve(response({ kind: 'ADVANCED', status: 'RECEIVED', deliveryVersion: '1' })); });
   });
   await client.session(); mode = 'network'; await assert.rejects(client.acknowledge(command(), 'RECEIVED'), error => classifyRuntimeError(error).kind === 'transient-network');
   mode = 'auth'; await assert.rejects(client.acknowledge(command(), 'RECEIVED'), error => error.status === 403);
@@ -132,7 +141,7 @@ test('ACK transport failure and session rotation racing response cannot confirm 
 });
 
 test('expiry blocks new RECEIVED/STARTED, not executed terminal reports; context has no mutable proof', () => {
-  const expired = { ...command(), expiresAt: '2000-01-01T00:00:00Z' };
+  const expired = { ...command(), expiresAt: Date.parse('2000-01-01T00:00:00Z') };
   for (const status of ['RECEIVED', 'STARTED']) assert.throws(() => validateCommandForManifest(expired, manifest(), status), /EXPIRED/);
   for (const status of ['SUCCEEDED', 'FAILED', 'REJECTED']) assert.doesNotThrow(() => validateCommandForManifest(expired, manifest(), status));
   for (const patch of [{ tenantId: 'foreign' }, { installationId: 'foreign' }, { workItemId: undefined }, { sessionToken: token }, { runtimeInstanceId: 'boot' }]) {
@@ -154,7 +163,7 @@ test('native fetch enforces same origin/prefix, appends current session proof an
 test('credential-bearing base URL and malformed response envelope fail closed', async t => {
   for (const url of ['https://api.example.test?api_key=old', 'https://user:password@api.example.test', 'https://api.example.test/base']) assert.throws(() => new RuntimeV1Client({ manifest: manifest(), apiBaseUrl: url, fetchFn() {} }), /ORIGIN_INVALID/);
   const { client } = await setup(t, async () => ({ ...response({}), json: async () => ({ sessionToken: token }) }));
-  await assert.rejects(client.session(), /RESPONSE_INVALID/);
+  await assert.rejects(client.session(), /RESPONSE_INVALID|PROTOCOL_INVALID_RESPONSE/);
 });
 
 test('retry classification does not turn TLS/auth/rebind errors into blind retries', () => {
@@ -183,7 +192,7 @@ test('native session rotation aborts only owned transport and rejects late respo
   await new Promise(resolve => setImmediate(resolve)); assert.equal(captured.signal.aborted, false)
   client.invalidateSession(); assert.equal(captured.signal.aborted, true)
   await client.session(); release(response({ started: true })); await pending
-  assert.equal(client.currentSession.sessionGeneration, 2)
+  assert.equal(client.currentSession.sessionGeneration, '2')
 })
 
 test('native explicit user cancellation composes with session signal without invalidating peers or the session', async t => {
@@ -195,7 +204,7 @@ test('native explicit user cancellation composes with session signal without inv
   await client.session(); const user = new AbortController()
   await client.nativeFetch('https://api.example.test/internal/agent/tasks/test', { signal: user.signal })
   assert.equal(seenSignal.aborted, false); user.abort(); assert.equal(seenSignal.aborted, true)
-  assert.equal(client.currentSession.sessionGeneration, 7)
+  assert.equal(client.currentSession.sessionGeneration, '7')
 })
 
 test('r2 ACK nullable reference/work item is explicit; absent, blank, forged identity or extra proof is not an ACL fallback', () => {
@@ -262,7 +271,7 @@ test('E05 native lease route is still session-fenced: invalidate aborts transpor
   await new Promise(resolve => setImmediate(resolve)); assert.equal(seen.signal.aborted, false);
   client.invalidateSession(); assert.equal(seen.signal.aborted, true);
   await client.session(); release(response({})); await pending;
-  assert.equal(client.currentSession.sessionGeneration, 2);
+  assert.equal(client.currentSession.sessionGeneration, '2');
   client.invalidateSession(); await assert.rejects(client.nativeFetch(e05LeaseUrl(), { method: 'POST' }), /RUNTIME_SESSION_REQUIRED/);
 });
 
@@ -271,13 +280,13 @@ test('enrollment uses actual b47 nested record fixture only, with synthetic auth
   const wire = JSON.parse(await readFile(new URL('./fixtures/unified-runtime-wire-v2.redacted.json', import.meta.url), 'utf8')).enrollment;
   assert.equal(wire.responseEnvelope, 'JsonResult.data'); assert.equal(Object.hasOwn(wire.response, 'installationId'), false);
   const nested = wire.response.installation;
-  const trusted = { runtimeProtocolVersion: 'v1', ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion'].map(key => [key, nested[key]])), manifestSha256: `sha256:${nested.manifestSha256}` };
-  assert.deepEqual(validateEnrollmentResult({ ...wire.response, runtimeAuthorization: installationToken }, trusted), { installationId: trusted.installationId, runtimeAuthorization: installationToken });
+  const trusted = { runtimeProtocolVersion: 'v1', installationId: nested.installationId, ...Object.fromEntries(['tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion'].map(key => [key, nested[key]])), manifestSha256: `sha256:${nested.manifestSha256}` };
+  assert.deepEqual(validateEnrollmentResult({ ...wire.response, installation: { ...Object.fromEntries(Object.entries(nested).filter(([k]) => k !== 'installationId')), runtimeInstallationId: nested.installationId }, runtimeAuthorization: installationToken }, trusted), { installationId: trusted.installationId, runtimeAuthorization: installationToken });
   assert.throws(() => validateEnrollmentResult(wire.response, trusted), /RUNTIME_ENROLLMENT_RESPONSE_INVALID/);
 });
 
 test('enrollment nested installation requires exact full subject, manifest, ACTIVE state and nullable heartbeat; no top-level fallback', () => {
-  for (const field of ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion', 'manifestSha256']) {
+  for (const field of ['runtimeInstallationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion', 'manifestSha256']) {
     const data = enrollment(); data.installation[field] = 'foreign';
     assert.throws(() => validateEnrollmentResult(data, manifest()), /RUNTIME_ENROLLMENT_RESPONSE_INVALID/);
   }
@@ -354,7 +363,7 @@ test('enrollment exclusive durable attempt fences simultaneous independent clien
   let calls = 0;
   const { client, directory } = await setup(t, async () => { calls++; return response(enrollment()); }, { authorization: false });
   const peer = new RuntimeV1Client({ manifest: manifest(), apiBaseUrl: client.apiBaseUrl, stateDir: directory,
-    fetchFn: async () => { calls++; return response(enrollment()); } });
+    fetchFn: fetchFixture(async () => { calls++; return response(enrollment()); }) });
   const results = await Promise.allSettled([client.enroll('one-time-synthetic-secret'), peer.enroll('one-time-synthetic-secret')]);
   assert.equal(results.filter(value => value.status === 'fulfilled').length, 1); assert.equal(calls, 1);
   assert.equal(results.find(value => value.status === 'rejected').reason.code, 'RUNTIME_ENROLLMENT_RECOVERY_REQUIRED');
@@ -377,7 +386,7 @@ test('E05 internal result and lease allow only frozen three method/path pairs, n
   const { client } = await setup(t, async (url, options) => { calls.push({ url: String(url), options }); return response(session(7)); });
   await client.session();
   for (const [method, suffix, body] of [['GET', 'lease', undefined], ['GET', 'result-commit', undefined], ['POST', 'result-commit', '{"workItemId":"work-1"}']]) {
-    await client.nativeFetch(e05InternalUrl(suffix), { method, body, headers: { Authorization: 'old', 'X-Agent-Id': 'frame-foreign' } });
+    await client.nativeFetch(e05InternalUrl(suffix), { method, body, headers: { Authorization: 'old', 'X-Agent-Id': 'frame-foreign', 'Content-Type': 'application/json' } });
     const request = calls.at(-1);
     assert.equal(request.options.headers.get('Authorization'), `AgentRuntime ${token}`);
     assert.equal(request.options.headers.get('X-Agent-Id'), manifest().canonicalAgentId);
