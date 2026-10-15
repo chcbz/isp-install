@@ -750,18 +750,21 @@ test('canonical skill product installation is data; wrong raw scope/Runtime-prod
   const c = await channelFixture(t, { types: ['SKILL_INSTALL'] });
   await Promise.all(c.executors.map(executor => executor.activate()));
   const identity = c.config.agents[0].manifest;
+  const state = c.states().find(value => value.profile.agentId === identity.canonicalAgentId);
+  const otherState = c.states().find(value => value !== state);
+  const socket = state.socket;
   const raw = { schemaVersion: 1, messageType: 'command.dispatch', commandType: 'SKILL_INSTALL',
     tenantId: identity.tenantId, clientId: identity.clientId, targetAgentId: identity.canonicalAgentId,
     installationId: 'synthetic-product-installation', commandId: 'skill-command', messageId: 'skill-message',
     correlationId: 'task', taskId: 'task', expiresAt: 3601000, payload: { instruction: 'install original product' } };
-  c.sockets[0].receive(raw); await c.tick();
-  assert.deepEqual(c.states()[0].accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))], JSON.stringify(c.logs));
+  socket.receive(raw); await c.tick();
+  assert.deepEqual(state.accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))], JSON.stringify(c.logs));
   for (const patch of [{ tenantId: 'foreign' }, { clientId: 'foreign' }, { targetAgentId: 'foreign' },
     { targetAgentId: undefined }, { installationId: identity.installationId }, { canonicalAgentId: 'foreign' }, { sessionGeneration: 6 }]) {
-    c.sockets[0].receive({ ...raw, ...patch });
+    socket.receive({ ...raw, ...patch });
   }
-  c.sockets[0].receive({ ...raw, commandType: 'WORK_ITEM_EXECUTE' }); // product field is not a Runtime proof
-  await c.tick(); assert.deepEqual(c.states()[0].accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))], JSON.stringify(c.logs)); assert.equal(c.states()[1].accepted.length, 0);
+  socket.receive({ ...raw, commandType: 'WORK_ITEM_EXECUTE' }); // product field is not a Runtime proof
+  await c.tick(); assert.deepEqual(state.accepted, [fromAgentWire(JSON.stringify(agentMessageFixture(raw)))], JSON.stringify(c.logs)); assert.equal(otherState.accepted.length, 0);
 });
 
 // Run only the install/validate stdlib snippets against hand-written launcher
