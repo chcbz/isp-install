@@ -306,14 +306,16 @@ export class TypedInspectionProfileRuntime {
       if (this.profile.typedInspectionProviderNetwork === 'restricted-proxy') {
         const egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs })
         const executionState = this._prepareEphemeralState('execution')
-        await egress.start(); const executionAdapter = this._spawnAdapter({ inputDirectory: probeDirectory, engineState: executionState, schemaMeasurement, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
+        let executionAdapter
         try {
+          await egress.start()
+          executionAdapter = this._spawnAdapter({ inputDirectory: probeDirectory, engineState: executionState, schemaMeasurement, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
           await egress.bindOwner(executionAdapter.child, this.bwrap, schemaMeasurement.snapshotIdentity); executionNetworkAttestation = await egress.attach()
           executionReadback = await this._initializeAndSeal(executionAdapter)
           const providerTls = await egress.measureAllowedTls(executionReadback.providerCaTrust)
           executionNetworkAttestation = Object.freeze({ ...executionNetworkAttestation, providerTls })
           if (!emptyMcpCatalog(executionReadback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
-        } finally { await executionAdapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose().catch(() => {}); rmSync(executionState.directory, { recursive: true, force: true }) }
+        } finally { await executionAdapter?.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose().catch(() => {}); rmSync(executionState.directory, { recursive: true, force: true }) }
       }
       const supportedInputs = exactSupportedInputs(this.profile.typedInspectionSupportedInputs)
       const profileId = String(this.profile.typedInspectionProfileId || `${this.profile.profileId}-typed-inspection-v1`)
@@ -350,14 +352,16 @@ export class TypedInspectionProfileRuntime {
       fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     }
     const engineState = this._prepareRequestState(binding, { requireExistingState })
-    const egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs }); await egress.start()
-    const adapter = this._spawnAdapter({ inputDirectory, engineState, schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
+    const egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs })
+    let adapter
     try {
+      await egress.start()
+      adapter = this._spawnAdapter({ inputDirectory, engineState, schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
       await egress.bindOwner(adapter.child, this.bwrap, this.nativeReadback.schema.snapshotIdentity); await egress.attach(); await this._initializeAndSeal(adapter)
       if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
       this.activeAdapters.set(requestKey, { adapter, egress, engineState, inputDirectory: realpathSync(inputDirectory) }); adapter.once('exit', () => { if (this.activeAdapters.get(requestKey)?.adapter === adapter) this.activeAdapters.delete(requestKey); void egress.dispose() })
       return adapter
-    } catch (error) { await adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose().catch(() => {}); if (engineState.created) rmSync(engineState.directory, { recursive: true, force: true }); throw error }
+    } catch (error) { await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose().catch(() => {}); if (engineState.created) rmSync(engineState.directory, { recursive: true, force: true }); throw error }
   }
   async releaseAdapter(requestKey) {
     const active = this.activeAdapters.get(requestKey); if (!active) return false

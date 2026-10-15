@@ -6525,6 +6525,9 @@ const disposeProfileStateOnce = async (state, reason) => {
   state.processor.stop()
   // Disable ingress and auth before awaiting an engine shutdown.
   if (profile.runtimeIdentity) { state.skillRegistry?.setSession(null); state.runtimeTransport = null; state.workspaceFileRuntimeAuthHeader = '' }
+  // A failed inbox can isolate the executor while its no-model measurement is
+  // still using the private CA/proxy. Let that owned work finish before disposal.
+  await state.typedInspectionProfilePromise
   await disposeAppServerState(state, { timeoutMs: 5000 })
   await state.typedInspectionProfileRuntime?.dispose()
   state.processor.pause()

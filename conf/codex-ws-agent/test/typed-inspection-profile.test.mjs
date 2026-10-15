@@ -243,3 +243,25 @@ test('recovery of missing original engine state fails before creating directorie
     assert.equal(existsSync(resolve(directory, 'codex-home')), false)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+for (const failureStage of ['start', 'spawn']) test(`failed inspection ${failureStage} disposes proxy and request state`, async () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'inspection-failed-start-'))
+  let disposed = 0
+  const expected = new Error(`failed-${failureStage}`)
+  const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+  Object.assign(runtime, {
+    profile: { typedInspectionProviderNetwork: 'restricted-proxy' },
+    activeAdapters: new Map(), nativeReadback: { schema: {} },
+    measure: async () => ({ contractReady: true }),
+    _prepareRequestState: () => ({ directory, created: true }),
+    egressFactory: () => ({ start: async () => { if (failureStage === 'start') throw expected }, dispose: async () => { disposed++ } }),
+    _spawnAdapter: () => { throw expected }
+  })
+  const binding = { schemaVersion: 1, requestKey: 'key', authorizationId: 'auth', manifestDigest: 'digest', requestId: 'req', turnId: 'turn', inputPolicyDigest: 'policy' }
+  try {
+    await assert.rejects(runtime.openAdapter(directory, 'key', binding), error => error === expected)
+    assert.equal(disposed, 1)
+    assert.equal(existsSync(directory), false)
+    assert.equal(runtime.activeAdapters.size, 0)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
