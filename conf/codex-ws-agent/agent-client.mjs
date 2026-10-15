@@ -1,3 +1,4 @@
+import { readNativeJson } from './native-json.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -5338,7 +5339,7 @@ const e05Http = async (nativeFetch, apiOrigin, path, method = 'GET', body = null
   // Existing lease POSTs legitimately include the exact manifest actor query.
   // Compare the full requested URL; the new internal GETs remain query-free.
   if (response.redirected === true || response.url !== endpoint.href || !/^application\/json(?:\s*;|$)/i.test(response.headers?.get?.('content-type') || '')) throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN')
-  try { return await response.json() } catch { throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN') }
+  try { return await readNativeJson(response) } catch { throw e05Failure('E05_HTTP_OUTCOME_UNKNOWN') }
 }
 
 export const createE05LeaseAdapter = ({ binding, nativeFetch, apiOrigin, now = Date.now }) => {
@@ -5605,7 +5606,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
     throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_CONTENT_TYPE', 'workspace runtime command pickup returned an invalid content type')
   }
   let body
-  try { body = await response.json() } catch {
+  try { body = await readNativeJson(response) } catch {
     throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_JSON', 'workspace runtime command pickup returned invalid JSON')
   }
   if (!isObject(body) || Object.keys(body).some(key => key !== 'items') || !Array.isArray(body.items) || body.items.length > 16) {

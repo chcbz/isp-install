@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { eventMessage, validateMessage } from '../lib/message-envelope.mjs';
 import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { resolve } from 'node:path';
 import { hostingFixture, candidateRequest, tick, code } from './hosting-fixture.mjs';
-import { parseHostingJson, validateHostingRequest } from '../lib/hosting-wire.mjs';
-import { startHostingServer, hostingRejection } from '../lib/hosting-server.mjs';
+import { parseHostingJson, validateHostingRequest, validateHostingAssociation } from '../lib/hosting-wire.mjs';
+import { startHostingServer } from '../lib/hosting-server.mjs';
 import { digestManifest, stableJson } from '../lib/manifest.mjs';
 import { readPrivateJson, writePrivateJson } from '../lib/security.mjs';
 const fixtureBytes = await readFile(new URL('./fixtures/gss-hosting-control-v1.json', import.meta.url));
@@ -20,7 +21,7 @@ const prepare = wire.prepareRequest;
 
 test('frozen Main synthetic fixture has exact provenance and accepted request/manifest catalogs', () => {
   assert.equal(createHash('sha256').update(fixtureBytes).digest('hex'), '5c4b833e6db5bab3122c6dee17ef49198462aee3c3edf58f628ed8571e241403');
-  for (const key of ['capabilitiesRequest', 'prepareRequest', 'ensureRequest', 'observeRequest', 'reprovisionPrepareRequest']) assert.deepEqual(validateHostingRequest(wire[key]), wire[key]);
+  for (const key of ['capabilitiesRequest', 'prepareRequest', 'ensureRequest', 'observeRequest', 'reprovisionPrepareRequest']) assert.deepEqual(validateHostingAssociation(wire[key]), wire[key]);
   assert.equal(digestManifest(wire.preparedResponse.manifest), wire.preparedResponse.manifest.manifestSha256);
   for (const key of ['preparedResponse', 'readyResponse', 'unknownResponse', 'reprovisionPreparedResponse']) {
     assert.equal(wire[key].protocol, 'runtime-hosting-v1'); assert.ok(['prepare', 'observe'].includes(wire[key].method));
@@ -40,7 +41,7 @@ test('wire rejects missing/unknown credentials, unsafe generations, association 
     { ...prepare, protocol: 'retired' }, { ...prepare, method: 'enroll' }, { ...prepare, validUntil: 1 },
     { ...prepare, operationId: 'other' }, { ...prepare, requestedAt: Number.MAX_SAFE_INTEGER + 1 },
     { ...wire.ensureRequest, provisionGeneration: 0 }, { ...wire.ensureRequest, manifestSha256: 'sha256:' + 'a'.repeat(64) },
-    { ...wire.ensureRequest, enrollmentSecret: 'never-accepted' }]) assert.throws(() => validateHostingRequest(request));
+    { ...wire.ensureRequest, enrollmentSecret: 'never-accepted' }]) assert.throws(() => validateHostingAssociation(request));
 });
 
 test('capabilities is exact scope and configured host, not socket existence', async t => {
@@ -165,16 +166,44 @@ function exchange(path, bytes) {
     socket.on('connect', () => socket.write(bytes)); socket.on('error', reject); socket.on('data', bytes => { response += bytes; }); socket.on('end', () => done(JSON.parse(response))); });
 }
 
-test('private UDS usable trusted group0660/parent0750, exact newline response, duplicate rejection and lost prepare reply recovery', async t => {
+function messageOf(internal) {
+  const { protocol, method, ...data } = internal;
+  if (Object.hasOwn(data, 'validUntil')) { data.validUntilAt = data.validUntil; delete data.validUntil; }
+  if (Object.hasOwn(data, 'installationId')) { data.runtimeInstallationId = data.installationId; delete data.installationId; }
+  if (Object.hasOwn(data, 'provisionGeneration')) data.provisionGeneration = String(data.provisionGeneration);
+  return eventMessage('hosting-fixture-request', `hosting.${method}`, 'hosting-fixture-message', data);
+}
+async function wireExchange(path, internal) {
+  const request = messageOf(internal);
+  const reply = validateMessage(await exchange(path, JSON.stringify(request) + '\n'));
+  assert.equal(reply.requestId, request.requestId); assert.equal(reply.correlationId, request.messageId);
+  assert.equal(reply.messageType, `${request.messageType}.result`); assert.equal(reply.code, 'E0');
+  return reply.data;
+}
+
+test('private UDS uses closed correlated envelopes, preserves scope and rejects old wire/duplicates', async t => {
   const f = await hostingFixture(t); const server = await startHostingServer({ control: f.control() }); t.after(() => server.close());
   const stat = await lstat(f.controlConfig.socketPath); assert.equal(stat.mode & 0o777, 0o660); assert.equal(stat.gid, f.controlConfig.socketGid);
-  const candidate = await exchange(f.controlConfig.socketPath, JSON.stringify(prepare) + '\n'); assert.equal(candidate.outcome, 'PREPARED');
-  assert.deepEqual(await exchange(f.controlConfig.socketPath, JSON.stringify(prepare) + '\n'), candidate);
-  const duplicate = await exchange(f.controlConfig.socketPath, JSON.stringify(prepare).replace('"method":"prepare"', '"method":"prepare","method":"ensure"') + '\n');
-  assert.equal(duplicate.outcome, 'REJECTED'); assert.equal(duplicate.reasonCode, 'HOSTING_DUPLICATE_FIELD');
-  const invalid = await exchange(f.controlConfig.socketPath, JSON.stringify({ ...prepare, command: 'do-not-run' }) + '\n'); assert.equal(invalid.outcome, 'REJECTED');
-  assert.equal((await exchange(f.controlConfig.socketPath, JSON.stringify(wire.capabilitiesRequest) + '\n')).available, true);
+  const candidate = await wireExchange(f.controlConfig.socketPath, prepare); assert.equal(candidate.outcome, 'PREPARED');
+  assert.equal(candidate.provisionGeneration, '1'); assert.equal(candidate.validUntilAt, null);
+  assert.match(candidate.runtimeInstallationId, /^rti_[0-9a-f]{32}$/); assert.equal(Object.hasOwn(candidate, 'installationId'), false);
+  assert.deepEqual(await wireExchange(f.controlConfig.socketPath, prepare), candidate);
+  const duplicate = await exchange(f.controlConfig.socketPath, JSON.stringify(messageOf(prepare)).replace('"protocolVersion":1', '"protocolVersion":1,"protocolVersion":1') + '\n');
+  assert.equal(duplicate.messageType, 'protocol.error'); assert.equal(duplicate.data.reasonCode, 'HOSTING_DUPLICATE_FIELD');
+  const invalid = await exchange(f.controlConfig.socketPath, JSON.stringify(messageOf({ ...prepare, command: 'do-not-run' })) + '\n');
+  assert.equal(invalid.code, 'HOSTING_FIELD_FORBIDDEN'); assert.equal(invalid.data, null); assert.equal(invalid.correlationId, 'hosting-fixture-message');
+  const legacy = await exchange(f.controlConfig.socketPath, JSON.stringify(prepare) + '\n'); assert.equal(legacy.messageType, 'protocol.error');
+  assert.equal((await wireExchange(f.controlConfig.socketPath, wire.capabilitiesRequest)).available, true);
   assert.equal(f.enrollmentCount(), 0); await server.close();
+});
+
+test('hosting projection round-trips private fixture association without changing manifest or journal schema', () => {
+  for (const key of ['capabilitiesRequest', 'prepareRequest', 'ensureRequest', 'observeRequest', 'reprovisionPrepareRequest'])
+    assert.deepEqual(validateHostingRequest(messageOf(wire[key])), wire[key]);
+  assert.throws(() => validateHostingRequest(wire.prepareRequest));
+  const request = messageOf(wire.ensureRequest); request.data.provisionGeneration = 1;
+  assert.throws(() => validateHostingRequest(request));
+  request.data.provisionGeneration = '9007199254740992'; assert.throws(() => validateHostingRequest(request));
 });
 
 test('UDS rejects unsafe world/writable parents and existing files/listeners without unlinking them', async t => {
@@ -185,22 +214,21 @@ test('UDS rejects unsafe world/writable parents and existing files/listeners wit
   await chmod(resolve(f.root, 'socket'), 0o750); await writeFile(f.controlConfig.socketPath, 'unknown-owned-file', { mode: 0o600 });
   await assert.rejects(startHostingServer({ control: f.control() }), code('HOSTING_SOCKET_EXISTS'));
   assert.equal(await readFile(f.controlConfig.socketPath, 'utf8'), 'unknown-owned-file');
-  assert.equal(hostingRejection('observe', Error('never leak arbitrary detail')).reasonCode, 'HOSTING_CONTROL_ERROR');
 });
 
 const until = async predicate => { for (let i = 0; i < 1000 && !predicate(); i++) await new Promise(done => setTimeout(done, 1)); assert.ok(predicate(), 'synthetic lifecycle reached expected event'); };
 
 test('lost actual ensure UDS response recovers identical admission without another installation/enrollment/session', async t => {
   const f = await hostingFixture(t); const server = await startHostingServer({ control: f.control() }); t.after(() => server.close());
-  const candidate = await exchange(f.controlConfig.socketPath, JSON.stringify(prepare) + '\n'); const ensure = candidateRequest(prepare, candidate, 'ensure');
+  const candidate = await wireExchange(f.controlConfig.socketPath, prepare); const ensure = candidateRequest(prepare, { installationId: candidate.runtimeInstallationId, manifestSha256: candidate.manifestSha256, provisionGeneration: Number(candidate.provisionGeneration) }, 'ensure');
   // Parent disconnects after write completion, before consuming any response.
   await new Promise((done, reject) => {
     const socket = connect(f.controlConfig.socketPath); socket.on('error', reject);
-    socket.on('connect', () => socket.write(JSON.stringify(ensure) + '\n', () => { socket.destroy(); done(); }));
+    socket.on('connect', () => socket.write(JSON.stringify(messageOf(ensure)) + '\n', () => { socket.destroy(); done(); }));
   });
   await until(() => Object.values(f.control().state.operations).some(operation => operation.admittedAt !== null)); await f.settle();
-  const response = await exchange(f.controlConfig.socketPath, JSON.stringify(ensure) + '\n'); assert.equal(response.outcome, 'SERVICE_READY');
-  assert.equal(response.installationId, candidate.installationId); assert.equal(f.enrollmentCount(), 1); assert.equal(f.sessionCount(), 1);
+  const response = await wireExchange(f.controlConfig.socketPath, ensure); assert.equal(response.outcome, 'SERVICE_READY');
+  assert.equal(response.runtimeInstallationId, candidate.runtimeInstallationId); assert.equal(f.enrollmentCount(), 1); assert.equal(f.sessionCount(), 1);
   await server.close();
 });
 

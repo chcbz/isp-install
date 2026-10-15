@@ -34,13 +34,14 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
   let pending;
   const hostConfig = { configVersion: 1, hostId: 'fixture-host', stateRoot: resolve(root, 'host'), agents: peers };
   const clientFactory = settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
-    const body = JSON.parse(options.body);
+    const envelope = JSON.parse(options.body); const body = envelope.data;
     if (url.endsWith('/enroll')) {
       enrollments++;
       if (loseEnrollment) throw Object.assign(Error('sensitive-server-error'), { code: 'ECONNRESET' });
-      return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: {
-        installation: { ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion', 'manifestSha256'].map(key => [key, body[key]])),
-          enrollmentExpiresAt: now + 3600000, status: 'ACTIVE', lastHeartbeatAt: null }, runtimeAuthorization: 'rta1_' + 'c'.repeat(64) } }) };
+      return new Response(JSON.stringify({ protocolVersion: 1, requestId: envelope.requestId, code: 'E0', msg: 'ok', data: {
+        installation: { ...Object.fromEntries(['runtimeInstallationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion', 'manifestSha256'].map(key => [key, body[key]])),
+          enrollmentExpiresAt: now + 3600000, status: 'ACTIVE', lastHeartbeatAt: null }, runtimeAuthorization: 'rta1_' + 'c'.repeat(64) } }),
+        { status: 200, headers: { 'content-type': 'application/json', 'x-request-id': envelope.requestId } });
     }
     throw Error('fixture only allows enrollment');
   } });

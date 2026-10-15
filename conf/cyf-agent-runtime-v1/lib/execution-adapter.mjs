@@ -243,6 +243,9 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
 export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   ".gitignore",
   "agent-client.mjs",
+  "api-envelope.mjs",
+  "message-envelope.mjs",
+  "native-json.mjs",
   "app-server-adapter.mjs",
   "chat-runtime.mjs",
   "codex-home.example.toml",

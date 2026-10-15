@@ -8,7 +8,7 @@ import { acquireRuntimeOwnership, requireOwnedPrivateRoot } from './runtime-host
 import { RuntimeV1Client } from './runtime-client.mjs';
 import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './security.mjs';
 import { hostingError, validateHostingConfig } from './hosting-config.mjs';
-import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validateHostingRequest } from './hosting-wire.mjs';
+import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validateHostingAssociation } from './hosting-wire.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const opKey = request => sha(stableJson({ tenantId: request.tenantId, clientId: request.clientId, operationId: request.operationId }));
@@ -57,7 +57,7 @@ export class HostingControl {
       if (Object.keys(subject).sort().join(',') !== 'activeOperationKey,enrollmentExpiresAt,enrollmentSecret,enrollmentSecretSha256,initialAssociation,lastSessionGeneration,latestGeneration,manifest,template') throw hostingError('HOSTING_JOURNAL_INVALID');
       if (Object.keys(subject.initialAssociation || {}).sort().join(',') !== [...HOSTING_ASSOCIATION_FIELDS].sort().join(',')) throw hostingError('HOSTING_JOURNAL_INVALID');
       validateManifest(subject.manifest);
-      validateHostingRequest({ protocol: HOSTING_PROTOCOL, method: 'prepare', ...subject.initialAssociation });
+      validateHostingAssociation({ protocol: HOSTING_PROTOCOL, method: 'prepare', ...subject.initialAssociation });
       validateHostingConfig({ ...this.config, template: subject.template });
       if (!this.scopeAllowed(subject.initialAssociation) || runtimeSubjectKey(subject.manifest) !== key
           || subject.initialAssociation.operationKind !== 'INITIAL' || subject.manifest.manifestVersion !== '1'
@@ -73,7 +73,7 @@ export class HostingControl {
     for (const [key, operation] of Object.entries(state.operations)) {
       if (Object.keys(operation).sort().join(',') !== 'admittedAt,association,provisionGeneration,recoveryRequired,subjectKey') throw hostingError('HOSTING_JOURNAL_INVALID');
       if (Object.keys(operation.association || {}).sort().join(',') !== [...HOSTING_ASSOCIATION_FIELDS].sort().join(',')) throw hostingError('HOSTING_JOURNAL_INVALID');
-      const association = validateHostingRequest({ protocol: HOSTING_PROTOCOL, method: 'prepare', ...operation.association });
+      const association = validateHostingAssociation({ protocol: HOSTING_PROTOCOL, method: 'prepare', ...operation.association });
       const subject = state.subjects[operation.subjectKey];
       if (!subject || opKey(association) !== key || runtimeSubjectKey(association) !== operation.subjectKey || !this.scopeAllowed(association)
           || initialFields.some(field => association[field] !== subject.initialAssociation[field])
@@ -118,7 +118,7 @@ export class HostingControl {
       enrollmentExpiresAt: subject.enrollmentExpiresAt, provisionGeneration: operation.provisionGeneration, hostId: this.host.config.hostId };
   }
   async handle(input) {
-    const request = validateHostingRequest(input);
+    const request = validateHostingAssociation(input);
     if (this.closing || !this.state || !this.host.releaseHost || this.host.stopping) throw hostingError('HOSTING_CONTROL_NOT_RUNNING');
     if (!this.scopeAllowed(request)) throw hostingError('HOSTING_SCOPE_REJECTED');
     if (request.method === 'capabilities') return { protocol: HOSTING_PROTOCOL, method: request.method, tenantId: request.tenantId,

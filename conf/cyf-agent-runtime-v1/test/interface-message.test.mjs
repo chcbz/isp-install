@@ -1,0 +1,16 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { decodeMessage, eventMessage, replyMessage } from '../lib/message-envelope.mjs'
+test('event and reply have closed roots and explicit correlation', () => {
+  const request = eventMessage('r', 'agent.register', 'm', { runtimeInstallationId: 'i', sessionGeneration: '9007199254740993' })
+  assert.deepEqual(decodeMessage(JSON.stringify(request)), request)
+  const reply = replyMessage(request, 'agent.registered', 'reply', 'E0', 'ok', null)
+  assert.equal(reply.correlationId, 'm'); assert.equal(reply.requestId, 'r'); assert.equal(reply.data, null)
+  assert.equal(Object.hasOwn(request, 'code'), false)
+})
+test('legacy aliases, partial replies, duplicates and missing data are rejected', () => {
+  const request = eventMessage('r', 'agent.register', 'm', null)
+  for (const value of [{ ...request, type: 'agent.register' }, { ...request, channel: 'agent' }, { ...request, code: 'E0' }, { ...request, messageType: 'agent_registered' }, { ...request, protocolVersion: 2 }]) assert.throws(() => decodeMessage(JSON.stringify(value)))
+  assert.throws(() => decodeMessage('{"protocolVersion":1,"requestId":"r","messageType":"agent.register","messageId":"m"}'))
+  assert.throws(() => decodeMessage('{"protocolVersion":1,"requestId":"r","messageType":"agent.register","messageId":"m","data":null,"data":{}}'))
+})

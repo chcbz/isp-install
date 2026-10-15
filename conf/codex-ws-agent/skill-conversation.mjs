@@ -1,3 +1,4 @@
+import { readNativeJson } from './native-json.mjs'
 /** Protocol4 shares the existing conversation inbox/session/lease/output transport.
  * This lane never consumes v1/v2/v3 commands or grants authority from model prose. */
 import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, readdirSync, writeFileSync } from 'node:fs'
@@ -85,7 +86,7 @@ export class SkillConversationLane {
       throw Object.assign(new Error('SKILL_API_RESPONSE_UNCONFIRMED'), { code: 'SKILL_API_RESPONSE_UNCONFIRMED', status: response?.status })
     }
     if (response.headers?.get?.('content-type') && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type'))) fail('SKILL_API_RESPONSE_UNCONFIRMED')
-    try { return parseSkillJson(await response.text()) } catch (cause) { fail('SKILL_API_RESPONSE_UNCONFIRMED', cause) }
+    try { return await readNativeJson(response) } catch (cause) { fail('SKILL_API_RESPONSE_UNCONFIRMED', cause) }
   }
   async readInput(path, command, fence, input, checkLease) {
     checkLease()

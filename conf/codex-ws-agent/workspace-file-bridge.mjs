@@ -1,3 +1,4 @@
+import { readNativeJson } from './native-json.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync,
@@ -680,7 +681,7 @@ export class WorkspaceFileBridge {
       fail('START_OUTCOME_UNKNOWN', 'native start response escaped its exact endpoint')
     }
     let receipt
-    try { receipt = await response.json() } catch { fail('START_OUTCOME_UNKNOWN', 'native start response is not JSON') }
+    try { receipt = await readNativeJson(response) } catch { fail('START_OUTCOME_UNKNOWN', 'native start response is not JSON') }
     if (!isPlainObject(receipt) || receipt.state !== 'STARTED'
         || receipt.taskId !== command.taskId || receipt.runId !== command.runId
         || !SAFE_RUNTIME_REFERENCE.test(receipt.executionId || '')) {

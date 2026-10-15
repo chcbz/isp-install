@@ -1,12 +1,14 @@
 // Private AF_UNIX stream, exactly one newline-terminated JSON exchange. This is
 // a control boundary INSIDE the existing process, not another Runtime/broker.
+import { randomUUID } from 'node:crypto';
+import { replyMessage, eventMessage } from './message-envelope.mjs';
 import { createServer } from 'node:net';
 import { chmod, chown, lstat, realpath } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { HostingControl } from './hosting-control.mjs';
 import { canonicalHostingPath, hostingError } from './hosting-config.mjs';
-import { HOSTING_METHODS, HOSTING_PROTOCOL, parseHostingJson } from './hosting-wire.mjs';
+import { parseHostingJson, validateHostingRequest, hostingReply } from './hosting-wire.mjs';
 
 export async function requireHostingSocketParent(config) {
   const parent = dirname(config.socketPath); await canonicalHostingPath(parent);
@@ -18,10 +20,6 @@ export async function requireHostingSocketParent(config) {
 const reasonCodes = new Set(['HOSTING_WIRE_INVALID', 'HOSTING_DUPLICATE_FIELD', 'HOSTING_FIELD_FORBIDDEN', 'HOSTING_SCOPE_REJECTED',
   'HOSTING_CONTROL_NOT_RUNNING', 'HOSTING_OPERATION_CONFLICT', 'HOSTING_SUBJECT_CONFLICT', 'HOSTING_ASSOCIATION_REJECTED',
   'HOSTING_LEASE_EXPIRED', 'HOSTING_GENERATION_EXHAUSTED', 'HOSTING_OPERATION_SUPERSEDED']);
-export function hostingRejection(method, cause) {
-  return { protocol: HOSTING_PROTOCOL, method: HOSTING_METHODS.includes(method) ? method : null, outcome: 'REJECTED',
-    reasonCode: reasonCodes.has(cause?.code) ? cause.code : 'HOSTING_CONTROL_ERROR' };
-}
 export async function startHostingServer({ control }) {
   const config = control.config; await requireHostingSocketParent(config);
   // Never unlink an existing listener, stale socket, symlink or unknown file.
@@ -37,14 +35,21 @@ export async function startHostingServer({ control }) {
       if (newline < 0) return;
       received = true;
       void (async () => {
-        let method = null;
+        let message = null;
         try {
           if (bytes.length !== newline + 1) throw hostingError('HOSTING_WIRE_INVALID');
           const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, newline));
-          const request = parseHostingJson(text); method = request?.method;
+          message = parseHostingJson(text);
+          const request = validateHostingRequest(message);
           const result = await control.handle(request);
-          if (!socket.destroyed) socket.end(`${JSON.stringify(result)}\n`);
-        } catch (cause) { if (!socket.destroyed) socket.end(`${JSON.stringify(hostingRejection(method, cause))}\n`); }
+          if (!socket.destroyed) socket.end(`${JSON.stringify(hostingReply(message, result))}\n`);
+        } catch (cause) {
+          const reason = reasonCodes.has(cause?.code) ? cause.code : 'HOSTING_CONTROL_ERROR';
+          let rejection;
+          try { rejection = replyMessage(message, `${message.messageType}.result`, randomUUID(), reason, 'Hosting request rejected', null); }
+          catch { rejection = eventMessage(randomUUID(), 'protocol.error', randomUUID(), { reasonCode: reason }); }
+          if (!socket.destroyed) socket.end(`${JSON.stringify(rejection)}\n`);
+        }
       })();
     });
     socket.on('end', () => { if (!received) socket.destroy(); });

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { encodeHttpRequest, decodeHttpResponse, parseStrictJson } from './api-envelope.mjs';
 import { readPrivateJson, writePrivateJson } from './security.mjs';
 
 const TRANSIENT_NETWORK_CODES = new Set([
@@ -33,27 +35,30 @@ export const RUNTIME_SESSION_TOKEN = /^rts1_[0-9a-f]{64}$/;
 export const RUNTIME_ACK_STATUSES = new Set(['RECEIVED', 'STARTED', 'SUCCEEDED', 'FAILED', 'REJECTED']);
 const fail = code => Object.assign(new Error(code), { code });
 const exact = value => typeof value === 'string' && value.length > 0 && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value);
-const identityFields = ['installationId', 'tenantId', 'clientId', 'canonicalAgentId'];
+const identityFields = ['runtimeInstallationId', 'tenantId', 'clientId', 'canonicalAgentId'];
+export const canonicalVersion = value => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 9223372036854775807n;
+const positiveVersion = value => canonicalVersion(value) && BigInt(value) > 0n;
 export function identityOf(manifest) {
   const { installationId, tenantId, clientId, canonicalAgentId, manifestVersion, manifestSha256 } = manifest;
-  return { installationId, tenantId, clientId, canonicalAgentId, manifestVersion, manifestSha256: manifestSha256.slice(7) };
+  return { runtimeInstallationId: installationId, tenantId, clientId, canonicalAgentId, manifestVersion, manifestSha256: manifestSha256.slice(7) };
 }
 export function normalizeRuntimeOrigin(value) {
   const url = new URL(value);
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw fail('RUNTIME_API_ORIGIN_INVALID');
   return url.origin;
 }
-export function validateRuntimeSession(value, { manifest, hostId, runtimeInstanceId, previousGeneration = 0 }) {
+export function validateRuntimeSession(value, { manifest, hostId, runtimeInstanceId, previousGeneration = '0' }) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw fail('RUNTIME_SESSION_INVALID');
-  for (const field of identityFields) if (value[field] !== manifest[field]) throw fail('RUNTIME_SESSION_IDENTITY_MISMATCH');
+  for (const field of identityFields) if (value[field] !== identityOf(manifest)[field]) throw fail('RUNTIME_SESSION_IDENTITY_MISMATCH');
   if (value.hostId !== hostId || value.runtimeInstanceId !== runtimeInstanceId || value.scheme !== 'AgentRuntime'
       || value.status !== 'CHANNEL_PENDING' || value.websocketPath !== '/ws/agent/channel'
-      || !RUNTIME_SESSION_TOKEN.test(value.sessionToken) || !Number.isSafeInteger(value.sessionGeneration)
-      || value.sessionGeneration <= previousGeneration) throw fail('RUNTIME_SESSION_PROOF_INVALID');
-  return Object.freeze(Object.fromEntries([...identityFields, 'hostId', 'runtimeInstanceId', 'sessionGeneration', 'scheme', 'sessionToken', 'websocketPath', 'status'].map(field => [field, value[field]])));
+      || !RUNTIME_SESSION_TOKEN.test(value.sessionToken) || !positiveVersion(value.sessionGeneration)
+      || !canonicalVersion(previousGeneration) || BigInt(value.sessionGeneration) <= BigInt(previousGeneration)) throw fail('RUNTIME_SESSION_PROOF_INVALID');
+  // The private session keeps its disk/engine identity name; only explicit wire adapters use runtimeInstallationId.
+  return Object.freeze({ installationId: value.runtimeInstallationId, ...Object.fromEntries([...identityFields.filter(field => field !== 'runtimeInstallationId'), 'hostId', 'runtimeInstanceId', 'sessionGeneration', 'scheme', 'sessionToken', 'websocketPath', 'status'].map(field => [field, value[field]])) });
 }
 export function runtimeSessionHeaders(session) {
-  if (!RUNTIME_SESSION_TOKEN.test(session?.sessionToken) || !Number.isSafeInteger(session.sessionGeneration) || session.sessionGeneration < 1) throw fail('RUNTIME_SESSION_REQUIRED');
+  if (!RUNTIME_SESSION_TOKEN.test(session?.sessionToken) || !positiveVersion(session.sessionGeneration)) throw fail('RUNTIME_SESSION_REQUIRED');
   return Object.freeze({ Authorization: `AgentRuntime ${session.sessionToken}`, 'X-Agent-Id': session.canonicalAgentId,
     'X-Agent-Installation-Id': session.installationId, 'X-Agent-Host-Id': session.hostId,
     'X-Agent-Runtime-Id': session.runtimeInstanceId, 'X-Agent-Session-Generation': String(session.sessionGeneration) });
@@ -62,20 +67,20 @@ export function validateCommandForManifest(command, manifest, status, now = Date
   if (!RUNTIME_ACK_STATUSES.has(status) || !command || typeof command !== 'object' || Array.isArray(command)) throw fail('RUNTIME_ACK_INVALID');
   const allowed = [...identityFields, 'messageId', 'correlationId', 'commandId', 'taskId', 'workItemId', 'payloadReference', 'expiresAt'];
   if (Object.keys(command).some(key => !allowed.includes(key))) throw fail('RUNTIME_ACK_FIELD_FORBIDDEN');
-  for (const key of ['messageId', 'correlationId', 'commandId', 'taskId', 'expiresAt']) if (!exact(command[key])) throw fail('RUNTIME_COMMAND_FIELD_REQUIRED');
-  for (const key of identityFields) if (command[key] !== manifest[key]) throw fail('RUNTIME_COMMAND_IDENTITY_MISMATCH');
+  for (const key of ['messageId', 'correlationId', 'commandId', 'taskId']) if (!exact(command[key])) throw fail('RUNTIME_COMMAND_FIELD_REQUIRED');
+  for (const key of identityFields) if (command[key] !== identityOf(manifest)[key]) throw fail('RUNTIME_COMMAND_IDENTITY_MISMATCH');
   if (command.workItemId !== null && !exact(command.workItemId)) throw fail('RUNTIME_COMMAND_WORK_INVALID');
   if (command.payloadReference !== null && !exact(command.payloadReference)) throw fail('RUNTIME_COMMAND_REFERENCE_INVALID');
-  const expiry = Date.parse(command.expiresAt);
-  if (!Number.isFinite(expiry)) throw fail('RUNTIME_COMMAND_EXPIRY_INVALID');
+  const expiry = command.expiresAt;
+  if (!safeEpoch(expiry)) throw fail('RUNTIME_COMMAND_EXPIRY_INVALID');
   if (expiry <= now && ['RECEIVED', 'STARTED'].includes(status)) throw fail('RUNTIME_COMMAND_EXPIRED');
   return Object.freeze({ ...command });
 }
 export function validateRuntimeAckResult(result, status, lastConfirmedVersion = null) {
   if (!result || !['ADVANCED', 'PRIOR'].includes(result.kind) || result.status !== status
-      || !Number.isSafeInteger(result.deliveryVersion) || result.deliveryVersion < 1
-      || (lastConfirmedVersion !== null && (!Number.isSafeInteger(lastConfirmedVersion) || lastConfirmedVersion < 1
-        || result.deliveryVersion < lastConfirmedVersion || result.kind === 'ADVANCED' && result.deliveryVersion <= lastConfirmedVersion))) throw fail('RUNTIME_ACK_COMMIT_UNCONFIRMED');
+      || !positiveVersion(result.deliveryVersion)
+      || (lastConfirmedVersion !== null && (!positiveVersion(lastConfirmedVersion)
+        || BigInt(result.deliveryVersion) < BigInt(lastConfirmedVersion) || result.kind === 'ADVANCED' && BigInt(result.deliveryVersion) <= BigInt(lastConfirmedVersion)))) throw fail('RUNTIME_ACK_COMMIT_UNCONFIRMED');
   return Object.freeze({ kind: result.kind, status: result.status, deliveryVersion: result.deliveryVersion });
 }
 
@@ -131,7 +136,7 @@ export const materialsChatHttpScope = (endpoint, options = {}) => {
 const ENROLLMENT_AUTHORIZATION = /^rta1_[0-9a-f]{64}$/;
 const safeEpoch = value => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime());
 export function validateEnrollmentResult(response, manifest) {
-  const fields = ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion', 'manifestSha256', 'enrollmentExpiresAt', 'status', 'lastHeartbeatAt'];
+  const fields = ['runtimeInstallationId', 'tenantId', 'clientId', 'canonicalAgentId', 'manifestVersion', 'manifestSha256', 'enrollmentExpiresAt', 'status', 'lastHeartbeatAt'];
   const installation = response?.installation;
   if (!response || typeof response !== 'object' || Array.isArray(response)
       || Object.keys(response).sort().join(',') !== 'installation,runtimeAuthorization'
@@ -142,7 +147,7 @@ export function validateEnrollmentResult(response, manifest) {
   if (Object.keys(expected).some(key => installation[key] !== expected[key])
       || installation.status !== 'ACTIVE' || !safeEpoch(installation.enrollmentExpiresAt)
       || installation.lastHeartbeatAt !== null && !safeEpoch(installation.lastHeartbeatAt)) throw fail('RUNTIME_ENROLLMENT_RESPONSE_INVALID');
-  return Object.freeze({ installationId: expected.installationId, runtimeAuthorization: response.runtimeAuthorization });
+  return Object.freeze({ installationId: expected.runtimeInstallationId, runtimeAuthorization: response.runtimeAuthorization });
 }
 const enrollmentRecovery = () => Object.assign(fail('RUNTIME_ENROLLMENT_RECOVERY_REQUIRED'), { recoveryRequired: true, retryable: false });
 
@@ -151,18 +156,21 @@ export class RuntimeV1Client {
     if (typeof fetchFn !== 'function') throw fail('RUNTIME_FETCH_REQUIRED');
     this.manifest = manifest; this.apiBaseUrl = normalizeRuntimeOrigin(apiBaseUrl); this.stateDir = stateDir;
     this.hostId = hostId; this.runtimeInstanceId = runtimeInstanceId; this.fetchFn = fetchFn;
-    this.currentSession = null; this.lastGeneration = 0; this.sessionAbort = null;
+    this.currentSession = null; this.lastGeneration = '0'; this.sessionAbort = null;
   }
   authorizationPath() { return `${this.stateDir}/runtime-authorization.json`; }
   enrollmentAttemptPath() { return `${this.stateDir}/runtime-enrollment-attempt.json`; }
   async request(path, body, headers = {}, { signal } = {}) {
+    const requestId = headers['X-Request-Id'] ?? headers['x-request-id'] ?? randomUUID();
     const response = await this.fetchFn(`${this.apiBaseUrl}${path}`, { method: 'POST', redirect: 'error',
-      headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), ...(signal ? { signal } : {}) });
-    if (!response.ok) throw Object.assign(fail('RUNTIME_HTTP_REJECTED'), { status: response.status });
-    if (!response.headers?.get?.('content-type')?.includes('application/json')) throw fail('RUNTIME_RESPONSE_INVALID');
-    const json = await response.json();
-    if (!json || typeof json !== 'object' || Array.isArray(json) || !Object.hasOwn(json, 'data') || !json.data || typeof json.data !== 'object') throw fail('RUNTIME_RESPONSE_INVALID');
-    return json.data;
+      headers: { 'content-type': 'application/json', ...headers, 'X-Request-Id': requestId },
+      body: JSON.stringify(encodeHttpRequest(body, requestId)), ...(signal ? { signal } : {}) });
+    if (!response.headers?.get?.('content-type')?.includes('application/json')) {
+      throw Object.assign(fail('PROTOCOL_INVALID_RESPONSE'), { status: response.status, requestId, failureClass: 'protocol' });
+    }
+    return decodeHttpResponse(await response.text(), {
+      status: response.status, requestId, responseRequestId: response.headers.get('x-request-id')
+    }).value;
   }
   async loadAuthorization() {
     const state = await readPrivateJson(this.authorizationPath(), null);
@@ -177,7 +185,7 @@ export class RuntimeV1Client {
     if (await readPrivateJson(this.authorizationPath(), null)) throw fail('RUNTIME_ENROLLMENT_AUTHORIZATION_EXISTS');
     if (await readPrivateJson(this.enrollmentAttemptPath(), null)) throw enrollmentRecovery();
     try {
-      await writePrivateJson(this.enrollmentAttemptPath(), { ...identityOf(this.manifest), status: 'REQUEST_MAY_CONSUME_SECRET' }, { exclusive: true });
+      await writePrivateJson(this.enrollmentAttemptPath(), { installationId: this.manifest.installationId, tenantId: this.manifest.tenantId, clientId: this.manifest.clientId, canonicalAgentId: this.manifest.canonicalAgentId, manifestVersion: this.manifest.manifestVersion, manifestSha256: this.manifest.manifestSha256.slice(7), status: 'REQUEST_MAY_CONSUME_SECRET' }, { exclusive: true });
     } catch (error) { if (error.code === 'EEXIST') throw enrollmentRecovery(); throw error; }
     try {
       const response = await this.request('/agent/runtime/v1/enroll', { ...identityOf(this.manifest), enrollmentSecret }, {}, options);
@@ -210,7 +218,7 @@ export class RuntimeV1Client {
     return this.request('/agent/runtime/v1/heartbeat', { ...identityOf(this.manifest), health }, { Authorization: `Bearer ${await this.loadAuthorization()}` }, options);
   }
   async acknowledge(command, status, lastConfirmedVersion = null, options = {}) {
-    if (lastConfirmedVersion !== null && (!Number.isSafeInteger(lastConfirmedVersion) || lastConfirmedVersion < 1)) throw fail('RUNTIME_ACK_VERSION_INVALID');
+    if (lastConfirmedVersion !== null && (!positiveVersion(lastConfirmedVersion))) throw fail('RUNTIME_ACK_VERSION_INVALID');
     const valid = validateCommandForManifest(command, this.manifest, status);
     const session = this.currentSession; const headers = this.sessionHeaders();
     const result = await this.request(`/agent/runtime/v1/commands/${encodeURIComponent(valid.messageId)}/acks`, {
@@ -232,9 +240,28 @@ export class RuntimeV1Client {
     const headers = new Headers(options.headers);
     for (const key of ['x-api-key', 'cookie', 'proxy-authorization', 'origin', ...Object.keys(proof)]) headers.delete(key);
     for (const [key, value] of Object.entries(proof)) headers.set(key, value);
-    const response = await this.fetchFn(endpoint, { ...options, redirect: 'error', headers,
+    const requestId = headers.get('X-Request-Id') ?? randomUUID();
+    headers.set('X-Request-Id', requestId);
+    const method = (options.method || 'GET').toUpperCase();
+    let body = options.body;
+    const multipart = typeof FormData !== 'undefined' && body instanceof FormData;
+    if (['POST', 'PUT', 'PATCH'].includes(method) || method === 'DELETE' && body !== undefined) {
+      if (!multipart && (body === undefined || body === null || /application\/json/i.test(headers.get('content-type') || ''))) {
+        const data = body == null ? null : parseStrictJson(typeof body === 'string' ? body : Buffer.from(body).toString('utf8'));
+        body = JSON.stringify(encodeHttpRequest(data, requestId));
+        headers.set('Content-Type', 'application/json');
+      }
+    }
+    const response = await this.fetchFn(endpoint, { ...options, method, ...(body === undefined ? {} : { body }), redirect: 'error', headers,
       ...(signal ? { signal: options.signal ? AbortSignal.any([signal, options.signal]) : signal } : {}) });
     if (this.currentSession !== session) throw fail('RUNTIME_NATIVE_SESSION_CHANGED');
+    // Validate correlation without replacing Response or rewriting canonical data/file bytes.
+    // Consumers explicitly decode data; failures remain real HTTP responses for their reconciliation policy.
+    if (method !== 'HEAD' && ![204, 304].includes(response.status) && /application\/json/i.test(response.headers.get('content-type') || '')) {
+      try { decodeHttpResponse(await response.clone().text(), { status: response.status, requestId, responseRequestId: response.headers.get('X-Request-Id') }); }
+      catch (error) { if (error.failureClass !== 'http') throw error; }
+      if (this.currentSession !== session) throw fail('RUNTIME_NATIVE_SESSION_CHANGED');
+    }
     return response;
   }
 }
