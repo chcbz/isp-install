@@ -41,6 +41,7 @@ const deny = code => { throw new NativeConversationError(code) }
 // Only the current installation-derived session proof may enter native HTTP.
 // No registration token, API key or partial identity fallback. Copy only the six
 // transport headers; none become lease/fingerprint/checkpoint business fields.
+export const nativePositiveLong = value => typeof value === 'string' && /^[1-9][0-9]{0,18}$/.test(value) && BigInt(value) <= 9223372036854775807n
 export const nativeSessionHeaders = (value, agentId, runtimeInstanceId) => {
   let headers
   try { headers = new Headers(value) } catch { deny('CONVERSATION_AUTH_UNAVAILABLE') }
@@ -51,7 +52,7 @@ export const nativeSessionHeaders = (value, agentId, runtimeInstanceId) => {
   if (!AUTH.test(proof.Authorization || '') || headers.has('x-api-key') || headers.has('cookie')
       || proof['X-Agent-Id'] !== agentId || proof['X-Agent-Runtime-Id'] !== runtimeInstanceId
       || !keys.every(key => typeof proof[key] === 'string' && proof[key].trim() === proof[key] && proof[key])
-      || !/^[1-9][0-9]*$/.test(generation || '') || !Number.isSafeInteger(Number(generation))) deny('CONVERSATION_AUTH_UNAVAILABLE')
+      || !nativePositiveLong(generation)) deny('CONVERSATION_AUTH_UNAVAILABLE')
   return Object.freeze(proof)
 }
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)

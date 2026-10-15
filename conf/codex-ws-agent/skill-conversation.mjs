@@ -5,13 +5,13 @@ import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdi
 import { isAbsolute, resolve } from 'node:path'
 import { executeSkill, parseSkillCommand, skillDigest, skillHash, skillId, skillSha } from './skill-executor.mjs'
 import { SkillExecutionStore, SkillEffects, validateSkillInputReceipts } from './skill-execution-store.mjs'
-import { nativeSessionHeaders } from './conversation-native.mjs'
+import { nativeSessionHeaders, nativePositiveLong } from './conversation-native.mjs'
 import { parseSkillJson, validateSkillData } from './skill-manifest.mjs'
 const BASE = '/internal/agent/tasks'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const fail = (code, cause = null) => { throw Object.assign(new Error(code), { code, ...(cause ? { cause } : {}) }) }
-const fenceValid = value => object(value) && Number.isSafeInteger(value.version) && value.version > 0 && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value.token || '')
-const leaseValid = (lease, command) => fenceValid(lease) && lease.executionId === command.executionId && Number.isSafeInteger(lease.expiresAt) && lease.expiresAt > Date.now()
+const fenceValid = value => object(value) && nativePositiveLong(value.version) && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value.token || '')
+const leaseValid = (lease, command) => fenceValid(lease) && Object.keys(lease).length === 4 && ['executionId', 'version', 'token', 'expiresAt'].every(key => Object.hasOwn(lease, key)) && lease.executionId === command.executionId && Number.isSafeInteger(lease.expiresAt) && lease.expiresAt > Date.now()
 const originOf = value => {
   let url; try { url = new URL(value) } catch { fail('SKILL_API_ORIGIN_INVALID') }
   if (url.username || url.password || url.search || url.hash || url.pathname !== '/' || !['http:', 'https:'].includes(url.protocol)
@@ -25,7 +25,7 @@ const byteLength = value => {
   return value
 }
 export function parseSkillInputSnapshot(snapshot, command, fence) {
-  if (!object(snapshot) || snapshot.schemaVersion !== 4 || snapshot.executionId !== command.executionId || snapshot.leaseVersion !== fence.version
+  if (!object(snapshot) || snapshot.schemaVersion !== 4 || !nativePositiveLong(snapshot.leaseVersion) || snapshot.executionId !== command.executionId || snapshot.leaseVersion !== fence.version
       || snapshot.snapshotDigest !== command.snapshotDigest || !Array.isArray(snapshot.inputs) || snapshot.inputs.length !== command.inputRefs.length
       || snapshot.noReferencedMaterials !== (snapshot.inputs.length === 0)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
   const seen = new Set()

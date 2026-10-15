@@ -12,13 +12,13 @@ const command = () => ({ executionProtocolVersion: 4, executionId: 'pwe_1', task
   snapshotDigest: 'c'.repeat(64), parameters: {}, instruction: '分析资料', inputRefs: [], outputs: { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'], additionalProperties: false }, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } })
 const headers = () => ({ Authorization: `AgentRuntime rts1_${'0'.repeat(64)}`, 'X-Agent-Id': 'agent', 'X-Agent-Installation-Id': 'installation', 'X-Agent-Host-Id': 'host', 'X-Agent-Runtime-Id': 'runtime', 'X-Agent-Session-Generation': '1' })
 const response = (url, value, status = 200, headers = {}) => {
-  const reply = new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json', ...headers } }); Object.defineProperty(reply, 'url', { value: url.href }); return reply
+  const reply = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'skill-test', code: 'E0', msg: 'ok', data: value }), { status, headers: { 'content-type': 'application/json', 'x-request-id': 'skill-test', ...headers } }); Object.defineProperty(reply, 'url', { value: url.href }); return reply
 }
 const fixture = t => {
   const root = mkdtempSync(resolve(tmpdir(), 'skill-lane-')); t.after(() => rmSync(root, { recursive: true, force: true }))
   const c = command(), calls = [], effects = new Map(); let modelCalls = 0, serverManifest = null, loseCommit = false, loseStage = false, inboxEmpty = false, corruptDigest = false
   const descriptor = { manifest: { runner: 'native-model', parametersSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', additionalProperties: false }, inputs: { minItems: 0, maxItems: 32, acceptedMimeTypes: ['text/plain'] }, outputs: c.outputs } }
-  const lease = () => ({ executionId: c.executionId, version: 1, token: '00000000-0000-0000-0000-000000000001', expiresAt: Date.now() + 600000 })
+  const lease = () => ({ executionId: c.executionId, version: '9007199254740993', token: '00000000-0000-0000-0000-000000000001', expiresAt: Date.now() + 600000 })
   const runner = { run: async ({ effects }) => {
     const result = await effects.invoke('native-model', { instruction: c.instruction }, async () => { modelCalls++; return { data: { summary: '由模型实际返回' } } })
     return { data: result.data, artifacts: c.outputs.artifactsRequired ? [{ outputId: 'output_1', contentMimeType: 'text/plain', bytes: Buffer.from('真实正文') }] : [], inputReceipts: [] }
@@ -29,9 +29,9 @@ const fixture = t => {
     if (url.pathname.endsWith('/commands')) return response(url, { items: inboxEmpty ? [] : [c] })
     if (url.pathname.endsWith('/lease') || url.pathname.endsWith('/lease/renew')) return response(url, lease())
     if (url.pathname.endsWith('/resume')) return response(url, { lease: lease(), resultManifest: serverManifest, phase: serverManifest ? 'ARCHIVING' : 'RUNNING', allowedWork: serverManifest ? ['STAGE_OUTPUTS', 'COMMIT_RESULT', 'PROJECT_RESULT'] : ['EXECUTE'] })
-    if (url.pathname.endsWith('/inputs')) return response(url, { schemaVersion: 4, executionId: c.executionId, leaseVersion: 1, snapshotDigest: c.snapshotDigest, noReferencedMaterials: true, inputs: [] })
+    if (url.pathname.endsWith('/inputs')) return response(url, { schemaVersion: 4, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotDigest: c.snapshotDigest, noReferencedMaterials: true, inputs: [] })
     if (url.pathname.endsWith('/start')) {
-      assert.ok(body.fence.version === 1 && body.fence.token); assert.equal(body.snapshotDigest, c.snapshotDigest)
+      assert.ok(body.fence.version === '9007199254740993' && body.fence.token); assert.equal(body.snapshotDigest, c.snapshotDigest)
       const key = url.pathname.split('/').at(-2), prior = effects.get(key)
       if (!prior) effects.set(key, { status: 'START_RECORDED', effectDigest: body.effectDigest })
       return response(url, { schemaVersion: 1, disposition: prior ? 'RECORDED' : 'NEW', status: prior?.status || 'START_RECORDED', providerRequestId: null, resultDigest: null })
@@ -111,11 +111,11 @@ test('syntactically valid but incorrect result digest is not a commit receipt', 
 test('frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit', () => {
   const c = command(); c.inputRefs = ['input_1']
   const input = { inputRef: 'input_1', sourceKind: 'TASK_LINKED_WORKSPACE_VERSION', sourceIdentity: { fileId: 'f', version: 1, purpose: 'INPUT' }, contentMimeType: 'text/plain', byteLength: 4, sha256: 'a'.repeat(64) }
-  const envelope = { schemaVersion: 4, executionId: c.executionId, leaseVersion: 1, snapshotDigest: c.snapshotDigest, noReferencedMaterials: false, inputs: [input] }
-  assert.deepEqual(parseSkillInputSnapshot(envelope, c, { version: 1 })[0], { ...input, byteLength: '4' })
+  const envelope = { schemaVersion: 4, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotDigest: c.snapshotDigest, noReferencedMaterials: false, inputs: [input] }
+  assert.deepEqual(parseSkillInputSnapshot(envelope, c, { version: '9007199254740993' })[0], { ...input, byteLength: '4' })
   for (const patch of [{ sourceKind: 'URL' }, { byteLength: Number.MAX_SAFE_INTEGER + 1 }, { byteLength: '-1' }, { sourceIdentity: null }])
-    assert.throws(() => parseSkillInputSnapshot({ ...envelope, inputs: [{ ...input, ...patch }] }, c, { version: 1 }), /SNAPSHOT_INVALID/)
-  assert.throws(() => parseSkillInputSnapshot({ ...envelope, noReferencedMaterials: true }, c, { version: 1 }), /SNAPSHOT_INVALID/)
+    assert.throws(() => parseSkillInputSnapshot({ ...envelope, inputs: [{ ...input, ...patch }] }, c, { version: '9007199254740993' }), /SNAPSHOT_INVALID/)
+  assert.throws(() => parseSkillInputSnapshot({ ...envelope, noReferencedMaterials: true }, c, { version: '9007199254740993' }), /SNAPSHOT_INVALID/)
 })
 
 test('only the real committed receipt permits execution-owned carrier adapter release', async t => {
@@ -181,4 +181,26 @@ test('server committed local-file result replays only under its frozen local-scr
   assert.equal(validateCommittedSkillResult(manifest, c, descriptor, 'ARCHIVING').state, 'RESULT_COMMITTED')
   for (const runner of ['native-model', 'provider-operation', undefined])
     assert.throws(() => validateCommittedSkillResult(manifest, c, { manifest: { ...descriptor.manifest, runner } }, 'ARCHIVING'), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
+})
+
+test('numeric, noncanonical and overflowing public lease versions fail before executor work', async t => {
+  for (const version of [1, '01', '0', '-1', '9223372036854775808']) {
+    const f = fixture(t)
+    const fetchFn = async (url, opts) => {
+      const reply = await f.options.fetchFn(url, opts)
+      if (!url.pathname.endsWith('/lease')) return reply
+      const wire = await reply.json()
+      return response(url, { ...wire.data, version })
+    }
+    await assert.rejects(new SkillConversationLane({ ...f.options, fetchFn }).poll(), /SKILL_LEASE_UNCERTAIN/)
+    assert.equal(f.modelCalls(), 0)
+  }
+})
+
+test('current native session header generation preserves all positive int64 values', async () => {
+  const { nativeSessionHeaders, nativePositiveLong } = await import('../conversation-native.mjs')
+  for (const generation of ['9007199254740993', '9223372036854775807']) {
+    assert.equal(nativeSessionHeaders({ ...headers(), 'X-Agent-Session-Generation': generation }, 'agent', 'runtime')['X-Agent-Session-Generation'], generation)
+  }
+  for (const generation of ['01', '0', '-1', '9223372036854775808', 1, null]) assert.equal(nativePositiveLong(generation), false)
 })
