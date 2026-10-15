@@ -458,7 +458,11 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
   const socketEvents = new EventEmitter();
   class Socket extends EventEmitter {
     constructor(url, options) {
-      super(); this.url = url; this.headers = options.headers; this.readyState = 0; this.sent = []; sockets.push(this);
+      super(); this.url = url; this.headers = options.headers; this.readyState = 0; this.sent = [];
+      // Concurrent session HTTP reads can complete in either order; fixture indices are subjects, not arrival order.
+      const index = config.agents.findIndex(agent => agent.manifest.canonicalAgentId === this.headers['X-Agent-Id']);
+      assert.ok(index >= 0);
+      if (!sockets[index]) sockets[index] = this; else sockets.push(this);
       queueMicrotask(() => { if (this.readyState === 0) { this.readyState = 1; this.emit('open'); socketEvents.emit('opened', this); } });
     }
     send(bytes) {
