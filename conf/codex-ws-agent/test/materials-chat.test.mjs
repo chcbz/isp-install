@@ -29,7 +29,7 @@ function messageFixture() {
     byteLength: source.byteLength, mimeType: source.mimeType, carrier: source.carrier, carrierContractDigest: source.carrierContractDigest,
     downloadUrl: `/internal/agent/chat/requests/${message.requestId}/turns/${message.turnId}/materials/inputs/${source.sourceRefId}/content` }))
   facts.typedDeliberation = { schemaVersion: 4, availableActions: [], availableSources: historicalSources.map(source => ({ sourceRefId: source.sourceRefId,
-    kind: 'TASK_WORKSPACE_FILE', mediaType: source.mediaKind, mimeType: source.mimeType })), inspectedSourceRefIds: [] }
+    kind: 'TASK_WORKSPACE_FILE', mediaType: source.mediaKind, contentMimeType: source.mimeType })), inspectedSourceRefIds: [] }
   const manifest = { schemaVersion: 1, profile: { schemaVersion: 1, supportedInputs: formats }, sources }
   const binding = Object.fromEntries(['tenantId','ownerJiacn','clientId','conversationId','conversationGeneration','taskId','requestId','turnId','targetAgentId'].map(key => [key, String(message[key])]))
   const manifestDigest = canonicalSha256({ domain: 'juyiting.materials-input', binding, manifest })
