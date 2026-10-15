@@ -1,6 +1,7 @@
 // Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
 // Session credentials live only here; outbound work checkpoints hold no proof.
 import { randomUUID } from 'node:crypto';
+import { toAgentWire, fromAgentWire } from '../../codex-ws-agent/agent-message-wire.mjs';
 import { RuntimeV1Client, classifyRuntimeError, runtimeAckWireContext } from './runtime-client.mjs';
 const adapterError = code => Object.assign(new Error(code), { code });
 const wait = (ms, signal) => new Promise(resolve => {
@@ -52,19 +53,16 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       const send = envelope => {
         if (!client.currentSession || socket?.readyState !== 1 || envelope.messageType === 'command.ack') return false;
         const session = client.currentSession;
-        const current = { ...envelope, tenantId: session.tenantId, clientId: session.clientId, agentId: session.canonicalAgentId,
-          sourceAgentId: session.canonicalAgentId, installationId: session.installationId, hostId: session.hostId,
-          runtimeInstanceId: session.runtimeInstanceId, sessionGeneration: session.sessionGeneration };
-        if (envelope.messageType === 'work.result' && envelope.resultType === 'SKILL_INSTALL_RESULT') {
-          // The durable result is business evidence. Never rewrite its product ID
-          // or original executing boot on reconnect; proof is the current socket,
-          // headers and explicit runtimeInstallationId, not that business field.
-          if (executor.matchesSkillInstallResult?.(envelope) !== true) return false;
-          current.installationId = envelope.installationId;
-          current.runtimeInstanceId = envelope.runtimeInstanceId;
-          current.runtimeInstallationId = session.installationId;
-        }
-        socket.send(JSON.stringify(current)); return true;
+        const businessResult = envelope.messageType === 'work.result' && envelope.resultType === 'SKILL_INSTALL_RESULT';
+        if (businessResult && executor.matchesSkillInstallResult?.(envelope) !== true) return false;
+        const transportIdentity = { tenantId: session.tenantId, clientId: session.clientId,
+          agentId: session.canonicalAgentId, sourceAgentId: session.canonicalAgentId,
+          hostId: session.hostId, sessionGeneration: session.sessionGeneration };
+        // Never overwrite original execution identity, even transiently.
+        const current = businessResult
+          ? { ...envelope, ...transportIdentity, runtimeInstallationId: session.installationId }
+          : { ...envelope, ...transportIdentity, installationId: session.installationId, runtimeInstanceId: session.runtimeInstanceId };
+        socket.send(JSON.stringify(toAgentWire(current, session))); return true;
       };
       const register = () => {
         if (!client.currentSession || socket?.readyState !== 1) return false;
@@ -106,9 +104,9 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           current.on('message', bytes => {
             if (socket !== current || signal.aborted) return;
             let frame;
-            try { frame = JSON.parse(bytes.toString()); } catch { logger('runtime-frame-rejected', { code: 'INVALID_JSON' }); return; }
+            try { frame = fromAgentWire(bytes.toString()); } catch { logger('runtime-frame-rejected', { code: 'INVALID_JSON' }); return; }
             if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
-            const payload = frame.data && typeof frame.data === 'object' && !Array.isArray(frame.data) ? frame.data : frame;
+            const payload = frame;
             if ([frame, payload].some(layer => layer.messageType === 'work.result.receipt'
                 && layer.resultType === 'SKILL_INSTALL_RESULT' && executor.matchesSkillInstallReceipt?.(layer) !== true)) {
               logger('runtime-frame-rejected', { code: 'RUNTIME_SKILL_RECEIPT_UNCORRELATED' }); return;
@@ -156,7 +154,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             }
             if (observed === 'rejected') { rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 })); current.close(1008); return; }
             if (typeOnlyControl && (frame.type === 'connected' || frame.type === 'agent_registered')) return;
-            if (typeOnlyControl && frame.type === 'ping') { send({ schemaVersion: 1, messageType: 'pong', type: 'pong', messageId: randomUUID() }); return; }
+            if (typeOnlyControl && frame.type === 'ping') { send({ schemaVersion: 1, messageType: 'pong', messageId: randomUUID(), correlationId: frame.messageId, requestId: frame.requestId }); return; }
             if (!channelConfirmed) return;
             // AgentWebSocketHandler.updateAgentStatus sends copyTrace(presence)
             // plus agentId/status as agent_status_updated, without messageType.
@@ -243,6 +241,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
 export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   ".gitignore",
   "agent-client.mjs",
+  "agent-message-wire.mjs",
   "api-envelope.mjs",
   "message-envelope.mjs",
   "native-json.mjs",

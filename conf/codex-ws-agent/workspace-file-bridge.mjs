@@ -627,7 +627,7 @@ export class WorkspaceFileBridge {
               { name: 'runId', value: command.runId },
               { name: 'outputId', value: output.outputId },
               { name: 'sha256', value: sha256 },
-              { name: 'length', value: String(length) }
+              { name: 'byteLength', value: String(length) }
             ]),
             file: Object.freeze({
               fieldName: 'file',
@@ -775,7 +775,7 @@ export class WorkspaceFileBridge {
 
     const commit = buildOutputCommit({ taskId: command.taskId, runId: command.runId, uploads: collected.uploads })
     const endpoint = endpointUrl(this.#apiOrigin, commit.path)
-    const commitBody = JSON.stringify(commit.body)
+    const commitBody = JSON.stringify({ outputs: commit.body.outputs.map(({ outputId, sha256, length }) => ({ outputId, sha256, byteLength: String(length) })) })
     let response
     try {
       response = await fetchReplayableOnce(this.#fetchFn, endpoint, () => ({

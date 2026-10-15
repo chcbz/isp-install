@@ -267,7 +267,7 @@ test('output collection is bound to the original manifest and emits upload multi
         { name: 'runId', value: 'run-1' },
         { name: 'outputId', value: 'result' },
         { name: 'sha256', value: digest(output) },
-        { name: 'length', value: String(output.length) }
+        { name: 'byteLength', value: String(output.length) }
       ],
       file: {
         fieldName: 'file',
@@ -449,6 +449,8 @@ test('uploads each declared output then commits its canonical output manifest wi
   ])
   assert.ok(uploads.every(request => request.options.body instanceof FormData))
   assert.equal(uploads[0].options.body.get('outputId'), 'result')
+  assert.equal(uploads[0].options.body.get('byteLength'), String(result.length))
+  assert.equal(uploads[0].options.body.has('length'), false)
   assert.equal(uploads[1].options.body.get('outputId'), 'alpha')
   const commit = requests[3]
   assert.equal(commit.url, `https://api.example.test${expected.path}`)
@@ -459,7 +461,7 @@ test('uploads each declared output then commits its canonical output manifest wi
     'Idempotency-Key': expected.idempotencyKey,
     'Content-Type': 'application/json'
   })
-  assert.equal(commit.options.body, JSON.stringify(expected.body))
+  assert.equal(commit.options.body, JSON.stringify({ outputs: expected.body.outputs.map(({ outputId, sha256, length }) => ({ outputId, sha256, byteLength: String(length) })) }))
   bridge.cleanup(command)
   assert.equal(existsSync(materialized.runDirectory), false)
 })
@@ -522,8 +524,8 @@ test('replays output upload and manifest commit once after an undici stale-socke
     assert.equal(attempt.contentType, 'application/json')
   }
   assert.deepEqual(commitAttempts, [
-    { idempotencyKey: expected.idempotencyKey, body: JSON.stringify(expected.body) },
-    { idempotencyKey: expected.idempotencyKey, body: JSON.stringify(expected.body) }
+    { idempotencyKey: expected.idempotencyKey, body: JSON.stringify({ outputs: expected.body.outputs.map(({ outputId, sha256, length }) => ({ outputId, sha256, byteLength: String(length) })) }) },
+    { idempotencyKey: expected.idempotencyKey, body: JSON.stringify({ outputs: expected.body.outputs.map(({ outputId, sha256, length }) => ({ outputId, sha256, byteLength: String(length) })) }) }
   ])
 })
 
@@ -634,7 +636,7 @@ test('native start is bound to verified inputs and validates the exact direct re
   const bridge = bridgeFor(root, async (url, options) => {
     requests.push({ url: url.toString(), options })
     if (options.method === 'GET') return responseFor(input, url.toString())
-    return { status: 200, redirected: false, url: url.toString(), json: async () => ({ executionId: 'pwe_exact', taskId: command.taskId, runId: command.runId, state: 'STARTED' }) }
+    return { status: 200, redirected: false, url: url.toString(), headers: new Headers({ 'X-Request-Id': 'start-test' }), text: async () => JSON.stringify({ protocolVersion: 1, requestId: 'start-test', code: 'E0', msg: 'ok', data: { executionId: 'pwe_exact', taskId: command.taskId, runId: command.runId, state: 'STARTED' } }) }
   })
   const options = { commandId: 'pwe_cmd_exact', messageId: 'pwe_msg_exact', runtimeAuthHeader: 'AgentRuntime token', runtimeAgentId: 'agent-a', runtimeInstanceId: 'runtime-a' }
   await assertRejectsCode(() => bridge.startExecution(command, options), 'RUN_NOT_BOUND')
