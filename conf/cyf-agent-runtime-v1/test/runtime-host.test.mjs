@@ -252,6 +252,7 @@ test('unified library catalog closes actual engine imports without retired provi
     assert.equal(EXECUTION_PAYLOAD_FILES.some(entry => entry === path || entry.startsWith(`${path}/`)), false, path);
   }
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('skill-manifest.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('juyiting-review-basis.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('schemas/skill-manifest-v1.schema.json'), true);
   const target = resolve(f.root, 'codex-ws-agent');
   const result = await collateExecutionPayload(engineSource, target);

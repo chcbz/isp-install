@@ -277,6 +277,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "conversation-reference-inputs.mjs",
   "evidence/typed-inspection-local-image-gpt-5.6-terra-1f95df2.json",
   "juyiting-action-outcome.mjs",
+  "juyiting-review-basis.mjs",
   "juyiting-typed-outcome-stream.mjs",
   "juyiting-typed-outcome.mjs",
   "managed-chat-scope-config.mjs",
