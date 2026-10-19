@@ -36,7 +36,7 @@ export function resolveChatMaterials(profile, message) {
     const format = formats.get(source.mimeType)
     if (!exact(source, ['sourceRefId', 'sourceKind', 'sha256', 'byteLength', 'mimeType', 'carrier', 'carrierContractDigest', 'downloadUrl'])
         || !id(source.sourceRefId) || (previous !== null && source.sourceRefId <= previous)
-        || !['TASK_WORKSPACE_FILE', 'TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT'].includes(source.sourceKind)
+        || !['TASK_WORKSPACE_FILE', 'TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'].includes(source.sourceKind)
         || typeof source.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(source.sha256)
         || typeof source.byteLength !== 'string' || !/^(0|[1-9][0-9]*)$/.test(source.byteLength) || BigInt(source.byteLength) > BigInt(Number.MAX_SAFE_INTEGER)
         || !format || source.carrier !== format.carrier || source.carrierContractDigest !== format.carrierContractDigest

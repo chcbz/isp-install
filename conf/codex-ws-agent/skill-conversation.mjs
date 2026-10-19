@@ -40,7 +40,7 @@ const resultReceipt = value => {
   const { resultSha256, ...receipt } = value
   return { ...receipt, resultDigest: resultSha256 }
 }
-const sourceKinds = new Set(['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT'])
+const sourceKinds = new Set(['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'])
 const byteLength = value => {
   if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(value) || BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
   return value

@@ -4747,11 +4747,11 @@ export const runFastChat = async (profile, message, {
     try { validateChatDispatch(message) } catch (error) { throw new AgentProtocolError(error.code || 'TYPED_DELIBERATION_BINDING_INVALID', error.message || 'Invalid typed deliberation dispatch binding') }
   }
   const actionRequest = resolveActionChatRequest(profile, message)
-  if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'typedDeliberation') && !actionRequest) throw new AgentProtocolError('ACTION_PROTOCOL_VERSION_INVALID', 'New durable planning accepts only action-v4')
+  if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'typedDeliberation') && !actionRequest) throw new AgentProtocolError('ACTION_PROTOCOL_VERSION_INVALID', 'New durable planning accepts only action-v5')
   const typedRequest = actionRequest
   const materials = resolveChatMaterials(profile, message)
-  if (materials && (!typedRequest || typeof controls.markPrepared !== 'function' || typeof controls.markFinalPrepared !== 'function')) throw new AgentProtocolError('MATERIALS_DURABILITY_REQUIRED', 'Materials CHAT requires a frozen action-v4 turn and durable inbox')
-  const actionContract = actionRequest ? buildActionOutcomeContract(actionRequest) : null
+  if (materials && (!typedRequest || typeof controls.markPrepared !== 'function' || typeof controls.markFinalPrepared !== 'function')) throw new AgentProtocolError('MATERIALS_DURABILITY_REQUIRED', 'Materials CHAT requires a frozen action-v5 turn and durable inbox')
+  const actionContract = actionRequest ? buildActionOutcomeContract(actionRequest, message.contextSnapshot?.facts?.reviewBasis ?? null) : null
   const outputSchema = actionContract ? actionContract.outputSchema : TYPED_DELIBERATION_OUTPUT_SCHEMA
   const outcomeInstructions = actionContract ? actionContract.instructions : TYPED_DELIBERATION_INSTRUCTIONS
   const outcomeContractDigest = actionContract ? actionContract.contractDigest : TYPED_DELIBERATION_CONTRACT_DIGEST
@@ -4830,13 +4830,13 @@ export const runFastChat = async (profile, message, {
     if (controls.isCancelled()) return { status: 'cancelled', turnId: result.turnId, routeUsed: 'CHAT_FAST', metrics }
     metrics.finalAt = Date.now()
     if (typedRequest) {
-      const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? []) : validateTypedInteractionOutcome(result.content, typedRequest)
+      const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null) : validateTypedInteractionOutcome(result.content, typedRequest)
       if (profile.trueDeltaEnabled) {
         const suffix = decoder.finish(outcome.text)
         if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn) }
       }
       if (materials) {
-        const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [])
+        const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
         const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: outcome, receiptDraft: preparedMaterials.inspectionInputReceiptDraft,
           engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key, validateOutcome })
         await controls.markFinalPrepared(finalPrepared)
@@ -4865,7 +4865,7 @@ export const runFastChat = async (profile, message, {
 export const recoverMaterialsChat = async (profile, message, record, { profileRuntime = null, adapter = null, controls = {}, sendFinal } = {}) => {
   const materials = resolveChatMaterials(profile, message), facts = resolveActionChatRequest(profile, message)
   if (!materials || !facts || typeof sendFinal !== 'function') throw new AgentProtocolError('MATERIALS_RECOVERY_BINDING_INVALID', 'Exact CHAT material request required')
-  const validateOutcome = raw => validateActionOutcome(raw, facts, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [])
+  const validateOutcome = raw => validateActionOutcome(raw, facts, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
   if (record.finalPrepared) return publishMaterialsChatFinal({ profile, message, materials, finalPrepared: record.finalPrepared, validateOutcome, controls, sendFinal })
   const preparation = record.preparation
   if (preparation?.contract !== 'juyiting-materials-chat-v1' || preparation.authorizationId !== materials.authorizationId || preparation.manifestDigest !== materials.manifestDigest) throw new AgentProtocolError('MATERIALS_RECOVERY_BINDING_INVALID', 'Exact persisted preparation required')

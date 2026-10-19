@@ -28,7 +28,7 @@ function messageFixture() {
   const sources = historicalSources.map(source => ({ sourceRefId: source.sourceRefId, sourceKind: 'TASK_WORKSPACE_FILE', sha256: source.sha256,
     byteLength: source.byteLength, mimeType: source.mimeType, carrier: source.carrier, carrierContractDigest: source.carrierContractDigest,
     downloadUrl: `/internal/agent/chat/requests/${message.requestId}/turns/${message.turnId}/materials/inputs/${source.sourceRefId}/content` }))
-  facts.typedDeliberation = { schemaVersion: 4, availableActions: [], availableSources: historicalSources.map(source => ({ sourceRefId: source.sourceRefId,
+  facts.typedDeliberation = { schemaVersion: 5, availableActions: [], availableSources: historicalSources.map(source => ({ sourceRefId: source.sourceRefId,
     kind: 'TASK_WORKSPACE_FILE', mediaType: source.mediaKind, contentMimeType: source.mimeType })), inspectedSourceRefIds: [] }
   const manifest = { schemaVersion: 1, profile: { schemaVersion: 1, supportedInputs: formats }, sources }
   const binding = Object.fromEntries(['tenantId','ownerJiacn','clientId','conversationId','conversationGeneration','taskId','requestId','turnId','targetAgentId'].map(key => [key, String(message[key])]))
@@ -36,7 +36,7 @@ function messageFixture() {
   facts.materialsInput = { schemaVersion: 1, authorizationId: `materials_${manifestDigest.slice(7,47)}`, manifestDigest, manifest }
   return validateChatDispatch(reseal(message))
 }
-function context(t, message = messageFixture(), outcome = { schemaVersion: 4, kind: 'ANSWER', text: 'Synthetic carrier-only test result, not verified image understanding.',
+function context(t, message = messageFixture(), outcome = { revision: null, schemaVersion: 5, kind: 'ANSWER', text: 'Synthetic carrier-only test result, not verified image understanding.',
   clarification: null, action: null, deliverable: false, deliveryRelation: null }) {
   const root = mkdtempSync(resolve(tmpdir(), 'runtime-materials-chat-')); t.after(() => rmSync(root, { recursive: true, force: true }))
   const fetched = [], frames = [], events = [], preparations = []; let finalPrepared = null, starts = 0

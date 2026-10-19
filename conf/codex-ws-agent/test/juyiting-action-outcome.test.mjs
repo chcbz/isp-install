@@ -2,12 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { ACTION_OUTCOME_SCHEMA, validateActionFacts, validateActionOutcome, resolveActionChatRequest } from '../juyiting-action-outcome.mjs'
-const fixture = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url), 'utf8'))
+const fixture = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v5.json', import.meta.url), 'utf8'))
 const facts = () => structuredClone(fixture.facts)
 const action = () => structuredClone(fixture.outcomes[2])
 
-test('v4 supports answer, clarification and schema-bound material skills, not top-level inspection', () => {
-  assert.deepEqual(ACTION_OUTCOME_SCHEMA.properties.schemaVersion.enum, [4])
+test('v5 supports answer, clarification and schema-bound material skills, not top-level inspection', () => {
+  assert.deepEqual(ACTION_OUTCOME_SCHEMA.properties.schemaVersion.enum, [5])
   for (const outcome of fixture.outcomes) assert.deepEqual(validateActionOutcome(JSON.stringify(outcome), facts()), outcome)
   assert.equal(Object.isFrozen(validateActionFacts(facts()).availableActions[0].inputMimeTypes), true)
 })
@@ -54,7 +54,7 @@ test('capability and read facts are exact; previous reading does not add an unsu
   assert.doesNotThrow(() => validateActionOutcome(action(), f))
 })
 
-test('v4 CHAT dispatch binds exact task/conversation/generation/target; unknown versions never downgrade to v3', () => {
+test('v5 CHAT dispatch binds exact task/conversation/generation/target; unknown versions never downgrade to v3', () => {
   const profile = { agentId: 'a', typedDeliberationEnabled: true }
   const message = { durable: true, route: 'CHAT', taskId: 'task', conversationId: 'c', conversationGeneration: '1', targetAgentId: 'a',
     contextSnapshot: { facts: { typedDeliberation: facts(), conversation: { id: 'c', generation: '1', scopeType: 'bounty' }, task: { id: 'task' }, targetAgentId: 'a' } } }
@@ -89,7 +89,7 @@ test('explicit text deliverable marker is durable Boolean data, not inferred fro
 test('explicit text relations require the exact advertised durable parent and never infer from linkage', () => {
   const parent = { outcomeId: 'original-text', finalDigest: `sha256:${'a'.repeat(64)}` }
   for (const mode of ['APPEND', 'REPLACE', 'RESET']) {
-    const value = { schemaVersion: 4, kind: 'ANSWER', text: '原文改稿  ', clarification: null, action: null, deliverable: true,
+    const value = { schemaVersion: 5, revision: null, kind: 'ANSWER', text: '原文改稿  ', clarification: null, action: null, deliverable: true,
       deliveryRelation: { mode, parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest } }
     assert.deepEqual(validateActionOutcome(value, facts(), parent), value)
     assert.equal(Object.isFrozen(validateActionOutcome(value, facts(), parent).deliveryRelation), true)
@@ -97,7 +97,7 @@ test('explicit text relations require the exact advertised durable parent and ne
     assert.throws(() => validateActionOutcome(value, facts(), { ...parent, finalDigest: `sha256:${'b'.repeat(64)}` }), /ACTION_DELIVERY_PARENT_INVALID/)
     assert.throws(() => validateActionOutcome({ ...value, deliverable: false }, facts(), parent), /ACTION_DELIVERY_PARENT_INVALID/)
   }
-  const old = { schemaVersion: 4, kind: 'ANSWER', text: '文字成果', clarification: null, action: null, deliverable: true, deliveryRelation: null }
+  const old = { schemaVersion: 5, revision: null, kind: 'ANSWER', text: '文字成果', clarification: null, action: null, deliverable: true, deliveryRelation: null }
   assert.deepEqual(validateActionOutcome({ ...old, deliveryRelation: null }, facts(), parent), old)
   assert.equal(Object.hasOwn(validateActionOutcome(old, facts(), parent), 'deliveryRelation'), true)
 })
@@ -108,7 +108,7 @@ test('actual API read fixture preserves identical explicit parent identity acros
   for (const group of groups) {
     const original = group.initial.outcome; const current = group.updated.outcome
     const parent = { outcomeId: original.outcomeId, finalDigest: original.finalDigest }
-    const native = { schemaVersion: 4, kind: current.kind, text: current.text, clarification: null, action: null,
+    const native = { schemaVersion: 5, revision: null, kind: current.kind, text: current.text, clarification: null, action: null,
       deliverable: current.deliverable, deliveryRelation: current.deliveryRelation }
     const result = validateActionOutcome(native, facts(), parent)
     assert.deepEqual(result, native); assert.equal(result.deliveryRelation.mode, group.mode)
@@ -120,7 +120,7 @@ test('actual API read fixture preserves identical explicit parent identity acros
 test('earlier retained replacement requires the exact advertised target while keeping its causal basis', () => {
   const group = JSON.parse(readFileSync(new URL('./fixtures/retained-text-delivery-v3.json', import.meta.url), 'utf8'))
   const ad = group.admissionFacts; const view = group.updated.outcome
-  const outcome = { schemaVersion: 4, kind: 'ANSWER', text: view.text, clarification: null, action: null, deliverable: true, deliveryRelation: view.deliveryRelation }
+  const outcome = { schemaVersion: 5, revision: null, kind: 'ANSWER', text: view.text, clarification: null, action: null, deliverable: true, deliveryRelation: view.deliveryRelation }
   assert.deepEqual(validateActionOutcome(outcome, facts(), ad.deliveryParent, ad.deliveryTargets), outcome)
   assert.notEqual(outcome.deliveryRelation.targetOutcomeId, outcome.deliveryRelation.parentOutcomeId)
   assert.throws(() => validateActionOutcome(outcome, facts(), ad.deliveryParent), /ACTION_DELIVERY_TARGET_INVALID/)
@@ -158,7 +158,7 @@ test('media basis advertises exact retained outputs without treating them as tex
   const text = { outcomeId: 'original-text', finalDigest: `sha256:${'a'.repeat(64)}`, text: '原文' }
   const outputs = ['bird', 'tree'].map(outputId => ({ ...parent, outputSource: { requestId: 'media-child', stepId: 'original-step', outputId, sha256: 'c'.repeat(64) } }))
   const targets = [text, ...outputs]
-  const value = { schemaVersion: 4, kind: 'ANSWER', text: '改稿', clarification: null, action: null, deliverable: true,
+  const value = { schemaVersion: 5, revision: null, kind: 'ANSWER', text: '改稿', clarification: null, action: null, deliverable: true,
     deliveryRelation: { mode: 'REPLACE', parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest,
       targetOutcomeId: text.outcomeId, targetFinalDigest: text.finalDigest } }
   assert.deepEqual(validateActionOutcome(value, facts(), parent, targets), value)

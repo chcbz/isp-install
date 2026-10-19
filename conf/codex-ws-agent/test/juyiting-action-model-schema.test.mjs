@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import Ajv2020 from 'ajv/dist/2020.js'
 import { buildActionOutcomeContract, validateActionOutcome } from '../juyiting-action-outcome.mjs'
-const fixture = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v4.json', import.meta.url)))
+const fixture = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v5.json', import.meta.url)))
 const facts = () => {
   const f = structuredClone(fixture.facts)
   for (const a of f.availableActions) a.parametersSchema.properties = {}
