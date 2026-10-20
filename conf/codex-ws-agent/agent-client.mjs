@@ -4751,7 +4751,7 @@ export const runFastChat = async (profile, message, {
   const typedRequest = actionRequest
   const materials = resolveChatMaterials(profile, message)
   if (materials && (!typedRequest || typeof controls.markPrepared !== 'function' || typeof controls.markFinalPrepared !== 'function')) throw new AgentProtocolError('MATERIALS_DURABILITY_REQUIRED', 'Materials CHAT requires a frozen action-v5 turn and durable inbox')
-  const actionContract = actionRequest ? buildActionOutcomeContract(actionRequest, message.contextSnapshot?.facts?.reviewBasis ?? null) : null
+  const actionContract = actionRequest ? buildActionOutcomeContract(actionRequest, message.contextSnapshot?.facts?.reviewBasis ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null) : null
   const outputSchema = actionContract ? actionContract.outputSchema : TYPED_DELIBERATION_OUTPUT_SCHEMA
   const outcomeInstructions = actionContract ? actionContract.instructions : TYPED_DELIBERATION_INSTRUCTIONS
   const outcomeContractDigest = actionContract ? actionContract.contractDigest : TYPED_DELIBERATION_CONTRACT_DIGEST

@@ -56,3 +56,14 @@ test('optional/open/unsupported schema fails explicitly, never changes required 
     assert.equal(JSON.stringify(f), before)
   }
 })
+
+
+test('production clarification and revision failures are excluded by the model schema', () => {
+  const f = { schemaVersion: 5, availableActions: [], availableSources: [], inspectedSourceRefIds: [] }
+  const unlinked = buildActionOutcomeContract(f)
+  assert.equal(unlinked.outputSchema.properties.text.minLength, 1)
+  assert.deepEqual(unlinked.outputSchema.properties.deliveryRelation, { type: 'null' })
+  const linked = buildActionOutcomeContract(f, null, { outcomeId: 'outcome-parent', finalDigest: 'sha256:' + 'a'.repeat(64) })
+  assert.ok(linked.outputSchema.properties.deliveryRelation.anyOf)
+  assert.notEqual(linked.contractDigest, unlinked.contractDigest)
+})
