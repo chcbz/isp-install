@@ -5643,7 +5643,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
     } catch (error) {
       rejected += 1
       state.processor.onReject?.(
-        error instanceof AgentProtocolError ? error : new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', 'workspace runtime command is invalid'),
+        error instanceof AgentProtocolError ? error : new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', `workspace runtime command is invalid (${['PROTOCOL_INVALID_MESSAGE', 'AGENT_MESSAGE_INVALID', 'PROTOCOL_INVALID_JSON'].includes(error?.code) ? error.code : 'DECODE_OR_VALIDATION'})`),
         item
       )
     }

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { ACTION_OUTCOME_SCHEMA, validateActionFacts, validateActionOutcome, resolveActionChatRequest } from '../juyiting-action-outcome.mjs'
+import { ACTION_OUTCOME_SCHEMA, ACTION_OUTCOME_INSTRUCTIONS, buildActionOutcomeContract, validateActionFacts, validateActionOutcome, resolveActionChatRequest } from '../juyiting-action-outcome.mjs'
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/unified-action-outcome-v5.json', import.meta.url), 'utf8'))
 const facts = () => structuredClone(fixture.facts)
 const action = () => structuredClone(fixture.outcomes[2])
@@ -192,3 +192,12 @@ test('action source uses exact API contentMimeType; legacy alias and mixed field
   delete source.contentMimeType
   assert.throws(() => validateActionFacts(f), /ACTION_SOURCES_INVALID/)
 })
+
+ test('delivery instructions separate generated work from authoritative submission receipts', () => {
+  const input = facts(); input.availableActions = [];
+  const contract = buildActionOutcomeContract(input);
+  assert.equal(contract.instructions, ACTION_OUTCOME_INSTRUCTIONS);
+  assert.match(contract.instructions, /platform, not the model, submits/);
+  assert.match(contract.instructions, /do not claim submission or acceptance succeeded before a server receipt/);
+  assert.match(contract.instructions, /without invented workflow disclaimers/);
+ });
