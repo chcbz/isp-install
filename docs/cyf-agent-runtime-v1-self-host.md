@@ -1,6 +1,8 @@
 # 聚义厅「自家接应」：统一 Runtime 安装、登记与升级
 
-核对：2026-10-12。Runtime 源码基线 `807b86d66153b765529bba1d547e4bcfbf0a3706` / **1.0.3**；本指南及准备工具是该基线后的接入补全。请使用包含本指南和工具的 `develop` 提交并记录实际 SHA，不使用旧 `master` 安装技能。Runtime 版本与 CYF 前后端版本分开。
+核对：**2026-10-20**。本次仅更新安装/升级流程与目录约定；核对源码为 `2f0518de38eef3b33dc6498865c35f266133a7e6`，覆盖安装器、Runtime 入口、systemd/环境模板、托管控制说明及执行引擎配置校验。该提交的 Runtime `package.json` 声明为 **1.2.0**；包版本、制品目录名、CYF Web/API 版本不是同一版本标识，不相互推断。
+
+本文不是最新发布清单，也不证明目标主机已经安装或验收。每次操作固定实际候选 commit/tree、制品路径/摘要、原安装基线和验证证据；远端未查询时不声称本地 HEAD 是远端最新。2026-10-12 的 1.0.3 接入与目录迁移结论只保留为历史范围，不作为新版本兼容性证明。
 
 本指南对应新版自家接应文书。如果线上仍显示旧 API Key、`.env` / `codex-profiles.conf`，说明页面尚未发布此改动：**不要照旧页面操作，也不要把本仓更新当成网站已更新**。由服务端所属账号操作者通过下述已有接口登记；目标端无需等待后台“签发 manifest”。
 
@@ -26,11 +28,17 @@
 
 先记录真实旧服务的 `systemctl cat <旧服务>`、运行用户、ExecStart/cwd、配置/状态目录；不要猜服务名。检查磁盘、目标平台、Node/npm/Python 和 Codex CLI 是否可执行。Node 无项目版本白名单，记录实际版本；依赖仍须真实适配。Python 3.11.13 为已验证基线，不代表任意架构天然通过。
 
-已有核验通过的1.0.3制品不用重复安装。首次安装示例（替换路径，使用真实工具）：
+优先复用与目标平台、固定源码及本次候选精确匹配的已验证制品；没有匹配证据才准备新制品。不得把历史安装成功当本次验证，也不覆盖正在运行的程序目录。以下只示例目标端制品准备，不授权 CYF 前后端本地生产构建/发布；CYF 前后端仍遵守项目 Flow 规则。
 
+先记录候选信息（占位值必须替换）：
 ```bash
 REPO=/absolute/path/to/isp-install
-ARTIFACT=/home/isp/apps/cyf-agent-runtime-v1/selfhost-1.0.3-BUILD_ID
+SOURCE_COMMIT='REPLACE_WITH_VERIFIED_FULL_COMMIT_SHA'
+# 在独立干净源码目录固定候选，不在他人工作区 checkout/reset。
+test "$(git -C "$REPO" rev-parse HEAD)" = "$SOURCE_COMMIT" || exit 1
+test -z "$(git -C "$REPO" status --porcelain)" || exit 1
+git -C "$REPO" rev-parse HEAD HEAD^{tree}
+ARTIFACT=/home/isp/apps/cyf-agent-runtime-v1/releases/REPLACE_WITH_UNIQUE_CANDIDATE_ID
 # 管理员只在必要时创建父目录并授权给真正的运行用户，不递归chown共享目录。
 # ARTIFACT须为不存在的canonical绝对路径；制品不可直接覆盖运行目录。
 bash "$REPO/conf/cyf-agent-runtime-v1/install.sh" \
@@ -133,7 +141,7 @@ for(const [name,value] of [[`${e.SUBJECT}.profile.json`,profile],[`${e.INSTANCE}
 JS
 ```
 
-模板只开普通原生文本通道，不自动启用图片能力或付费Provider。1.0.3文本开关要求native HTTP轮询且不能与controlled-image profile混用；已有图片角色升级应保留图片配置，不能机械套用此文本模板。托管 hosting-control profile 无原生文件根目录，不能套本单机模板。
+模板只开普通原生文本通道，不自动启用图片能力或付费Provider。本次核对源码的文本开关要求 native HTTP 轮询且不能与 controlled-image profile 混用；已有图片角色升级应保留图片配置，不能机械套用此文本模板。托管 hosting-control profile 无原生文件根目录，不能套本单机模板。
 
 普通 `command.dispatch` 的仓库工作任务还需单独 `workspacePolicyId` 和受信任仓库策略（见执行引擎 workspace-manager 与已有运行配置）；上面原生文本模板不代表所有代码工作区能力已启用。不要借此临时克隆不可信仓库。
 
@@ -160,6 +168,25 @@ CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE="$CANDIDATE/enrollment-secret" \
 授权写入该Agent `stateRoot/runtime-authorization.json`。在网页用原ID查询确认 `ACTIVE`，并确认目标端授权已持久化，再删除**本批已消费的** `enrollment-secret`（保留manifest）。服务环境里不得长期存留secret或该secret路径。未知响应先查安装状态及本机授权，不盲重enroll。
 
 ## 7. 管理员切换服务
+
+### 7.1 已有统一 Runtime 升级（不重新登记）
+
+升级走第2节准备候选、第5节按现有配置校验、本节切换和第8节验收；**跳过第3、4、6节的首次登记/enroll**。第5节示例只用于新配置，不重建已有 host/profile。
+
+1. **只读盘点**：确认实际 unit、运行用户、`ExecStart`、cwd、环境文件及 drop-in；通过 `systemctl show "$UNIT" -p FragmentPath -p DropInPaths -p WorkingDirectory -p ExecStart -p EnvironmentFiles` 核对，`UNIT` 必须是已确认归属的服务。另核对真实进程路径、原制品与配置、各 subject 的 manifest/installation/hostId、授权和状态路径。不要把含凭据的配置或完整环境输出到聊天/普通日志。
+2. **明确升级范围**：检查候选的协议/状态格式、Codex CLI、Node/Python ABI、依赖及 runner 要求；配置校验不等于这些条件全部兼容。若需显式迁移，先制定当前状态对应的恢复方案；不承诺任意旧版直接跨版本升级。
+3. **准备恢复点**：保存原 unit/drop-in、原制品和私有配置；记录摘要与权限。盘点聊天、指令、租约、ACK、文件/技能执行及结果未知状态；不能通过清队列、清锁、自动重跑或重复付费消除问题。共用实例切换会影响所有 subject，先协调维护窗口。
+4. **候选预检**：候选放独立目录，用实际服务用户、原配置及相同的 Provider/policy 文件路径环境运行候选 `validate`。不执行 `run`，不启动第二 writer。检查新依赖是否真实可用；不得关闭原能力以掩盖缺项。不要 `source` 未审核配置或把 systemd EnvironmentFile 当通用 shell 脚本。
+5. **停写并备份**：按下述授权流程温和停止准确 unit，等待所属引擎/子进程与写者退出、锁正常释放；再完整备份持久状态（包括各 HOME、SQLite/WAL/SHM、授权、registry、ledger、inbox/outbox，以及已启用的 managedRoot）。备份存 `/home/isp/baks/<批次>/` 并按凭据保护，禁止运行中复制单个 DB 冒充一致快照。
+6. **精确切换**：只修改受管 drop-in 的制品 cwd/启动/预检路径，保持原配置、身份和状态路径。若必须改配置，保存前值、固定候选并 readback；先审查已有多个 drop-in 的合并效果，不覆盖无关修复。显式迁移完成后再次预检，再 daemon-reload 并启动准确 unit。
+7. **逐项验收**：核对实际进程使用候选路径、无重复 writer、每个 subject 的当前注册/在线与实测能力；按第8节做明确授权的新业务验收。旧在线记录、服务 active、inbox completed 或目录存在均不足以证明交付成功。
+8. **失败处置**：保留新状态和日志，先归因；只有确认旧制品能读取当前状态时才恢复旧启动配置。若新版本已写入不可逆状态，不拿旧 DB 快照覆盖新业务事实，不盲回退或再次 enroll；按已制定的恢复方案处理并报告真实阻塞。
+
+### 7.2 从旧独立 codex-ws-agent 迁移
+
+先查是否已有统一 Runtime installation：已有则沿用，没有才执行首次登记/enroll。保留原角色绑定，不除名重绑、不复用旧 API Key。旧协议队列不自动导入，逐项处理在途/未知结果；完整 HOME 和路径索引的迁移按第9节执行。旧服务确认停止后才启动统一服务，不把制品中的内嵌执行库当成另一套需启用的服务。
+
+### 7.3 服务切换模板与边界
 
 准备时检查 `id` 和 `sudo -n -l`，权限不足就交付具体命令，不要求用户发送管理员密码。下面为需要管理员审核的模板，不会由安装器自动执行：
 
@@ -189,6 +216,8 @@ KillSignal=SIGTERM
 
 ## 8. 验收与交付
 
+首次接入与升级都按实际启用能力验收；纯文本模板不能证明图片/识别/技能可用。技能需同时满足真实 runner/工具/Provider 绑定、当前会话目录、安装 entitlement 和业务调用授权；仅安装包名或开关不代表 READY。`local-script` 依赖真实 bubblewrap 隔离探测，不允许无沙箱回退。不要为验收顺便启用新付费能力或触发未授权 Provider 调用。
+
 按顺序记录，不混淆状态：
 1. 制品安装/闭包校验完成。
 2. 安装登记PENDING → enroll ACTIVE（仅首次接入）。
@@ -215,7 +244,15 @@ KillSignal=SIGTERM
 | 每个角色完整Codex HOME | `state/cyf-agent-runtime-v1/<instance>/agents/<subject>/codex-home` |
 | 每个角色runtime授权、workspace、private-runs | 同一`agents/<subject>/`下彼此独立子目录 |
 | 尚需引用的历史工作数据 | `state/cyf-agent-runtime-v1/<instance>/history/`，保持原角色权限/归属 |
+| 动态托管角色持久状态 | `state/cyf-agent-runtime-v1-managed/<instance>/`；与普通角色状态分开，沿用实际 `managedRoot` |
 | 退役程序和恢复证据 | `baks/<本次批次>/`，不是第二套活动服务 |
+| 本机临时控制 UDS | `/run/cyf-agent-runtime-v1/<instance>/control.sock`；不是网络端口或持久数据 |
+| systemd unit/drop-in | `/etc/systemd/system/` |
+| 开机临时目录规则 | `/etc/tmpfiles.d/cyf-agent-runtime-v1-hosting.conf` |
+
+**目录原则：长期程序、配置、状态和备份归入 `/home/isp`；系统服务定义和临时 socket 保留 Linux 标准位置，不为路径整齐迁入 `/home/isp`。** `/run` 随重启清空，审核后的 tmpfiles 规则在开机时重建父目录，Runtime 监听时创建 socket；这不是重建安装身份或业务状态。标准托管示例为父目录 `root:isp 0750`、socket `0660`，实际组/GID 必须与 API 配置一致，不以放宽权限解决连通性问题。
+
+托管控制仅用于本机 API → Runtime 的 prepare/ensure 等指定 subject 操作，不是模型聊天或公网入口。API 的 socket-path 与 Runtime 的 socketPath 必须一致，详见 [托管控制说明](../conf/cyf-agent-runtime-v1/HOSTING-CONTROL.md) 和 [tmpfiles 模板](../conf/cyf-agent-runtime-v1/systemd/cyf-agent-runtime-v1-hosting.tmpfiles.conf.example)。安装器不自动应用该规则、不创建生产控制目录；运行中不得手删 socket，未知旧端点/锁须先确认归属和写者停止，不自动抢占或清理。
 
 制品中的`codex-ws-agent/`是内嵌执行库，不能全局改名或删掉。安装器仍**只准备制品**；不自动搬HOME、接管锁、改身份、停服务或启用旧服务，也不把目录更新当作升级完成。
 
