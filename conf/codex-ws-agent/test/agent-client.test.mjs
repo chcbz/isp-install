@@ -3336,6 +3336,24 @@ test('workspace command polling accepts only exact native queue envelopes and di
   assert.equal(JSON.stringify(fetchCalls).includes('runtime-secret'), false)
 })
 
+test('workspace queue rejects invalid roots with value-free shape diagnostics', async () => {
+  const rejected = []
+  const secret = 'never-print-command-or-secret'
+  const state = { workspaceFileBridge: { apiOrigin: 'https://api.example.test' },
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'f'.repeat(64)}`,
+    processor: { handle: async () => assert.fail('invalid root must never dispatch'),
+      onReject: error => rejected.push(error) } }
+  const result = await pollWorkspaceFileCommands({ profile, state, fetchFn: async url => {
+    const response = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'native-fixture', code: 'E0', msg: 'ok',
+      data: { items: [{ protocolVersion: 1, requestId: secret, messageId: secret, messageType: 'command.dispatch', data: { instruction: secret }, correlationId: null, code: null, msg: null }] } }),
+      { status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'native-fixture' } })
+    Object.defineProperty(response, 'url', { value: String(url) }); return response
+  } })
+  assert.deepEqual(result, { dispatched: 0, rejected: 1 })
+  assert.match(rejected[0].message, /PROTOCOL_INVALID_MESSAGE; rootKeys=8; versionType=number; dataType=object; replyFields=null,null,null/)
+  assert.equal(rejected[0].message.includes(secret), false)
+})
+
 test('workspace command polling retries one stale undici socket before dispatching the read-only queue response', async () => {
   const root = temporaryDirectory()
   const configured = {

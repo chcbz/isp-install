@@ -5643,7 +5643,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
     } catch (error) {
       rejected += 1
       state.processor.onReject?.(
-        error instanceof AgentProtocolError ? error : new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', `workspace runtime command is invalid (${['PROTOCOL_INVALID_MESSAGE', 'AGENT_MESSAGE_INVALID', 'PROTOCOL_INVALID_JSON'].includes(error?.code) ? error.code : 'DECODE_OR_VALIDATION'})`),
+        error instanceof AgentProtocolError ? error : new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', `workspace runtime command is invalid (${['PROTOCOL_INVALID_MESSAGE', 'AGENT_MESSAGE_INVALID', 'PROTOCOL_INVALID_JSON'].includes(error?.code) ? error.code : 'DECODE_OR_VALIDATION'}; rootKeys=${isObject(item) ? Object.keys(item).length : -1}; versionType=${typeof item?.protocolVersion}; dataType=${isObject(item?.data) ? 'object' : typeof item?.data}; replyFields=${['correlationId', 'code', 'msg'].map(key => !hasOwn(item || {}, key) ? 'absent' : item[key] === null ? 'null' : typeof item[key]).join(',')}; eventTypeValid=${typeof item?.messageType === 'string' && /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/.test(item.messageType)})`),
         item
       )
     }
