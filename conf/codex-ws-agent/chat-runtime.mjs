@@ -755,9 +755,18 @@ export class ChatAckOutbox {
   count() { return readdirSync(this.pending).filter(name => name.endsWith('.json')).length }
 }
 
-export function buildThreadKey({ tenantId, clientId, ownerJiacn, profileId, agentId, conversationId, mode, workspaceScopeHash = '', cwd = '', enginePolicyHash = '', toolPolicyHash = '', instructionSourceHash = '', modelConfigHash = '', conversationGeneration = '', authorizationId = '', manifestDigest = '', inputPolicyDigest = '' }) {
+// Existing authenticated context facts are the authority; never infer a task owner from the profile.
+export function chatTaskAuthorityDigest(message) {
+  const facts = message.contextSnapshot?.facts
+  if (!object(facts)) throw new Error('CHAT_CONTEXT_BINDING_REQUIRED')
+  return canonicalSha256({ taskId: facts.task?.id ?? null, taskAuthority: facts.taskAuthority ?? null })
+}
+
+export function buildThreadKey({ tenantId, clientId, ownerJiacn, profileId, agentId, conversationId, mode, workspaceScopeHash = '', cwd = '', enginePolicyHash = '', toolPolicyHash = '', instructionSourceHash = '', modelConfigHash = '', conversationGeneration = '', taskAuthorityDigest = '', authorizationId = '', manifestDigest = '', inputPolicyDigest = '' }) {
   const components = [tenantId, clientId, ownerJiacn, profileId, agentId, conversationId, mode, workspaceScopeHash, cwd, enginePolicyHash, toolPolicyHash, instructionSourceHash, modelConfigHash, String(conversationGeneration)]
   if (!components.every(value => typeof value === 'string' && value.length > 0)) throw new Error('THREAD_KEY_BINDING_REQUIRED')
+  // A grant replacement must never resume a thread with the previous authorization's context.
+  if (mode === 'CHAT') components.push(taskAuthorityDigest)
   if (mode === 'INSPECT') {
     const inspectionBindings = [authorizationId, manifestDigest, inputPolicyDigest]
     if (!inspectionBindings.every(value => typeof value === 'string' && value.length > 0)) throw new Error('THREAD_KEY_INSPECTION_BINDING_REQUIRED')

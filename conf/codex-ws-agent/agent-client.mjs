@@ -77,7 +77,7 @@ import {
   managedImageScopeMatches
 } from './managed-image-scope-config.mjs'
 import { emptyManagedChatScopes, loadManagedChatScopes, applyManagedChatScope } from './managed-chat-scope-config.mjs'
-import { canResumePreEngineInspection, buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
+import { canResumePreEngineInspection, buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import {
   AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
   measureCodexAppServerBinary, resolveCodexAppServerSchemaContract
@@ -90,7 +90,7 @@ import {
 import { TypedOutcomeTextStreamDecoder } from './juyiting-typed-outcome-stream.mjs'
 import { TypedInspectionMaterializer, recoverTypedInspection, resolveTypedInspectionRequest, runTypedInspection } from './typed-inspection-runtime.mjs'
 import { TypedInspectionProfileRuntime } from './typed-inspection-profile.mjs'
-export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration, TypedInspectionMaterializer, resolveTypedInspectionRequest }
+export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration, TypedInspectionMaterializer, resolveTypedInspectionRequest }
 
 const AGENT_RELEASE_ROOT = dirname(fileURLToPath(import.meta.url))
 const WORKSPACE_FILE_TOOLCHAIN_DIR = resolve(AGENT_RELEASE_ROOT, '.toolchain')
@@ -4795,7 +4795,7 @@ export const runFastChat = async (profile, message, {
     ? (typedRequest ? canonicalSha256({ base: instructionSourceHash, typedContractBinding }) : instructionSourceHash)
     : canonicalSha256({ source: 'runtime-static', instructions: developerInstructions, ...(typedRequest ? { typedContractBinding } : {}) })
   const effectiveModelConfigHash = modelConfigHash || canonicalSha256({ model: profile.chatModel || profile.codexModel || 'default', effort: profile.chatReasoningEffort || '', models: selectedAdapter.readback?.models || {}, config: selectedAdapter.readback?.config || {} })
-  const key = buildThreadKey({ tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId, mode: 'CHAT', workspaceScopeHash: 'none', cwd: chatWorkdir, enginePolicyHash: effectiveEnginePolicyHash, toolPolicyHash: effectiveToolPolicyHash, instructionSourceHash: effectiveInstructionSourceHash, modelConfigHash: effectiveModelConfigHash, conversationGeneration: String(message.conversationGeneration) })
+  const key = buildThreadKey({ tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId, mode: 'CHAT', workspaceScopeHash: 'none', cwd: chatWorkdir, enginePolicyHash: effectiveEnginePolicyHash, toolPolicyHash: effectiveToolPolicyHash, instructionSourceHash: effectiveInstructionSourceHash, modelConfigHash: effectiveModelConfigHash, conversationGeneration: String(message.conversationGeneration), taskAuthorityDigest: chatTaskAuthorityDigest(message) })
   metrics.queueAt = Date.now()
   const prior = materials ? null : bindingStore?.get(key)
   if (prior?.state === 'RECOVERY_REQUIRED') throw Object.assign(new Error('THREAD_BINDING_RECOVERY_REQUIRED'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })

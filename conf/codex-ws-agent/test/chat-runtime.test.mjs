@@ -10,7 +10,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import {
   buildContextEnvelope, canonicalSha256, validateChatDispatch, buildChatDispatchAck, PersistentChatInbox,
-  ChatAckOutbox, FairLaneScheduler, buildThreadKey, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, MAX_CONTEXT_SNAPSHOT_BYTES, verifyHostedWireContract
+  ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, MAX_CONTEXT_SNAPSHOT_BYTES, verifyHostedWireContract
 } from '../chat-runtime.mjs'
 import {
   AppServerAdapter, CODEX_APP_SERVER_SCHEMA, CODEX_APP_SERVER_SCHEMA_CONTRACTS,
@@ -892,4 +892,36 @@ test('measured deployed CLI 0.161.0 schema preserves app-server fields used by R
   assert.deepEqual(turn.required, ['input', 'threadId']); assert.equal(turn.properties.input.type, 'array'); assert.ok(turn.properties.outputSchema)
   assert.ok(thread.properties.developerInstructions); assert.ok(thread.properties.baseInstructions)
   assert.deepEqual(schemas['v2/TurnCompletedNotification.json'].definitions.TurnStatus.enum, ['completed', 'interrupted', 'failed', 'inProgress'])
+})
+
+
+test('external task CHAT thread identity separates A owners and persisted grant generations for the same B', () => {
+  const base = { tenantId: 't', clientId: 'c', ownerJiacn: 'task-A', profileId: 'executor-B', agentId: 'agent-B', conversationId: '42', mode: 'CHAT', workspaceScopeHash: 'none', cwd: '/chat', enginePolicyHash: 'engine', toolPolicyHash: 'tools', instructionSourceHash: 'instructions', modelConfigHash: 'model', conversationGeneration: '1' }
+  const message = { contextSnapshot: { facts: { task: { id: 'task-1' }, taskAuthority: { grantId: 'grant-1', grantVersion: '1', assignmentRevision: '7' } } } }
+  const key = value => buildThreadKey({ ...base, taskAuthorityDigest: chatTaskAuthorityDigest(value) })
+  assert.equal(key(message), key(structuredClone(message)))
+  const progressed = structuredClone(message); progressed.contextSnapshot.facts.task.status = 'reviewing'; progressed.contextSnapshot.facts.task.revision = '99'
+  assert.equal(key(message), key(progressed), 'ordinary task progress is not an authorization generation')
+  for (const [field, value] of [['grantId', 'grant-2'], ['grantVersion', '2'], ['assignmentRevision', '8']]) {
+    const changed = structuredClone(message); changed.contextSnapshot.facts.taskAuthority[field] = value
+    assert.notEqual(key(message), key(changed), field)
+  }
+  assert.notEqual(key(message), buildThreadKey({ ...base, ownerJiacn: 'task-C', taskAuthorityDigest: chatTaskAuthorityDigest(message) }))
+  assert.throws(() => chatTaskAuthorityDigest({}), /CHAT_CONTEXT_BINDING_REQUIRED/)
+})
+
+test('one B ACK outbox replays separate A and C dispatch identities without rebinding task data to B', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'external-chat-ack-'))
+  try {
+    const agent = { agentId: 'agent-B' }
+    const outbox = new ChatAckOutbox({ rootDir: root, profile: agent }).initialize()
+    outbox.enqueue(buildChatDispatchAck(agent, { ownerJiacn: 'task-A', messageId: 'message-A', dispatchId: 'dispatch-A' }))
+    outbox.enqueue(buildChatDispatchAck(agent, { ownerJiacn: 'task-C', messageId: 'message-C', dispatchId: 'dispatch-C' }))
+    const sent = []
+    new ChatAckOutbox({ rootDir: root, profile: agent }).initialize().drain(ack => { sent.push(bindChatDispatchAckToSession(ack, agent, 'boot-B-2')); return true })
+    assert.deepEqual(sent.map(x => [x.messageId, x.dispatchId, x.agentId, x.runtimeInstanceId]), [
+      ['message-A', 'dispatch-A', 'agent-B', 'boot-B-2'], ['message-C', 'dispatch-C', 'agent-B', 'boot-B-2']
+    ])
+    assert.ok(sent.every(x => !Object.hasOwn(x, 'ownerJiacn')))
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
