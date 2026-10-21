@@ -201,3 +201,20 @@ test('action source uses exact API contentMimeType; legacy alias and mixed field
   assert.match(contract.instructions, /do not claim submission or acceptance succeeded before a server receipt/);
   assert.match(contract.instructions, /without invented workflow disclaimers/);
  });
+
+test('existing-result submission is format-neutral and never fabricates a textual deliverable or execution', () => {
+  const f = JSON.parse(readFileSync(new URL('./fixtures/existing-delivery-submit-v5.json', import.meta.url), 'utf8'))
+  assert.deepEqual(validateActionOutcome(f.outcome, f.facts, f.parent, f.targets), f.outcome)
+  assert.ok(buildActionOutcomeContract(f.facts, null, f.parent).outputSchema.properties.kind.enum.includes('SUBMISSION_REQUEST'))
+  assert.ok(!buildActionOutcomeContract(f.facts).outputSchema.properties.kind.enum.includes('SUBMISSION_REQUEST'))
+  for (const mutate of [o => { o.deliverable = true }, o => { o.deliveryRelation = null },
+    o => { o.deliveryRelation.mode = 'APPEND' }, o => { o.deliveryRelation.parentOutcomeId = 'foreign' },
+    o => { o.deliveryRelation.parentFinalDigest = 'sha256:' + 'c'.repeat(64) }, o => { o.kind = 'ANSWER' },
+    o => { o.action = { actionId: 'regenerate' } }, o => { o.deliveryRelation.targetOutcomeId = 'file' }]) {
+    const outcome = structuredClone(f.outcome); mutate(outcome)
+    assert.throws(() => validateActionOutcome(outcome, f.facts, f.parent, f.targets))
+  }
+  assert.throws(() => validateActionOutcome(f.outcome, f.facts, null, f.targets))
+  assert.throws(() => validateActionOutcome(f.outcome, f.facts, f.parent, []))
+  assert.throws(() => validateActionOutcome(f.outcome, f.facts, f.parent, [...f.targets, ...f.targets]))
+})

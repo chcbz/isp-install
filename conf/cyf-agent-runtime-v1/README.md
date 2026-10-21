@@ -411,3 +411,8 @@ Runtime心跳仍使用现有presence协议与30秒默认间隔，不引入第二
 ### 版本辨识与目录（2026-10-21）
 
 新制品目录统一`/home/isp/apps/cyf-agent-runtime-v1/releases/<runtime-version>`，版本取本包`package.json`，不使用Web/API版本、功能名或日期。旧目录保留历史名称，禁止在线改名。`current`只标识已核验的unified运行版本，安装器不更新它；systemd固定真实路径。发布记录置于制品外`release-records/`，未知历史来源不得补造。操作和验收规则见`docs/cyf-agent-runtime-v1-self-host.md` §2.1。
+
+### 2026-10-21 已有成果提交契约（源码候选，未激活）
+CYF协同任务遵循 `/home/isp/wsps/cyf/AGENTS.md` 与 `api/docs/interface-standard.md` v1.2；单Owner，不修改公共全局规则。
+`codex-ws-agent` 现行v5 typed union增加 `SUBMISSION_REQUEST`，注册outcomeKinds同步。只有用户明确要求提交、存在冻结deliveryParent及非空deliveryTargets、没有待验收reviewBasis时可返回；SUBMIT引用原成果，deliverable=false、action/revision/clarification=null。操作说明不得成为文字RESULT；不得重新生成媒体，不得代验收。不按MIME决定主流程。
+同步fixture `../codex-ws-agent/test/fixtures/existing-delivery-submit-v5.json`；API同内容fixture在chat-service tests/contracts。需要Web、API（含CHECK约束迁移）、Runtime同批协调就绪；源码更新/测试通过不等于主机runtime安装更新。发布必须固定runtime制品及实例版本并验注册/业务链，本次尚未激活。

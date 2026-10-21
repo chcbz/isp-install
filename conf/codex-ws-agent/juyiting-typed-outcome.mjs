@@ -205,7 +205,7 @@ export const buildTypedDeliberationDeclaration = (profile, adapter) => {
       profile.chatSandbox === 'read-only' && profile.chatToolPolicy === 'read-only-constrained' && typedDeliberationAdapterReady(profile, adapter) ? 'READY' : 'UNAVAILABLE',
     carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V5',
     referenceModes: ['NONE', 'AVAILABLE'],
-    outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST', 'REVISION_REQUEST'],
+    outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST', 'REVISION_REQUEST', 'SUBMISSION_REQUEST'],
     engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA',
     strictNoToolsVerified: false,
     toolPolicy: 'read-only-constrained'

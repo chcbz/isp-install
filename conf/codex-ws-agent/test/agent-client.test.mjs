@@ -737,7 +737,7 @@ test('typed deliberation declaration binds the exact locally selected schema con
   const liveNative = adapter(native)
   const declaration = {
     schemaVersion: 5, state: 'READY', carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V5', referenceModes: ['NONE', 'AVAILABLE'],
-    outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST', 'REVISION_REQUEST'], engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA',
+    outcomeKinds: ['ANSWER', 'CLARIFY', 'ACTION_REQUEST', 'REVISION_REQUEST', 'SUBMISSION_REQUEST'], engine: 'CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA',
     strictNoToolsVerified: false, toolPolicy: 'read-only-constrained'
   }
   assert.deepEqual(buildAgentRegistrationPayload(configured, null, true, liveNative).typedDeliberation, declaration)
