@@ -4,7 +4,7 @@ import { readPrivateJson, writePrivateJson } from './security.mjs';
 
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN',
-  'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'
+  'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'
 ]);
 const PERMANENT_TLS_CODES = new Set([
   'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_REVOKED',
@@ -28,6 +28,18 @@ export function classifyRuntimeError(error) {
   }
   if (causes.some(cause => TRANSIENT_NETWORK_CODES.has(cause.code))) return { kind: 'transient-network' };
   return { kind: 'permanent' };
+}
+
+// Diagnostics never include messages, URLs, response bodies or credentials.
+export function runtimeErrorFacts(error) {
+  const codes = []; const seen = new Set();
+  for (let cause = error; cause && !seen.has(cause) && seen.size < 8; cause = cause.cause) {
+    seen.add(cause);
+    if (typeof cause.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(cause.code)) codes.push(cause.code);
+  }
+  const status = Number(error?.status);
+  return { category: classifyRuntimeError(error).kind, codes: [...new Set(codes)],
+    ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { status } : {}) };
 }
 
 // Session/ACK r1 + canonical projection r2; immutable ACKs have no session/token.

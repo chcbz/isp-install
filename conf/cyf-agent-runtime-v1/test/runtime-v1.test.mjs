@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { digestManifest, validateManifest } from '../lib/manifest.mjs';
 import { createLogger, readEnrollmentSecret, readPrivateJson } from '../lib/security.mjs';
 import { PERMANENT_RUNTIME_EXIT_STATUS, runtimeExitStatus } from '../agent-runtime.mjs';
-import { classifyRuntimeError, RuntimeV1Client, validateCommandForManifest, validateRuntimeAckResult, validateEnrollmentResult } from '../lib/runtime-client.mjs';
+import { classifyRuntimeError, runtimeErrorFacts, RuntimeV1Client, validateCommandForManifest, validateRuntimeAckResult, validateEnrollmentResult } from '../lib/runtime-client.mjs';
 
 // Wire r1 catalogs pinned to API87c894dc, SHA256 56d7c3d...322adb.
 // Synthetic credentials only. HTTP mocked here: NOT cross-end/production evidence.
@@ -167,7 +167,7 @@ test('credential-bearing base URL and malformed response envelope fail closed', 
 });
 
 test('retry classification does not turn TLS/auth/rebind errors into blind retries', () => {
-  for (const code of ['UND_ERR_SOCKET','UND_ERR_CONNECT_TIMEOUT','ECONNRESET','ETIMEDOUT','EAI_AGAIN']) assert.equal(classifyRuntimeError(new TypeError('fetch failed', { cause: { code } })).kind, 'transient-network');
+  for (const code of ['UND_ERR_SOCKET','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT','ECONNRESET','ETIMEDOUT','EAI_AGAIN']) assert.equal(classifyRuntimeError(new TypeError('fetch failed', { cause: { code } })).kind, 'transient-network');
   for (const code of ['CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID']) assert.equal(runtimeExitStatus(new TypeError('TLS', { cause: { code } })), PERMANENT_RUNTIME_EXIT_STATUS);
   assert.equal(runtimeExitStatus(Object.assign(Error('auth'), { status: 403 })), PERMANENT_RUNTIME_EXIT_STATUS);
   assert.equal(runtimeExitStatus(Object.assign(Error('rebind'), { code: 'REBINDS_REQUIRED' })), PERMANENT_RUNTIME_EXIT_STATUS);
@@ -405,4 +405,13 @@ test('E05 internal result and lease allow only frozen three method/path pairs, n
   assert.equal(calls.length, before);
   await client.nativeFetch('https://api.example.test/internal/agent/tasks/task-1/context-pack', { method: 'GET' });
   assert.equal(calls.length, before + 1); // no blanket rewrite of unrelated native APIs
+});
+
+
+test('runtime failure diagnosis records safe codes without messages or authorization', () => {
+  const error = new TypeError('secret https://token@host', { cause: { code: 'UND_ERR_HEADERS_TIMEOUT', message: 'private' } });
+  assert.deepEqual(runtimeErrorFacts(error), { category: 'transient-network', codes: ['UND_ERR_HEADERS_TIMEOUT'] });
+  assert.deepEqual(runtimeErrorFacts({ status: 403, code: 'SECRET=token', message: 'secret' }), { category: 'authorization', codes: [], status: 403 });
+  assert.equal(classifyRuntimeError({ code: 'RUNTIME_SESSION_PROOF_INVALID' }).kind, 'permanent');
+  assert.equal(classifyRuntimeError({ code: 'UNKNOWN' }).kind, 'permanent');
 });

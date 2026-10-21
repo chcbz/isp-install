@@ -2,7 +2,7 @@
 // Session credentials live only here; outbound work checkpoints hold no proof.
 import { randomUUID } from 'node:crypto';
 import { toAgentWire, fromAgentWire } from '../../codex-ws-agent/agent-message-wire.mjs';
-import { RuntimeV1Client, classifyRuntimeError, runtimeAckWireContext } from './runtime-client.mjs';
+import { RuntimeV1Client, classifyRuntimeError, runtimeErrorFacts, runtimeAckWireContext } from './runtime-client.mjs';
 const adapterError = code => Object.assign(new Error(code), { code });
 const wait = (ms, signal) => new Promise(resolve => {
   if (signal.aborted) return resolve();
@@ -46,6 +46,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         apiBaseUrl: apiOrigin, stateDir: options.agent.stateRoot, hostId: config.hostId, runtimeInstanceId: instanceId });
       let socket = null; let observer = null; let abort = null; let loop = null; let channelConfirmed = false;
       let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
+      let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
       let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false; let registeredAt = null; let serviceReadyAt = null; let replay = null;
       const durable = () => executor.durableStateHealthy() === true;
       const usable = () => executor.readyCommandTypes().length > 0 || executor.chatReady();
@@ -85,8 +86,9 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         replay = Promise.resolve().then(() => executor.resume()).catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' }));
         void replay.finally(() => { replay = null; });
       };
-      const disconnect = () => { registeredAt = null; serviceReadyAt = null; channelConfirmed = false; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const disconnect = () => { channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
       const connectOnce = async signal => {
+        channelState = 'connecting';
         const session = await client.session({ signal });
         if (signal.aborted) return;
         observer = new RegistrationAckObserver({ agentId: session.canonicalAgentId, runtimeInstanceId: instanceId,
@@ -98,7 +100,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           let ended = false;
           const end = error => { if (ended) return; ended = true; signal.removeEventListener('abort', stopped); if (socket === current) disconnect(); error ? rejectConnection(error) : resolveConnection(); };
           current.on('open', () => { if (socket === current && !signal.aborted) register(); });
-          current.on('error', error => { if (socket === current && !signal.aborted) logger('runtime-channel-error', { category: classifyRuntimeError(error).kind }); });
+          current.on('error', error => { if (socket === current && !signal.aborted) logger('runtime-channel-error', runtimeErrorFacts(error)); });
           current.on('close', (code) => end(code === 1008 ? Object.assign(adapterError('RUNTIME_CHANNEL_REVOKED'), { status: 403 }) : null));
           current.on('unexpected-response', (_request, response) => { current.terminate(); end(Object.assign(adapterError('RUNTIME_HANDSHAKE_REJECTED'), { status: response.statusCode })); });
           current.on('message', bytes => {
@@ -170,6 +172,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
                 logger('runtime-frame-rejected', { code: 'RUNTIME_CONTROL_RECEIPT_INVALID' }); return;
               }
               // Do not log the frame, arbitrary trace fields, error text or tokens.
+              lastPresenceAckAt = Date.now();
               logger('runtime-control-receipt', { type: 'agent_status_updated' }); return;
             }
             // Validated informational control events never enter the durable business processor.
@@ -196,9 +199,11 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             try { await connectOnce(abort.signal); attempt = 0; }
             catch (error) {
               if (abort.signal.aborted) break;
-              const category = classifyRuntimeError(error).kind;
-              if (!['transient-network', 'transient-http'].includes(category)) { rejectActivated(error); admitted = false; logger('runtime-agent-isolated', { subjectKey: options.subjectKey, category }); return; }
-              logger('runtime-channel-retry', { subjectKey: options.subjectKey, category });
+              lastFailure = runtimeErrorFacts(error);
+              const category = lastFailure.category;
+              if (!['transient-network', 'transient-http'].includes(category)) { channelState = 'isolated'; rejectActivated(error); admitted = false; logger('runtime-agent-isolated', { subjectKey: options.subjectKey, ...lastFailure }); return; }
+              channelState = 'retrying';
+              logger('runtime-channel-retry', { subjectKey: options.subjectKey, ...lastFailure });
             }
             if (!abort.signal.aborted) await wait(Math.min(1000 * 2 ** Math.min(attempt++, 6), 60000), abort.signal);
           }
@@ -211,7 +216,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         heartbeat: async () => {
           if (!client.currentSession || socket?.readyState !== 1) return;
           const healthy = durable();
-          send(module.buildProtocolEnvelope('agent.presence', { messageId: randomUUID(), status: ready() ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId));
+          if (send(module.buildProtocolEnvelope('agent.presence', { messageId: randomUUID(), status: ready() ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId))) lastPresenceSentAt = Date.now();
           // Health revocation never removes authorization to report known outcomes.
           if (!healthy) { declaredHealthy = false; executor.suspendAdmission(); }
           else if (!declaredHealthy) register();
@@ -226,6 +231,10 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           return closed;
         },
         cancelActivation: () => { admitted = false; abort?.abort(); socket?.close(); rejectActivated?.(adapterError('RUNTIME_CHANNEL_STOPPED')); },
+        health: () => ({ subjectKey: options.subjectKey, agentId: options.agent.manifest.canonicalAgentId,
+          connected: !!client.currentSession && socket?.readyState === 1, registered: channelConfirmed,
+          ready: ready(), channelState: ready() ? 'ready' : channelState,
+          lastPresenceSentAt, lastPresenceAckAt, lastFailure }),
         sessionGeneration: () => client.lastGeneration,
         evidence: () => {
           if (!ready() || !registeredAt || !serviceReadyAt || !client.currentSession) return null;
@@ -237,6 +246,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       };
       attached.set(options.subjectKey, api); return api;
     },
+    health: () => [...attached.values()].map(executor => executor.health()),
     heartbeat: () => Promise.allSettled([...attached.values()].map(executor => executor.heartbeat())),
     close: async () => { closing = true; await Promise.all([...attached.values()].map(executor => executor.close())); await engine.close(); }
   };

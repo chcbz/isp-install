@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readRuntimeHostConfig } from './lib/manifest.mjs';
-import { createLogger, readEnrollmentSecret, readRuntimeProviderEnvironments } from './lib/security.mjs';
+import { createLogger, readEnrollmentSecret, readRuntimeProviderEnvironments, writePrivateJson } from './lib/security.mjs';
 import { classifyRuntimeError, RuntimeV1Client } from './lib/runtime-client.mjs';
 import { RuntimeHost } from './lib/runtime-host.mjs';
 import { createExecutionAdapterFactory } from './lib/execution-adapter.mjs';
@@ -58,7 +58,18 @@ export async function runUnifiedRuntime({ config, apiOrigin, instanceId = random
       // Per-Agent registration is independent from the host heartbeat loop.
       // Every activation has its own rejection handler above.
       void Promise.allSettled(activate);
-      while (!signal.aborted) { await adapters.heartbeat(); if (!signal.aborted) await waitFn(heartbeatIntervalMs, signal); }
+      while (!signal.aborted) {
+        await adapters.heartbeat();
+        // Observation only: no credentials, business payloads or authority. A failed write
+        // cannot stop healthy channels; the external monitor detects stale/missing evidence.
+        if (adapters.health) {
+          try { await writePrivateJson(resolve(config.stateRoot, 'runtime-health.json'), {
+            version: 1, pid: process.pid, instanceId, observedAt: Date.now(), heartbeatIntervalMs,
+            agents: adapters.health()
+          }); } catch { logger('runtime-health-write-failed', { code: 'HEALTH_SNAPSHOT_UNAVAILABLE' }); }
+        }
+        if (!signal.aborted) await waitFn(heartbeatIntervalMs, signal);
+      }
     } finally { signal.removeEventListener('abort', stop); }
   } finally {
     try { await controlServer?.close(); await host.stop(); await adapters.close(); }

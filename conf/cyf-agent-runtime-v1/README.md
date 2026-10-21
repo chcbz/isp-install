@@ -399,3 +399,10 @@ Actual data/artifact bytes are persisted through the existing NEW-only effect
 mechanism before stage/commit. A lost/unknown process result is never relaunched.
 No PDF/XLSX/video package is added by this adapter; new tool names still require
 separate genuine probes rather than speculative readiness.
+
+## 断连诊断与健康观测（2026-10-21）
+
+Runtime心跳仍使用现有presence协议与30秒默认间隔，不引入第二条连接/业务重试队列。
+`UND_ERR_HEADERS_TIMEOUT`、`UND_ERR_BODY_TIMEOUT`与已有连接超时一样按传输错误重连；鉴权、TLS、重绑定和无法归类的协议错误仍隔离，不默认无限重试。重连/隔离日志只输出类别、允许字符集的错误码链和HTTP状态，不输出原报文、URL、令牌或错误message。历史只记录permanent的事件不能据此反推具体错误码。
+
+持有host写锁后，在每轮心跳后原子更新`stateRoot/runtime-health.json`（0600）。只包含进程/实例、观测时间、间隔、各Agent连接/注册/执行就绪、最后presence发送与有效回执时间、脱敏错误事实。文件不是授权或业务状态来源；外部巡检核对当前PID与新鲜度，不能以systemd active代替可用。快照写失败不打断健康连接，外部以缺失/过期告警；停止后保留旧快照，由PID/时间拒绝。不得把快照改成在线来恢复Agent。

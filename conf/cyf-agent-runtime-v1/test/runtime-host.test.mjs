@@ -450,7 +450,7 @@ test('toolchain validation refuses a host-global interpreter alias instead of fa
 
 // M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
 // lifecycle. Synthetic socket/HTTP only; no server/production claim.
-async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false } = {}) {
+async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null } = {}) {
   const { EventEmitter } = await import('node:events');
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
   const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
@@ -512,6 +512,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
     loadEngine: async () => module, clientFactory: settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
       const body = JSON.parse(options.body).data; requests.push({ url, options, body });
       if (url.endsWith('/session')) {
+        if (sessionFailureOnce) { const code = sessionFailureOnce; sessionFailureOnce = null; throw new TypeError('fetch failed', { cause: { code } }); }
         const current = (generation.get(body.runtimeInstallationId) || 6) + 1; generation.set(body.runtimeInstallationId, current);
         return httpFixture(options, { ...Object.fromEntries(['runtimeInstallationId','tenantId','clientId','canonicalAgentId','hostId','runtimeInstanceId'].map(key => [key, body[key]])), sessionGeneration: String(current),
           scheme: 'AgentRuntime', sessionToken: 'rts1_' + 'a'.repeat(64), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' });
@@ -1500,4 +1501,50 @@ test('real API typed skill receipt binds durable product evidence; transport kee
   assert.equal(state.transport.send(envelope), false); // acknowledged records cannot invent a fresh result send.
   socket.receive({ ...receipt, messageType: 'chat.final.receipt' }); await c.tick(); assert.equal(state.accepted.length, 2);
   assert.ok(c.logs.some(row => row.code === 'RUNTIME_FRAME_GENERATION_MISMATCH' && row.field === 'sessionGeneration'));
+});
+
+
+test('channel health distinguishes registered ready from acknowledged presence and disconnection', async t => {
+  const c = await channelFixture(t); await c.executors[0].activate(); await c.tick();
+  assert.equal(c.executors[0].health().registered, true);
+  assert.equal(c.executors[0].health().lastPresenceAckAt, null);
+  await c.adapters.heartbeat();
+  assert.ok(c.executors[0].health().lastPresenceSentAt > 0);
+  const text = JSON.stringify(c.adapters.health());
+  assert.doesNotMatch(text, /sessionToken|Authorization|runtimeAuthorization/);
+  c.sockets[0].close(1008); await c.tick();
+  assert.equal(c.executors[0].health().connected, false);
+  assert.equal(c.executors[0].health().ready, false);
+  assert.equal(c.executors[0].health().channelState, 'isolated');
+});
+
+
+test('a real client header timeout retries into authenticated registration, not permanent isolation', async t => {
+  const c = await channelFixture(t, { sessionFailureOnce: 'UND_ERR_HEADERS_TIMEOUT' });
+  await c.executors[0].activate(); await c.tick();
+  assert.equal(c.executors[0].ready(), true);
+  assert.ok(c.logs.some(x => x.event === 'runtime-channel-retry' && x.codes.includes('UND_ERR_HEADERS_TIMEOUT')));
+  assert.ok(!c.logs.some(x => x.event === 'runtime-agent-isolated'));
+  assert.equal(c.requests.filter(x => x.url.endsWith('/session')).length, 2);
+  await c.adapters.heartbeat();
+  const receipt = presenceReceipt(c.sockets[0].sent.find(x => x.messageType === 'agent.presence'));
+  c.sockets[0].receive(receipt); await c.tick();
+  assert.ok(c.executors[0].health().lastPresenceAckAt > 0);
+});
+
+
+test('host health snapshot is private, current-process and observational only', async t => {
+  const { runUnifiedRuntime } = await import('../agent-runtime.mjs');
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const controller = new AbortController();
+  const fake = executors();
+  await runUnifiedRuntime({ config, apiOrigin: 'https://api.example.test', signal: controller.signal,
+    waitFn: async () => { controller.abort(); }, createAdapters: async () => ({
+      createExecutor: fake.createExecutor, heartbeat: async () => {}, close: async () => {},
+      health: () => [{ connected: false, registered: false, ready: false, lastPresenceAckAt: null }]
+    }) });
+  const file = resolve(config.stateRoot, 'runtime-health.json');
+  const data = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(data.pid, process.pid); assert.equal(data.agents[0].ready, false);
+  assert.equal((await lstat(file)).mode & 0o777, 0o600);
+  assert.equal(data.heartbeatIntervalMs, 30000);
 });
