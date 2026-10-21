@@ -406,3 +406,8 @@ Runtime心跳仍使用现有presence协议与30秒默认间隔，不引入第二
 `UND_ERR_HEADERS_TIMEOUT`、`UND_ERR_BODY_TIMEOUT`与已有连接超时一样按传输错误重连；鉴权、TLS、重绑定和无法归类的协议错误仍隔离，不默认无限重试。重连/隔离日志只输出类别、允许字符集的错误码链和HTTP状态，不输出原报文、URL、令牌或错误message。历史只记录permanent的事件不能据此反推具体错误码。
 
 持有host写锁后，在每轮心跳后原子更新`stateRoot/runtime-health.json`（0600）。只包含进程/实例、观测时间、间隔、各Agent连接/注册/执行就绪、最后presence发送与有效回执时间、脱敏错误事实。文件不是授权或业务状态来源；外部巡检核对当前PID与新鲜度，不能以systemd active代替可用。快照写失败不打断健康连接，外部以缺失/过期告警；停止后保留旧快照，由PID/时间拒绝。不得把快照改成在线来恢复Agent。
+
+
+### 版本辨识与目录（2026-10-21）
+
+新制品目录统一`/home/isp/apps/cyf-agent-runtime-v1/releases/<runtime-version>`，版本取本包`package.json`，不使用Web/API版本、功能名或日期。旧目录保留历史名称，禁止在线改名。`current`只标识已核验的unified运行版本，安装器不更新它；systemd固定真实路径。发布记录置于制品外`release-records/`，未知历史来源不得补造。操作和验收规则见`docs/cyf-agent-runtime-v1-self-host.md` §2.1。

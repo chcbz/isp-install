@@ -53,3 +53,9 @@ Do not commit real passwords, API keys, host-specific `.env` files, or private C
 - Verify these defaults with `node --test tests/host-storage-policy.test.mjs`, plus Bash syntax and affected Runtime hosting tests. This is read-only source validation, not installation or production release evidence.
 
 - Static/self-host HOME uses `state/cyf-agent-runtime-v1/<instance>/agents/<subject>/codex-home`; existing authorized relocations follow `docs/cyf-agent-runtime-v1-self-host.md` §9, preserving full HOME and actual SQLite path indexes. Installer never implicitly migrates state or re-enrolls.
+
+## Runtime release naming (2026-10-21)
+
+- New canonical artifacts live at `/home/isp/apps/cyf-agent-runtime-v1/releases/<runtime-version>/`; use the Runtime `package.json` version, never the Web/API version, feature name or date. Any changed payload needs a new Runtime version; never overwrite an existing artifact. Existing named releases remain historical, not a naming template.
+- Follow `docs/cyf-agent-runtime-v1-self-host.md` §2.1 for release records and activation markers. Preparing a release does not activate it; systemd remains pinned to the validated real artifact path. `current` is an observational link for the unified instance, updated only after actual process and channel verification, not an installer side effect.
+- Keep records outside immutable artifacts in `release-records/`; record exact source/version/hash and distinguish prepared from verified-active. Unknown historical provenance stays unknown. Do not rename a running artifact or assume relocatable private toolchains.

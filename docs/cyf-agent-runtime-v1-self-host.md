@@ -38,7 +38,8 @@ SOURCE_COMMIT='REPLACE_WITH_VERIFIED_FULL_COMMIT_SHA'
 test "$(git -C "$REPO" rev-parse HEAD)" = "$SOURCE_COMMIT" || exit 1
 test -z "$(git -C "$REPO" status --porcelain)" || exit 1
 git -C "$REPO" rev-parse HEAD HEAD^{tree}
-ARTIFACT=/home/isp/apps/cyf-agent-runtime-v1/releases/REPLACE_WITH_UNIQUE_CANDIDATE_ID
+RUNTIME_VERSION='REPLACE_WITH_RUNTIME_PACKAGE_VERSION'
+ARTIFACT="/home/isp/apps/cyf-agent-runtime-v1/releases/$RUNTIME_VERSION"
 # 管理员只在必要时创建父目录并授权给真正的运行用户，不递归chown共享目录。
 # ARTIFACT须为不存在的canonical绝对路径；制品不可直接覆盖运行目录。
 bash "$REPO/conf/cyf-agent-runtime-v1/install.sh" \
@@ -49,6 +50,25 @@ git -C "$REPO" rev-parse HEAD
 ```
 
 安装器只准备 `runtime/`、`codex-ws-agent/`（内部执行引擎）、`node/bin/node` 及完整私有依赖。**不安装/启用 systemd、不登记、不迁移配置或状态。** 不借宿主 Python 包掩盖私有环境缺失。记录制品目录、源码SHA、安装回执及摘要，平台工具链验收失败应先归因。
+
+### 2.1 版本目录、发布记录与当前版本标识（2026-10-21）
+
+统一布局：
+
+```text
+/home/isp/apps/cyf-agent-runtime-v1/
+  releases/<runtime-version>/             # 真实完整制品目录，例如1.2.2
+  release-records/<artifact-directory>.json # 版本/来源/摘要/验证记录，位于制品外
+  current -> releases/<active-directory>  # unified实例的已核验运行版本标识
+  RELEASES.md                             # 当前主机版本说明与历史例外
+```
+
+- `<runtime-version>`必须等于制品`runtime/package.json`的version，采用Runtime独立语义版本。新内容必须升版；同版本路径存在即拒绝覆盖，不靠追加功能名或日期规避。版本排序按语义版本，不按目录mtime或字符串大小。预发布版本不得自动视为最新稳定版。
+- `release-records`记录`schemaVersion`、`runtimeVersion`、真实`artifactPath`、完整`sourceCommit/sourceTree`、制品manifest路径及SHA256、安装/核验时间、验证证据。历史缺项写null并说明，不以目录名推断来源，不伪造安装时间；证据文件不包含凭据。记录位于制品外，不为补文档修改已校验制品。部署状态核对真实服务，历史记录不是持续健康承诺。
+- 准备/安装新版本不代表启用。按§7.1完成固定源码、实际配置校验、停写备份、精确unit切换和身份/通道验证后，才原子更新`current`并readback。链接目标必须为本机已核验的真实制品目录；目标存在且`current`原来是链接或不存在，若是实体目录/文件则停止调查，不能覆盖。
+- `current`是便于人查看的标识，**systemd仍固定真实版本目录**。不把启动命令改成跟随可变链接，不从`current`路径直接运行要求canonical路径的安装器/校验器。实际PID的cwd/启动路径优先于链接；两者不一致须报告标识漂移，不能宣称已切换。该根链接只代表unified实例；其他独立实例以各自unit为准，不能让一个链接冒充全主机状态。
+- 已有`runtime-ui-workflow-*`、`runtime-health-*`目录保留为历史例外，记录各自真实Runtime版本；**不在线重命名、不删除旧制品、不重启服务仅为改名**。当前1.2.1目录因此保留旧名；下一次实际升级使用纯版本目录。不建立同版本第二份制品或路径别名冒充规范迁移。
+- 回退必须先确认当前状态可被目标程序读取；不能只改链接假装回退，也不能自动恢复旧DB覆盖新业务事实。成功回退后再更新标识与记录。
 
 ## 3. 目标端准备登记材料（首次接入）
 
