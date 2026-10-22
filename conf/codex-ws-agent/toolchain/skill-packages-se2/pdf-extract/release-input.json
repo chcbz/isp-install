@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "skillKey": "pdf-extract",
+  "skillVersion": "1.0.0",
+  "packageFile": "pdf-extract-1.0.0.zip",
+  "packageSha256": "a406a6883abe81617f247afe9b2ead65fd9ac62e137020dbc75de9fa7a5d6e63",
+  "packageByteLength": 2298888,
+  "entries": 193,
+  "manifestSha256": "495e9f0ca235375ef531084803bffbe7bdf30440fe55297726a6781b8e35c127",
+  "dependencyLockSha256": "fa467bbb983eff516b624bdb74302da40525c2eeead145927a7f1eb074ec3edf",
+  "state": "PREPARED_NOT_PUBLISHED"
+}
