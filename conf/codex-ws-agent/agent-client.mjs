@@ -1,3 +1,4 @@
+import { nativePollDiagnostic } from './native-poll-diagnostic.mjs'
 import { fromAgentWire } from './agent-message-wire.mjs'
 import { readNativeJson } from './native-json.mjs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -5696,8 +5697,7 @@ const startNativeConversationPoller = (profile, state) => {
       const code = typeof error?.code === 'string' && /^(?:CONVERSATION|SKILL|MATERIALS)_[A-Z_]{1,80}$/.test(error.code)
         ? error.code : 'CONVERSATION_UNAVAILABLE'
       const processed = Number.isSafeInteger(error?.processed) && error.processed >= 0 ? error.processed : 0
-      const causeCode = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'ABORT_ERR'].includes(error?.cause?.code) ? error.cause.code : 'NONE'
-      console.warn(`native conversation poll unavailable | profile=${profile.profileId} | code=${code} | processed=${processed} | cause=${causeCode}`)
+      console.warn(`native conversation poll unavailable | profile=${profile.profileId} | code=${code} | processed=${processed} | diagnostic=${JSON.stringify(nativePollDiagnostic(error))}`)
     } finally { state.conversationNativePollInFlight = false }
   }
   void tick()

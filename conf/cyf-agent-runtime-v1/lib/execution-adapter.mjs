@@ -262,6 +262,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "api-envelope.mjs",
   "message-envelope.mjs",
   "native-json.mjs",
+  "native-poll-diagnostic.mjs",
   "app-server-adapter.mjs",
   "chat-runtime.mjs",
   "codex-home.example.toml",

@@ -136,12 +136,14 @@ test('a pending UNKNOWN retains its error but does not starve unrelated next inb
   first.effects.set('native-model', { status: 'START_RECORDED' })
   await assert.rejects(first.lane.poll(), /SKILL_RESULT_UNKNOWN/)
   second.c.executionId = 'pwe_2'; second.c.runId = 'run_2'; second.c.commandId = 'cmd_2'; second.c.messageId = 'msg_2'
-  const options = { ...first.options, runners: second.options.runners, fetchFn: async (url, opts) => {
+  let now = 0
+  const options = { ...first.options, now: () => now, random: () => 1, runners: second.options.runners, fetchFn: async (url, opts) => {
     if (url.pathname.endsWith('/commands')) return response(url, { items: [wireCommand(second.c)] })
     return (url.pathname.includes('/runs/run_2/') ? second.options : first.options).fetchFn(url, opts)
   } }
   const lane = new SkillConversationLane(options)
   for (let attempt = 0; attempt < 2; attempt++) {
+    now += 300000
     await assert.rejects(lane.poll(), error => {
       assert.equal(error.code, 'SKILL_RESULT_UNKNOWN'); assert.equal(error.processed, 1)
       assert.deepEqual(error.executionErrors, [{ executionId: first.c.executionId, code: 'SKILL_RESULT_UNKNOWN' }])
@@ -224,4 +226,48 @@ test('public command projection keeps private checkpoint hash preimage byte-for-
   assert.equal(JSON.stringify(publicCommand), publicBytes)
   assert.throws(() => skillCommandFromWire(original), /SKILL_COMMAND_INVALID/)
   assert.throws(() => skillCommandFromWire({ ...publicCommand, snapshotDigest: original.snapshotDigest }), /SKILL_COMMAND_INVALID/)
+})
+
+
+test('UNKNOWN defers only its execution, avoids heavy process calls and resumes after exponential backoff', async t => {
+  const f = fixture(t); let now = 0, calls = 0, recover = false
+  const lane = new SkillConversationLane({ ...f.options, now: () => now, random: () => 1 })
+  lane.process = async () => { calls++; if (!recover) throw Object.assign(new Error('unknown'), { code: 'SKILL_RESULT_UNKNOWN' }) }
+  await assert.rejects(lane.poll(), /unknown/)
+  for (now = 3000; now < 15000; now += 3000) assert.deepEqual(await lane.poll(), { processed: 0, deferred: 1 })
+  assert.equal(calls, 1)
+  await assert.rejects(lane.poll(), /unknown/); assert.equal(calls, 2)
+  now = 44999; assert.deepEqual(await lane.poll(), { processed: 0, deferred: 1 })
+  now = 45000; recover = true; assert.deepEqual(await lane.poll(), { processed: 1 })
+  assert.equal(lane.unknownRetries.size, 0)
+  assert.equal(f.modelCalls(), 0)
+})
+test('UNKNOWN delay is bounded without a deadline; unrelated commands continue during cooldown', async t => {
+  const f = fixture(t); let now = 0; const visited = []
+  const lane = new SkillConversationLane({ ...f.options, now: () => now, random: () => 0 })
+  const other = { ...f.c, executionId: 'pwe_2', runId: 'run_2' }
+  lane.fetch = async url => response(url, { items: [wireCommand(f.c), wireCommand(other)] })
+  lane.process = async c => { visited.push(c.executionId); if (c.executionId === f.c.executionId) throw Object.assign(new Error('unknown'), { code: 'SKILL_RESULT_UNKNOWN' }) }
+  await assert.rejects(lane.poll(), /unknown/)
+  visited.length = 0; assert.deepEqual(await lane.poll(), { processed: 1, deferred: 1 }); assert.deepEqual(visited, ['pwe_2'])
+  for (let i = 0; i < 12; i++) {
+    const retry = lane.unknownRetries.get(f.c.executionId)
+    assert.ok(retry.nextAt - now >= 12000 && retry.nextAt - now <= 300000)
+    now = retry.nextAt; await assert.rejects(lane.poll(), /unknown/)
+  }
+})
+test('reconstructing a lane never replays an unknown effect despite resetting scheduling delay', async t => {
+  const f = fixture(t); f.effects.set('native-model', { status: 'START_RECORDED' })
+  await assert.rejects(f.lane.poll(), /SKILL_RESULT_UNKNOWN/)
+  await assert.rejects(new SkillConversationLane(f.options).poll(), /SKILL_RESULT_UNKNOWN/)
+  assert.equal(f.modelCalls(), 0)
+})
+test('a different recovery error clears UNKNOWN backoff and is not silently swallowed', async t => {
+  const f = fixture(t); let now = 0, code = 'SKILL_RESULT_UNKNOWN'
+  const lane = new SkillConversationLane({ ...f.options, now: () => now, random: () => 1 })
+  lane.process = async () => { throw Object.assign(new Error(code), { code }) }
+  await assert.rejects(lane.poll(), /SKILL_RESULT_UNKNOWN/)
+  now = 15000; code = 'SKILL_TRANSPORT_UNKNOWN'
+  await assert.rejects(lane.poll(), /SKILL_TRANSPORT_UNKNOWN/)
+  assert.equal(lane.unknownRetries.size, 0)
 })

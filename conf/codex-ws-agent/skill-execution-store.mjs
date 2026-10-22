@@ -146,7 +146,7 @@ export class SkillEffects {
     try { value = await invoke() } catch (cause) {
       this.store.write(name, { ...local, status: 'UNKNOWN' })
       try { await this.report(effectId, { effectDigest, providerBindingRevision: this.bindingRevision, status: 'UNKNOWN', providerRequestId: null, resultDigest: null }) } catch {}
-      throw Object.assign(new Error('SKILL_RESULT_UNKNOWN'), { code: 'SKILL_RESULT_UNKNOWN', cause })
+      throw Object.assign(new Error('SKILL_RESULT_UNKNOWN'), { code: 'SKILL_RESULT_UNKNOWN', stage: 'skill-effect-invoke', cause })
     }
     // Store actual returned bytes before reporting result or staging any output.
     const encoded = { ...value }
