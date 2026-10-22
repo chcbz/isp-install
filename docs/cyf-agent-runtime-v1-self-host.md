@@ -288,3 +288,11 @@ KillSignal=SIGTERM
 8. 失败保留阶段记录、先归因再恢复：原制品和当前业务状态保持对应，逆向移动原数据并恢复配置/路径映射。若新服务已产生写入，禁止用旧DB快照覆盖当前状态；只逆向修正当前索引。恢复也只能启动统一服务，不重新enroll、清队列或重放未知请求。
 
 现用目录、退役备份、源码可用、目标服务在线和真实业务验收分别记录。目标机升级不意味着网站已发布；网站新文书发布也不会远程自动更新已有安装。
+
+## 10. CYF unified Node baseline (2026-10-22 candidate)
+
+The CYF host and Flow toolchain target Node **24.22.1**, with npm **11.19.1** from the same official distribution. Runtime 1.2.5 must be prepared with that exact supplied Node/npm; its immutable artifact may carry the same Node bytes, not a separate version track. The generic Runtime installer still records the actual interpreter and does not impose a new global engine allowlist. This candidate is not evidence that any host has switched.
+
+Linux x64 archive SHA-256: `6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6`. Verify the official release manifest and archive before preparation. Extract as the intended trusted owner (`--no-same-owner` for root preparation); archive numeric UIDs are not host trust identities. Do not relax the local-script interpreter checks.
+
+The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/npm must be inventoried and migrated together with global CLI resolution; merely prepending PATH is not convergence. Preserve existing global packages and their permissions. Coordinate other owners' active Node/Codex processes: changing filesystem entries does not change their running interpreter. Old artifacts are recovery material, not active alternative toolchains. Do not mark full-system convergence until actual service processes and Flow runs use the unified version. Runtime activation follows §7.1 and preserves identities, HOME and state; do not modify a running immutable artifact.

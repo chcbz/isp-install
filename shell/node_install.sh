@@ -20,26 +20,20 @@ show_os_info
 #===============================================================
 # 配置变量
 #===============================================================
-# 可选版本: lts (长期支持) 或 current (最新版)
-NODE_VERSION="${NODE_VERSION:-lts}"
-INSTALL_PREFIX="$ISP_APPS/nodejs"
-
-# 获取下载 URL
-get_node_url() {
-    local version=$1
-    local arch="x64"
-    
-    if [ "$version" = "lts" ]; then
-        # 获取最新 LTS 版本
-        local lts_version=$(curl -sL https://nodejs.org/dist/index.json | grep -m1 '"lts"' | grep -oP '"version":\s*"\K[^"]+')
-        echo "https://nodejs.org/dist/${lts_version}/node-${lts_version}-linux-${arch}.tar.xz"
-    else
-        echo "https://nodejs.org/dist/${version}/node-${version}-linux-${arch}.tar.xz"
-    fi
+# Explicit release input; never resolve a moving "latest" during installation.
+# CYF host, Runtime artifact and Flow use this same LTS baseline (2026-10-22).
+NODE_VERSION="${NODE_VERSION:-v24.22.1}"
+INSTALL_PREFIX="$ISP_APPS/node"
+[[ "$NODE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo 'NODE_VERSION must be an explicit vMAJOR.MINOR.PATCH' >&2; exit 1;
 }
-
-NODE_URL=$(get_node_url $NODE_VERSION)
-NODE_ARCHIVE=$(basename $NODE_URL)
+# Updating an existing host requires its release backup and process coordination;
+# do not silently nest an extracted distribution in the existing installation.
+[ ! -e "$INSTALL_PREFIX" ] && [ ! -L "$INSTALL_PREFIX" ] || {
+    echo 'Existing Node installation: use the coordinated host upgrade procedure' >&2; exit 1;
+}
+NODE_ARCHIVE="node-${NODE_VERSION}-linux-x64.tar.xz"
+NODE_URL="https://nodejs.org/dist/${NODE_VERSION}/${NODE_ARCHIVE}"
 
 #===============================================================
 # 下载 Node.js
@@ -53,6 +47,18 @@ if [ ! -f "$NODE_ARCHIVE" ]; then
     download_file "$NODE_URL"
 fi
 
+# Authenticate cached and freshly downloaded bytes against the release manifest.
+SUMS_FILE="$(mktemp "$ISP_PKGS/.node-shasums.XXXXXX")"
+trap 'rm -f -- "$SUMS_FILE"' EXIT
+curl --fail --silent --show-error --location "https://nodejs.org/dist/$NODE_VERSION/SHASUMS256.txt" -o "$SUMS_FILE"
+NODE_SHA="$(awk -v name="$NODE_ARCHIVE" '$2 == name { print $1 }' "$SUMS_FILE")"
+[ "${#NODE_SHA}" -eq 64 ] || { echo 'Missing release SHA256' >&2; exit 1; }
+# The default release also has an independently fixed digest, shared with Flow.
+if [ "$NODE_VERSION" = v24.22.1 ]; then
+    [ "$NODE_SHA" = 6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 ] || exit 1
+fi
+printf '%s  %s\n' "$NODE_SHA" "$NODE_ARCHIVE" | sha256sum -c -
+
 #===============================================================
 # 解压安装
 #===============================================================
@@ -60,9 +66,9 @@ echo ""
 echo "[2/3] 解压安装 Node.js..."
 
 mkdir -p $ISP_APPS
-tar -xJf $NODE_ARCHIVE -C $ISP_APPS
+tar --no-same-owner -xJf "$NODE_ARCHIVE" -C "$ISP_APPS"
 
-# 重命名为 nodejs
+# Canonical host Node entry
 NODE_DIR=$(tar -tf $NODE_ARCHIVE | head -1 | cut -d'/' -f1)
 mv $ISP_APPS/$NODE_DIR $INSTALL_PREFIX
 
@@ -114,7 +120,7 @@ $INSTALL_PREFIX/bin/npm install -g yarn pnpm pm2
 cat > $ISP_BIN/node.sh << 'SCRIPT'
 #!/bin/bash
 
-NODE_HOME=/home/isp/apps/nodejs
+NODE_HOME=/home/isp/apps/node
 
 case "$1" in
     version|v)
