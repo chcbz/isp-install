@@ -123,7 +123,8 @@ test('byte-pinned E05 r2 at fake clock reaches local real HTTP ACK and unique ma
   assert.deepEqual(runtime.ledger.getEntry(raw.commandId).runtimeCommand, expected());
   assert.equal(accepted.item.record.expiresAt, raw.expiresAt);
   runtime.processor.resume(); await runtime.processor.waitForIdle(); await runtime.processor.runtimeAckTail;
-  assert.equal(runs, 1); assert.deepEqual(h.errors, []);
+  assert.deepEqual(h.errors, []);
+  assert.equal(runs, 1, JSON.stringify({ ackFailure: runtime.processor.runtimeAckFailure?.code || runtime.processor.runtimeAckFailure?.name, rejected: runtime.rejected.map(error => ({ code: error.code })), acks: h.acks().map(row => row.body.status) }));
   const { hostId: oldHost, runtimeInstanceId: oldBoot, sessionGeneration: oldGeneration, deliveryVersion: oldVersion, status: oldStatus, ...oldContext } = wire.canonicalDispatchProjectionR2.projectedFirstAck;
   assert.deepEqual(h.acks()[0].body, { ...runtimeAckWireContext(oldContext), hostId: oldHost, runtimeInstanceId: oldBoot, sessionGeneration: String(oldGeneration), deliveryVersion: oldVersion, status: oldStatus });
   assert.deepEqual(h.acks().map(row => [row.body.status, row.body.deliveryVersion]), [['RECEIVED', null], ['STARTED', '1'], ['SUCCEEDED', '2']]);
