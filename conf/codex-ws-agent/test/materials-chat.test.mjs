@@ -42,6 +42,9 @@ function context(t, message = messageFixture(), outcome = { revision: null, sche
   const fetched = [], frames = [], events = [], preparations = []; let finalPrepared = null, starts = 0
   const readback = { initialize: {}, account: {}, models: {}, config: {}, tools: {}, schema: { ...schema, schemaContractId: schema.contractId, measured: true } }
   const adapter = { closed: false, readback, startOrResumeThread: async (prior, policy) => {
+    assert.match(policy.developerInstructions, /Context Envelope and the authorized material carriers actually attached/);
+    assert.match(policy.developerInstructions, /inputMimeTypes list restricts that skill execution, not native reading/);
+    assert.match(policy.developerInstructions, /if a carrier is absent or genuinely unreadable/);
     assert.equal(prior, null); assert.equal(policy.cwd, '/inputs'); assert.equal(policy.config.network, false); return { threadId: 'materials-thread' }
   }, runTurn: async options => {
     starts++; events.push('turn'); assert.equal(options.input.length, 33)

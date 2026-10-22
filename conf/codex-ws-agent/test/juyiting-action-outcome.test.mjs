@@ -218,3 +218,15 @@ test('existing-result submission is format-neutral and never fabricates a textua
   assert.throws(() => validateActionOutcome(f.outcome, f.facts, f.parent, []))
   assert.throws(() => validateActionOutcome(f.outcome, f.facts, f.parent, [...f.targets, ...f.targets]))
 })
+
+// Native material reading must not inherit an editing skill's MIME restrictions.
+test('native read answer accepts AVIF while PNG-only skill execution remains rejected', () => {
+  const f = facts(); f.availableSources = [{ sourceRefId: 'source-avif', kind: 'TASK_WORKSPACE_FILE', mediaType: 'image', contentMimeType: 'image/avif' }];
+  f.inspectedSourceRefIds = []; f.availableActions[0].inputMimeTypes = ['image/png', 'image/jpeg'];
+  const answer = structuredClone(fixture.outcomes[0]);
+  assert.doesNotThrow(() => validateActionOutcome(answer, f));
+  const execute = action(); execute.action.sourceRefIds = ['source-avif'];
+  assert.throws(() => validateActionOutcome(execute, f), /ACTION_SELECTION_INVALID/);
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /inputMimeTypes list restricts that skill execution, not native reading/);
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /if a carrier is absent or genuinely unreadable/);
+});

@@ -164,3 +164,7 @@ INSPECT 测量完成会触发携带最新声明的重新注册。读取资料和
 INSPECT 的 v3 原生输出 schema 进一步固定 `deliverable=false`、`deliveryRelation=null`，不把资料读取回复关联成可验收成果。模型终态返回后，即使成果关联/其他严格校验拒绝回复，也必须保留原私有引擎状态供只读核对，不得在 finally 删除唯一终态，再用新模型 turn 补偿。历史已被删除的引擎状态不可能由本修复补回；缺少原终态时不能伪造成功。
 
 恢复只允许打开已存在且有精确 binding marker 的原引擎目录。原目录/marker 缺失时返回 `TYPED_INSPECTION_RECOVERY_STATE_MISSING`，不重建目录、不复制新凭据、不启动新 adapter 或模型 turn；必须另行安排明确的全新验证请求，不能冒充原 turn 的终态恢复。
+
+### 原生资料读取与执行技能边界（2026-10-22）
+
+Runtime 1.2.6 的定向修正基于 `6c2cadc6`：CHAT 模型输入包含 Context Envelope **及本 turn 实际投递的授权 material carriers**。`availableActions[].inputMimeTypes` 只限制对应技能执行，不限制原生读图/阅读；原始来源仍保留原格式、hash，原生输入可使用已验证的解码派生图。不能因为编辑技能只接受 PNG/JPEG 就要求已投递 AVIF 的用户重新上传。无 carrier 或实际不可读仍需如实提示，不猜内容、不用阅读权限扩大技能权限。回归入口：`test/materials-chat.test.mjs`、`test/juyiting-action-outcome.test.mjs`；本节描述源码，线上是否切换以版本发布记录为准。
