@@ -296,3 +296,13 @@ The CYF host and Flow toolchain target Node **24.22.1**, with npm **11.19.1** fr
 Linux x64 archive SHA-256: `6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6`. Verify the official release manifest and archive before preparation. Extract as the intended trusted owner (`--no-same-owner` for root preparation); archive numeric UIDs are not host trust identities. Do not relax the local-script interpreter checks.
 
 The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/npm must be inventoried and migrated together with global CLI resolution; merely prepending PATH is not convergence. Preserve existing global packages and their permissions. Coordinate other owners' active Node/Codex processes: changing filesystem entries does not change their running interpreter. Old artifacts are recovery material, not active alternative toolchains. Do not mark full-system convergence until actual service processes and Flow runs use the unified version. Runtime activation follows §7.1 and preserves identities, HOME and state; do not modify a running immutable artifact.
+
+## UNKNOWN 技能恢复诊断（2026-10-22 局部源码核对）
+
+覆盖源码 `2d7650a77b058c7d80bec95e5511ef1faf6126cb`（Runtime 候选 1.2.5），仅技能 conversation lane 调度和安全日志，不代表已安装或激活。
+
+- `SKILL_RESULT_UNKNOWN` 按 executionId 延期恢复；基准间隔 15/30/60/120/240/300 秒，实际加入 0.8–1.0 倍抖动；不是请求 deadline，不终止未知执行，不重新发起未知外部副作用。到期仍走原身份、租约、结果和幂等校验。
+- 冷却期跳过该执行的完整 process，返回 `deferred` 计数而非宣称处理成功；其他执行继续。正常收件箱轮询及本地待处理扫描仍保留，尚非事件驱动或独立轻量查询协议。状态变化最迟需等当前冷却到期才会被恢复路径观察。
+- 调度信息只在当前 lane 内存中；重建/重启后重新核对一次，持久化 effect/attempt/result 的安全规则保持不变，不能因此重放 UNKNOWN。恢复成功或转为其他可处理错误时清除对应退避。
+- native poll 的 `diagnostic` 仅输出安全结构化字段：`cause=ABSENT` 表示没有 cause，`REDACTED` 表示存在但不能直接输出；网络码及合法 SKILL_/MATERIALS_ 码保留。技能进程失败可带安全 exitCode/signal，执行错误带 executionId。首次 effect 调用异常标记 `stage=skill-effect-invoke`；其他路径为 `native-conversation-poll`。不打印原始 message/stack/stderr/命令或输入。
+- 冷却期间不重复抛出同一 UNKNOWN；到期仍未知时保留真实告警。本次未做持久化告警聚合、原始异常历史补全或卡住任务自动修复。不得删除现有 checkpoint 或伪造成功来消除告警。

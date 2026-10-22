@@ -85,12 +85,13 @@ export function validateCommittedSkillResult(manifest, command, descriptor, phas
 }
 
 export class SkillConversationLane {
-  constructor({ apiOrigin, rootDir, agentId, runtimeInstanceId, scope, getRuntimeHeaders, fetchFn = globalThis.fetch, registry, runners, onCommitted = async () => {} }) {
+  constructor({ apiOrigin, rootDir, agentId, runtimeInstanceId, scope, getRuntimeHeaders, fetchFn = globalThis.fetch, registry, runners, onCommitted = async () => {}, now = Date.now, random = Math.random }) {
     this.origin = originOf(apiOrigin)
     if (!isAbsolute(rootDir || '') || !skillId(agentId) || !skillId(runtimeInstanceId) || typeof getRuntimeHeaders !== 'function'
         || typeof fetchFn !== 'function' || !scope || scope.agentId !== agentId || !registry || !(runners instanceof Map)) fail('SKILL_LANE_CONFIG_INVALID')
     this.root = resolve(rootDir, 'skill-runs'); this.agentId = agentId; this.instanceId = runtimeInstanceId
     this.scope = scope; this.auth = getRuntimeHeaders; this.fetch = fetchFn; this.registry = registry; this.runners = runners; this.active = false; this.onCommitted = onCommitted
+    this.now = now; this.random = random; this.unknownRetries = new Map()
   }
   headers() { return nativeSessionHeaders(this.auth(), this.agentId, this.instanceId) }
   async request(path, method, body, statuses = [200]) {
@@ -167,23 +168,37 @@ export class SkillConversationLane {
         if (previous && skillDigest(previous) !== skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
         commands.set(command.executionId, command)
       }
+      // Scheduling only: never an execution admission or a terminal failure.
+      for (const id of this.unknownRetries.keys()) if (!commands.has(id)) this.unknownRetries.delete(id)
+      let deferred = 0
       let processed = 0, firstError = null
       const executionErrors = [], proof = JSON.stringify(this.headers())
       for (const command of commands.values()) {
         // A command-local UNKNOWN must not starve unrelated work. A changed
         // subject/session or unsafe shared checkpoint tree ends the whole poll.
         if (proof !== JSON.stringify(this.headers())) fail('SKILL_SESSION_CHANGED')
-        try { await this.process(command); processed++ } catch (error) {
+        const retry = this.unknownRetries.get(command.executionId)
+        if (retry && this.now() < retry.nextAt) { deferred++; continue }
+        try {
+          await this.process(command); processed++
+          this.unknownRetries.delete(command.executionId)
+        } catch (error) {
           const code = error?.code
           if (typeof code !== 'string' || !/^(?:SKILL|MATERIALS)_[A-Z_]{1,80}$/.test(code)
               || /^(?:SKILL_SESSION_|SKILL_STORE_|SKILL_SCOPE_|SKILL_LANE_CONFIG_|SKILL_API_ORIGIN_)/.test(code)) throw error
+          if (code === 'SKILL_RESULT_UNKNOWN') {
+            const attempt = Math.min((retry?.attempt || 0) + 1, 6)
+            // 15s -> 30s -> ... -> 5min, with downward jitter; no deadline.
+            const delay = Math.floor(Math.min(300000, 15000 * 2 ** (attempt - 1)) * (0.8 + 0.2 * this.random()))
+            this.unknownRetries.set(command.executionId, { attempt, nextAt: this.now() + delay })
+          } else this.unknownRetries.delete(command.executionId)
           firstError ||= error
           executionErrors.push({ executionId: command.executionId, code })
         }
       }
       // Preserve the actual first error and cause, not a fake success/failure.
       if (firstError) { Object.assign(firstError, { processed, executionErrors }); throw firstError }
-      return { processed }
+      return deferred ? { processed, deferred } : { processed }
     } finally { this.active = false }
   }
   async process(command) {
