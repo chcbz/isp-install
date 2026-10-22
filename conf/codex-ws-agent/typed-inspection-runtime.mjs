@@ -1,3 +1,5 @@
+import { IMAGE_INPUT_MIMES, normalizeImageInput, IMAGE_TRANSFORM_ID } from './image-input.mjs'
+import { prepareImageDerivative } from './image-input-file.mjs'
 import { nativeSessionHeaders } from './conversation-native.mjs'
 import { parseNativeApiOrigin } from './workspace-file-bridge.mjs'
 import { ACTION_OUTCOME_SCHEMA, ACTION_OUTCOME_INSTRUCTIONS, validateActionFacts, validateActionOutcome } from './juyiting-action-outcome.mjs'
@@ -216,7 +218,7 @@ export const decodeWavInspectionInput = bytes => {
   return freeze({ decoder: 'wav-pcm-ieee-float-v1', ...format, frameCount: samples.length / format.blockAlign, sampleDigest: `sha256:${sha256(samples)}` })
 }
 export const BUILTIN_TYPED_INSPECTION_DECODERS = freeze({
-  'image/png': Object.freeze({ decoderId: 'png-rgba8-rgb8-noninterlaced-v1', validate: ({ bytes }) => decodePngInspectionInput(bytes) }),
+  ...Object.fromEntries(IMAGE_INPUT_MIMES.map(mime => [mime, Object.freeze({ decoderId: IMAGE_TRANSFORM_ID, validate: ({ bytes }) => { const value = normalizeImageInput(bytes, mime); return { decoder: IMAGE_TRANSFORM_ID, width: value.width, height: value.height, ...value.provenance } } })])),
   'audio/wav': Object.freeze({ decoderId: 'wav-pcm-ieee-float-v1', validate: ({ bytes }) => decodeWavInspectionInput(bytes) })
 })
 
@@ -309,6 +311,7 @@ export class TypedInspectionMaterializer {
 const carrierSource = (source, profileRuntime = null, inputDirectory = '') => {
   const base = { sourceRefId: source.sourceRefId, sha256: source.sha256, byteLength: source.byteLength, mimeType: source.mimeType,
     carrier: source.carrier, carrierContractDigest: source.carrierContractDigest, bytes: Buffer.from(source.bytes) }
+  if (source.carrier === 'LOCAL_IMAGE' && source.mimeType !== 'image/png') return { ...base, path: source.path, derivative: prepareImageDerivative(source, path => profileRuntime ? profileRuntime.mapInputPath(path, inputDirectory) : path) }
   if (source.carrier === 'LOCAL_IMAGE' || source.carrier === 'LOCAL_AUDIO') return { ...base, path: profileRuntime ? profileRuntime.mapInputPath(source.path, inputDirectory) : source.path }
   if (source.carrier === 'PARSED_TEXT') return { ...base, parser: source.parser, parsedText: source.parsedText }
   return base

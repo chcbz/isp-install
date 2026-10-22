@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "skillKey": "text-file",
-  "skillVersion": "1.0.1",
+  "skillVersion": "1.1.0",
   "title": "文本文件",
   "description": "从实际任务资料生成完整UTF-8文本文件。",
   "runner": "native-model",
@@ -20,7 +20,15 @@
       "text/plain",
       "text/markdown",
       "application/json",
-      "image/png"
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "image/gif",
+      "image/bmp",
+      "image/tiff",
+      "image/heic",
+      "image/heif",
+      "image/avif"
     ]
   },
   "outputs": {

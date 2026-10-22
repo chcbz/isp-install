@@ -1,3 +1,4 @@
+import { IMAGE_INPUT_MIMES } from './image-input.mjs'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve, sep } from 'node:path'
 import { parseNativeApiOrigin } from './workspace-file-bridge.mjs'
@@ -33,7 +34,7 @@ const parseInspection = value => {
   const supportedInputs = value.supportedInputs.map(item => {
     const key = [item?.mediaKind, item?.mimeType, item?.carrier].join('\0')
     if (!exactKeys(item, ['mediaKind', 'mimeType', 'carrier', 'carrierContractDigest']) || !digest(item.carrierContractDigest) ||
-      !['image\0image/png\0LOCAL_IMAGE', 'audio\0audio/wav\0LOCAL_AUDIO', 'text\0text/plain\0DIRECT_TEXT'].includes(key) || seen.has(key)) {
+      ![...IMAGE_INPUT_MIMES.map(mime => `image\0${mime}\0LOCAL_IMAGE`), 'audio\0audio/wav\0LOCAL_AUDIO', 'text\0text/plain\0DIRECT_TEXT'].includes(key) || seen.has(key)) {
       throw new Error('Invalid scoped INSPECT supported input')
     }
     seen.add(key); return Object.freeze({ ...item })

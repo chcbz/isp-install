@@ -1,3 +1,4 @@
+import { prepareImageDerivative } from './image-input-file.mjs'
 /** Authorized materials in the original CHAT turn. Reuses the existing byte
  * materializer, measured carrier isolation and durable CHAT inbox; no new lane. */
 import { canonicalSha256 } from './chat-runtime.mjs'
@@ -64,6 +65,7 @@ export async function prepareChatMaterials({ profile, message, materials, materi
   const sources = materialized.sources.map(source => {
     const base = { sourceRefId: source.sourceRefId, sha256: source.sha256, byteLength: source.byteLength,
       mimeType: source.mimeType, carrier: source.carrier, carrierContractDigest: source.carrierContractDigest, bytes: source.bytes }
+    if (source.carrier === 'LOCAL_IMAGE' && source.mimeType !== 'image/png') return { ...base, path: profileRuntime.mapInputPath(source.path, materialized.directory), derivative: prepareImageDerivative(source, path => profileRuntime.mapInputPath(path, materialized.directory)) }
     return source.carrier === 'LOCAL_IMAGE' || source.carrier === 'LOCAL_AUDIO'
       ? { ...base, path: profileRuntime.mapInputPath(source.path, materialized.directory) }
       : source.carrier === 'PARSED_TEXT' ? { ...base, parser: source.parser, parsedText: source.parsedText } : base

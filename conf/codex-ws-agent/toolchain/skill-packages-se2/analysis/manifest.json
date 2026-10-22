@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "skillKey": "analysis",
-  "skillVersion": "1.0.1",
+  "skillVersion": "1.1.0",
   "title": "资料分析",
   "description": "在隔离原生模型中使用实际授权资料生成结构化分析。",
   "runner": "native-model",
@@ -20,7 +20,15 @@
       "text/plain",
       "text/markdown",
       "application/json",
-      "image/png"
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "image/gif",
+      "image/bmp",
+      "image/tiff",
+      "image/heic",
+      "image/heif",
+      "image/avif"
     ]
   },
   "outputs": {

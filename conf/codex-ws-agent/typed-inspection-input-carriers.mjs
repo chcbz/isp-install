@@ -80,13 +80,21 @@ const parseDirectText = source => {
   return { nativeInput: { type: 'text', text }, receiptSource: receiptSource(source, contributionDigest) }
 }
 const parseLocal = (source, adapters, key) => {
-  if (!exactKeys(source, ['sourceRefId', 'sha256', 'byteLength', 'mimeType', 'carrier', 'carrierContractDigest', 'bytes', 'path']) || !validString(source.path)) fail('TYPED_INSPECTION_SOURCE_INVALID')
+  if (!exactKeys(source, ['sourceRefId', 'sha256', 'byteLength', 'mimeType', 'carrier', 'carrierContractDigest', 'bytes', 'path', ...(source.derivative ? ['derivative'] : [])]) || !validString(source.path)) fail('TYPED_INSPECTION_SOURCE_INVALID')
   assertSourceBytes(source)
-  const adapter = assertAdapter(adapters, key, source.mimeType)
+  const derived = source.derivative
+  if (derived && (key !== 'localImage' || !exactKeys(derived, ['transform','sourceSha256','sourceMimeType','sha256','byteLength','mimeType','bytes','path']) ||
+      derived.sourceSha256 !== source.sha256 || (derived.sourceMimeType !== source.mimeType &&
+        !(['image/heic','image/heif'].includes(source.mimeType) && ['image/heic','image/heif'].includes(derived.sourceMimeType))) ||
+      derived.transform !== 'magick-wasm-0.0.45-auto-orient-png-v1' || derived.mimeType !== 'image/png' ||
+      !Buffer.isBuffer(derived.bytes) || sha256(derived.bytes) !== derived.sha256 || String(derived.bytes.length) !== derived.byteLength || !validString(derived.path))) fail('TYPED_INSPECTION_IMAGE_PROVENANCE_INVALID')
+  const path = derived ? derived.path : source.path
+  const mimeType = derived ? derived.mimeType : source.mimeType
+  const adapter = assertAdapter(adapters, key, mimeType)
   let nativeInput
-  try { nativeInput = adapter.toNativeInput(Object.freeze({ path: source.path, mimeType: source.mimeType, sourceRefId: source.sourceRefId })) } catch { fail(`TYPED_INSPECTION_${key === 'localImage' ? 'LOCAL_IMAGE' : 'LOCAL_AUDIO'}_UNSUPPORTED`) }
-  if (!exactKeys(nativeInput, ['type', 'path']) || nativeInput.type !== key || nativeInput.path !== source.path) fail(`TYPED_INSPECTION_${key === 'localImage' ? 'LOCAL_IMAGE' : 'LOCAL_AUDIO'}_UNSUPPORTED`)
-  const contributionDigest = canonicalDigest(contributionBase(source))
+  try { nativeInput = adapter.toNativeInput(Object.freeze({ path, mimeType, sourceRefId: source.sourceRefId })) } catch { fail(`TYPED_INSPECTION_${key === 'localImage' ? 'LOCAL_IMAGE' : 'LOCAL_AUDIO'}_UNSUPPORTED`) }
+  if (!exactKeys(nativeInput, ['type', 'path']) || nativeInput.type !== key || nativeInput.path !== path) fail(`TYPED_INSPECTION_${key === 'localImage' ? 'LOCAL_IMAGE' : 'LOCAL_AUDIO'}_UNSUPPORTED`)
+  const contributionDigest = canonicalDigest({ ...contributionBase(source), ...(derived ? { derivative: { transform: derived.transform, sourceSha256: derived.sourceSha256, sha256: derived.sha256, mimeType: derived.mimeType, byteLength: derived.byteLength } } : {}) })
   return { nativeInput, receiptSource: receiptSource(source, contributionDigest) }
 }
 const parseParsedText = source => {

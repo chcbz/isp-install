@@ -300,6 +300,8 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "report-outbox.mjs",
   "skill-install-manager.mjs",
   "materials-input.mjs",
+  "image-input.mjs",
+  "image-input-file.mjs",
   "materials-chat.mjs",
   "skill-bindings.mjs",
   "skill-runners/native-model.mjs",

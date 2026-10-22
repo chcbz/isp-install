@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "skillKey": "image-generate",
-  "skillVersion": "1.0.0",
+  "skillVersion": "1.1.0",
   "title": "图片生成",
   "description": "根据任务要求生成图片，可带已授权参考图。",
   "runner": "provider-operation",
@@ -18,7 +18,14 @@
     "maxItems": 16,
     "acceptedMimeTypes": [
       "image/png",
-      "image/jpeg"
+      "image/jpeg",
+      "image/webp",
+      "image/gif",
+      "image/bmp",
+      "image/tiff",
+      "image/heic",
+      "image/heif",
+      "image/avif"
     ]
   },
   "outputs": {

@@ -1,3 +1,4 @@
+import { prepareImageDerivative } from './image-input-file.mjs'
 /** Shared carrier preparation for native CHAT and native-model skills. Source
  * bytes must already have been authorized by the frozen server snapshot. These
  * receipts prove delivery, not understanding. No material can grant tool access. */
@@ -35,9 +36,10 @@ export function buildMaterialsInputs({ inputs, supportedInputs = [], adapters = 
     } else {
       const decoder = BUILTIN_TYPED_INSPECTION_DECODERS[input.contentMimeType]
       if (!decoder) fail('MATERIALS_CARRIER_UNAVAILABLE')
-      try { decoder.validate({ bytes: input.bytes }) } catch (cause) { fail('MATERIALS_BYTES_INVALID', cause) }
+      try { decoder.validate({ bytes: input.bytes }) } catch (cause) { if (cause.code?.startsWith('IMAGE_')) throw cause; fail('MATERIALS_BYTES_INVALID', cause) }
       if (typeof input.path !== 'string' || realpathSync(input.path) !== input.path || !readFileSync(input.path).equals(input.bytes)) fail('MATERIALS_PATH_INVALID')
       source.path = mapPath(input.path)
+      if (config.carrier === 'LOCAL_IMAGE' && input.contentMimeType !== 'image/png') source.derivative = prepareImageDerivative({ path: input.path, bytes: input.bytes, mimeType: input.contentMimeType }, mapPath)
     }
     sources.push(source)
   }

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "skillKey": "image-edit",
-  "skillVersion": "1.0.0",
+  "skillVersion": "1.1.0",
   "title": "图片编辑",
   "description": "按用户要求修改已授权的一张图片。",
   "runner": "provider-operation",
@@ -18,7 +18,14 @@
     "maxItems": 1,
     "acceptedMimeTypes": [
       "image/png",
-      "image/jpeg"
+      "image/jpeg",
+      "image/webp",
+      "image/gif",
+      "image/bmp",
+      "image/tiff",
+      "image/heic",
+      "image/heif",
+      "image/avif"
     ]
   },
   "outputs": {

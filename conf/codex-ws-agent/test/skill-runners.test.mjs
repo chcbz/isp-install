@@ -42,7 +42,7 @@ test('generic image broker reuses exact codec and controlled endpoint without co
   assert.equal((await runner.probe({ entrypoint: 'unknown-runner' })).ready, false)
 })
 test('image edits actually transmit verified reference bytes; real errors/redirects are not faked', async () => {
-  const bindings = bindingFixture(), current = await bindings.resolve({ scope, alias: 'image' }); const input = material(Buffer.from([137,80,78,71,13,10,26,10]), 'image/png')
+  const bindings = bindingFixture(), current = await bindings.resolve({ scope, alias: 'image' }); const fixture = JSON.parse(readFileSync(new URL('./fixtures/mixed-material-api-wire-v3.json', import.meta.url))); const input = material(Buffer.from(fixture.materials.find(item => item.bytesBase64.startsWith('iVBOR')).bytesBase64, 'base64'), 'image/png')
   let calls = 0; const cause = Object.assign(new Error('reset'), { code: 'ECONNRESET' })
   const runner = createImageProviderRunner({ bindings, scope, fetchFn: async (url, opts) => { calls++; assert.equal(url.pathname, '/v1/images/edits'); assert.match(JSON.parse(opts.body).images[0].image_url, /^data:image\/png;base64,/); throw cause } })
   await assert.rejects(runner.run({ descriptor: descriptor('image-http.edit'), binding: current, inputs: [input], instruction: 'edit', parameters: {}, effects: effect }), error => error === cause)
@@ -100,7 +100,7 @@ test('skill native carrier structurally decodes genuine PNG/WAV bytes and reject
     const request = { inputs: [input], supportedInputs: [config], adapters, authorizationId: 'pwe_1', snapshotDigest: 'b'.repeat(64) }
     const prepared = buildMaterialsInputs(request); assert.equal(prepared.nativeInputs.length, 1); assert.equal(prepared.inputReceipts[0].delivery, 'DELIVERED')
     const forged = material('not real image/audio bytes', mimeType); forged.path = input.path
-    assert.throws(() => buildMaterialsInputs({ ...request, inputs: [forged] }), error => error.code === 'MATERIALS_BYTES_INVALID' && error.cause.code.includes('DECODER_REJECTED'))
+    assert.throws(() => buildMaterialsInputs({ ...request, inputs: [forged] }), error => mimeType.startsWith('image/') ? ['IMAGE_FORMAT_UNSUPPORTED','IMAGE_MIME_MISMATCH','IMAGE_DECODE_FAILED'].includes(error.code) : error.code === 'MATERIALS_BYTES_INVALID' && error.cause.code.includes('DECODER_REJECTED'))
   }
 })
 

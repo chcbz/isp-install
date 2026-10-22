@@ -126,7 +126,7 @@ test('private root symlink is rejected and concrete PNG decoder inflates actual 
   const decoded = decodePngInspectionInput(png)
   assert.deepEqual({ width: decoded.width, height: decoded.height, channels: decoded.channels }, { width: 1, height: 1, channels: 4 })
   assert.match(decoded.pixelDigest, /^sha256:[a-f0-9]{64}$/)
-  assert.equal(BUILTIN_TYPED_INSPECTION_DECODERS['image/png'].decoderId, 'png-rgba8-rgb8-noninterlaced-v1')
+  assert.equal(BUILTIN_TYPED_INSPECTION_DECODERS['image/png'].decoderId, 'magick-wasm-0.0.45-auto-orient-png-v1')
   const wav = Buffer.alloc(46); wav.write('RIFF', 0); wav.writeUInt32LE(38, 4); wav.write('WAVE', 8); wav.write('fmt ', 12); wav.writeUInt32LE(16, 16)
   wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34)
   wav.write('data', 36); wav.writeUInt32LE(2, 40); wav.writeInt16LE(1234, 44)
