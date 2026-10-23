@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "skillKey": "archive-maintenance",
+  "skillVersion": "1.1.0",
+  "title": "典籍维护",
+  "description": "将指定 UTF-8 底本整理为不可变典籍版本，默认草稿。",
+  "runner": "local-script",
+  "entrypoint": "scripts/build-archive.mjs",
+  "parametersSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {},
+    "additionalProperties": true
+  },
+  "inputs": {
+    "minItems": 0,
+    "maxItems": 0,
+    "acceptedMimeTypes": []
+  },
+  "outputs": {
+    "dataSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object"
+    },
+    "mimeTypes": [
+      "application/json"
+    ],
+    "multiple": false,
+    "artifactsRequired": false
+  },
+  "requirements": {
+    "tools": [
+      "node"
+    ]
+  }
+}

@@ -1,3 +1,5 @@
+import { ArchiveJobReconciler } from './archive-job-reconciler.mjs'
+import { PositionSkillReconciler } from './position-skill-reconciler.mjs'
 import { nativePollDiagnostic } from './native-poll-diagnostic.mjs'
 import { fromAgentWire } from './agent-message-wire.mjs'
 import { readNativeJson } from './native-json.mjs'
@@ -6662,6 +6664,30 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         bindTransport: transport => {
           if (!entry.state || entry.closed || !transport || typeof transport.ready !== 'function' || typeof transport.send !== 'function') throw new AgentProtocolError('RUNTIME_TRANSPORT_REQUIRED', 'A bound Runtime transport is required')
           entry.state.runtimeTransport = transport
+        },
+        reconcilePositionSkills: async () => {
+          const state = entry.state, transport = state?.runtimeTransport
+          if (!state || entry.closed || !state.profile.skillInstallEnabled || !transport?.ready?.()) return
+          if (!state.positionSkillReconciler || state.positionSkillTransport !== transport) {
+            state.positionSkillTransport = transport
+            state.positionSkillReconciler = new PositionSkillReconciler({ manager: state.skillInstallManager,
+              nativeFetch: (url, opts) => transport.nativeFetch(url, opts),
+              apiOrigin: state.skillInstallManager.wsUrl.replace(/^ws/, 'http'), agentId: state.profile.agentId,
+              current: () => !state.disposed && state.runtimeTransport === transport && transport.ready(),
+              changed: phase => { if (phase === 'changing') state.skillRegistry?.invalidate(); else void refreshMeasuredSkills(state) } })
+          }
+          return state.positionSkillReconciler.poll()
+        },
+        reconcileArchiveJobs: async () => {
+          const state=entry.state, transport=state?.runtimeTransport
+          if(!state || entry.closed || !state.profile.skillInstallEnabled || !transport?.ready?.())return
+          if(!state.archiveJobReconciler || state.archiveJobTransport!==transport){
+            state.archiveJobTransport=transport
+            state.archiveJobReconciler=new ArchiveJobReconciler({manager:state.skillInstallManager,
+              nativeFetch:(url,opts)=>transport.nativeFetch(url,opts),apiOrigin:state.skillInstallManager.wsUrl.replace(/^ws/,'http'),
+              agentId:state.profile.agentId,current:()=>!entry.closed && !state.disposed && state.runtimeTransport===transport && transport.ready()})
+          }
+          return state.archiveJobReconciler.poll()
         },
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
         matchesSkillInstallResult: envelope => entry.state?.skillInstallManager.matchesDurableResultEnvelope(envelope) === true,

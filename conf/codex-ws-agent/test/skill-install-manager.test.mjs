@@ -1344,3 +1344,71 @@ test('typed receipt product identity requires exact durable pending or acknowled
   runtime.manager.healthError = new Error('fixture corruption');
   assert.equal(runtime.manager.matchesDurableResultReceipt(receipt), false);
 });
+
+test('position grant installs without marketplace order, reclaims only last-source generation and survives restart', async () => {
+  const bytes = validPackage()
+  const url = 'https://api.example.test/internal/agent/position-skills/ps_test/revisions/1/package'
+  const runtime = managerRuntime({ packageBytes: bytes, fetchFn: async () => responseFor(bytes, url) })
+  const cmd = dispatch(bytes, { commandType: 'SKILL_GRANT_INSTALL', grantId: 'ps_test', orderId: undefined,
+    commandId: 'ps_test-1', messageId: 'ps_test-1', installationId: 'ps_test-1', downloadPath: new URL(url).pathname })
+  const result = await runtime.manager.execute(cmd)
+  assert.equal(result.status, 'completed', result.errorMessage)
+  assert.equal(result.resultEnvelope.grantId, 'ps_test')
+  assert.equal(Object.hasOwn(result.resultEnvelope, 'orderId'), false)
+  assert.equal(runtime.manager.listInstalledSkills().length, 1)
+  assert.throws(() => runtime.manager.removeGranted('ps_test', '1'), /stale removal/)
+  runtime.manager.removeGranted('ps_other', '2')
+  assert.equal(runtime.manager.listInstalledSkills().length, 1)
+  runtime.manager.removeGranted('ps_test', '2')
+  assert.equal(runtime.manager.listInstalledSkills().length, 0)
+  assert.equal(existsSync(resolve(runtime.codexHome, 'skills', 'repo-test')), false)
+  const restarted = managerForExistingState(runtime); restarted.initialize()
+  assert.equal(restarted.listInstalledSkills().length, 0)
+  restarted.removeGranted('ps_test', '2')
+  const stale = await restarted.execute(cmd)
+  assert.equal(stale.status, 'failed')
+})
+
+test('grant reclamation refuses a replaced foreign directory', async () => {
+  const bytes = validPackage()
+  const url = 'https://api.example.test/internal/agent/position-skills/ps_foreign/revisions/1/package'
+  const runtime = managerRuntime({ packageBytes: bytes, fetchFn: async () => responseFor(bytes, url) })
+  const result = await runtime.manager.execute(dispatch(bytes, { commandType: 'SKILL_GRANT_INSTALL', grantId: 'ps_foreign',
+    commandId: 'ps_foreign-1', messageId: 'ps_foreign-1', installationId: 'ps_foreign-1', downloadPath: new URL(url).pathname }))
+  assert.equal(result.status, 'completed', result.errorMessage)
+  const target = resolve(runtime.codexHome, 'skills', 'repo-test')
+  renameSync(target, `${target}-saved`); mkdirSync(target); writeFileSync(resolve(target, 'user.txt'), 'preserve')
+  assert.throws(() => runtime.manager.removeGranted('ps_foreign', '2'), /exact active installation evidence/)
+  assert.equal(readFileSync(resolve(target, 'user.txt'), 'utf8'), 'preserve')
+})
+
+test('a newer desired grant retires only old physical generations and keeps same-generation replay', async () => {
+  const bytes = validPackage()
+  let revision = '1'
+  const runtime = managerRuntime({ packageBytes: bytes, fetchFn: async () => responseFor(bytes, `https://api.example.test/internal/agent/position-skills/ps_upgrade/revisions/${revision}/package`) })
+  const command = () => dispatch(bytes, { commandType: 'SKILL_GRANT_INSTALL', grantId: 'ps_upgrade', orderId: undefined,
+    commandId: `ps_upgrade-${revision}`, messageId: `ps_upgrade-${revision}`, installationId: `ps_upgrade-${revision}`,
+    fencingToken: revision, deliveryEpoch: revision, downloadPath: `/internal/agent/position-skills/ps_upgrade/revisions/${revision}/package` })
+  assert.equal((await runtime.manager.execute(command())).status, 'completed')
+  runtime.manager.removeGranted('ps_upgrade', revision, { keepCurrent: true })
+  assert.equal(runtime.manager.listInstalledSkills().length, 1)
+  revision = '3'
+  runtime.manager.removeGranted('ps_upgrade', revision, { keepCurrent: true })
+  assert.equal(runtime.manager.listInstalledSkills().length, 0)
+  assert.equal((await runtime.manager.execute(command())).status, 'completed')
+  runtime.manager.removeGranted('ps_upgrade', revision, { keepCurrent: true })
+  assert.equal((await runtime.manager.execute(command())).idempotent, true)
+  assert.throws(() => runtime.manager.removeGranted('ps_upgrade', '2', { keepCurrent: true }), /stale removal/)
+})
+
+
+test('the exact generic archive package passes the durable installer identity and executable checks', async () => {
+  const bytes=readFileSync(new URL('../../skills/archive-maintenance-1.1.1.zip',import.meta.url))
+  const url='https://api.example.test/internal/agent/position-skills/ps_archive/revisions/1/package'
+  const runtime=managerRuntime({packageBytes:bytes,fetchFn:async()=>responseFor(bytes,url)})
+  const result=await runtime.manager.execute(dispatch(bytes,{commandType:'SKILL_GRANT_INSTALL',grantId:'ps_archive',orderId:undefined,
+    commandId:'ps_archive-1',messageId:'ps_archive-1',installationId:'ps_archive-1',skillKey:'archive-maintenance',skillVersion:'1.1.1',downloadPath:new URL(url).pathname}))
+  assert.equal(result.status,'completed',result.errorMessage)
+  assert.equal(runtime.manager.listInstalledSkills()[0].manifest.runner,'local-script')
+  assert.equal(runtime.manager.listInstalledSkills()[0].manifest.skillKey,'archive-maintenance')
+})

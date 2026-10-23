@@ -415,3 +415,22 @@ test('runtime failure diagnosis records safe codes without messages or authoriza
   assert.equal(classifyRuntimeError({ code: 'RUNTIME_SESSION_PROOF_INVALID' }).kind, 'permanent');
   assert.equal(classifyRuntimeError({ code: 'UNKNOWN' }).kind, 'permanent');
 });
+
+
+test('archive native lane permits only exact job reads/results and never user or arbitrary archive endpoints', async t => {
+  const calls=[];const {client}=await setup(t,async(url,options)=>{calls.push({url,options});return response(calls.length===1?session(7):{});});
+  await client.session();
+  for(const [path,options] of [
+    ['/internal/archive/v1/jobs',{}],['/internal/archive/v1/jobs/job-1/source',{}],['/internal/archive/v1/jobs/job-1/result',{}],
+    ['/internal/archive/v1/jobs/job-1/result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({manifestJson:null,manifestFileSha256:null,errorCode:'ARCHIVE_SCRIPT_FAILED'})}]
+  ])await client.nativeFetch('https://api.example.test'+path,options);
+  assert.equal(calls.length,5);
+  for(const [path,options] of [
+    ['/internal/archive/v1/jobs',{method:'POST',body:'{}'}],['/internal/archive/v1/jobs/job-1/source',{method:'POST',body:'{}'}],
+    ['/internal/archive/v1/jobs/job-1/result',{method:'DELETE'}],['/internal/archive/v1/jobs/job-1/result/extra',{}],
+    ['/internal/archive/v1/jobs?owner=forged',{}],['/archive/admin/v1/jobs',{}],['/internal/archive/v1/other',{}],
+    ['/internal/archive/v1/jobs/%6aob-1/source',{}],['/internal/archive/v1/jobs/job-1/source',{body:'{}'}]
+  ])await assert.rejects(client.nativeFetch('https://api.example.test'+path,options),/SCOPE_INVALID/);
+  assert.equal(calls.length,5);client.invalidateSession();
+  await assert.rejects(client.nativeFetch('https://api.example.test/internal/archive/v1/jobs'),/SESSION_REQUIRED/);
+});

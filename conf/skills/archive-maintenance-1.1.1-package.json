@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "skillKey": "archive-maintenance",
+  "skillVersion": "1.1.1",
+  "packageFile": "archive-maintenance-1.1.1.zip",
+  "packageSha256": "5861b17f8eed7bb71a4c1d3ab93f2ec23a734e2915269f7715413e021d03c780",
+  "packageByteLength": 3006,
+  "manifestSha256": "c5f20d2633fdd5c1fca570a257bb3d9380775fa7ff4d8f6ad6353eecc63c5c07",
+  "state": "PREPARED_NOT_PUBLISHED"
+}

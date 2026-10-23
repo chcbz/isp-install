@@ -37,6 +37,7 @@ const RESULT_TYPE = 'SKILL_INSTALL_RESULT'
 export const WORK_RESULT_RECEIPT_TYPE = 'work.result.receipt'
 const RESULT_RECEIPT_STATUS = 'ACCEPTED'
 const COMMAND_TYPE = 'SKILL_INSTALL'
+const GRANT_COMMAND_TYPE = 'SKILL_GRANT_INSTALL'
 const DOWNLOAD_PREFIX = '/internal/agent/skill-installations/'
 const MARKER_NAME = '.cyf-installation.json'
 const DEFAULT_MAX_PACKAGE_BYTES = 16 * 1024 * 1024
@@ -432,7 +433,7 @@ const commandFingerprint = command => `sha256:${sha256Hex(Buffer.from(JSON.strin
   fencingToken: command.fencingToken,
   deliveryEpoch: command.deliveryEpoch,
   targetAgentId: command.targetAgentId,
-  orderId: command.orderId,
+  ...(command.grantId ? { grantId: command.grantId } : { orderId: command.orderId }),
   installationId: command.installationId,
   productVersionId: command.productVersionId,
   skillKey: command.skillKey,
@@ -447,7 +448,7 @@ export const validateSkillInstallCommand = (message, profile, maxPackageBytes = 
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'SKILL_INSTALL command must be an object')
   }
   const commandType = exactField(message, 'commandType')
-  if (commandType !== COMMAND_TYPE) {
+  if (![COMMAND_TYPE, GRANT_COMMAND_TYPE].includes(commandType)) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, `commandType must be exactly ${COMMAND_TYPE}`)
   }
   const targetAgentId = requireSafeId(exactField(message, 'targetAgentId'), 'targetAgentId')
@@ -466,7 +467,9 @@ export const validateSkillInstallCommand = (message, profile, maxPackageBytes = 
     fencingToken: requirePositiveDecimal(exactField(message, 'fencingToken'), 'fencingToken'),
     deliveryEpoch: requirePositiveDecimal(exactField(message, 'deliveryEpoch'), 'deliveryEpoch'),
     targetAgentId,
-    orderId: requireSafeId(exactField(message, 'orderId'), 'orderId'),
+    ...(commandType === GRANT_COMMAND_TYPE
+      ? { grantId: requireSafeId(exactField(message, 'grantId'), 'grantId') }
+      : { orderId: requireSafeId(exactField(message, 'orderId'), 'orderId') }),
     installationId: requireSafeId(exactField(message, 'installationId'), 'installationId'),
     productVersionId: requireSafeId(exactField(message, 'productVersionId'), 'productVersionId'),
     skillKey: exactField(message, 'skillKey'),
@@ -490,7 +493,13 @@ export const validateSkillInstallCommand = (message, profile, maxPackageBytes = 
   if (typeof command.packageDigest !== 'string' || !SHA256_DIGEST.test(command.packageDigest)) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'packageDigest must be canonical lowercase sha256')
   }
-  const exactDownloadPath = `${DOWNLOAD_PREFIX}${command.installationId}/package`
+  if (command.grantId && (command.installationId !== `${command.grantId}-${command.fencingToken}`
+      || command.deliveryEpoch !== command.fencingToken)) {
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'grant generation does not match physical installation')
+  }
+  const exactDownloadPath = command.grantId
+    ? `/internal/agent/position-skills/${command.grantId}/revisions/${command.fencingToken}/package`
+    : `${DOWNLOAD_PREFIX}${command.installationId}/package`
   if (typeof command.downloadPath !== 'string' || command.downloadPath !== exactDownloadPath) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'downloadPath must be the exact installation-scoped API path')
   }
@@ -526,7 +535,8 @@ export const buildSkillDownloadUrl = (wsUrl, downloadPath) => {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'downloadPath is invalid')
   }
   if (download.origin !== endpoint.origin || download.username || download.password
-      || download.search || download.hash || !download.pathname.startsWith(DOWNLOAD_PREFIX)) {
+      || download.search || download.hash || !(download.pathname.startsWith(DOWNLOAD_PREFIX)
+        || /^\/internal\/agent\/position-skills\/[A-Za-z0-9][A-Za-z0-9._:-]{0,99}\/revisions\/[1-9][0-9]*\/package$/.test(download.pathname))) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'downloadPath must remain on the configured API origin')
   }
   return download
@@ -908,7 +918,7 @@ export const buildSkillInstallResultEnvelope = ({ profile, command, status, fail
   attempt: command?.attempt ?? 0,
   fencingToken: command?.fencingToken || '',
   deliveryEpoch: command?.deliveryEpoch || '',
-  orderId: command?.orderId || '',
+  ...(command?.grantId ? { grantId: command.grantId } : { orderId: command?.orderId || '' }),
   installationId: command?.installationId || '',
   targetAgentId: command?.targetAgentId || profile.agentId,
   sourceAgentId: profile.agentId,
@@ -1049,7 +1059,7 @@ export class SkillInstallManager {
   }
 
   _validateRegistryRecord(record, expectedInstallationId = '') {
-    if (!isObject(record) || record.formatVersion !== 2 || !['PREPARED', 'ACTIVE', 'QUARANTINED'].includes(record.state)
+    if (!isObject(record) || record.formatVersion !== 2 || !['PREPARED', 'ACTIVE', 'QUARANTINED', 'REMOVING', 'REMOVED'].includes(record.state)
         || typeof record.installationId !== 'string' || typeof record.commandFingerprint !== 'string'
         || !isObject(record.command) || !isObject(record.resultEnvelope)) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry is corrupt')
@@ -1316,7 +1326,8 @@ export class SkillInstallManager {
 
   _recoverRegistry() {
     for (const record of this._listRegistry()) {
-      if (record.state !== 'QUARANTINED') this._reconcilePreparedRecord(record)
+      if (record.state === 'REMOVING') this._finishGrantedRemoval(record)
+      else if (!['QUARANTINED', 'REMOVED'].includes(record.state)) this._reconcilePreparedRecord(record)
     }
   }
 
@@ -1693,6 +1704,7 @@ export class SkillInstallManager {
       if (existing.commandFingerprint !== command.fingerprint) {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installationId was reused with a different command fingerprint')
       }
+      if (['REMOVING', 'REMOVED'].includes(existing.state)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'retired grant generation cannot reactivate')
       if (existing.state === 'ACTIVE') {
         if (!validateMarker(existing.targetPath, command, command.fingerprint, existing.resultEnvelope.manifestSha256, existing.packageTreeDigest ?? null)) {
           throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installed target no longer matches its durable registry')
@@ -1709,7 +1721,7 @@ export class SkillInstallManager {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installationId has an unresolved prepared registry record')
     }
     for (const record of this._listRegistry()) {
-      if (record.command.skillKey === command.skillKey) {
+      if (record.command.skillKey === command.skillKey && record.state !== 'REMOVED') {
         throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'skillKey is already owned by another installationId')
       }
     }
@@ -1906,6 +1918,55 @@ export class SkillInstallManager {
     })
   }
 
+  /** Reclaim only this exact grant's verified installation. Preserve retired bytes outside CODEX_HOME.
+   * The REMOVING journal is written before the atomic move and recovered on restart. */
+  removeGranted(grantId, revision, { keepCurrent = false } = {}) {
+    requireSafeId(grantId, 'grantId'); requirePositiveDecimal(revision, 'revision')
+    if (!this.enabled || this.healthError) throw this.healthError || new SkillInstallError(SKILL_INSTALL_FAILURE.DISABLED, 'managed installation disabled')
+    return this._withLockSync(`grant-remove:${grantId}:${revision}`, () => {
+      for (const original of this._listRegistry()) {
+        if (original.command.grantId !== grantId || original.state === 'REMOVED') continue
+        if (keepCurrent && original.command.fencingToken === revision) continue
+        if (BigInt(original.command.fencingToken) >= BigInt(revision)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'stale removal cannot remove a newer grant')
+        if (original.state === 'REMOVING') { this._finishGrantedRemoval(original); continue }
+        if (original.state !== 'ACTIVE' || !validateMarker(original.targetPath, original.command, original.commandFingerprint,
+          original.resultEnvelope.manifestSha256, original.packageTreeDigest ?? null)) {
+          throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'removal requires exact active installation evidence')
+        }
+        const record = { ...original, state: 'REMOVING', removalRevision: revision,
+          removalPath: resolve(this.installationsQuarantineDir, `removed-${original.installationId}-${revision}`),
+          removalIdentity: pathIdentity(original.targetPath) }
+        this._writeRegistry(record)
+        this._finishGrantedRemoval(record)
+      }
+      return { grantId, revision, removed: true }
+    })
+  }
+
+  _finishGrantedRemoval(record) {
+    if (!record.command.grantId || !record.removalIdentity || typeof record.removalPath !== 'string'
+        || dirname(record.removalPath) !== this.installationsQuarantineDir
+        || basename(record.removalPath) !== `removed-${record.installationId}-${record.removalRevision}`) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'invalid removal journal')
+    }
+    if (existsSync(record.targetPath)) {
+      if (!validateMarker(record.targetPath, record.command, record.commandFingerprint,
+        record.resultEnvelope.manifestSha256, record.packageTreeDigest ?? null)) {
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'removal must not touch a replaced or foreign skill')
+      }
+      const moved = this.atomicFs.renameNoReplace(record.targetPath, record.removalPath, {
+        sourceParent: record.skillsRootIdentity, targetParent: pathIdentity(this.installationsQuarantineDir),
+        sourceIdentity: record.removalIdentity
+      })
+      if (!moved.ok) throw this._atomicFailure(moved, 'grant skill reclamation')
+    }
+    if (!validateMarker(record.removalPath, record.command, record.commandFingerprint,
+      record.resultEnvelope.manifestSha256, record.packageTreeDigest ?? null)) {
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'removed installation evidence missing')
+    }
+    this._writeRegistry({ ...record, state: 'REMOVED', removedAt: this.now() })
+  }
+
   reconcileCommandOutcome(message) {
     if (message?.commandType !== COMMAND_TYPE) return null
     return this._withLockSync(`reconcile-command:${message.installationId || ''}`, () => {
@@ -1933,6 +1994,8 @@ export class SkillInstallManager {
         this._quarantineResult(sourcePath, fileName.slice(0, -5), error)
         break
       }
+      // Grant receipts use the existing native session HTTP boundary, never the marketplace WS result lane.
+      if (record.envelope.grantId) continue
       if (replayToken && record.lastReplayToken === replayToken) continue
       let sent = false
       try { sent = sendFn(record.envelope) === true } catch { break }

@@ -221,7 +221,12 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           // Health revocation never removes authorization to report known outcomes.
           if (!healthy) { declaredHealthy = false; executor.suspendAdmission(); }
           else if (!declaredHealthy) register();
-          if (channelConfirmed) resume();
+          if (channelConfirmed) {
+            resume();
+            void Promise.resolve(executor.reconcilePositionSkills?.()).then(()=>executor.reconcileArchiveJobs?.()).catch(error => {
+              if (error.status !== 404) logger('position-skill-reconciliation-deferred', { code: error.code || 'POSITION_UNAVAILABLE' });
+            });
+          }
         },
         close: () => {
           if (!closed) closed = (async () => {
@@ -315,6 +320,8 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "skill-config-candidate.mjs",
   "skill-conversation.mjs",
   "skill-executor.mjs",
+  "position-skill-reconciler.mjs",
+  "archive-job-reconciler.mjs",
   "skill-execution-store.mjs",
   "skill-manifest.mjs",
   "skill-registry.mjs",
