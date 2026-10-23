@@ -138,12 +138,13 @@ default and source readiness alone is not authorization or deployment evidence.
 
 `AGENT_MANAGED_CHAT_SCOPES_FILE` points to a canonical private operator-owned JSON
 file: `{ "schemaVersion": 1, "authorizations": [...] }`. Each authorization has
-exact `tenantId`, `clientId`, `ownerJiacn`, `agentId`, `generation`, `profileId`,
-and a supported `appServerSchemaContractId` bound to the measured native version.
+exact `tenantId`, `clientId`, `ownerJiacn`, `agentId`, `generation`, `profileId`.
+There is no CLI version allowlist or generated-protocol digest gate. The old
+`appServerSchemaContractId` field has no effect and is not required.
 Only this exact managed identity receives native CHAT/typed controls; other
 managed identities do not inherit global CHAT activation. CHAT cwd is allocated
 from the managed profile identity, not copied from a template. A scope enables
-measurement, not READY: the installed binary/schema and initialized adapter
+measurement, not READY: the integrity-measured executable and initialized adapter
 still determine readiness. This does not enable INSPECT or image generation.
 
 

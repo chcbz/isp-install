@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { runSkillNativeModel } from '../agent-client.mjs'
-import { CODEX_APP_SERVER_SCHEMA_CONTRACTS, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID } from '../app-server-adapter.mjs'
+import { CODEX_APP_SERVER_SCHEMA_CONTRACTS, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID } from './fixtures/recorded-app-server-schemas.mjs'
 import { skillHash } from '../skill-executor.mjs'
 const setup = (finishReason = 'completed') => {
   const contract = CODEX_APP_SERVER_SCHEMA_CONTRACTS[DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID]

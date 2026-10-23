@@ -19,7 +19,6 @@
       "chatToolPolicy": "read-only-constrained",
       "fastChatEnabled": true,
       "appServerEnabled": true,
-      "appServerSchemaContractId": "codex-cli-0.161.0",
       "trueDeltaEnabled": true,
       "nativeConversationHttpPollEnabled": false,
       "workspaceNoTaskPolicy": "reject"

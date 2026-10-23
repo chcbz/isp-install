@@ -174,7 +174,7 @@ JS
 "$ARTIFACT/runtime/validate.sh" --root "$ARTIFACT" --config "$CFG/$INSTANCE.host.json"
 ```
 
-以上是配置/制品校验，不证明Codex实际执行、网络授权或业务已经成功。服务用户与配置/凭据/状态所有者必须一致；host状态不得和Agent可写根目录重叠。Codex CLI app-server协议须匹配制品适配器支持契约，不能仅凭Node版本或validate成功断言CLI兼容。
+以上是配置/制品校验，不证明Codex实际执行、网络授权或业务已经成功。服务用户与配置/凭据/状态所有者必须一致；host状态不得和Agent可写根目录重叠。Runtime1.2.9起不按Codex CLI版本或生成schema摘要拦截；保留实际握手/必需RPC及业务字段校验，不能仅凭Node版本、validate或版本探测成功断言CLI兼容。
 
 ## 6. enroll（首次接入且已登记PENDING）
 
@@ -333,3 +333,13 @@ The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/
 | 安装、工具链与Python | 来源、依赖、包摘要、不可变清单、固定app路径、锁与可恢复安装保留；未运行生产安装或重打包 |
 
 剩余已识别但本轮未改写的路径包括：`validateWorkspaceFileOutput`同步Python重开、技能安装原子操作辅助进程、资料解码/图片衍生处理、启动时命令适配器版本探测、Git工作区同步子进程以及持久队列扫描。这些不是已证实可删除的重复校验；若继续消除阻塞，应逐条调整异步调用合同并定向回归，不能只把函数声明改成async导致调用方漏await。当前不为这些潜在开销添加任意硬门限，也不据此声称业务性能全面达标。
+
+## Codex版本与生成协议不再作为准入门禁（2026-10-23，1.2.9源码候选）
+
+本节覆盖前文1.2.8的版本/schema探测口径。基线源码3c993e58033d901622c24126028199cdf4e2c76f；修改范围仅为Codex App Server启动、typed就绪与配置门禁，不是取消CYF业务协议校验。
+
+- 移除生产版本/schema合同注册表、固定版本相等比较和生成协议bundle摘要比较。启动不再运行`app-server generate-json-schema`；`--version`仅记录观察，失败或未知版本不阻止运行。历史schema fixtures仅用于测试，不作为生产白名单。
+- 静态/托管配置不再要求`appServerSchemaContractId`；已存字段忽略，不参与授权/就绪。READY需要实际初始化及已测量执行文件，不因未来版本、schema附加字段或缺失的诊断版本号判为UNAVAILABLE。
+- 必需RPC真实错误、消息绑定/结果结构、身份/ACL、网络/文件沙箱、摘要、锁和发布完整性保持原行为。未知CLI不等于兼容已验证；实际业务回归仍必要。
+- `schema`历史诊断槽中的`measured`仍指执行文件测量；合同ID/bundle摘要为空，不伪造schema已测量。汇总用`binaryMeasured`/`codexCliVersion`，INSPECT合同ID不再拼接CLI版本；执行策略仍绑定实际binaryIdentityDigest，旧carrier证据不得冒充新文件证据。
+- `CODEX_APP_SERVER_CONFIGURED_EXECUTABLE_DRIFT`是运行期间文件改变的完整性保护，仍拒绝旧测量执行。新程序获授权部署/受控重启后重新测量；不在请求中自动信任漂移、不回放旧请求、不改全局Codex。此源码说明不证明已经安装或多轮图片已验收。

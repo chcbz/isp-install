@@ -19,7 +19,7 @@ test('exact scoped composition enables native typed CHAT, not a fabricated READY
   assert.equal(enabled.typedDeliberationEnabled, true); assert.equal(enabled.chatEngine, 'app-server')
   assert.equal(enabled.chatSandbox, 'read-only'); assert.equal(enabled.chatToolPolicy, 'read-only-constrained')
   assert.equal(enabled.chatWorkdir, undefined)
-  assert.equal(enabled.appServerSchemaContractId, 'codex-cli-0.160.0')
+  assert.equal(enabled.appServerSchemaContractId, undefined)
   assert.equal(buildTypedDeliberationDeclaration(enabled, null).state, 'UNAVAILABLE')
 })
 test('every identity dimension is exact; global defaults cannot enable unrelated managed CHAT', () => {
@@ -60,10 +60,10 @@ test('managed CHAT workdirs are private and identity-isolated', () => {
   } finally { rmSync(root, { recursive: true }) }
 })
 
-test('unknown or missing exact native schema remains rejected', () => {
-  assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, appServerSchemaContractId: 'codex-cli-unknown' }])))
+test('unknown and omitted CLI schema selections do not gate exact scoped authorization', () => {
+  assert.equal(parseManagedChatScopes(doc([{ ...authorization, appServerSchemaContractId: 'codex-cli-unknown' }])).count, 1)
   const { appServerSchemaContractId, ...missing } = authorization
-  assert.throws(() => parseManagedChatScopes(doc([missing])))
+  assert.equal(parseManagedChatScopes(doc([missing])).count, 1)
 })
 
 test('readiness updates acknowledged registration, not a presence-only declaration', () => {

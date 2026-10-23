@@ -156,7 +156,7 @@ test('real bwrap profile performs a non-paid native app-server handshake with pr
     profileId: 'native-probe', agentId: 'native-probe-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex',
     codexHome: process.env.CYF_CODEX_HOME || '/root/.codex', appServerSchemaContractId: 'codex-cli-0.159.2',
     typedInspectionSupportedInputs: [{ mediaKind: 'text', mimeType: 'text/plain', carrier: 'DIRECT_TEXT', carrierContractDigest: `sha256:${'1'.repeat(64)}` }],
-    typedInspectionProviderId: 'typed-inspection-probe', typedInspectionProviderBaseUrl: 'https://provider.invalid/v1',
+    typedInspectionProviderId: 'typed-inspection-probe', typedInspectionProviderBaseUrl: process.env.CYF_TYPED_INSPECTION_PROBE_PROVIDER_URL || 'https://provider.invalid/v1',
     typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionNetworkConnectTimeoutMs: 1000
   }
   const secondInputs = resolve(root, 'inputs-second'); const secondState = resolve(root, 'state-second')

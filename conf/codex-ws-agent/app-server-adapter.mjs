@@ -10,43 +10,12 @@ import { dirname, resolve } from 'node:path'
 const id = value => typeof value === 'string' && value.length > 0
 const deniedMethods = /(?:command|file|permission|network|mcp|dynamic.?tool|tool)/i
 const terminalMethods = new Set(['turn/failed', 'turn/cancelled', 'turn/interrupted'])
-export const CODEX_APP_SERVER_SCHEMA = Object.freeze({ cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' })
-export const DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID = 'codex-cli-0.153.4'
-export const CODEX_APP_SERVER_SCHEMA_CONTRACTS = Object.freeze({
-  'codex-cli-0.161.0': Object.freeze({
-    contractId: 'codex-cli-0.161.0',
-    cliVersion: '0.161.0',
-    bundleSha256: 'e7eb93e544b11833bd4ac39d14ec6ef26791b5b1ea43db0e451d772d6d27067a'
-  }),
-  [DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID]: Object.freeze({
-    contractId: DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
-    ...CODEX_APP_SERVER_SCHEMA
-  }),
-  'codex-cli-0.160.0': Object.freeze({
-    contractId: 'codex-cli-0.160.0',
-    cliVersion: '0.160.0',
-    bundleSha256: '7243ba241962af92ca60581f1a81808ebda4212a800f8b205f54703bcfd508c5'
-  }),
-  'codex-cli-0.159.2': Object.freeze({
-    contractId: 'codex-cli-0.159.2',
-    cliVersion: '0.159.2',
-    bundleSha256: '7243ba241962af92ca60581f1a81808ebda4212a800f8b205f54703bcfd508c5'
-  })
-})
-
 const binaryMeasurementCache = new Map()
 const verifiedBinaryStates = new WeakMap()
 const inspectExecutable = createExecutableInspector({ cacheResults: false })
 const binarySnapshotDirectories = new Set()
 const failTrust = message => { const error = new Error(message); error.code = 'APP_SERVER_BINARY_UNTRUSTED'; error.trustReason = message; return error }
 const trustCause = error => error?.trustReason || (error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? error?.message : error?.code) || 'UNKNOWN'
-export const resolveCodexAppServerSchemaContract = profile => {
-  const selected = typeof profile?.appServerSchemaContractId === 'string' && profile.appServerSchemaContractId.trim()
-    ? profile.appServerSchemaContractId.trim()
-    : DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID
-  if (!Object.hasOwn(CODEX_APP_SERVER_SCHEMA_CONTRACTS, selected)) throw failTrust(`CODEX_APP_SERVER_SCHEMA_CONTRACT_UNKNOWN:${selected}`)
-  return CODEX_APP_SERVER_SCHEMA_CONTRACTS[selected]
-}
 const hashOpenedFile = (fd, size = fstatSync(fd, { bigint: true }).size) => {
   const digest = createHash('sha256'); const buffer = Buffer.allocUnsafe(1024 * 1024); let offset = 0n
   while (offset < size) {
@@ -363,7 +332,7 @@ export async function verifySpawnedAppServerExecutable(child, measurement, { tim
 }
 
 export function measureCodexAppServerBinary(profile, {
-  expected = resolveCodexAppServerSchemaContract(profile), spawnSyncFn = spawnSync, cache = binaryMeasurementCache, temporaryRoot = tmpdir(), snapshotRoot = profile.codexHome || temporaryRoot
+  spawnSyncFn = spawnSync, cache = binaryMeasurementCache, temporaryRoot = tmpdir(), snapshotRoot = profile.codexHome || temporaryRoot
 } = {}) {
   if (process.platform !== 'linux') throw failTrust('CODEX_APP_SERVER_IMMUTABLE_SNAPSHOT_UNSUPPORTED')
   let resolved; let configuredIdentity; let executableIdentity; let sourceFd
@@ -375,8 +344,7 @@ export function measureCodexAppServerBinary(profile, {
     // sufficient to reuse trust. Keep the original content-bound cache key/wire.
     const configuredNow = statIdentity(resolved.configured); const executableNow = statIdentity(resolved.executable)
     for (const candidate of cache.values()) {
-      if (candidate.cliVersion !== expected.cliVersion || candidate.bundleSha256 !== expected.bundleSha256 || candidate.schemaContractId !== (expected.contractId || null)
-          || !sameIdentity(configuredNow, candidate.configuredIdentity) || !sameIdentity(executableNow, candidate.executableIdentity) || !verifiedBinaryStates.has(candidate)) continue
+      if (!sameIdentity(configuredNow, candidate.configuredIdentity) || !sameIdentity(executableNow, candidate.executableIdentity) || !verifiedBinaryStates.has(candidate)) continue
       try { if (sameVerificationState(verifiedBinaryStates.get(candidate), binaryIntegrityState(profile, candidate))) return candidate } catch {}
     }
     configuredIdentity = statIdentity(resolved.configured); configuredIdentity.sha256 = hashFile(resolved.configured)
@@ -384,7 +352,7 @@ export function measureCodexAppServerBinary(profile, {
     configuredIdentity.ancestorPolicy = protectedAncestorPolicy(resolved.configured)
     executableIdentity.ancestorPolicy = protectedAncestorPolicy(resolved.executable)
   } catch (error) { if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') throw error; throw failTrust(`CODEX_APP_SERVER_BINARY_MEASUREMENT_FAILED:${error.code || error.message}`) }
-  const cacheKey = createHash('sha256').update(JSON.stringify({ configuredIdentity, executableIdentity, expected })).digest('hex')
+  const cacheKey = createHash('sha256').update(JSON.stringify({ configuredIdentity, executableIdentity })).digest('hex')
   const cached = cache.get(cacheKey)
   if (cached) { verifyCodexAppServerBinaryIdentity(profile, cached); return cached }
   try { sourceFd = openSync(resolved.executable, constants.O_RDONLY | constants.O_NOFOLLOW) }
@@ -397,23 +365,19 @@ export function measureCodexAppServerBinary(profile, {
   }
   closeSync(sourceFd)
   const snapshotIdentity = statIdentity(snapshot.path); snapshotIdentity.sha256 = hashFile(snapshot.path); snapshotIdentity.ancestorPolicy = protectedAncestorPolicy(snapshot.path)
-  const version = spawnSyncFn(snapshot.path, ['--version'], { encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome || '' } })
-  if (version.error || version.status !== 0 || version.signal) { binarySnapshotDirectories.delete(snapshot.directory); rmSync(snapshot.directory, { recursive: true, force: true }); throw failTrust('CODEX_APP_SERVER_VERSION_MEASUREMENT_FAILED') }
-  const versionOutput = String(version.stdout || '').trim()
-  if (versionOutput !== `codex-cli ${expected.cliVersion}`) { binarySnapshotDirectories.delete(snapshot.directory); rmSync(snapshot.directory, { recursive: true, force: true }); throw failTrust(`CODEX_APP_SERVER_VERSION_MISMATCH:${versionOutput}`) }
-  const generated = mkdtempSync(resolve(temporaryRoot, 'codex-app-server-schema-'))
   try {
-    const schema = spawnSyncFn(snapshot.path, ['app-server', 'generate-json-schema', '--experimental', '--out', generated], {
-      encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
-      env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome || '' }
-    })
-    if (schema.error || schema.status !== 0 || schema.signal) throw failTrust('CODEX_APP_SERVER_SCHEMA_MEASUREMENT_FAILED')
-    const bundle = readFileSync(resolve(generated, 'codex_app_server_protocol.schemas.json'))
-    const bundleSha256 = createHash('sha256').update(bundle).digest('hex')
-    if (bundleSha256 !== expected.bundleSha256) throw failTrust(`CODEX_APP_SERVER_SCHEMA_MISMATCH:${bundleSha256}`)
+    // Version is diagnostic only. Neither its value nor schema generation is a
+    // prerequisite to use the actual App Server RPCs. Integrity remains binding.
+    let versionOutput = ''; let versionProbeError = null
+    try {
+      const version = spawnSyncFn(snapshot.path, ['--version'], { encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome || '' } })
+      if (version.error || version.status !== 0 || version.signal) versionProbeError = version.error?.code || version.signal || `EXIT_${version.status}`
+      else versionOutput = String(version.stdout || '').trim()
+    } catch (error) { versionProbeError = error.code || 'VERSION_PROBE_FAILED' }
+    const cliVersion = /^codex-cli\s+(\S+)$/.exec(versionOutput)?.[1] || null
     const resources = resourceManifest(executableResources(resolved.executable)); const telemetry = resourceTelemetry(resources)
     const measurement = {
-      measured: true, schemaContractId: expected.contractId || null, cliVersion: expected.cliVersion, versionOutput, bundleSha256, snapshotKind: snapshot.snapshotKind,
+      measured: true, schemaContractId: null, cliVersion, versionOutput, versionProbeError, bundleSha256: null, snapshotKind: snapshot.snapshotKind,
       binarySha256: executableIdentity.sha256, binaryIdentityDigest: cacheKey, resourceDigest: manifestDigest(resources),
       resourceFileCount: telemetry.fileCount, resourceBytes: telemetry.totalBytes,
       configuredIdentity: Object.freeze(configuredIdentity), executableIdentity: Object.freeze(executableIdentity), snapshotIdentity: Object.freeze(snapshotIdentity)
@@ -423,13 +387,13 @@ export function measureCodexAppServerBinary(profile, {
   } catch (error) {
     binarySnapshotDirectories.delete(snapshot.directory); rmSync(snapshot.directory, { recursive: true, force: true })
     if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') throw error
-    throw failTrust(`CODEX_APP_SERVER_SCHEMA_MEASUREMENT_FAILED:${error.code || error.message}`)
-  } finally { rmSync(generated, { recursive: true, force: true }) }
+    throw failTrust(`CODEX_APP_SERVER_BINARY_MEASUREMENT_FAILED:${error.code || error.message}`)
+  }
 }
 
 let integrityWorker = null; let integritySequence = 0
 const integrityPending = new Map()
-const runBinaryIntegrity = (operation, profile, measurement = null, environment = undefined, expected = undefined) => new Promise((resolveJob, reject) => {
+const runBinaryIntegrity = (operation, profile, measurement = null, environment = undefined) => new Promise((resolveJob, reject) => {
   if (!integrityWorker) {
     const worker = new Worker(new URL('./app-server-integrity-worker.mjs', import.meta.url), { execArgv: [] }); integrityWorker = worker
     const failed = error => {
@@ -451,10 +415,10 @@ const runBinaryIntegrity = (operation, profile, measurement = null, environment 
     })
   }
   const id = ++integritySequence; integrityPending.set(id, { resolve: resolveJob, reject }); integrityWorker.ref()
-  try { integrityWorker.postMessage({ id, operation, profile: { codexBin: profile.codexBin, codexHome: profile.codexHome, appServerSchemaContractId: profile.appServerSchemaContractId }, measurement: measurement ? { ...measurement, snapshotPath: measurement.snapshotPath } : null, environment, expected }) }
+  try { integrityWorker.postMessage({ id, operation, profile: { codexBin: profile.codexBin, codexHome: profile.codexHome }, measurement: measurement ? { ...measurement, snapshotPath: measurement.snapshotPath } : null, environment }) }
   catch (error) { integrityPending.delete(id); if (!integrityPending.size) integrityWorker.unref(); reject(error) }
 })
-export const measureCodexAppServerBinaryAsync = (profile, { environment, expected } = {}) => runBinaryIntegrity('measure', profile, null, environment, expected)
+export const measureCodexAppServerBinaryAsync = (profile, { environment } = {}) => runBinaryIntegrity('measure', profile, null, environment)
 
 export class AppServerAdapter extends EventEmitter {
   static async spawnAsync(profile, options = {}) {
@@ -487,7 +451,7 @@ export class AppServerAdapter extends EventEmitter {
     super(); if (!child) throw new Error('APP_SERVER_CHILD_REQUIRED')
     this.child = child; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.maxStderrBytes = maxStderrBytes; this.spawnedExecutableVerifier = spawnedExecutableVerifier
     this.nextId = 1; this.pending = new Map(); this.buffer = ''; this.stderrBytes = 0; this.closed = false
-    this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [], schema: schemaMeasurement || { ...CODEX_APP_SERVER_SCHEMA, measured: false } }
+    this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [], schema: schemaMeasurement || { measured: false } }
     this.send = send || (frame => child.stdin.write(`${JSON.stringify(frame)}\n`))
     child.stdout.on('data', chunk => this._onData(chunk.toString('utf8')))
     child.stderr?.on('data', chunk => { this.stderrBytes += chunk.length; if (this.stderrBytes > this.maxStderrBytes) this.close(new Error('APP_SERVER_STDERR_LIMIT')) })

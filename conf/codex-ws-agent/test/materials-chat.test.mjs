@@ -8,7 +8,7 @@ import { normalizeInboundMessage, runFastChat, recoverMaterialsChat, buildAgentR
 import { canonicalSha256, validateChatDispatch, PersistentChatInbox } from '../chat-runtime.mjs'
 import { resolveChatMaterials } from '../materials-chat.mjs'
 import { TypedInspectionMaterializer } from '../typed-inspection-runtime.mjs'
-import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
+import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from './fixtures/recorded-app-server-schemas.mjs'
 import { materialsChatHttpScope } from '../../cyf-agent-runtime-v1/lib/runtime-client.mjs'
 const fixtureBytes = readFileSync(new URL('./fixtures/mixed-material-api-wire-v3.json', import.meta.url))
 const fixture = JSON.parse(fixtureBytes)

@@ -56,7 +56,7 @@ import {
 import { WorkspaceFileBridge } from '../workspace-file-bridge.mjs'
 import { RegistrationAckObserver } from '../registration-ack.mjs'
 import { ExecutionReportOutbox, EXECUTION_REPORT_RESULT_TYPE } from '../report-outbox.mjs'
-import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
+import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from './fixtures/recorded-app-server-schemas.mjs'
 
 const temporaryDirectories = []
 afterEach(() => {
@@ -718,11 +718,11 @@ test('typed inspection CA bundle path survives exact profile and fallback normal
 })
 
 
-test('typed deliberation declaration binds the exact locally selected schema contract and defaults legacy', () => {
+test('typed readiness uses live handshake and integrity, not selected CLI version or schema', () => {
   const legacy = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4']; const native = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
   const defaultProfile = normalizeProfile({ agentId: 'typed-default' })
   assert.equal(defaultProfile.typedDeliberationEnabled, false)
-  assert.equal(defaultProfile.appServerSchemaContractId, legacy.contractId)
+  assert.equal(defaultProfile.appServerSchemaContractId, undefined)
   const defaultTypedProfile = normalizeProfile({
     agentId: 'typed-default-ready', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
     chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained'
@@ -742,10 +742,10 @@ test('typed deliberation declaration binds the exact locally selected schema con
   }
   assert.deepEqual(buildAgentRegistrationPayload(configured, null, true, liveNative).typedDeliberation, declaration)
   assert.deepEqual(buildAgentPresencePayload(configured, 'online', { appServerAdapter: liveNative }).typedDeliberation, declaration)
-  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: adapter(legacy) }).typedDeliberation.state, 'UNAVAILABLE')
-  assert.equal(buildAgentPresencePayload({ ...configured, appServerSchemaContractId: legacy.contractId }, 'online', { appServerAdapter: liveNative }).typedDeliberation.state, 'UNAVAILABLE')
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: adapter(legacy) }).typedDeliberation.state, 'READY')
+  assert.equal(buildAgentPresencePayload({ ...configured, appServerSchemaContractId: legacy.contractId }, 'online', { appServerAdapter: liveNative }).typedDeliberation.state, 'READY')
   assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...liveNative, closed: true } }).typedDeliberation.state, 'UNAVAILABLE')
-  const incompleteMeasured = { closed: false, readback: { initialize: {}, schema: { measured: true } } }
+  const incompleteMeasured = { closed: false, readback: { initialize: {}, schema: { measured: false } } }
   for (const inherited of [...Object.getOwnPropertyNames(Object.prototype), ' __proto__ ']) {
     assert.equal(
       buildAgentRegistrationPayload({ ...configured, appServerSchemaContractId: inherited }, null, true, incompleteMeasured).typedDeliberation.state,

@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { resolveCodexAppServerSchemaContract } from './app-server-adapter.mjs'
 
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
 const exactKeys = (value, expected) => {
@@ -189,12 +188,9 @@ export const resolveTypedDeliberationRequest = (profile, message) => {
 }
 
 export const typedDeliberationAdapterReady = (profile, adapter) => {
-  let selected
-  try { selected = resolveCodexAppServerSchemaContract(profile) } catch { return false }
-  const measured = adapter?.readback?.schema
-  return Boolean(adapter && !adapter.closed && adapter.readback?.initialize && measured?.measured === true &&
-    measured.schemaContractId === selected.contractId && measured.cliVersion === selected.cliVersion &&
-    measured.bundleSha256 === selected.bundleSha256)
+  // Readiness follows the live handshake and measured executable, not a CLI
+  // version allowlist or byte-for-byte equality of the generated protocol.
+  return Boolean(adapter && !adapter.closed && adapter.readback?.initialize && adapter.readback?.schema?.measured === true)
 }
 
 export const buildTypedDeliberationDeclaration = (profile, adapter) => {

@@ -80,8 +80,8 @@ import {
 import { emptyManagedChatScopes, loadManagedChatScopes, applyManagedChatScope } from './managed-chat-scope-config.mjs'
 import { canResumePreEngineInspection, buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import {
-  AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
-  measureCodexAppServerBinary, measureCodexAppServerBinaryAsync, resolveCodexAppServerSchemaContract
+  AppServerAdapter, cleanupCodexAppServerSnapshots,
+  measureCodexAppServerBinary, measureCodexAppServerBinaryAsync
 } from './app-server-adapter.mjs'
 import { buildActionOutcomeContract, resolveActionChatRequest, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import {
@@ -588,7 +588,6 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     chatWorkdir: profile.chatWorkdir || fallback.chatWorkdir || '',
     fastChatEnabled: parseEnabledFlag(profile.fastChatEnabled ?? fallback.fastChatEnabled),
     appServerEnabled: parseEnabledFlag(profile.appServerEnabled ?? fallback.appServerEnabled),
-    appServerSchemaContractId: String(profile.appServerSchemaContractId ?? fallback.appServerSchemaContractId ?? DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID).trim() || DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
     trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
     typedDeliberationEnabled: parseEnabledFlag(profile.typedDeliberationEnabled ?? fallback.typedDeliberationEnabled),
     typedInspectionEnabled: parseEnabledFlag(profile.typedInspectionEnabled ?? fallback.typedInspectionEnabled),
@@ -4720,8 +4719,8 @@ const appServerReadbackSummary = adapter => {
     toolCount: tools.length,
     configDigest: canonicalSha256(readback.config || {}),
     toolCatalogDigest: canonicalSha256(readback.tools || {}),
-    schemaMeasured: readback.schema?.measured === true,
-    schemaBundleSha256: readback.schema?.bundleSha256 || '',
+    binaryMeasured: readback.schema?.measured === true,
+    codexCliVersion: readback.schema?.cliVersion || null,
     binaryIdentityDigest: readback.schema?.binaryIdentityDigest || '',
     hostedWireContract: readback.hostedWireContract || hostedWireContractReadback() || null,
     policy: 'read-only-constrained; approval-never-is-not-deny-all'
@@ -4945,7 +4944,6 @@ export const profileConfigurationErrors = profile => {
   if (profile.typedInspectionCarrierEvidenceDigest && !/^sha256:[a-f0-9]{64}$/.test(profile.typedInspectionCarrierEvidenceDigest)) errors.push('typedInspectionCarrierEvidenceDigest must be an exact sha256 digest')
   if (profile.typedInspectionCarrierEvidencePath && !(profile.chatModel || profile.codexModel)) errors.push('typedInspectionCarrierEvidencePath requires an explicit chatModel or codexModel')
   if (!profile.typedInspectionBwrapBin) errors.push('typedInspectionBwrapBin is required')
-  try { resolveCodexAppServerSchemaContract(profile) } catch (error) { errors.push(error.message) }
   const chatInboxMaxFiles = profile.chatInboxMaxFiles ?? 1024
   const chatInboxMaxBytes = profile.chatInboxMaxBytes ?? 64 * 1024 * 1024
   if (!Number.isSafeInteger(chatInboxMaxFiles) || chatInboxMaxFiles < 1 || chatInboxMaxFiles > 100000) errors.push('chatInboxMaxFiles must be an integer from 1 to 100000')
@@ -5017,7 +5015,6 @@ export const buildConfigurationReport = runtimeConfig => ({
       codexApproval: profile.codexApproval,
       codexSessionMode: profile.codexSessionMode,
       codexTimeoutMs: profile.codexTimeoutMs,
-      appServerSchemaContractId: profile.appServerSchemaContractId,
       codexModel: profile.codexModel || null,
       modelSource: profile.codexModel ? 'agent --model' : 'Codex configuration/default',
       websocketAuthSource: profile.runtimeIdentity ? 'installation-derived-session' : 'retired-api-key',

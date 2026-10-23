@@ -3,10 +3,10 @@
 import { parentPort } from 'node:worker_threads'
 import { spawnSync } from 'node:child_process'
 import { measureCodexAppServerBinary, verifyCodexAppServerBinaryIdentity, binaryVerificationState } from './app-server-adapter.mjs'
-parentPort.on('message', ({ id, operation, profile, measurement, environment, expected }) => {
+parentPort.on('message', ({ id, operation, profile, measurement, environment }) => {
   try {
     let result = measurement
-    if (operation === 'measure') result = measureCodexAppServerBinary(profile, { ...(expected ? { expected } : {}), ...(environment ? { spawnSyncFn: (bin, args, options) => spawnSync(bin, args, { ...options, env: environment }) } : {}) })
+    if (operation === 'measure') result = measureCodexAppServerBinary(profile, { ...(environment ? { spawnSyncFn: (bin, args, options) => spawnSync(bin, args, { ...options, env: environment }) } : {}) })
     else if (operation === 'verify') verifyCodexAppServerBinaryIdentity(profile, measurement)
     else throw new Error('UNKNOWN_BINARY_INTEGRITY_OPERATION')
     parentPort.postMessage({ id, result: { ...result, snapshotPath: result.snapshotPath }, verification: binaryVerificationState(result) })

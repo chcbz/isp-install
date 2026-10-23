@@ -13,9 +13,8 @@ import {
   ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, MAX_CONTEXT_SNAPSHOT_BYTES, verifyHostedWireContract
 } from '../chat-runtime.mjs'
 import {
-  AppServerAdapter, CODEX_APP_SERVER_SCHEMA, CODEX_APP_SERVER_SCHEMA_CONTRACTS,
-  DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID, measureCodexAppServerBinary,
-  reclaimStaleCodexAppServerSnapshots, resolveCodexAppServerSchemaContract,
+  AppServerAdapter, measureCodexAppServerBinary,
+  reclaimStaleCodexAppServerSnapshots,
   verifyCodexAppServerBinaryIdentity, verifySpawnedAppServerExecutable
 } from '../app-server-adapter.mjs'
 import { bindChatDispatchAckToSession, normalizeInboundMessage, runFastChat, runProfileChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
@@ -51,31 +50,6 @@ test('pinned Codex CLI 0.153.4 generated schemas match recorded digests and wire
   assert.deepEqual(turnStart.required, ['input', 'threadId']); assert.equal(turnStart.properties.input.type, 'array'); assert.ok(turnStart.properties.outputSchema)
   assert.ok(threadStart.properties.developerInstructions); assert.ok(threadStart.properties.baseInstructions); assert.equal(threadStart.properties.instructions, undefined)
   assert.deepEqual(completed.definitions.TurnStatus.enum, ['completed', 'interrupted', 'failed', 'inProgress'])
-})
-
-test('app-server schema registry keeps legacy default and requires an exact explicit registered native profile', () => {
-  assert.equal(DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID, 'codex-cli-0.153.4')
-  assert.deepEqual(CODEX_APP_SERVER_SCHEMA, {
-    cliVersion: appContract.cliVersion,
-    bundleSha256: appContract.bundleSha256
-  })
-  assert.deepEqual(resolveCodexAppServerSchemaContract({}), CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4'])
-  assert.deepEqual(resolveCodexAppServerSchemaContract({ appServerSchemaContractId: nativeAppContract.contractId }), {
-    contractId: nativeAppContract.contractId,
-    cliVersion: nativeAppContract.cliVersion,
-    bundleSha256: nativeAppContract.bundleSha256
-  })
-  assert.deepEqual(
-    resolveCodexAppServerSchemaContract({ appServerSchemaContractId: `  ${nativeAppContract.contractId}  ` }),
-    CODEX_APP_SERVER_SCHEMA_CONTRACTS[nativeAppContract.contractId]
-  )
-  for (const unregistered of ['codex-cli-unknown', ...Object.getOwnPropertyNames(Object.prototype), ' __proto__ ']) {
-    const selected = unregistered.trim()
-    assert.throws(
-      () => resolveCodexAppServerSchemaContract({ appServerSchemaContractId: unregistered }),
-      error => error.code === 'APP_SERVER_BINARY_UNTRUSTED' && error.trustReason === `CODEX_APP_SERVER_SCHEMA_CONTRACT_UNKNOWN:${selected}`
-    )
-  }
 })
 
 test('API-generated hostedWire golden is byte-exact and accepted as schema v1 additive durable CHAT', () => {
@@ -157,7 +131,7 @@ test('production Fast CHAT path emits only real schema-v1 delta/final with exact
     initialized: true, accountType: 'apiKey', modelCount: 0, toolCount: 0,
     configDigest: 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
     toolCatalogDigest: 'sha256:fe2f3b4ef49492d81cb350fb689bf9f9dff6cfd1817d72d6ff9fe3350e3d5e6a',
-    schemaMeasured: false, schemaBundleSha256: '', binaryIdentityDigest: '',
+    binaryMeasured: false, codexCliVersion: null, binaryIdentityDigest: '',
     hostedWireContract: verifyHostedWireContract(),
     policy: 'read-only-constrained; approval-never-is-not-deny-all'
   })
@@ -275,7 +249,7 @@ test('app-server initializes readback and waits for matching real delta/final/te
   const result = await turn; assert.deepEqual(deltas, ['real']); assert.equal(result.content, 'final'); assert.equal(result.turnId, 'turn-1')
   assert.deepEqual(sent.slice(0, 6).map(frame => frame.method), ['initialize', 'initialized', 'account/read', 'model/list', 'config/read', 'mcpServerStatus/list'])
   const threadStart = sent.find(frame => frame.method === 'thread/start'); const turnStart = sent.find(frame => frame.method === 'turn/start')
-  assert.equal(appContract.bundleSha256, adapter.readback.schema.bundleSha256)
+  assert.deepEqual(adapter.readback.schema, { measured: false })
   assert.equal(Object.hasOwn(threadStart.params, 'instructions'), false); assert.equal(threadStart.params.developerInstructions, '')
   assert.equal(Object.hasOwn(threadStart.params, 'outputSchema'), false); assert.equal(Object.hasOwn(turnStart.params, 'outputSchema'), false)
   assert.deepEqual(turnStart.params.input, [{ type: 'text', text: '{}' }]); assert.equal(turnStart.params.sandboxPolicy.networkAccess, false)
@@ -564,7 +538,7 @@ test('completed processing marker is forward-settled to archive and dedupe ledge
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('actual codex binary version and generated experimental schema are measured fail-closed and cached', () => {
+test('binary integrity is measured and cached without version or generated schema gates', () => {
   const root = mkdtempSync(resolve(tmpdir(), 'codex-bin-measure-'))
   try {
     const bundle = '{"measured":"schema"}\n'; const digest = createHash('sha256').update(bundle).digest('hex')
@@ -572,14 +546,14 @@ test('actual codex binary version and generated experimental schema are measured
     const temp = resolve(root, 'temporary'); mkdirSync(temp)
     const expected = { contractId: 'test-1', cliVersion: 'test-1', bundleSha256: digest }; const cache = new Map()
     const measured = measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp })
-    assert.equal(measured.measured, true); assert.equal(measured.schemaContractId, 'test-1'); assert.equal(measured.bundleSha256, digest); assert.ok(measured.binaryIdentityDigest)
+    assert.equal(measured.measured, true); assert.equal(measured.cliVersion, 'test-1'); assert.equal(measured.schemaContractId, null); assert.equal(measured.bundleSha256, null); assert.ok(measured.binaryIdentityDigest)
     assert.equal(measured.resourceFileCount, 0); assert.equal(measured.resourceBytes, '0')
     assert.equal(measured.snapshotKind, 'copy'); assert.equal(statSync(measured.snapshotPath).mode & 0o777, 0o500)
     assert.notEqual(statSync(measured.snapshotPath).ino, statSync(bin).ino)
     assert.strictEqual(measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp }), measured)
     assert.deepEqual(readdirSync(temp), [])
-    assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, cliVersion: 'wrong' }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
-    assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected: { ...expected, bundleSha256: '0'.repeat(64) }, cache: new Map(), temporaryRoot: temp }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    assert.strictEqual(measureCodexAppServerBinary({ codexBin: bin, codexHome: root, appServerSchemaContractId: 'unknown-cli' }, { cache, temporaryRoot: temp }), measured)
+    assert.equal(measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { cache: new Map(), temporaryRoot: temp }).cliVersion, 'test-1')
     assert.deepEqual(readdirSync(temp), [])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
@@ -749,7 +723,7 @@ test('modern durable CHAT fails closed on binary trust mismatch and never invoke
   try {
     const bad = resolve(root, 'bad-codex'); writeFileSync(bad, `#!/usr/bin/env node\nif(process.argv[2]==='--version')process.stdout.write('codex-cli wrong\\n');\n`); chmodSync(bad, 0o700)
     let trustError
-    try { measureCodexAppServerBinary({ codexBin: bad, codexHome: root }, { cache: new Map(), temporaryRoot: root }) } catch (error) { trustError = error }
+    try { const measured = measureCodexAppServerBinary({ codexBin: bad, codexHome: root }, { cache: new Map(), temporaryRoot: root }); writeFileSync(bad, '#!/bin/sh\nexit 1\n'); verifyCodexAppServerBinaryIdentity({ codexBin: bad }, measured) } catch (error) { trustError = error }
     assert.equal(trustError?.code, 'APP_SERVER_BINARY_UNTRUSTED')
     let legacySpawns = 0
     await assert.rejects(() => runProfileChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, normalizedWire({ route: 'CHAT' }), {
@@ -879,9 +853,6 @@ test('persisted CHAT ACK drain uses fresh socket identity on replay and preserve
 
 test('measured deployed CLI 0.161.0 schema preserves app-server fields used by Runtime', () => {
   const fixture = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures/codex-app-server-schema-0.161.0-contract.json')))
-  assert.deepEqual(resolveCodexAppServerSchemaContract({ appServerSchemaContractId: fixture.contractId }), {
-    contractId: fixture.contractId, cliVersion: fixture.cliVersion, bundleSha256: fixture.bundleSha256
-  })
   const schemas = {}
   for (const [name, digest] of Object.entries(fixture.schemas)) {
     const bytes = readFileSync(resolve(import.meta.dirname, 'fixtures/codex-app-server-0.161.0-schemas', name))
@@ -923,5 +894,25 @@ test('one B ACK outbox replays separate A and C dispatch identities without rebi
       ['message-A', 'dispatch-A', 'agent-B', 'boot-B-2'], ['message-C', 'dispatch-C', 'agent-B', 'boot-B-2']
     ])
     assert.ok(sent.every(x => !Object.hasOwn(x, 'ownerJiacn')))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('version is optional telemetry and runtime never generates or compares protocol schemas', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'codex-no-protocol-gate-'))
+  try {
+    const bin = resolve(root, 'codex'); copyFileSync('/bin/true', bin); chmodSync(bin, 0o700)
+    for (const probe of [
+      () => ({ status: 0, stdout: 'codex-cli 0.164.0\n' }),
+      () => ({ status: 0, stdout: 'unknown vendor build' }),
+      () => ({ status: 2, stdout: '' }),
+      () => { throw Object.assign(new Error('probe unavailable'), { code: 'ENOENT' }) }
+    ]) {
+      const calls = []
+      const measured = measureCodexAppServerBinary({ codexBin: bin, codexHome: root, appServerSchemaContractId: 'not-registered' }, {
+        cache: new Map(), temporaryRoot: root, spawnSyncFn: (path, args) => { calls.push(args); return probe() }
+      })
+      assert.equal(measured.measured, true); assert.equal(measured.schemaContractId, null); assert.equal(measured.bundleSha256, null)
+      assert.deepEqual(calls, [['--version']]); assert.equal(verifyCodexAppServerBinaryIdentity({ codexBin: bin }, measured), true)
+    }
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

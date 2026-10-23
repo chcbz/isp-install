@@ -7,7 +7,7 @@ import { resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
 import { canonicalSha256, buildContextEnvelope, buildThreadKey, PersistentChatInbox, validateChatDispatch } from '../chat-runtime.mjs'
 import { normalizeInboundMessage } from '../agent-client.mjs'
-import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
+import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from './fixtures/recorded-app-server-schemas.mjs'
 import {
   BUILTIN_TYPED_INSPECTION_DECODERS, TypedInspectionMaterializer, decodePngInspectionInput, decodeWavInspectionInput,
   INSPECTION_ACTION_OUTCOME_SCHEMA, recoverTypedInspection, resolveTypedInspectionRequest, runTypedInspection

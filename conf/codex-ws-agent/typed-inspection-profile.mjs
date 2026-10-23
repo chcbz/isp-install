@@ -321,7 +321,7 @@ export class TypedInspectionProfileRuntime {
       }
       const supportedInputs = exactSupportedInputs(this.profile.typedInspectionSupportedInputs)
       const profileId = String(this.profile.typedInspectionProfileId || `${this.profile.profileId}-typed-inspection-v1`)
-      const engineContractId = String(this.profile.typedInspectionEngineContractId || `codex-app-server-${schemaMeasurement.schemaContractId}-typed-inspection-v1`)
+      const engineContractId = String(this.profile.typedInspectionEngineContractId || 'codex-app-server-typed-inspection-v1')
       const networkPolicy = this.profile.typedInspectionProviderNetwork === 'restricted-proxy' ? restrictedProviderNetworkPolicy(this.profile.typedInspectionProviderBaseUrl, { connectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs }) : null
       const enginePolicyDigest = canonicalSha256({ schemaContractId: schemaMeasurement.schemaContractId, bundleSha256: schemaMeasurement.bundleSha256, binaryIdentityDigest: schemaMeasurement.binaryIdentityDigest, bwrap: bwrapPolicy(this.bwrap), mounts: SANDBOX_MOUNTS, networkPolicy, providerHttpRoute: 'respect_system_proxy=true/readback-required', providerCaTrustDigest: executionReadback?.providerCaTrust?.sha256 || null })
       const toolPolicyDigest = canonicalSha256({ policy: 'MANIFEST_READ_ONLY', mcpCatalogEmptyMeasured: true, mcpCatalogNotStrictNoToolsProof: true, webSearch: 'disabled', adapterDeniedRequests: 'command|file|permission|network|mcp|dynamic-tool|tool', bootstrapCredential: 'removed-before-model-turn', sandboxPolicy: { type: 'readOnly', networkAccess: false }, filesystem: SANDBOX_MOUNTS })

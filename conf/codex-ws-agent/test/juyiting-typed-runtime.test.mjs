@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { AppServerAdapter, CODEX_APP_SERVER_SCHEMA_CONTRACTS } from '../app-server-adapter.mjs'
+import { AppServerAdapter } from '../app-server-adapter.mjs'
+import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from './fixtures/recorded-app-server-schemas.mjs'
+import { typedDeliberationAdapterReady } from '../juyiting-typed-outcome.mjs'
 import { runFastChat, MESSAGE_TYPES } from '../agent-client.mjs'
 import { canonicalSha256, validateChatDispatch } from '../chat-runtime.mjs'
 import { buildActionOutcomeContract } from '../juyiting-action-outcome.mjs'
@@ -125,19 +127,13 @@ test('typed and plain CHAT use distinct threads while plain wire/content stays w
   assert.equal(Object.hasOwn(plainFrames.at(-1).payload, 'outcomeContractVersion'), false)
 })
 
-test('disabled, malformed or schema-selection-mismatched typed request rejects before any engine start with no fallback', async () => {
+test('disabled, malformed or unready typed request rejects before any engine start with no fallback', async () => {
   for (const scenario of [
     { selectedProfile: { ...profile, typedDeliberationEnabled: false }, selectedMessage: typedMessage(), adapter: { readback: measuredReadback() } },
     { selectedProfile: profile, selectedMessage: typedMessage({ route: 'INSPECT' }), adapter: { readback: measuredReadback() } },
     { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { measured: false }) } },
-    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(legacyContract) } },
-    { selectedProfile: { ...profile, appServerSchemaContractId: legacyContract.contractId }, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract) } },
     { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: true, readback: measuredReadback() } },
     { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: { ...measuredReadback(), initialize: null } } },
-    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { cliVersion: '0.153.4' }) } },
-    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { bundleSha256: '0'.repeat(64) }) } },
-    { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { schemaContractId: legacyContract.contractId }) } },
-    { selectedProfile: { ...profile, appServerSchemaContractId: 'codex-cli-unknown' }, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract) } }
   ]) {
     let starts = 0; let fallback = 0
     scenario.adapter.startOrResumeThread = async () => { starts++; return { threadId: 'forbidden' } }
@@ -149,11 +145,11 @@ test('disabled, malformed or schema-selection-mismatched typed request rejects b
 })
 
 
-test('inherited schema contract keys reject incomplete measured readback before engine start', async () => {
+test('unmeasured executable remains unavailable regardless of obsolete schema selection', async () => {
   for (const inherited of [...Object.getOwnPropertyNames(Object.prototype), ' __proto__ ']) {
     let starts = 0; let fallback = 0
     const adapter = {
-      closed: false, readback: { initialize: {}, schema: { measured: true } },
+      closed: false, readback: { initialize: {}, schema: { measured: false } },
       startOrResumeThread: async () => { starts++; return { threadId: 'forbidden' } }
     }
     await assert.rejects(() => runFastChat({ ...profile, appServerSchemaContractId: inherited }, typedMessage(), {
@@ -456,4 +452,12 @@ test('native CHAT receives only API retained edited media targets and keeps thei
 test('old typed planning contracts cannot start any new durable model turn', async () => {
   const message = mutateTypedMessage((_message, facts) => { facts.typedDeliberation.schemaVersion = 3 })
   await assertInvalidTypedStartsNoEngine(message, 'ACTION_PROTOCOL_VERSION_INVALID')
+})
+
+ test('unregistered versions and changed protocol observations do not disable a live adapter', () => {
+  for (const cliVersion of ['0.164.0', '999.0.0', null]) {
+    const adapter = { closed: false, readback: measuredReadback(nativeContract, { cliVersion, schemaContractId: null, bundleSha256: null }) }
+    assert.equal(typedDeliberationAdapterReady({ ...profile, appServerSchemaContractId: 'unregistered' }, adapter), true)
+    assert.equal(typedDeliberationAdapterReady(profile, { ...adapter, closed: true }), false)
+  }
 })
