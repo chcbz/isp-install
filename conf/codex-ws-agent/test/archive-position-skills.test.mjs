@@ -75,3 +75,18 @@ test('parser failure gets a durable safe receipt and does not starve the next bo
   }})
   assert.deepEqual(await runner.poll(),{processed:2});assert.equal(results[0].errorCode,'ARCHIVE_SCRIPT_FAILED');assert.ok(!JSON.stringify(results).includes('private details'));assert.ok(results[1].manifestJson)
 })
+
+test('a durable publication CAS conflict does not starve the next book and cannot masquerade as published',async()=>{
+  const base={agentId:'agent1',state:'WAITING',installationId:'g1-1',packageDigest:'sha256:'+'a'.repeat(64),manifestSha256:'b'.repeat(64),skillKey:'archive-maintenance',mode:'AUTO'}
+  const jobs=[{...base,jobId:'stale'},{...base,jobId:'good'}],states=[]
+  const manager={listInstalledSkills:()=>[{installationId:'g1-1',packageSha256:'a'.repeat(64),manifestSha256:'b'.repeat(64),manifest:{skillKey:'archive-maintenance',runner:'local-script'}}]}
+  const runner=new ArchiveJobReconciler({manager,apiOrigin:'https://api.test',agentId:'agent1',execute:async(_i,s)=>buildArchive(s),nativeFetch:async(url,options)=>{
+    if(url.pathname==='/internal/archive/v1/jobs')return response(jobs)
+    const id=url.pathname.split('/').at(-2)
+    if(url.pathname.endsWith('/source'))return response(source('正文',id))
+    if(options.method!=='POST')return response({state:'WAITING'})
+    const result=JSON.parse(options.body),state=id==='stale'?'FAILED':'PUBLISHED';states.push(state)
+    return response({jobId:id,state,errorCode:id==='stale'?'ARCHIVE_EDITION_CONFLICT':null,resultDigest:result.manifestFileSha256})
+  }})
+  assert.deepEqual(await runner.poll(),{processed:2});assert.deepEqual(states,['FAILED','PUBLISHED'])
+})

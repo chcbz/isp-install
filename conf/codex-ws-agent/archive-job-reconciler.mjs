@@ -49,8 +49,9 @@ export class ArchiveJobReconciler {
       this.installed(job)
       if(!this.current())fail('ARCHIVE_SESSION_CHANGED')
       const receipt=await this.json(`${path}/result`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(result)})
+      const publicationConflict=job.mode==='AUTO' && receipt?.state==='FAILED' && receipt.errorCode==='ARCHIVE_EDITION_CONFLICT'
       if(receipt?.jobId!==job.jobId || receipt.resultDigest!==result.manifestFileSha256
-          || !(job.mode==='AUTO'?['PUBLISHED']:['DRAFT','PUBLISHED']).includes(receipt.state))fail('ARCHIVE_RECEIPT_INVALID')
+          || (!publicationConflict && !(job.mode==='AUTO'?['PUBLISHED']:['DRAFT','PUBLISHED']).includes(receipt.state)))fail('ARCHIVE_RECEIPT_INVALID')
       processed++
     }return {processed}
   }
