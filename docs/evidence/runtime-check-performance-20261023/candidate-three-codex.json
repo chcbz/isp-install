@@ -1,0 +1,743 @@
+{
+  "observedAt": "2026-10-23T08:28:50.408Z",
+  "implementation": "candidate based on 297272f5; network module modified; fixture hashes prepared once before trials",
+  "noProviderRequests": true,
+  "result": [
+    {
+      "id": 1,
+      "result": "PASS",
+      "attestation": {
+        "schemaVersion": 1,
+        "measured": true,
+        "policy": {
+          "schemaVersion": 1,
+          "providerOrigin": "https://provider.example.invalid",
+          "providerAuthority": "provider.example.invalid:443",
+          "transport": "fixed-connect-proxy-v1",
+          "connectTimeoutMs": "15000",
+          "namespace": "private-slirp4netns-v1",
+          "slirpMountIsolation": "unshare-mount-recursive-private-v1",
+          "slirpTarget": "exact-owner-netns-path-v1",
+          "directEgress": "nft-default-drop-readback-v1",
+          "hostLoopback": "proxy-port-only",
+          "dns": "proxy-side-only"
+        },
+        "hostCanaryReachableControl": true,
+        "forbiddenConnectRejected": true,
+        "otherHostPortBlocked": true,
+        "sandboxCanaryBlocked": true,
+        "nftDefaultDropReadback": true,
+        "nftRulesDigest": "sha256:fd6523ed0f5e416f16cbc34280e1670c40c496c3717402cd652d99060ec4e369",
+        "directInternetProbeBlocked": true,
+        "directInternetBlocked": true
+      }
+    },
+    {
+      "id": 2,
+      "result": "PASS",
+      "attestation": {
+        "schemaVersion": 1,
+        "measured": true,
+        "policy": {
+          "schemaVersion": 1,
+          "providerOrigin": "https://provider.example.invalid",
+          "providerAuthority": "provider.example.invalid:443",
+          "transport": "fixed-connect-proxy-v1",
+          "connectTimeoutMs": "15000",
+          "namespace": "private-slirp4netns-v1",
+          "slirpMountIsolation": "unshare-mount-recursive-private-v1",
+          "slirpTarget": "exact-owner-netns-path-v1",
+          "directEgress": "nft-default-drop-readback-v1",
+          "hostLoopback": "proxy-port-only",
+          "dns": "proxy-side-only"
+        },
+        "hostCanaryReachableControl": true,
+        "forbiddenConnectRejected": true,
+        "otherHostPortBlocked": true,
+        "sandboxCanaryBlocked": true,
+        "nftDefaultDropReadback": true,
+        "nftRulesDigest": "sha256:df9e87a9bc7d72698fbc36b9fcaef564ecdd5e1fc135fd6bb1abfae98c0da2db",
+        "directInternetProbeBlocked": true,
+        "directInternetBlocked": true
+      }
+    },
+    {
+      "id": 3,
+      "result": "PASS",
+      "attestation": {
+        "schemaVersion": 1,
+        "measured": true,
+        "policy": {
+          "schemaVersion": 1,
+          "providerOrigin": "https://provider.example.invalid",
+          "providerAuthority": "provider.example.invalid:443",
+          "transport": "fixed-connect-proxy-v1",
+          "connectTimeoutMs": "15000",
+          "namespace": "private-slirp4netns-v1",
+          "slirpMountIsolation": "unshare-mount-recursive-private-v1",
+          "slirpTarget": "exact-owner-netns-path-v1",
+          "directEgress": "nft-default-drop-readback-v1",
+          "hostLoopback": "proxy-port-only",
+          "dns": "proxy-side-only"
+        },
+        "hostCanaryReachableControl": true,
+        "forbiddenConnectRejected": true,
+        "otherHostPortBlocked": true,
+        "sandboxCanaryBlocked": true,
+        "nftDefaultDropReadback": true,
+        "nftRulesDigest": "sha256:46687553b54e50f648b0c39b93ecfb242c870b522bb395f5a019b8170eac4ecf",
+        "directInternetProbeBlocked": true,
+        "directInternetBlocked": true
+      }
+    }
+  ],
+  "events": [
+    {
+      "ms": 7522,
+      "event": "bind-start",
+      "trial": 1,
+      "childPid": 1379235
+    },
+    {
+      "ms": 7577,
+      "event": "bind-start",
+      "trial": 2,
+      "childPid": 1379243
+    },
+    {
+      "ms": 7588,
+      "event": "bind-start",
+      "trial": 3,
+      "childPid": 1379246
+    },
+    {
+      "ms": 7794,
+      "event": "holder-stderr",
+      "trial": 3,
+      "text": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"/tmp/codex-home\"))\n"
+    },
+    {
+      "ms": 7794,
+      "event": "holder-stderr",
+      "trial": 2,
+      "text": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"/tmp/codex-home\"))\n"
+    },
+    {
+      "ms": 7794,
+      "event": "holder-stderr",
+      "trial": 1,
+      "text": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"/tmp/codex-home\"))\n"
+    },
+    {
+      "ms": 10616,
+      "event": "holder-stderr",
+      "trial": 2,
+      "text": "2026-10-23T08:28:11.388504Z ERROR codex_app_server: Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.\n"
+    },
+    {
+      "ms": 10617,
+      "event": "holder-stderr",
+      "trial": 3,
+      "text": "2026-10-23T08:28:11.388751Z ERROR codex_app_server: Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.\n"
+    },
+    {
+      "ms": 10634,
+      "event": "holder-stderr",
+      "trial": 1,
+      "text": "2026-10-23T08:28:11.420174Z ERROR codex_app_server: Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.\n"
+    },
+    {
+      "ms": 18610,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 15
+    },
+    {
+      "ms": 18610,
+      "event": "bind-ok",
+      "trial": 2,
+      "holderPid": 1379245
+    },
+    {
+      "ms": 18631,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 33
+    },
+    {
+      "ms": 18631,
+      "event": "bind-ok",
+      "trial": 3,
+      "holderPid": 1379248
+    },
+    {
+      "ms": 18634,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 32
+    },
+    {
+      "ms": 18634,
+      "event": "bind-ok",
+      "trial": 1,
+      "holderPid": 1379238
+    },
+    {
+      "ms": 18639,
+      "event": "proxy-start",
+      "trial": 3,
+      "proxyPort": 41009,
+      "canaryPort": 34951
+    },
+    {
+      "ms": 18639,
+      "event": "proxy-start",
+      "trial": 2,
+      "proxyPort": 44399,
+      "canaryPort": 44139
+    },
+    {
+      "ms": 18640,
+      "event": "proxy-start",
+      "trial": 1,
+      "proxyPort": 35089,
+      "canaryPort": 39931
+    },
+    {
+      "ms": 18652,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 13
+    },
+    {
+      "ms": 18655,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 16
+    },
+    {
+      "ms": 18658,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 18
+    },
+    {
+      "ms": 18662,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 10
+    },
+    {
+      "ms": 18662,
+      "event": "command-start",
+      "trial": 3,
+      "bin": "/usr/bin/nsenter",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18671,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 15
+    },
+    {
+      "ms": 18671,
+      "event": "command-start",
+      "trial": 2,
+      "bin": "/usr/bin/nsenter",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18677,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 19
+    },
+    {
+      "ms": 18677,
+      "event": "command-start",
+      "trial": 1,
+      "bin": "/usr/bin/nsenter",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18718,
+      "event": "command-close",
+      "trial": 3,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 18719,
+      "event": "command-close",
+      "trial": 1,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 18719,
+      "event": "command-close",
+      "trial": 2,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 18723,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 5
+    },
+    {
+      "ms": 18727,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 8
+    },
+    {
+      "ms": 18730,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 11
+    },
+    {
+      "ms": 18734,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 11
+    },
+    {
+      "ms": 18735,
+      "event": "command-start",
+      "trial": 3,
+      "bin": "/usr/bin/nsenter",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18743,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 16
+    },
+    {
+      "ms": 18743,
+      "event": "command-start",
+      "trial": 1,
+      "bin": "/usr/bin/nsenter",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18751,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 20
+    },
+    {
+      "ms": 18751,
+      "event": "command-start",
+      "trial": 2,
+      "bin": "/usr/bin/nsenter",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18753,
+      "event": "command-stdout",
+      "trial": 3,
+      "bin": "/usr/bin/nsenter",
+      "text": "table inet cyf_typed_inspection {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t\tct state established,related accept\n\t\tiifname \"lo\" accept\n\t}\n\n\tchain output {\n\t\ttype filter hook output priority filter; policy drop;\n\t\tct state established,related accept\n\t\toifname \"lo\" accept\n\t\tip daddr 10.0.2.2 tcp dport 41009 accept\n\t}\n}\n"
+    },
+    {
+      "ms": 18754,
+      "event": "command-stdout",
+      "trial": 1,
+      "bin": "/usr/bin/nsenter",
+      "text": "table inet cyf_typed_inspection {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t\tct state established,related accept\n\t\tiifname \"lo\" accept\n\t}\n\n\tchain output {\n\t\ttype filter hook output priority filter; policy drop;\n\t\tct state established,related accept\n\t\toifname \"lo\" accept\n\t\tip daddr 10.0.2.2 tcp dport 35089 accept\n\t}\n}\n"
+    },
+    {
+      "ms": 18754,
+      "event": "command-close",
+      "trial": 1,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 18754,
+      "event": "command-close",
+      "trial": 3,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 18757,
+      "event": "command-stdout",
+      "trial": 2,
+      "bin": "/usr/bin/nsenter",
+      "text": "table inet cyf_typed_inspection {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t\tct state established,related accept\n\t\tiifname \"lo\" accept\n\t}\n\n\tchain output {\n\t\ttype filter hook output priority filter; policy drop;\n\t\tct state established,related accept\n\t\toifname \"lo\" accept\n\t\tip daddr 10.0.2.2 tcp dport 44399 accept\n\t}\n}\n"
+    },
+    {
+      "ms": 18757,
+      "event": "command-close",
+      "trial": 2,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 18761,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 7
+    },
+    {
+      "ms": 18762,
+      "event": "command-start",
+      "trial": 1,
+      "bin": "/usr/bin/unshare",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18770,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 16
+    },
+    {
+      "ms": 18771,
+      "event": "command-start",
+      "trial": 3,
+      "bin": "/usr/bin/unshare",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18778,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 21
+    },
+    {
+      "ms": 18779,
+      "event": "command-start",
+      "trial": 2,
+      "bin": "/usr/bin/unshare",
+      "kind": "namespace-control"
+    },
+    {
+      "ms": 18784,
+      "event": "command-stderr",
+      "trial": 1,
+      "bin": "/usr/bin/unshare",
+      "text": "sent tapfd=6 for tap0\n"
+    },
+    {
+      "ms": 18784,
+      "event": "command-stderr",
+      "trial": 3,
+      "bin": "/usr/bin/unshare",
+      "text": "sent tapfd=6 for tap0\n"
+    },
+    {
+      "ms": 18784,
+      "event": "command-stderr",
+      "trial": 2,
+      "bin": "/usr/bin/unshare",
+      "text": "sent tapfd=6 for tap0\n"
+    },
+    {
+      "ms": 18785,
+      "event": "command-stdout",
+      "trial": 3,
+      "bin": "/usr/bin/unshare",
+      "text": "WARNING: Support for seccomp is experimental\n"
+    },
+    {
+      "ms": 18785,
+      "event": "command-stdout",
+      "trial": 1,
+      "bin": "/usr/bin/unshare",
+      "text": "WARNING: Support for seccomp is experimental\n"
+    },
+    {
+      "ms": 18786,
+      "event": "command-stdout",
+      "trial": 2,
+      "bin": "/usr/bin/unshare",
+      "text": "WARNING: Support for seccomp is experimental\n"
+    },
+    {
+      "ms": 18786,
+      "event": "command-stderr",
+      "trial": 2,
+      "bin": "/usr/bin/unshare",
+      "text": "received tapfd=6\n"
+    },
+    {
+      "ms": 18786,
+      "event": "command-stderr",
+      "trial": 3,
+      "bin": "/usr/bin/unshare",
+      "text": "received tapfd=6\n"
+    },
+    {
+      "ms": 18786,
+      "event": "command-stderr",
+      "trial": 1,
+      "bin": "/usr/bin/unshare",
+      "text": "received tapfd=6\n"
+    },
+    {
+      "ms": 18798,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 7
+    },
+    {
+      "ms": 18801,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 9
+    },
+    {
+      "ms": 19451,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 658
+    },
+    {
+      "ms": 19456,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 657
+    },
+    {
+      "ms": 19456,
+      "event": "command-start",
+      "trial": 3,
+      "bin": "/usr/bin/nsenter",
+      "kind": "python-probe"
+    },
+    {
+      "ms": 19471,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 669
+    },
+    {
+      "ms": 19471,
+      "event": "command-start",
+      "trial": 1,
+      "bin": "/usr/bin/nsenter",
+      "kind": "python-probe"
+    },
+    {
+      "ms": 19491,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 39
+    },
+    {
+      "ms": 19491,
+      "event": "command-start",
+      "trial": 2,
+      "bin": "/usr/bin/nsenter",
+      "kind": "python-probe"
+    },
+    {
+      "ms": 19530,
+      "event": "proxy-tcp",
+      "trial": 3,
+      "remote": "127.0.0.1"
+    },
+    {
+      "ms": 19530,
+      "event": "proxy-tcp",
+      "trial": 1,
+      "remote": "127.0.0.1"
+    },
+    {
+      "ms": 19531,
+      "event": "proxy-connect",
+      "trial": 3,
+      "authority": "forbidden.invalid:443"
+    },
+    {
+      "ms": 19532,
+      "event": "proxy-connect",
+      "trial": 1,
+      "authority": "forbidden.invalid:443"
+    },
+    {
+      "ms": 19532,
+      "event": "proxy-socket-finish",
+      "trial": 3
+    },
+    {
+      "ms": 19532,
+      "event": "proxy-socket-finish",
+      "trial": 1
+    },
+    {
+      "ms": 19533,
+      "event": "proxy-socket-close",
+      "trial": 3
+    },
+    {
+      "ms": 19533,
+      "event": "proxy-socket-close",
+      "trial": 1
+    },
+    {
+      "ms": 19543,
+      "event": "proxy-tcp",
+      "trial": 2,
+      "remote": "127.0.0.1"
+    },
+    {
+      "ms": 19544,
+      "event": "proxy-connect",
+      "trial": 2,
+      "authority": "forbidden.invalid:443"
+    },
+    {
+      "ms": 19544,
+      "event": "proxy-socket-finish",
+      "trial": 2
+    },
+    {
+      "ms": 19544,
+      "event": "proxy-socket-close",
+      "trial": 2
+    },
+    {
+      "ms": 49562,
+      "event": "command-stdout",
+      "trial": 1,
+      "bin": "/usr/bin/nsenter",
+      "text": "connected HTTP/1.1 403 Forbidden blocked blocked\n"
+    },
+    {
+      "ms": 49568,
+      "event": "command-stdout",
+      "trial": 3,
+      "bin": "/usr/bin/nsenter",
+      "text": "connected HTTP/1.1 403 Forbidden blocked blocked\n"
+    },
+    {
+      "ms": 49568,
+      "event": "command-close",
+      "trial": 1,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 49569,
+      "event": "command-close",
+      "trial": 3,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 49578,
+      "event": "owner-check",
+      "trial": 1,
+      "durationMs": 9
+    },
+    {
+      "ms": 49578,
+      "event": "attach-pass",
+      "trial": 1
+    },
+    {
+      "ms": 49580,
+      "event": "event-loop",
+      "trial": 1,
+      "maxMs": 751.828991,
+      "meanMs": 26.191024948222083
+    },
+    {
+      "ms": 49604,
+      "event": "owner-check",
+      "trial": 3,
+      "durationMs": 35
+    },
+    {
+      "ms": 49604,
+      "event": "attach-pass",
+      "trial": 3
+    },
+    {
+      "ms": 49604,
+      "event": "event-loop",
+      "trial": 3,
+      "maxMs": 751.828991,
+      "meanMs": 26.19151554834685
+    },
+    {
+      "ms": 49605,
+      "event": "command-stdout",
+      "trial": 2,
+      "bin": "/usr/bin/nsenter",
+      "text": "connected HTTP/1.1 403 Forbidden blocked blocked\n"
+    },
+    {
+      "ms": 49607,
+      "event": "holder-exit",
+      "trial": 1,
+      "code": null,
+      "signal": "SIGTERM"
+    },
+    {
+      "ms": 49607,
+      "event": "holder-exit",
+      "trial": 3,
+      "code": null,
+      "signal": "SIGTERM"
+    },
+    {
+      "ms": 49608,
+      "event": "command-close",
+      "trial": 1,
+      "bin": "/usr/bin/unshare",
+      "code": null,
+      "signal": "SIGTERM"
+    },
+    {
+      "ms": 49608,
+      "event": "command-close",
+      "trial": 2,
+      "bin": "/usr/bin/nsenter",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "ms": 49616,
+      "event": "owner-check",
+      "trial": 2,
+      "durationMs": 8
+    },
+    {
+      "ms": 49616,
+      "event": "attach-pass",
+      "trial": 2
+    },
+    {
+      "ms": 49616,
+      "event": "event-loop",
+      "trial": 2,
+      "maxMs": 751.828991,
+      "meanMs": 26.19672897755611
+    },
+    {
+      "ms": 49620,
+      "event": "holder-exit",
+      "trial": 2,
+      "code": null,
+      "signal": "SIGTERM"
+    }
+  ]
+}

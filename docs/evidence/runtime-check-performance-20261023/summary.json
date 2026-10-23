@@ -1,0 +1,64 @@
+{
+  "observedDate": "2026-10-23",
+  "runtimeCandidate": "1.2.8",
+  "sourceCommit": "040991f180e54cdad818840bafb59d368320ae47",
+  "sourceTree": "6225395c62ebe932aea66e72bec155bf2e7d9901",
+  "baselineCommit": "297272f5e7af49c6bda703b37f0fc8a6a830a4a7",
+  "productionStill": "Runtime1.2.6",
+  "noProductionChanges": true,
+  "noModelTurns": true,
+  "testResult": {
+    "tests": 294,
+    "pass": 293,
+    "fail": 0,
+    "skip": 1,
+    "skipped": "Credentialed real native profile handshake opt-in, not replaced by a mock PASS"
+  },
+  "staticAudit": {
+    "shippedPayloadFiles": 71,
+    "firstPartyModules": 72,
+    "allInventoriedModuleHashesMatchSourceCommit": true
+  },
+  "networkCanary": {
+    "results": [
+      {
+        "trial": 1,
+        "result": "PASS"
+      },
+      {
+        "trial": 2,
+        "result": "PASS"
+      },
+      {
+        "trial": 3,
+        "result": "PASS"
+      }
+    ],
+    "maxEventLoopDelayMs": 751.828991,
+    "timeoutMs": 15000,
+    "ownedHoldersGone": true,
+    "harnessDifference": "Expected binary fixture hashes prepared once before trials; original baseline computes those synchronously per trial. Same installed Codex holder, original timeout and nft policy; not a whole-startup speedup benchmark."
+  },
+  "realMeasurement": {
+    "observedAt": "2026-10-23T08:34:42.346Z",
+    "firstMs": 58899.979701,
+    "cachedMs": 5.904113999997207,
+    "sameSnapshot": true,
+    "measuredCli": "0.161.0",
+    "maxEventLoopDelayMs": 853.540863
+  },
+  "localHttp": {
+    "responses": 264,
+    "all403": true,
+    "maxObservedResponseMs": 724.9873719999996
+  },
+  "dependencySource": {
+    "readOnlyNodeModules": "/home/isp/apps/cyf-agent-runtime-v1/app/codex-ws-agent/node_modules",
+    "sourceAndInstalledLockSha256": "8b2fd2cdde99e92793b54ead0ad819932a435c256b7af2771b7e72be64a57ea3"
+  },
+  "serviceReadback": [
+    "MainPID=1183474",
+    "ActiveState=active",
+    "SubState=running"
+  ]
+}

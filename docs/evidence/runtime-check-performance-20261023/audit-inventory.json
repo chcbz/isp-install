@@ -1,0 +1,728 @@
+{
+  "scope": "All shipped first-party JS/Python execution modules and first-party host entry/libs; static operation-site scan plus hotspot review, not exhaustive dynamic execution, dependencies or retired source.",
+  "sourceCommit": "040991f180e54cdad818840bafb59d368320ae47",
+  "payloadFiles": 71,
+  "scannedModules": 72,
+  "files": [
+    {
+      "file": "conf/codex-ws-agent/agent-client.mjs",
+      "sha256": "a65d8fd3d3e892d71bc92497dc30cc610d4650b0dbce51b1c017473d7dae1a8f",
+      "syncOperationLines": [
+        4,
+        5,
+        13,
+        19,
+        20,
+        29,
+        111,
+        667,
+        673,
+        674,
+        681,
+        687,
+        712,
+        730,
+        731,
+        825,
+        838,
+        1136,
+        1249,
+        1338,
+        1350,
+        1361,
+        1491,
+        1507,
+        1749,
+        1770,
+        1929,
+        1960,
+        2000,
+        2024,
+        2290,
+        3657,
+        3692,
+        3837,
+        3905,
+        3945,
+        4022,
+        4025,
+        4416,
+        5095,
+        5163,
+        5437,
+        6217,
+        6594
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/agent-message-wire.mjs",
+      "sha256": "c2fa56c4c326d8a455a589a571a98bf2a31d690ea0dc136a2d664b252a82931b",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/api-envelope.mjs",
+      "sha256": "22a1b24533afe7ad7e880fff38e3709f722dbf0c134ef7ed27ba702e6da4a14d",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/app-server-adapter.mjs",
+      "sha256": "f7ea3d05ef6a4647560f3db8d86198d8331d5b00e191f93167e0b6be58a6df72",
+      "syncOperationLines": [
+        1,
+        2,
+        6,
+        51,
+        54,
+        94,
+        113,
+        143,
+        145,
+        146,
+        155,
+        160,
+        173,
+        194,
+        304,
+        366,
+        387,
+        411,
+        412
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/app-server-integrity-worker.mjs",
+      "sha256": "8776e26d2e110b50231447f8cad51ab2096c1cc3a973759a022c33d11be37b58",
+      "syncOperationLines": [
+        4,
+        9
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/chat-runtime.mjs",
+      "sha256": "826bee7cc90d3d3cba244f575f41ee6af2a5fcfdf82c74a97ced90fcc9cf425c",
+      "syncOperationLines": [
+        2,
+        4,
+        5,
+        42,
+        59,
+        68,
+        76,
+        77,
+        78,
+        207,
+        245,
+        255,
+        288,
+        312,
+        333,
+        357,
+        384,
+        395,
+        411,
+        419,
+        448,
+        468,
+        530,
+        545,
+        581,
+        582,
+        586,
+        611,
+        648,
+        655,
+        664,
+        690,
+        748,
+        754,
+        775,
+        786
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-bounty-capability.mjs",
+      "sha256": "971460ef6f27fb8d7def698b477411661fef6153a259e334d6fd3b92c97ee10f",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-bounty-v3-capability.mjs",
+      "sha256": "a7dc7513c1706ff6b4985208b727a1e9fc94af0008818e7ebd8143f70ac68437",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-delivery-retention-v3.mjs",
+      "sha256": "beb2f3c77f23a5dadcb8eddd84f18d25abcebbfe712fe04a164641e381e9bbec",
+      "syncOperationLines": [
+        5,
+        6,
+        7,
+        13,
+        22,
+        29,
+        30,
+        72
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-gpt-cli-config.mjs",
+      "sha256": "2bb8019023788c35805862cbf8144d951ccf847ec63a6b3f24b788f6bf913924",
+      "syncOperationLines": [
+        1,
+        2,
+        14
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-gpt-cli-egress-gate.mjs",
+      "sha256": "1812097d6b9a46b0530af1d5c50bbb30ae1b634533e648b792af1d8899b0a7a8",
+      "syncOperationLines": [
+        1,
+        7
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-gpt-cli-executor-v3.mjs",
+      "sha256": "99f632e1cbd9df972e734934f2fb89d901608571723b51dcb97aed70c27f844d",
+      "syncOperationLines": [
+        2,
+        7,
+        9,
+        10,
+        32,
+        45,
+        46,
+        49,
+        98
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-http-config.mjs",
+      "sha256": "59fa8c1cf6a2d67a210720377a523992933fd65e4151268a9b970b203b5d7bc3",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-http-executor-v3.mjs",
+      "sha256": "ddd11e2f8f76e8c17732e8b2cfc877799700ebf8da55deff9b0c6daf5911e801",
+      "syncOperationLines": [
+        2,
+        21
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-http-executor.mjs",
+      "sha256": "7e0a52c906a89a3c2454257ca0945894cd77fe04ffb2a651a14a59d6da17b124",
+      "syncOperationLines": [
+        1,
+        8,
+        34,
+        72
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-http-ledger.mjs",
+      "sha256": "21bcb8b6eecf15296cb5e92c23100c87de101dc205e20187581658a83dafc477",
+      "syncOperationLines": [
+        1,
+        8,
+        12,
+        44,
+        76,
+        161,
+        217
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-http-provider-binding.mjs",
+      "sha256": "105d8280c783271d17314feb39675fe7ee68bc6b2af5dd3d98d19f900222e51f",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/controlled-image-v3-files.mjs",
+      "sha256": "e5560124cbcc001d7f99ab643e2d93a33b44ba23b1ae1d54a4bf95c03f994023",
+      "syncOperationLines": [
+        1,
+        8,
+        30,
+        81,
+        118
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/conversation-controlled-image-v3.mjs",
+      "sha256": "ebb01033280d0d564d1c00efa7e118166209f9fd2ebc9e6a05a87dd3e924126d",
+      "syncOperationLines": [
+        2,
+        22
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/conversation-controlled-image.mjs",
+      "sha256": "75149c8b09e9b334d792916f4c33d19d0f5118674e920c293d23d20381ff330c",
+      "syncOperationLines": [
+        5,
+        21
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/conversation-native.mjs",
+      "sha256": "a9cf55e45bf13a0ded706e8e536fe74c829cad2f6dfa3459f8c2d7f6160f7d0c",
+      "syncOperationLines": [
+        8,
+        19
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/conversation-reference-inputs-v3.mjs",
+      "sha256": "a9e915fff6a5e85c87a895b1cf833f37aaf84596e80f4211cc39bafd2969d4ba",
+      "syncOperationLines": [
+        2,
+        36,
+        160
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/conversation-reference-inputs.mjs",
+      "sha256": "e2597710d51043d570d8a44d86953a6ec1dfa47c22b183ad81f534ae6aa24409",
+      "syncOperationLines": [
+        5,
+        45
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/conversation-text-file.mjs",
+      "sha256": "1a9ce8fd0ceedc54926a40c35697ab89fd4af2cee3b704eb6b4d61594c9762f0",
+      "syncOperationLines": [
+        1,
+        39
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/executable-integrity.mjs",
+      "sha256": "3b97998ebe475790ae8a3dba0fb029aaf4ce62a9fa102344f6e8dbf6a7dea49e",
+      "syncOperationLines": [
+        2,
+        17
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/image-input-file.mjs",
+      "sha256": "36ba62d1e1eb0c6e0a820618e24ade986a98f6d01486bd94ae2922694ce1f5cd",
+      "syncOperationLines": [
+        1,
+        7,
+        14,
+        19,
+        22
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/image-input.mjs",
+      "sha256": "9f05f8702bc76a299ec6fe10e7f794fb37582b8c0cf30daee3f578a90cf465da",
+      "syncOperationLines": [
+        3,
+        4,
+        7,
+        14
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/juyiting-action-outcome.mjs",
+      "sha256": "78af671c669c72b369885b84920e1035d509c7b8bd6125b5414077e37563047f",
+      "syncOperationLines": [
+        2,
+        60,
+        128
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/juyiting-review-basis.mjs",
+      "sha256": "a8ff7686c7fdd7b106a0414b84bb14c23f5088d85baecc2c41acc54c347af610",
+      "syncOperationLines": [
+        1,
+        8
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/juyiting-typed-outcome-stream.mjs",
+      "sha256": "282d42ad1ab8df94043b97c060fd8825a70d6c1b89ccbea4f77e3daee742789b",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/juyiting-typed-outcome.mjs",
+      "sha256": "2987eb19431924d07766205cd01e7e9a5faffa198908544a85b01a2e4c458922",
+      "syncOperationLines": [
+        1,
+        216
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/managed-chat-scope-config.mjs",
+      "sha256": "3bb6632f395d6d8986d94fe601704288d82e93c99dccd83ae744b66208b4faf9",
+      "syncOperationLines": [
+        2,
+        69
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/managed-image-scope-config.mjs",
+      "sha256": "21d13127b8a6920c27065758f452abb2cb107702fe0d9ba40f8a5c2a00baab9d",
+      "syncOperationLines": [
+        1,
+        165
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/materials-chat.mjs",
+      "sha256": "ba22fc657f9a5d81e78d6077111e1b400b2aa996a189f900b83df1158c8b1548",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/materials-input.mjs",
+      "sha256": "3deeaead348d5670cebd00443bf32909771e4deb43d8a86c3426a698155ee79e",
+      "syncOperationLines": [
+        5,
+        40
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/message-envelope.mjs",
+      "sha256": "08b82fc985e4a2f32116d0407ba6a03af47a306ff3d1f5a99782b3045899aa9b",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/native-bounty-capability.mjs",
+      "sha256": "3b49196c11fdb4967eda9a394f18c3f77223c40018e29a16ea8d85d44d6884d0",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/native-json.mjs",
+      "sha256": "30bcd19c350669d9da89c6ec236f63209fd9f5e06c5e1cf7b8d29e2debd6ea74",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/native-poll-diagnostic.mjs",
+      "sha256": "431ce5934027941aaf4e1dff8e0bb05f06d47724e3bcd9408279e2021cbe0a05",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/registration-ack.mjs",
+      "sha256": "a82f7733622871daaa1ce6611e9dd7abe34abbf8be0910b789bf0aafce7d7764",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/report-outbox.mjs",
+      "sha256": "2376b4fc6707f4466ac7668b601e33bb2febbc49c0cf8bb62e58b713b18b3084",
+      "syncOperationLines": [
+        1,
+        3,
+        4,
+        26,
+        41,
+        42,
+        60,
+        66,
+        113,
+        130
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-bindings.mjs",
+      "sha256": "1f51d37167e40dd66d634ed5a0f79e20abe7f97305c62fc7f505fe1a1ef24c5b",
+      "syncOperationLines": [
+        1,
+        42
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-config-candidate.mjs",
+      "sha256": "1c731680b04b6fc4229e007ed8c9ed55b45d78a4394287f722ce2d3c10c5ed6e",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-conversation.mjs",
+      "sha256": "4c82f7b0318ba3e91d60ca581861ae20c93d22712033ff1eadc5a0aca3fa2ece",
+      "syncOperationLines": [
+        4,
+        151,
+        258,
+        263,
+        267
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-execution-store.mjs",
+      "sha256": "d4d53c88f139629f0c84b33166b1e420205472c3a773293870ea6897fd2be561",
+      "syncOperationLines": [
+        3,
+        4,
+        17,
+        24,
+        31
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-executor.mjs",
+      "sha256": "2937a41241644c34a7edb5d8e10451a1e4e9301f9fa818cd9b60e7bcc8722151",
+      "syncOperationLines": [
+        1,
+        5
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-install-manager.mjs",
+      "sha256": "0cb76107beb4daa79b4a86bc94b3021c88f0bfee952220b0876288abbf2c46e8",
+      "syncOperationLines": [
+        1,
+        2,
+        7,
+        11,
+        18,
+        58,
+        64,
+        290,
+        339,
+        344,
+        362,
+        363,
+        369,
+        399,
+        647,
+        648,
+        834,
+        880,
+        1025,
+        1026,
+        1443,
+        1544,
+        1564,
+        1900
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-manifest.mjs",
+      "sha256": "dd467a5aa8040b78e492b0b23be49ac112f9ac31821dcf67dd9dd5170f08d8be",
+      "syncOperationLines": [
+        2,
+        3,
+        15,
+        89,
+        92,
+        98,
+        126
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-registry.mjs",
+      "sha256": "394c0dd7a44140f1891baed2737c716b550b5cc32e8881ff0ad244e00d47d44a",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-runners/image-http-codec.mjs",
+      "sha256": "8e80d094e19b8210fc74ebc7980caa4653e42e4830ed05a2657408846b54e5e8",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-runners/image-provider.mjs",
+      "sha256": "b8c4a69464ff09a0b60563735f4282942eac62d41d1c21697f4a4d14ad3de6d5",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-runners/local-script.mjs",
+      "sha256": "abed3c1af4557bb9081fadaefd123aa45879540a1205f0c8b07e3c9459b8b52c",
+      "syncOperationLines": [
+        5,
+        31,
+        37,
+        47,
+        89,
+        90,
+        92,
+        97,
+        98,
+        108,
+        110
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/skill-runners/native-model.mjs",
+      "sha256": "ec813b39fc577941dc5d87cebc11817d55eab8e663789951705b68dd887241ca",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/toolchain/delivery_tool.py",
+      "sha256": "173d156c16f65e45b754077bf8ba466ecb4cc198d5c511228adc88817573226f",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/codex-ws-agent/typed-inspection-input-carriers.mjs",
+      "sha256": "6b50488f4cf10d1df32f7a4c871b106f677394781a3a6bd0a62c12282d3d4933",
+      "syncOperationLines": [
+        5,
+        17
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/typed-inspection-network.mjs",
+      "sha256": "82b5b408006f8c18238334cc2c8d7c37e57f38178af17788da6923414d55efff",
+      "syncOperationLines": [
+        3,
+        4,
+        9,
+        11,
+        158,
+        279
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/typed-inspection-profile.mjs",
+      "sha256": "0a7799dcb53212b4658fefb9a0fe51996f0d4b223317f3c2fb6e994a72371301",
+      "syncOperationLines": [
+        1,
+        2,
+        4,
+        5,
+        19,
+        21,
+        22,
+        25,
+        40,
+        51,
+        52,
+        91,
+        116,
+        117,
+        130,
+        131,
+        134,
+        149,
+        151,
+        155,
+        176,
+        182,
+        183,
+        217,
+        299,
+        300
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/typed-inspection-runtime.mjs",
+      "sha256": "a123ff7fb76854b58fe01c1f53aa5b578cff9c3f0d830e48c83afb20e6533b9d",
+      "syncOperationLines": [
+        6,
+        8,
+        9,
+        33,
+        43,
+        278
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/workspace-file-bridge.mjs",
+      "sha256": "2e235d4d6d56e194f156c06a59fc85210df637ec28cd0fa6d1fcf7bf1df15d88",
+      "syncOperationLines": [
+        2,
+        9,
+        14,
+        229,
+        259,
+        268,
+        296,
+        418,
+        532,
+        596,
+        612,
+        748
+      ]
+    },
+    {
+      "file": "conf/codex-ws-agent/workspace-manager.mjs",
+      "sha256": "d640c7729aa743035cd1ac6d4a6d3190c162e03dd0e192a59a46adaf84f353bc",
+      "syncOperationLines": [
+        1,
+        2,
+        9,
+        14,
+        23,
+        55,
+        68,
+        69,
+        214,
+        225,
+        262,
+        360,
+        647,
+        648,
+        781,
+        1124
+      ]
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/agent-runtime.mjs",
+      "sha256": "abcdbf9943ea936a94624893cd4aec5393737c8ef8d91085e792da40caae0474",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/api-envelope.mjs",
+      "sha256": "22a1b24533afe7ad7e880fff38e3709f722dbf0c134ef7ed27ba702e6da4a14d",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/execution-adapter.mjs",
+      "sha256": "59869328526ae23e6f334ebdd1d00754773a6ff40f31f839323f9798992763c4",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/hosting-config.mjs",
+      "sha256": "f1525b76756880240b46f14d6fcf44ce882e1cd0e3648ddad2ce76e886f79e27",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/hosting-control.mjs",
+      "sha256": "e91e25eef21218feaa5f7004c55709a4612a35035ef7d24f1ecaaee8c172ea61",
+      "syncOperationLines": [
+        3,
+        21
+      ]
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/hosting-server.mjs",
+      "sha256": "242c88c35e230ed7c12cc2e6e0dd2c4f19bc3510a853fcf409ebda376ef654c7",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/hosting-wire.mjs",
+      "sha256": "36db327a04b0e369225ae4f0dd6b78bbb5b2f914b20e63e0cd21ee98c4300d16",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/manifest.mjs",
+      "sha256": "66541a36d2a025638e397194ee684c474629db33e37d143cc88ff33197a8379e",
+      "syncOperationLines": [
+        2,
+        18,
+        46
+      ]
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/message-envelope.mjs",
+      "sha256": "08b82fc985e4a2f32116d0407ba6a03af47a306ff3d1f5a99782b3045899aa9b",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/runtime-client.mjs",
+      "sha256": "295d7488fbf16dda82cd1c8dd77d3fe21b28835dbcb00b4c06c044d7cad2949f",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/runtime-host.mjs",
+      "sha256": "757eae3536d08be47bc7ea719a8795d11ddf15ffeb6ec843f8c26e17c1df5437",
+      "syncOperationLines": []
+    },
+    {
+      "file": "conf/cyf-agent-runtime-v1/lib/security.mjs",
+      "sha256": "7eb4bfc7e574ebdfc4a7647ff5d12c8aeab7eb214a2f6da276161142e094f756",
+      "syncOperationLines": []
+    }
+  ]
+}

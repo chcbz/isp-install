@@ -1,0 +1,12 @@
+{
+  "README.md": "bc2457cb86fac4cbb6cb4b7e5e0afdebdde417a8182cba8bd497b5d725cb566a",
+  "audit-inventory.json": "ae4516e3f8cd80b9e8e49e6a0dcc11fdaf3c68a55924fa17895a4e54229a1794",
+  "baseline-three-codex.json": "3fdc45be09ad78ed31fd9a448aa19d7f1908fa8c01d17bcb984940899aa22bc6",
+  "baseline-three-reproduce.mjs": "3cf00b6892eebbb944d08da22432762d4be992a99938aa1633ad5ffdfc9ff622",
+  "candidate-real-measurement.json": "2fb4d27349d2d1911f5a9eb62a0131cfead413b01261a180a0bacb5e99471bc2",
+  "candidate-real-measurement.mjs": "1398a1046a2b6a7342f8aad2c05d7378f5cd8c4d0ff51bf0932affcf65593781",
+  "candidate-three-codex.json": "30a8b847274a089ead7a0e80b0081ea964eace87a58c4e5c1e7f43f7d8c2266b",
+  "candidate-three-reproduce.mjs": "ae3f565f8999f0bed9b20e1da254f60ad159286666e5490efd94df7e8d5d450a",
+  "regression.log": "ca0da511d3942486f9e57495219350ece53640483f3b2b21bfaf625b0f7e8557",
+  "summary.json": "d7157a8f868080d9f742e8537fa0350290dfaedee648fb97741b0edac0baaeb3"
+}
