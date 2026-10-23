@@ -30,7 +30,7 @@ for await (const line of lines) {
    const results=[]
    for(const headers of [{Authorization:'Bearer user-jwt'},{'X-API-Key':'retired'}, {...client.sessionHeaders(),'X-Agent-Runtime-Id':'old-boot'}])results.push((await fetch(message.origin+'/internal/archive/v1/jobs',{headers})).status)
    emit({op:message.op,statuses:results})
-  } else if(message.op==='STOP') {emit({op:'STOPPED'});break}
+  } else if(message.op==='STOP') {client.invalidateSession();emit({op:'STOPPED'});lines.close();process.stdin.destroy();break}
   else throw new Error('FIXTURE_COMMAND_INVALID')
  } catch(error) {emit({op:'FAILED',code:error.code||error.message||'UNKNOWN',status:error.status||null})}
 }
