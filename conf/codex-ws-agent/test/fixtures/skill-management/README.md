@@ -83,3 +83,78 @@ cross-service portions remain coordinator integration work. Frozen behavior
 statuses are intentionally not rewritten to PASS. No paid provider, production
 installation, garbage collection, Flow build, deployment or browser acceptance
 is claimed by these source tests. Exact run totals and logs accompany delivery.
+
+## Java/MySQL → real Node peer (test-only JSONL entry)
+
+Entry, from this repository root:
+
+```bash
+node conf/codex-ws-agent/test/fixtures/skill-management-node-peer.mjs
+```
+
+No server, bundler, new runner framework, model or installed Runtime is needed.
+Minimum dependencies: Linux/glibc `renameat2`, `python3` standard library
+(`CYF_PYTHON_BIN` may explicitly select the existing interpreter), and this
+execution library's **locked** `ajv@8.17.1`, `yauzl@3.4.0` plus their transitive
+packages. Other payload dependencies (`ws`, ImageMagick, Python delivery tools)
+are not imported by this bridge. Verification used Node 24.22.1; that is an
+observed toolchain, not a new version allowlist. Flow can use the existing
+package-lock install rather than introducing a separate dependency graph.
+
+Each stdin line is a **private test-control JSON object**, not a new CYF wire
+contract. The initial line must be `init`, for example (replace synthetic scope,
+fence, root and bytes with the Java fixture's exact values):
+
+```json
+{"op":"init","id":"init","root":"/absolute/private/empty-java-test-root","apiOrigin":"https://api.example.test","profileId":"java-owned-mysql-runtime","scope":{"tenantId":"0","clientId":"client_demo","ownerJiacn":"owner_demo","agentId":"agt_demo"},"fence":{"installationId":"rti_demo","hostId":"host_demo","runtimeInstanceId":"boot_demo","sessionGeneration":"1"},"packages":[],"testExecutableReadiness":false}
+```
+
+- Root must be a canonical private current-UID empty directory, or already carry
+  this bridge's exact identity marker. It never adopts ordinary Runtime state.
+  HOME, journal and packages are derived under this root; EOF leaves evidence
+  intact. The Java fixture owns explicit isolated-root cleanup after peer exit.
+- Add the API fixture's exact approved archive bytes, without re-zipping:
+  `{"op":"putPackage","id":"pkg","skillInstallationId":"si_1","base64":"<original ZIP base64>"}`.
+  Reusing an installation ID with different bytes is rejected. The real manager
+  checks original target length/hash, path, extractor/manifest and source fences.
+- Deliver the **original Java-produced UTF-8 bytes**, not a DTO reconstructed by
+  Node: `{"op":"receive","id":"prepare","wireBase64":"<base64 of complete original Command or ResultReceipt envelope>"}`.
+  Actual `fromAgentWire` and `SkillInstallManager.handle(Buffer)` consume the raw
+  bytes, retaining duplicate/numeric-token rejection. This is not a mocked consumer.
+- ACK/result output: `{"kind":"ack"|"result","wireBase64":"<original full envelope bytes>"}`.
+  Feed decoded bytes to the existing Java WS ingress under the fixture's current
+  trusted Runtime proof. Result is an independent event without outer `code`.
+  Persist the Java transaction and send its **actual ResultReceipt bytes** back
+  via `receive`; do not fabricate ACK/receipt success in the Node bridge.
+- Catalog output: `{"kind":"catalog","value":<shared CapabilityAdapterInput>}`.
+  Pass its `skillExecution` through the existing authenticated capability
+  consumer with the exact scope/boot/session. This bridge does not itself prove
+  Java registration authentication or turn presence into readiness.
+- Every successful control operation ends with `{"kind":"done","id":...}`;
+  invalid input emits `{"kind":"error","id":...,"code":...}` instead. No
+  secrets or arbitrary error content are printed. Account for legitimate
+  duplicate outbox result/ACK frames before the end marker.
+- `{"op":"catalog","id":"c"}` measures current catalog;
+  `{"op":"replay","id":"r"}` drains durable ACKs and results in bounded batches.
+- `{"op":"restart","id":"boot2","fence":{...}}` reconstructs the real manager
+  and registry against the same isolated journal, using the next boot/session;
+  retained result bytes still carry the original execution boot.
+- `{"op":"resolveTask","id":"old-task","taskSkillBinding":<shared TaskSkillBinding>}`
+  resolves through the **real Registry retained-package lookup**, returning a
+  `taskPackage` with the exact installation/product/version/hash/permissions.
+  This proves package selection, not API task admission or model execution.
+
+Default `testExecutableReadiness:false` registers no executable runners:
+INSTRUCTION is NOT_EXECUTABLE and executable preparation fails if dependencies
+cannot be measured. For synthetic executable integration fixtures only,
+`true` supplies explicitly fake deterministic runner/tool/provider-binding probes.
+Every fake runner's `run` throws `BRIDGE_EXECUTION_FORBIDDEN`; no Codex or provider
+is called. This is evidence of management/registration binding, **not actual
+production dependency or provider readiness**.
+
+Bridge regression: `node --test --test-concurrency=1
+conf/codex-ws-agent/test/skill-management-node-peer.test.mjs`. It launches this
+actual stdin/stdout process and feeds real original package/command bytes through
+first install, upgrade, disable, retained old-task lookup, crossboot byte replay,
+real receipt retirement and raw-token rejection. Actual API/MySQL + this Node
+peer remains the main Owner's Flow integration execution, not a local PASS claim.
