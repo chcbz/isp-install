@@ -1,0 +1,28 @@
+{
+  "contractVersion": "SM-C1",
+  "lockedAt": "2026-10-23T21:41:16.458170+08:00",
+  "publicStandardVersion": "1.2 (2026-10-14)",
+  "status": "TARGET_CONTRACT_DEFINED_NOT_IMPLEMENTED",
+  "scope": "Document and synthetic-fixture snapshot, not release approval; no self hash",
+  "files": {
+    "api/docs/interface-standard.md": "7dc50a51b5c3faa2d5311dd0f749ed2000365c34febc3c3714ba2a945180548f",
+    "specs/juyiting-skill-execution/management-contract.md": "42707edf45970cb7370806518765575970c064f2670e85fc52275d19ed86da3a",
+    "specs/juyiting-skill-execution/management-mvp.md": "db71c941ad7dd65c1b10028c591e2619b9c56f040067d19ddec5ab5a2ef5ff27",
+    "specs/juyiting-skill-execution/fixtures/management-contract-v1.schema.json": "9b66ef04627fc67c50fb28cfa52805df83478c89416cd9a195446159a6119f8a",
+    "specs/juyiting-skill-execution/fixtures/management-contract-v1.examples.json": "b9e48e96fc431b4920af44a437097d6479a61d7c2ccb076ad6be266db133171e",
+    "specs/juyiting-skill-execution/fixtures/management-contract-v1.behavior.json": "dcd4b7ae53c539b343480fe11b639fcf47bcd6c14b100b139f10fa24302a8edf",
+    "specs/juyiting-skill-execution/evidence/management-contract-20261023/static-check.cjs": "c65ac0e67908c82cb48a52d065e59346d6ad256ef859fbcb954145ff404acb77",
+    "specs/juyiting-skill-execution/evidence/management-contract-20261023/static-check.json": "b73c10edf19a70765db1833b1ce49138312faeb798d511802d691a2884e9358a",
+    "specs/juyiting-skill-execution/evidence/management-contract-20261023/document-check.json": "d720e84a3bc78c9f7143ddd15463c2c898dae8f315c15a11b256fcd257c60f19",
+    "specs/juyiting-skill-execution/evidence/management-contract-20261023/source-baseline.json": "2a333d8b288e78ccba42d6490b4cabcf827c0bbb43593e8b82048fe8f99eb130"
+  },
+  "verification": {
+    "schemaPositive": 58,
+    "schemaNegative": 21,
+    "rawNegative": 5,
+    "digestVectors": 6,
+    "httpRoutes": 7,
+    "businessCasesNotRun": 22,
+    "prototypeInputsUnchanged": 6
+  }
+}

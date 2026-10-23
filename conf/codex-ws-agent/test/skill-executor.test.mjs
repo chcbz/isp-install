@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { executeSkill, parseSkillCommand } from '../skill-executor.mjs'
 const schema = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false }
 const command = () => ({ executionProtocolVersion: 4, executionId: 'pwe_1', taskId: 't1', runId: 'r1', conversationId: 'c1', conversationGeneration: '1',
+  taskSkillBinding: { executionId: 'pwe_1', taskGrantId: 'grant_1', taskGrantVersion: '1', agentId: 'agent', skillKey: 'text-file', skillInstallationId: 'si_a', productVersionId: 'spv_a', skillVersion: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64), approvedPermissionsSha256: 'd'.repeat(64) },
   skill: { key: 'text-file', version: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64) },
   commandId: 'cmd1', messageId: 'msg1', snapshotDigest: 'c'.repeat(64), parameters: { title: '内容' }, instruction: '生成文本', inputRefs: [], outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } })
 const fixture = () => {
@@ -53,4 +54,21 @@ test('canonical object keys are UTF16 lexical, never JS integer-property enumera
   const expected = '{"10":5e-324,"2":0,"a":[1.5,1e-7],"z":{"10":0.000001,"2":1e+21}}'
   assert.equal(skillCanonicalJson(value), expected); assert.equal(skillDigest(value), skillHash(expected))
   for (const value of [NaN, Infinity, undefined, 1n]) assert.throws(() => skillCanonicalJson(value), /SKILL_CANONICAL_JSON_INVALID/)
+})
+
+test('protocol4 requires the exact shared task binding and rejects substituted execution/package references before claim', async () => {
+  const original = command()
+  for (const key of ['executionId', 'skillKey', 'skillVersion', 'packageSha256', 'manifestSha256']) {
+    const changed = structuredClone(original)
+    changed.taskSkillBinding[key] = key.endsWith('Sha256') ? 'e'.repeat(64) : 'substituted'
+    assert.throws(() => parseSkillCommand(changed), /SKILL_COMMAND_INVALID/)
+  }
+  for (const taskSkillBinding of [null, { ...original.taskSkillBinding, taskGrantVersion: '01' },
+    { ...original.taskSkillBinding, approvedPermissionsSha256: null }, { ...original.taskSkillBinding, extra: true }]) {
+    await assert.rejects(executeSkill({ ...original, taskSkillBinding }, {
+      registry: { requireExact() { assert.fail('invalid binding must not reach registry/claim') } }
+    }))
+  }
+  const { taskSkillBinding, ...missing } = original
+  assert.throws(() => parseSkillCommand(missing), /SKILL_COMMAND_INVALID/)
 })

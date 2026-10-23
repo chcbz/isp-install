@@ -1,3 +1,4 @@
+import { isManagementMessage, parseManagementMessage } from './skill-management-wire.mjs'
 import { randomUUID } from 'node:crypto'
 import { decodeMessage, eventMessage, validateMessage } from './message-envelope.mjs'
 
@@ -18,10 +19,11 @@ const rename = (data, from, to) => {
   data[to] = data[from]; delete data[from]
 }
 const decimal = value => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 9223372036854775807n
-const skill = data => data.resultType === 'SKILL_INSTALL_RESULT' || data.commandType === 'SKILL_INSTALL'
+const retiredManagement = data => data.resultType === 'SKILL_INSTALL_RESULT' || ['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE'].includes(data.commandType)
 const publicType = type => ({ ping: 'connection.ping', pong: 'connection.pong', protocol_error: 'protocol.error', error: 'protocol.error' })[type] || type
 export function toAgentWire(privateMessage, session = null) {
-  if (!object(privateMessage)) invalid()
+  if (isManagementMessage(privateMessage)) return parseManagementMessage(privateMessage)
+  if (!object(privateMessage) || retiredManagement(privateMessage)) invalid()
   const data = { ...privateMessage }
   const type = publicType(data.messageType), messageId = data.messageId || randomUUID()
   const requestId = data.requestId || messageId
@@ -36,17 +38,7 @@ export function toAgentWire(privateMessage, session = null) {
     if (typeof data[key] === 'string' && decimal(data[key]) && BigInt(data[key]) <= BigInt(Number.MAX_SAFE_INTEGER)) data[key] = Number(data[key])
     if (!Number.isSafeInteger(data[key]) || data[key] < 0) invalid()
   }
-  rename(data, 'installationId', skill(data) ? 'skillInstallationId' : 'runtimeInstallationId')
-  if (data.resultType === 'SKILL_INSTALL_RESULT') {
-    rename(data, 'runtimeInstanceId', 'executionRuntimeInstanceId')
-    if (session) data.runtimeInstanceId = session.runtimeInstanceId
-    if (data.installedAt !== null && data.installedAt !== undefined) {
-      if (!decimal(data.installedAt) || BigInt(data.installedAt) > BigInt(Number.MAX_SAFE_INTEGER)) invalid()
-      data.installedAt = Number(data.installedAt)
-    }
-    if (typeof data.packageDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(data.packageDigest)) invalid()
-    data.packageSha256 = data.packageDigest.slice(7); delete data.packageDigest
-  }
+  rename(data, 'installationId', 'runtimeInstallationId')
   if (type === 'connection.pong') {
     const correlationId = data.correlationId; delete data.correlationId
     return validateMessage({ protocolVersion: 1, requestId, messageType: type, messageId, data, correlationId, code: 'E0', msg: 'ok' })
@@ -55,22 +47,15 @@ export function toAgentWire(privateMessage, session = null) {
 }
 export function fromAgentWire(text) {
   const message = decodeMessage(text)
+  if (isManagementMessage(message)) return parseManagementMessage(text)
   if (!object(message.data)) invalid()
-  const data = { ...message.data }
+  const data = { ...message.data }; if (retiredManagement(data)) invalid()
   if (['messageType', 'messageId', 'protocolVersion', 'type', 'channel', 'installationId'].some(key => Object.hasOwn(data, key))) invalid()
   for (const key of revisions) if (Object.hasOwn(data, key) && !decimal(data[key])) invalid()
-  rename(data, skill(data) ? 'skillInstallationId' : 'runtimeInstallationId', 'installationId')
+  rename(data, 'runtimeInstallationId', 'installationId')
   if (object(data.runtimeAuth)) {
     data.runtimeAuth = { ...data.runtimeAuth }
     rename(data.runtimeAuth, 'runtimeInstallationId', 'installationId')
-  }
-  if (data.resultType === 'SKILL_INSTALL_RESULT' && Object.hasOwn(data, 'executionRuntimeInstanceId')) {
-    delete data.runtimeInstanceId; rename(data, 'executionRuntimeInstanceId', 'runtimeInstanceId')
-  }
-  if (skill(data) && Object.hasOwn(data, 'packageDigest')) invalid()
-  if (skill(data) && Object.hasOwn(data, 'packageSha256')) {
-    if (!/^[0-9a-f]{64}$/.test(data.packageSha256)) invalid()
-    data.packageDigest = `sha256:${data.packageSha256}`; delete data.packageSha256
   }
   for (const key of ['issuedAt', 'sentAt', 'occurredAt', 'expiresAt']) {
     if (Object.hasOwn(data, key) && (!Number.isSafeInteger(data[key]) || data[key] < 0)) invalid()
@@ -112,10 +97,6 @@ export function fromAgentWire(text) {
   if (message.messageType === 'protocol.error') {
     data.type = 'protocol_error'; if (message.correlationId) data.messageId = message.correlationId
   }
-  if (data.resultType === 'SKILL_INSTALL_RESULT' && message.messageType === 'work.result.receipt') {
-    if (message.code !== 'E0' || !message.correlationId) invalid()
-    delete data.code; delete data.message
-  }
-  if (!Object.hasOwn(data, 'requestId') && data.resultType !== 'SKILL_INSTALL_RESULT') data.requestId = message.requestId
+  if (!Object.hasOwn(data, 'requestId')) data.requestId = message.requestId
   return data
 }

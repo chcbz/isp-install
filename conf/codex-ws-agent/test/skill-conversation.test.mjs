@@ -9,6 +9,7 @@ import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { skillConversationHttpScope } from '../../cyf-agent-runtime-v1/lib/runtime-client.mjs'
 const scope = { tenantId: 'tenant', clientId: 'client', ownerJiacn: 'owner', agentId: 'agent' }
 const command = () => ({ executionProtocolVersion: 4, executionId: 'pwe_1', taskId: 'task', runId: 'run', conversationId: 'conversation', conversationGeneration: '1', commandId: 'cmd', messageId: 'msg',
+  taskSkillBinding: { executionId: 'pwe_1', taskGrantId: 'grant_1', taskGrantVersion: '1', agentId: 'agent', skillKey: 'analysis', skillInstallationId: 'si_a', productVersionId: 'spv_a', skillVersion: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64), approvedPermissionsSha256: 'd'.repeat(64) },
   skill: { key: 'analysis', version: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64) },
   snapshotDigest: 'c'.repeat(64), parameters: {}, instruction: '分析资料', inputRefs: [], outputs: { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'], additionalProperties: false }, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } })
 const wireCommand = ({ snapshotDigest, ...command }) => ({ ...command, snapshotSha256: snapshotDigest })
@@ -135,7 +136,7 @@ test('a pending UNKNOWN retains its error but does not starve unrelated next inb
   const first = fixture(t), second = fixture(t)
   first.effects.set('native-model', { status: 'START_RECORDED' })
   await assert.rejects(first.lane.poll(), /SKILL_RESULT_UNKNOWN/)
-  second.c.executionId = 'pwe_2'; second.c.runId = 'run_2'; second.c.commandId = 'cmd_2'; second.c.messageId = 'msg_2'
+  second.c.executionId = 'pwe_2'; second.c.taskSkillBinding.executionId = 'pwe_2'; second.c.runId = 'run_2'; second.c.commandId = 'cmd_2'; second.c.messageId = 'msg_2'
   let now = 0
   const options = { ...first.options, now: () => now, random: () => 1, runners: second.options.runners, fetchFn: async (url, opts) => {
     if (url.pathname.endsWith('/commands')) return response(url, { items: [wireCommand(second.c)] })
@@ -157,7 +158,7 @@ test('a pending UNKNOWN retains its error but does not starve unrelated next inb
 test('shared store or session failures immediately halt poll instead of crossing the security boundary', async t => {
   for (const code of ['SKILL_SESSION_CHANGED', 'SKILL_STORE_UNSAFE', 'SKILL_STORE_IDENTITY_CONFLICT']) {
     const f = fixture(t), calls = [], original = Object.assign(new Error(code), { code, cause: new Error('actual cause') })
-    const second = { ...command(), executionId: 'pwe_2', runId: 'run_2' }
+    const second = { ...command(), executionId: 'pwe_2', runId: 'run_2' }; second.taskSkillBinding.executionId = 'pwe_2'
     f.lane.fetch = async url => response(url, { items: [wireCommand(f.c), wireCommand(second)] })
     f.lane.process = async command => { calls.push(command.executionId); throw original }
     await assert.rejects(f.lane.poll(), error => error === original)
@@ -245,7 +246,7 @@ test('UNKNOWN defers only its execution, avoids heavy process calls and resumes 
 test('UNKNOWN delay is bounded without a deadline; unrelated commands continue during cooldown', async t => {
   const f = fixture(t); let now = 0; const visited = []
   const lane = new SkillConversationLane({ ...f.options, now: () => now, random: () => 0 })
-  const other = { ...f.c, executionId: 'pwe_2', runId: 'run_2' }
+  const other = { ...structuredClone(f.c), executionId: 'pwe_2', runId: 'run_2' }; other.taskSkillBinding.executionId = 'pwe_2'
   lane.fetch = async url => response(url, { items: [wireCommand(f.c), wireCommand(other)] })
   lane.process = async c => { visited.push(c.executionId); if (c.executionId === f.c.executionId) throw Object.assign(new Error('unknown'), { code: 'SKILL_RESULT_UNKNOWN' }) }
   await assert.rejects(lane.poll(), /unknown/)

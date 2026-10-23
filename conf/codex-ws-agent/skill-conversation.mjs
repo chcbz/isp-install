@@ -298,7 +298,7 @@ export class SkillConversationLane {
           try { recovered = await this.request(`${path}/resume`, 'POST', { executionId: command.executionId, snapshotSha256: command.snapshotDigest }) } catch { throw original }
           if (!recovered.resultManifest) throw original
           const descriptor = (await this.registry.requireExact({ skillKey: command.skill.key, skillVersion: command.skill.version,
-            packageSha256: command.skill.packageSha256, manifestSha256: command.skill.manifestSha256 }, { allowUnavailable: true })).descriptor
+            packageSha256: command.skill.packageSha256, manifestSha256: command.skill.manifestSha256 }, { allowUnavailable: true, taskBinding: command.taskSkillBinding })).descriptor
           receipt = validateCommittedSkillResult(recovered.resultManifest, command, descriptor, recovered.phase, manifest)
         }
         if (receipt?.manifestId !== manifestId || receipt.state !== 'RESULT_COMMITTED' || receipt.resultDigest !== digest

@@ -32,6 +32,7 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from '
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { GitWorkspaceManager, WorkspaceManagerError } from './workspace-manager.mjs'
+import { isManagementMessage } from './skill-management-wire.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
@@ -481,6 +482,7 @@ export const normalizeInboundMessage = raw => {
   }
 
   if (canonicalType === MESSAGE_TYPES.COMMAND_DISPATCH) {
+    if (['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE'].includes(normalized.commandType)) throw new AgentProtocolError('SKILL_MANAGEMENT_SCHEMA_REQUIRED', 'Management uses the SM-C1 durable command path')
     for (const [field, value] of [
       ['commandId', normalized.commandId],
       ['commandType', normalized.commandType],
@@ -1226,19 +1228,6 @@ const FINGERPRINT_SEMANTIC_ENVELOPE_FIELDS = Object.freeze([
 const FINGERPRINT_COMPAT_BUSINESS_FIELDS = Object.freeze([
   'prompt', 'content', 'instruction', 'description', 'title', 'currentTaskTitle'
 ])
-const SKILL_INSTALL_FINGERPRINT_FIELDS = Object.freeze([
-  ['dispatchAttempt', 'attempt'],
-  ['fencingToken', 'fencingToken'],
-  ['deliveryEpoch', 'deliveryEpoch'],
-  ['orderId', 'orderId'],
-  ['installationId', 'installationId'],
-  ['productVersionId', 'productVersionId'],
-  ['skillKey', 'skillKey'],
-  ['skillVersion', 'skillVersion'],
-  ['packageSize', 'packageSize'],
-  ['packageDigest', 'packageDigest'],
-  ['downloadPath', 'downloadPath']
-])
 const FINGERPRINT_PAYLOAD_ROOT_CONTROL_FIELDS = new Set([
   ...FINGERPRINT_TRANSPORT_FIELDS,
   ...FINGERPRINT_SEMANTIC_ENVELOPE_FIELDS
@@ -1287,11 +1276,6 @@ const buildFingerprintSource = normalized => {
     taskId: String(normalized?.taskId || ''),
     workItemId: String(normalized?.workItemId || ''),
     businessPayload: canonicalizeFingerprintValue(businessPayload)
-  }
-  if (normalized?.commandType === 'SKILL_INSTALL') {
-    source.skillInstall = Object.fromEntries(SKILL_INSTALL_FINGERPRINT_FIELDS.map(([fingerprintField, messageField]) => (
-      [fingerprintField, normalized?.[messageField]]
-    )))
   }
   return source
 }
@@ -2499,9 +2483,7 @@ export const runtimeCommandContext = (profile, message) => {
       || raw.tenantId !== identity.tenantId || raw.clientId !== identity.clientId || raw.targetAgentId !== identity.canonicalAgentId
       || hasOwn(raw, 'canonicalAgentId') && raw.canonicalAgentId !== identity.canonicalAgentId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Original dispatch must match the trusted complete subject before projection')
   if (hasOwn(raw, 'installationId')) {
-    if (raw.commandType === 'SKILL_INSTALL') {
-      if (raw.installationId === identity.installationId) throw new AgentProtocolError('RUNTIME_COMMAND_INSTALLATION_CONFUSION', 'Skill product installation must not be Runtime authorization')
-    } else if (raw.installationId !== identity.installationId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Business frame cannot replace Runtime installation')
+    if (raw.installationId !== identity.installationId) throw new AgentProtocolError('RUNTIME_COMMAND_SCOPE_MISMATCH', 'Business frame cannot replace Runtime installation')
   }
   for (const key of ['messageId', 'correlationId', 'commandId', 'commandType', 'taskId']) if (!exactRuntimeCommandField(raw[key])) throw new AgentProtocolError('RUNTIME_COMMAND_CONTEXT_REQUIRED', 'Dispatch must carry original D06 message and work context')
   if (!Number.isSafeInteger(raw.expiresAt) || !Number.isFinite(new Date(raw.expiresAt).getTime())) throw new AgentProtocolError('RUNTIME_COMMAND_EXPIRY_INVALID', 'Original expiry must be a safe integer within the epoch millisecond date range')
@@ -2596,10 +2578,8 @@ export class AgentMessageProcessor {
       targetAgentId: message.targetAgentId || '',
       taskId: message.taskId || '',
       workItemId: message.workItemId || '',
-      // Native skill installation is authorized by the live original order on every
-      // ACK/download/result. Keep the original hint in the fingerprint and HTTP context,
-      // but do not impose the unrelated task-invitation timeout on its durable queue.
-      expiresAt: this.profile.runtimeIdentity && message.commandType === 'SKILL_INSTALL' ? null : message.expiresAt,
+      // Task ACK context only; management uses its taskless SM-C1 journal.
+      expiresAt: message.expiresAt,
       ...(this.profile.runtimeIdentity ? { runtimeCommand: runtimeCommandContext(this.profile, message) } : {})
     }
   }
@@ -4185,7 +4165,6 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => {
     runtimeCapabilities: buildRuntimeCapabilities(profile),
     ...(typedDeliberation ? { typedDeliberation: online && typedInspection ? { ...typedDeliberation, materialsInput: { schemaVersion: 1, supportedInputs: typedInspection.supportedInputs } } : typedDeliberation } : {}),
     ...(online && typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {}),
-    ...(online && extra.skillRegistry?.declaration?.() ? { skillExecution: extra.skillRegistry.declaration() } : {})
   }
 }
 
@@ -4275,11 +4254,12 @@ export const runSkillNativeModel = async (state, { command, inputs, instruction,
 
 export const bindMeasuredSkillSession = (state, binding) => {
   if (!state || state.disposed) return false
-  if (!binding) { state.skillRegistry?.setSession(null); return false }
+  if (!binding) { state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); return false }
   const identity = state.profile.runtimeIdentity
   if (!identity || binding.scope.tenantId !== identity.tenantId || binding.scope.clientId !== identity.clientId
       || binding.scope.agentId !== identity.canonicalAgentId || binding.fence.installationId !== identity.installationId
       || binding.fence.runtimeInstanceId !== state.profile.runtimeInstanceId) throw new AgentProtocolError('SKILL_SESSION_SCOPE_MISMATCH', 'Authenticated skill subject mismatch')
+  state.skillInstallManager?.bindSession(binding)
   if (!state.skillRegistry || JSON.stringify(state.skillRegistry.scope) !== JSON.stringify(binding.scope)) {
     state.skillRegistry?.setSession(null)
     const bindings = new SkillBindings({ file: state.profile.skillBindingsFile,
@@ -4303,6 +4283,7 @@ export const bindMeasuredSkillSession = (state, binding) => {
       ['local-script', localRunner]
     ])
     state.skillRegistry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => state.skillInstallManager.listInstalledSkills(),
+      loadRetained: skillInstallationId => state.skillInstallManager.listInstalledSkills({ includeRetained: true, skillInstallationId }),
       runnerRegistry: state.skillRunners, toolProbes: new Map([['node', () => localRunner.probeTool()]]), resolveBinding: request => bindings.resolve(request) })
     if (state.profile.workspaceFileApiOrigin && state.profile.workspaceFileRootDir) {
       state.conversationNativeLane = new SkillConversationLane({ apiOrigin: state.profile.workspaceFileApiOrigin,
@@ -4312,6 +4293,7 @@ export const bindMeasuredSkillSession = (state, binding) => {
         onCommitted: command => state.typedInspectionProfileRuntime?.releaseAdapter(`skill:${command.executionId}:${command.snapshotDigest}`) })
     }
   }
+  state.skillInstallManager.verifyCandidate = async row => (await state.skillRegistry.measureInstallation(row)).item
   if (!state.skillRegistry.setSession(binding.fence)) return false
   // Runner probes measure actual dependencies; missing tool/binding remains UNAVAILABLE.
   void refreshMeasuredSkills(state)
@@ -5525,6 +5507,7 @@ export const runManagedCommand = async ({
   materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus,
   nativeFetch, apiOrigin, commandCheckpoint, now = Date.now, signal, sessionCurrent, onSkillInstallChanged = null
 }) => {
+  if (isManagementMessage(message)) return skillInstallManager.handle(message)
   const binding = e05ReassignmentBinding(profile, message)
   if (binding) return runE05Command({ profile, message, binding, workspaceManager, runCodexFn,
     nativeFetch, apiOrigin, commandCheckpoint, now, signal, sessionCurrent })
@@ -5536,11 +5519,8 @@ export const runManagedCommand = async ({
     // manifest is their only completion fact; sending legacy task reports would target a fake task.
     return workspaceFileResult
   }
-  if (message.commandType !== 'SKILL_INSTALL') return runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
-  const changed = phase => { try { onSkillInstallChanged?.(phase) } catch { /* catalog failure is not installation failure */ } }
-  changed('changing')
-  try { return await skillInstallManager.execute(message) }
-  finally { changed('changed') }
+  if (['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE'].includes(message.commandType)) throw new AgentProtocolError('SKILL_MANAGEMENT_SCHEMA_REQUIRED', 'Management requires SM-C1 command envelope')
+  return runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
 }
 
 const WORKSPACE_FILE_QUEUE_PATH = '/internal/agent/tasks/workspace-executions/commands'
@@ -6530,7 +6510,7 @@ const disposeProfileStateOnce = async (state, reason) => {
   state.processor.pause()
   state.processor.stop()
   // Disable ingress and auth before awaiting an engine shutdown.
-  if (profile.runtimeIdentity) { state.skillRegistry?.setSession(null); state.runtimeTransport = null; state.workspaceFileRuntimeAuthHeader = '' }
+  if (profile.runtimeIdentity) { state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.runtimeTransport = null; state.workspaceFileRuntimeAuthHeader = '' }
   // A failed inbox can isolate the executor while its no-model measurement is
   // still using the private CA/proxy. Let that owned work finish before disposal.
   await state.typedInspectionProfilePromise
@@ -6664,13 +6644,14 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           entry.state.runtimeTransport = transport
         },
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
+        matchesSkillManagementAck: envelope => entry.state?.skillInstallManager.matchesDurableAckEnvelope(envelope) === true,
         matchesSkillInstallResult: envelope => entry.state?.skillInstallManager.matchesDurableResultEnvelope(envelope) === true,
         matchesSkillInstallReceipt: receipt => entry.state?.skillInstallManager.matchesDurableResultReceipt(receipt) === true,
         attachSocket: socket => { entry.state.ws = socket },
         durableStateHealthy: () => {
           const state = entry.state
           if (!state || state.disposed || state.processor.failClosedError || state.ledger.hasCorruption() || state.ackOutbox.hasCorruption()) return false
-          try { state.ackOutbox.pendingEnvelopes(); return true } catch { return false }
+          try { state.ackOutbox.pendingEnvelopes(); return state.skillInstallManager.isHealthy() } catch { return false }
         },
         registrationPayload: () => buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
           true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry),
@@ -6681,11 +6662,17 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           if (state.workspaceManager && state.commandAdapterReady) types.push('TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH')
           // WORK_ITEM_CANCEL has no independently verified exact command cancel
           // adapter; CHAT cancellation retains its original exact turn contract.
-          if (state.skillInstallManager.enabled) types.push('SKILL_INSTALL')
+          if (state.skillInstallManager.enabled) types.push('SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE')
           return types
         },
         chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
-        acceptFrame: frame => entry.state.processor.handle(frame),
+        acceptFrame: async frame => {
+          const state = entry.state
+          if (!isManagementMessage(frame)) return state.processor.handle(frame)
+          const result = await state.skillInstallManager.handle(frame)
+          if (frame.messageType === 'command.dispatch') await refreshMeasuredSkills(state)
+          return result
+        },
         resume: async () => {
           const state = entry.state
           if (!state.runtimeTransport?.reportReady()) return
@@ -6694,17 +6681,21 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           const confirmed = await state.processor.replayAcks()
           if (state.runtimeTransport.ready() && confirmed) state.processor.resume()
           state.executionReportOutbox.sendPending(envelope => sendRaw(envelope, entry.profile))
-          state.skillInstallManager.replayResults()
+          state.skillInstallManager.replayAcks()
+          await state.skillInstallManager.resumePendingCommands()
+          const skillReplayToken = state.skillInstallManager.session
+          startBoundedSkillResultReplay({ manager: state.skillInstallManager, replayToken: skillReplayToken,
+            isStable: () => state.runtimeTransport?.reportReady() && state.skillInstallManager.session === skillReplayToken })
           if (state.runtimeTransport.ready()) {
             startWorkspaceFilePoller(entry.profile, state)
             startNativeConversationPoller(entry.profile, state)
             // New executions use the same protocol4 conversation poll, never an image lane.
           }
         },
-        suspendAdmission: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.processor.pause(); stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state) },
-        disconnected: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
+        suspendAdmission: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.processor.pause(); stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state) },
+        disconnected: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); stopControlledImageV3ConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
         ready: () => Boolean(!entry.closed && entry.state && !entry.state.disposed && !entry.state.processor.failClosedError && entry.state.runtimeTransport?.ready?.()),
-        pause: async () => { entry.state?.e05CommandAbort?.abort(); entry.state?.processor.pause(); if (entry.state) { entry.state.skillRegistry?.setSession(null); entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
+        pause: async () => { entry.state?.e05CommandAbort?.abort(); entry.state?.processor.pause(); if (entry.state) { entry.state.skillRegistry?.setSession(null); entry.state.skillInstallManager?.bindSession(null); entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
         close: () => closeEntry(entry),
         // This read-only structure exposes state only to the trusted adapter, not
         // to the UI, logs, profile file or engine environment.

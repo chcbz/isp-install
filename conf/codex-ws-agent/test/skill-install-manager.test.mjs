@@ -1,1346 +1,604 @@
+import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { Readable } from 'node:stream'
-import test, { afterEach } from 'node:test'
+import { SkillInstallManager } from '../skill-install-manager.mjs'
+import { replyMessage } from '../message-envelope.mjs'
+import { packageFixture, command, activate, binding, profile, headers } from './fixtures/skill-management-fixture.mjs'
 
-import {
-  ACK_STATUS,
-  AckOutbox,
-  AgentMessageProcessor,
-  DurableDedupeLedger,
-  CommandFingerprint,
-  MESSAGE_TYPES,
-  PersistentCommandInbox,
-  ensureProfiles,
-  normalizeProfile,
-  runManagedCommand,
-  startBoundedSkillResultReplay
-} from '../agent-client.mjs'
-import {
-  LINUX_ATOMIC_FS,
-  SKILL_INSTALL_FAILURE,
-  WORK_RESULT_RECEIPT_TYPE,
-  SkillInstallError,
-  SkillInstallManager,
-  buildSkillDownloadUrl,
-  defaultSkillInstallStateRoot
-} from '../skill-install-manager.mjs'
-
-
-const runtimeHeaders = { Authorization: `AgentRuntime rts1_${'a'.repeat(64)}`, 'X-Agent-Id': 'agent-a', 'X-Agent-Installation-Id': 'installation-a', 'X-Agent-Host-Id': 'host-a', 'X-Agent-Runtime-Id': 'boot-a', 'X-Agent-Session-Generation': '1' }
-
-const temporaryDirectories = []
-afterEach(() => {
-  while (temporaryDirectories.length) rmSync(temporaryDirectories.pop(), { recursive: true, force: true })
-})
-
-const temporaryDirectory = () => {
-  const directory = mkdtempSync(resolve(tmpdir(), 'codex-ws-agent-skill-'))
-  temporaryDirectories.push(directory)
-  return directory
+const setup = (t, options = {}) => {
+  const root = mkdtempSync(resolve(tmpdir(), 'cyf-smc1-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const home = resolve(root, 'home'); mkdirSync(home)
+  let downloads = 0; const emitted = [], packages = new Map()
+  const settings = { profile: profile(home), stateRoot: resolve(root, 'state'), wsUrl: 'ws://127.0.0.1:8080/ws/agent/channel',
+    enabled: true, runtimeInstanceId: 'boot_demo', getRuntimeHeaders: () => headers(binding),
+    fetchFn: async url => { downloads++; const bytes = packages.get(url.pathname); assert.ok(bytes, url.pathname)
+      return new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.length), 'content-type': 'application/octet-stream' } }) },
+    sendResultFn: msg => { emitted.push(structuredClone(msg)); return true }, ...options }
+  const manager = new SkillInstallManager(settings); manager.initialize(); manager.bindSession(binding)
+  manager.verifyCandidate = async () => ({ readiness: 'READY' })
+  const add = fixture => { packages.set(`/internal/agent/skill-installations/${fixture.target.skillInstallationId}/package`, fixture.bytes); return fixture }
+  return { root, home, manager, settings, emitted, add, downloads: () => downloads }
 }
 
-const profile = codexHome => ({
-  profileId: 'profile-a',
-  agentId: 'agent-a',
-  agentName: 'Agent A',
-  personaName: 'Agent A',
-  apiKey: '',
-  codexHome,
-  codexWorkdir: codexHome,
-  codexBin: '/bin/true',
-  codexSandbox: 'workspace-write',
-  codexApproval: 'never',
-  codexSessionMode: 'new',
-  codexTimeoutMs: 1000
+test('SM-C1 real ZIP PREPARE → ACTIVATE, durable ACK/result, receipt retirement and exact instruction declaration', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), prepare = command(pkg.target)
+  const result = await f.manager.handle(prepare)
+  assert.equal(result.resultEnvelope.data.evidence.outcome, 'PREPARED')
+  assert.equal(f.emitted[0].messageType, 'command.ack')
+  assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
+  assert.equal(f.manager.listInstalledSkills().length, 0)
+  const activation = activate(prepare), applied = (await f.manager.handle(activation)).resultEnvelope
+  assert.equal(applied.data.evidence.outcome, 'APPLIED')
+  assert.equal(applied.data.evidence.readiness, 'NOT_EXECUTABLE')
+  assert.equal(applied.data.executionRuntimeInstanceId, 'boot_demo')
+  assert.equal(Object.hasOwn(applied, 'code'), false)
+  assert.equal(f.manager.listInstalledSkills()[0].manifest, null)
+  assert.ok(readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md'), 'utf8').includes('1.0.0'))
+  assert.equal(f.downloads(), 1)
+  await f.manager.handle(activation); assert.equal(f.downloads(), 1)
+  const receipt = replyMessage(applied, 'work.result.receipt', 'receipt_1', 'E0', 'committed', {
+    schemaVersion: 2, skillChangeId: applied.data.skillChangeId, commandId: applied.data.commandId, attempt: applied.data.attempt, receiptStatus: 'ACCEPTED' })
+  f.manager.acknowledgeResultReceipt(receipt)
+  assert.equal(f.manager.pendingResults().some(row => row.envelope.messageId === applied.messageId), false)
 })
 
-const crcTable = (() => {
-  const table = new Uint32Array(256)
-  for (let index = 0; index < 256; index += 1) {
-    let value = index
-    for (let bit = 0; bit < 8; bit += 1) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1)
-    table[index] = value >>> 0
-  }
-  return table
-})()
-
-const crc32 = bytes => {
-  let crc = 0xffffffff
-  for (const byte of bytes) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8)
-  return (crc ^ 0xffffffff) >>> 0
+// Safety and recovery regressions migrated from the retired schema1 installer.
+// These deliberately exercise the existing extractor, Linux renameat2 and journal,
+// not a substitute management state machine.
+import { writeFileSync, symlinkSync, linkSync, renameSync, readdirSync, utimesSync, lstatSync } from 'node:fs'
+import { buildSkillDownloadUrl, LINUX_ATOMIC_FS, SKILL_INSTALL_FAILURE } from '../skill-install-manager.mjs'
+import { managementDigest } from '../skill-management-wire.mjs'
+import { SkillRegistry } from '../skill-registry.mjs'
+import { executeSkill } from '../skill-executor.mjs'
+import { policy, reconcile, zip, skillDocument, hash } from './fixtures/skill-management-fixture.mjs'
+const outcome = result => result.resultEnvelope.data.evidence.outcome
+const receiptFor = result => replyMessage(result, 'work.result.receipt', `receipt_${result.messageId}`, 'E0', 'committed', {
+  schemaVersion: 2, skillChangeId: result.data.skillChangeId, commandId: result.data.commandId, attempt: result.data.attempt, receiptStatus: 'ACCEPTED' })
+const restart = (f, options = {}) => {
+  const manager = new SkillInstallManager({ ...f.settings, ...options }); manager.initialize()
+  manager.bindSession({ ...binding, fence: { ...binding.fence, runtimeInstanceId: options.runtimeInstanceId || f.settings.runtimeInstanceId } })
+  manager.verifyCandidate = async () => ({ readiness: 'READY' }); return manager
 }
-
-const zip = entries => {
-  const localParts = []
-  const centralParts = []
-  let offset = 0
-  for (const item of entries) {
-    const name = Buffer.from(item.name, 'utf8')
-    const data = Buffer.isBuffer(item.data) ? item.data : Buffer.from(item.data || '', 'utf8')
-    const crc = crc32(data)
-    const flags = 0x0800
-    const mode = item.mode ?? (item.name.endsWith('/') ? 0o040755 : 0o100644)
-    const local = Buffer.alloc(30)
-    local.writeUInt32LE(0x04034b50, 0)
-    local.writeUInt16LE(20, 4)
-    local.writeUInt16LE(flags, 6)
-    local.writeUInt16LE(0, 8)
-    local.writeUInt32LE(crc, 14)
-    local.writeUInt32LE(data.length, 18)
-    local.writeUInt32LE(data.length, 22)
-    local.writeUInt16LE(name.length, 26)
-    localParts.push(local, name, data)
-
-    const central = Buffer.alloc(46)
-    central.writeUInt32LE(0x02014b50, 0)
-    central.writeUInt16LE(0x0314, 4)
-    central.writeUInt16LE(20, 6)
-    central.writeUInt16LE(flags, 8)
-    central.writeUInt16LE(0, 10)
-    central.writeUInt32LE(crc, 16)
-    central.writeUInt32LE(data.length, 20)
-    central.writeUInt32LE(data.length, 24)
-    central.writeUInt16LE(name.length, 28)
-    central.writeUInt32LE((mode << 16) >>> 0, 38)
-    central.writeUInt32LE(offset, 42)
-    centralParts.push(central, name)
-    offset += local.length + name.length + data.length
-  }
-  const centralDirectory = Buffer.concat(centralParts)
-  const eocd = Buffer.alloc(22)
-  eocd.writeUInt32LE(0x06054b50, 0)
-  eocd.writeUInt16LE(entries.length, 8)
-  eocd.writeUInt16LE(entries.length, 10)
-  eocd.writeUInt32LE(centralDirectory.length, 12)
-  eocd.writeUInt32LE(offset, 16)
-  return Buffer.concat([...localParts, centralDirectory, eocd])
+const installed = async f => {
+  const pkg = f.add(packageFixture()), prepare = command(pkg.target)
+  assert.equal(outcome(await f.manager.handle(prepare)), 'PREPARED')
+  const activation = activate(prepare); assert.equal(outcome(await f.manager.handle(activation)), 'APPLIED')
+  return { pkg, prepare, activation }
 }
+const crashed = name => (stage => { if (stage === name) throw Object.assign(new Error(`crash:${name}`), { simulatedCrash: true }) })
 
-const skillDocument = (skillKey = 'repo-test', version = '1.0.0') => (
-  `---\nname: ${skillKey}\ndescription: Run focused authorized repository tests.\nmetadata:\n  version: "${version}"\n---\n\n# ${skillKey}\n`
-)
-
-const validPackage = (skillKey = 'repo-test', version = '1.0.0') => zip([
-  { name: 'SKILL.md', data: skillDocument(skillKey, version) },
-  { name: 'scripts/run.sh', data: '#!/bin/sh\necho safe\n', mode: 0o100755 }
-])
-
-const digest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
-
-const dispatch = (packageBytes, overrides = {}) => ({
-  schemaVersion: 1,
-  messageType: MESSAGE_TYPES.COMMAND_DISPATCH,
-  messageId: 'msg-install-1',
-  requestId: 'msg-install-1',
-  commandType: 'SKILL_INSTALL',
-  commandId: 'cmd-install-1',
-  attempt: 1,
-  fencingToken: '1',
-  deliveryEpoch: '1',
-  targetAgentId: 'agent-a',
-  orderId: 'so_1',
-  installationId: 'si_1',
-  productVersionId: 'spv_1',
-  skillKey: 'repo-test',
-  skillVersion: '1.0.0',
-  packageSize: String(packageBytes.length),
-  packageDigest: digest(packageBytes),
-  downloadPath: '/internal/agent/skill-installations/si_1/package',
-  ...overrides
-})
-
-const responseFor = (bytes, url = 'https://api.example.test/internal/agent/skill-installations/si_1/package') => ({
-  status: 200,
-  redirected: false,
-  url,
-  headers: { get: name => name.toLowerCase() === 'content-length' ? String(bytes.length) : null },
-  body: Readable.from([bytes])
-})
-
-const receiptFor = (envelope, overrides = {}) => ({
-  schemaVersion: 1,
-  messageType: WORK_RESULT_RECEIPT_TYPE,
-  messageId: `receipt-${envelope.messageId}`,
-  correlationId: envelope.messageId,
-  resultType: envelope.resultType,
-  receiptStatus: 'ACCEPTED',
-  commandId: envelope.commandId,
-  attempt: envelope.attempt,
-  fencingToken: envelope.fencingToken,
-  deliveryEpoch: envelope.deliveryEpoch,
-  installationId: envelope.installationId,
-  targetAgentId: envelope.targetAgentId,
-  ...overrides
-})
-
-const identity = path => {
-  const status = lstatSync(path, { bigint: true })
-  return {
-    path: resolve(path),
-    dev: status.dev.toString(),
-    ino: status.ino.toString(),
-    kind: status.isDirectory() ? 'directory' : status.isFile() ? 'file' : status.isSymbolicLink() ? 'symlink' : 'other'
+test('management disabled, strict target/path/hash/size and API-key rejection precede fetch/ACK', async t => {
+  const f = setup(t, { enabled: false }), c = command(packageFixture().target)
+  await assert.rejects(f.manager.handle(c), { code: 'SKILL_INSTALL_DISABLED' })
+  assert.equal(f.emitted.length, 0); assert.equal(f.downloads(), 0)
+  f.manager.enabled = true
+  for (const patch of [{ downloadPath: '/internal/agent/skill-installations/other/package' },
+    { target: { ...c.data.target, byteLength: '01' } }, { target: { ...c.data.target, skillInstallationId: '../escape' } },
+    { target: { ...c.data.target, manifestSha256: 'x' } }, { taskId: 'order_not_task' }]) {
+    await assert.rejects(f.manager.handle(command(c.data.target, patch)))
   }
-}
-
-const identityMatches = (left, right) => left && right
-  && left.path === right.path && left.dev === right.dev && left.ino === right.ino && left.kind === right.kind
-
-const ownerEvidenceDigest = directory => {
-  let bytes
-  try { bytes = readFileSync(resolve(directory, 'owner.json')) } catch (error) {
-    if (error?.code === 'ENOENT') bytes = Buffer.alloc(0)
-    else throw error
-  }
-  return createHash('sha256').update(bytes).digest('hex')
-}
-
-const testAtomicFs = {
-  renameNoReplace(sourcePath, targetPath, expected = {}) {
-    try {
-      if (expected.sourceParent && !identityMatches(identity(resolve(sourcePath, '..')), expected.sourceParent)) {
-        return { ok: false, code: 'PARENT_CHANGED_ROLLED_BACK', message: 'source parent changed' }
-      }
-      if (expected.targetParent && !identityMatches(identity(resolve(targetPath, '..')), expected.targetParent)) {
-        return { ok: false, code: 'PARENT_CHANGED_ROLLED_BACK', message: 'target parent changed' }
-      }
-      if (expected.sourceIdentity && !identityMatches(identity(sourcePath), expected.sourceIdentity)) {
-        return { ok: false, code: 'SOURCE_CHANGED', message: 'source changed' }
-      }
-      if (expected.sourceOwnerSha256 && ownerEvidenceDigest(sourcePath) !== expected.sourceOwnerSha256) {
-        return { ok: false, code: 'SOURCE_CHANGED', message: 'source owner generation changed' }
-      }
-      if (existsSync(targetPath)) return { ok: false, code: 'TARGET_EXISTS', message: 'target exists' }
-      renameSync(sourcePath, targetPath)
-      if (expected.sourceOwnerSha256 && ownerEvidenceDigest(targetPath) !== expected.sourceOwnerSha256) {
-        return { ok: false, code: 'POSTCONDITION_FAILED', message: 'target owner generation changed' }
-      }
-      return { ok: true, code: 'OK', message: '' }
-    } catch (error) {
-      return { ok: false, code: 'IO_ERROR', message: error.message }
-    }
-  },
-  exchangeIfMatch() {
-    return { ok: false, code: 'UNSUPPORTED', message: 'test helper does not emulate exchange' }
-  }
-}
-
-const managerForExistingState = ({ profile: selectedProfile, stateRoot, sendResultFn = () => false, atomicFs = testAtomicFs, ...options }) => new SkillInstallManager({
-  profile: selectedProfile,
-  stateRoot,
-  wsUrl: 'wss://api.example.test/ws/agent/channel',
-  getRuntimeHeaders: () => runtimeHeaders,
-  enabled: true,
-  fetchFn: async () => { throw new Error('network must not be used during recovery') },
-  sendResultFn,
-  runtimeInstanceId: 'runtime-restart',
-  atomicFs,
-  ...options
+  assert.equal(f.emitted.length, 0); assert.equal(f.downloads(), 0)
+  assert.throws(() => new SkillInstallManager({ ...f.settings, apiKey: 'no-legacy-auth' }), /legacy API-key/)
 })
 
-const managerRuntime = ({ enabled = true, packageBytes = validPackage(), sendResultFn = () => false, fetchFn, root = temporaryDirectory(), atomicFs = testAtomicFs } = {}) => {
-  const codexHome = resolve(root, 'codex-home')
-  mkdirSync(codexHome, { recursive: true })
-  const selectedProfile = profile(codexHome)
-  const stateRoot = resolve(root, 'state')
-  const manager = new SkillInstallManager({
-    profile: selectedProfile,
-    stateRoot,
-    wsUrl: 'wss://api.example.test/ws/agent/channel?keep=1',
-    getRuntimeHeaders: () => runtimeHeaders,
-    enabled,
-    fetchFn: fetchFn || (async () => responseFor(packageBytes)),
-    sendResultFn,
-    runtimeInstanceId: 'runtime-test',
-    atomicFs,
-    now: (() => { let value = 1788320000000; return () => value++ })()
-  })
-  manager.initialize()
-  return { root, codexHome, stateRoot, profile: selectedProfile, manager, packageBytes }
-}
-
-test('SKILL_INSTALL is default-off and performs no download or activation', async () => {
-  const bytes = validPackage()
-  let downloads = 0
-  const runtime = managerRuntime({
-    enabled: false,
-    packageBytes: bytes,
-    fetchFn: async () => { downloads += 1; return responseFor(bytes) }
-  })
-  const persistFailure = runtime.manager._persistFailureResult.bind(runtime.manager)
-  let persistedUnderMutex = false
-  runtime.manager._persistFailureResult = (...args) => {
-    assert.ok(runtime.manager.lockOwner)
-    persistedUnderMutex = true
-    return persistFailure(...args)
-  }
-  const result = await runtime.manager.execute(dispatch(bytes))
-
-  assert.equal(result.status, 'failed')
-  assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.DISABLED)
-  assert.equal(result.resultEnvelope.failureCode, 'SKILL_INSTALL_DISABLED')
-  assert.equal(downloads, 0)
-  assert.equal(persistedUnderMutex, true)
-  assert.equal(runtime.manager.pendingResults().length, 1)
-})
-
-test('failure-result persistence loss stays non-terminal for startup reconciliation', async () => {
-  const bytes = validPackage()
-  const runtime = managerRuntime({ enabled: false, packageBytes: bytes })
-  runtime.manager._persistFailureResult = () => {
-    assert.ok(runtime.manager.lockOwner)
-    throw new Error('injected failure-result persistence loss')
-  }
-  const result = await runtime.manager.execute(dispatch(bytes))
-  assert.equal(result.status, 'recovery_required')
-  assert.equal(result.activationCommitted, false)
-  assert.equal(runtime.manager.pendingResults().length, 0)
-})
-
-test('strict command, target, path, and declared-size validation perform no download', async t => {
-  const bytes = validPackage()
-  const cases = [
-    ['command type', { commandType: 'skill_install' }, SKILL_INSTALL_FAILURE.COMMAND_INVALID],
-    ['target Agent', { targetAgentId: 'agent-b' }, SKILL_INSTALL_FAILURE.COMMAND_INVALID],
-    ['download path', { downloadPath: 'https://evil.example/package' }, SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN],
-    ['declared size', { packageSize: String(16 * 1024 * 1024 + 1) }, SKILL_INSTALL_FAILURE.PACKAGE_TOO_LARGE]
-  ]
-  for (const [name, overrides, expectedCode] of cases) {
-    await t.test(name, async () => {
-      let downloads = 0
-      const runtime = managerRuntime({
-        packageBytes: bytes,
-        fetchFn: async () => { downloads += 1; return responseFor(bytes) }
-      })
-      const result = await runtime.manager.execute(dispatch(bytes, overrides))
-      assert.equal(result.failureCode, expectedCode)
-      assert.equal(downloads, 0)
-      assert.equal(runtime.manager.getInstallation('si_1'), null)
-    })
-  }
-})
-
-test('same-origin download uses only installation-derived session proof and digest mismatch fails before extraction', async () => {
-  const bytes = validPackage()
-  const observed = []
-  const runtime = managerRuntime({
-    packageBytes: bytes,
-    fetchFn: async (url, options) => {
-      observed.push({ url: url.toString(), options })
-      return responseFor(bytes)
-    }
-  })
-  const result = await runtime.manager.execute(dispatch(bytes, { packageDigest: `sha256:${'0'.repeat(64)}` }))
-
-  assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.PACKAGE_DIGEST_MISMATCH)
-  assert.equal(observed.length, 1)
-  const endpoint = new URL(observed[0].url)
-  assert.equal(endpoint.origin, 'https://api.example.test')
-  assert.equal(endpoint.pathname, '/internal/agent/skill-installations/si_1/package')
-  assert.equal(endpoint.search, '')
-  assert.deepEqual(observed[0].options.headers, { ...runtimeHeaders, Accept: 'application/zip' })
-  assert.equal(JSON.stringify(runtime.manager.pendingResults()).includes('existing-secret'), false)
-})
-
-test('malicious ZIP entries and skill identity mismatches fail closed', async t => {
-  const cases = [
-    ['traversal', zip([{ name: '../SKILL.md', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['absolute', zip([{ name: '/SKILL.md', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['backslash', zip([{ name: 'dir\\SKILL.md', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['control character', zip([{ name: 'docs/control\u0001.txt', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['trailing dot alias', zip([{ name: 'docs./file.txt', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['trailing space alias', zip([{ name: 'docs /file.txt', data: 'bad' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['reserved marker', zip([{ name: '.cyf-installation.json', data: '{}' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['duplicate', zip([
-      { name: 'SKILL.md', data: skillDocument() },
-      { name: 'SKILL.md', data: 'duplicate' }
-    ]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['symlink', zip([
-      { name: 'SKILL.md', data: skillDocument() },
-      { name: 'escape', data: '../outside', mode: 0o120777 }
-    ]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['missing manifest', zip([{ name: 'README.md', data: 'missing skill identity' }]), SKILL_INSTALL_FAILURE.ARCHIVE_INVALID],
-    ['identity mismatch', validPackage('different-skill', '2.0.0'), SKILL_INSTALL_FAILURE.IDENTITY_MISMATCH]
-  ]
-  for (const [name, bytes, expectedCode] of cases) {
-    await t.test(name, async () => {
-      const runtime = managerRuntime({ packageBytes: bytes })
-      const result = await runtime.manager.execute(dispatch(bytes))
-      assert.equal(result.failureCode, expectedCode)
-      assert.equal(runtime.manager.getInstallation('si_1'), null)
-    })
-  }
-})
-
-test('metadata.version frontmatter accepts the bounded string mapping format', async t => {
-  const cases = [
-    ['plain version', 'name: repo-test\ndescription: Run authorized tests.\nmetadata:\n  version: 1.0.0'],
-    ['quoted strings and comments', "name: 'repo-test' # exact key\ndescription: \"Run: authorized tests.\"\nmetadata: # string metadata\n  version: '1.0.0' # exact version"],
-    ['additional supported fields', "name: repo-test\ndescription: 'Run buyer''s authorized tests.'\nlicense: MIT\nallowed-tools: Bash\nmetadata:\n  short-description: Run focused tests.\n  version: \"1.0.0\""],
-    ['metadata first with CRLF', 'metadata:\r\n  version: "1.0.0"\r\nname: repo-test\r\ndescription: Run authorized tests.']
-  ]
-  for (const [name, header] of cases) {
-    await t.test(name, async () => {
-      const bytes = zip([{ name: 'SKILL.md', data: `---\n${header}\n---\n# Fixture\n` }])
-      const runtime = managerRuntime({ packageBytes: bytes })
-      const result = await runtime.manager.execute(dispatch(bytes))
-      assert.equal(result.status, 'completed', result.errorMessage)
-      assert.equal(runtime.manager.getInstallation('si_1').state, 'ACTIVE')
-      assert.equal(result.resultEnvelope.skillVersion, '1.0.0')
-    })
-  }
-})
-
-test('metadata.version frontmatter rejects missing, duplicate, conflicting, or unsupported identities', async t => {
-  const header = 'name: repo-test\ndescription: Run authorized tests.\nmetadata:\n  version: "1.0.0"'
-  const cases = [
-    ['missing description', header.replace('description: Run authorized tests.\n', '')],
-    ['empty description', header.replace('Run authorized tests.', '""')],
-    ['whitespace description', header.replace('Run authorized tests.', "'   '")],
-    ['non-string description', header.replace('Run authorized tests.', 'true')],
-    ['missing name', header.replace('name: repo-test\n', '')],
-    ['missing metadata version', 'name: repo-test\ndescription: Run tests.\nmetadata:\n  label: fixture'],
-    ['legacy top-level version', 'name: repo-test\ndescription: Run tests.\nversion: "1.0.0"'],
-    ['top-level version even when matching', `${header}\nversion: "1.0.0"`],
-    ['conflicting top-level version', `${header}\nversion: "2.0.0"`],
-    ['same duplicate name', `name: repo-test\n${header}`],
-    ['conflicting duplicate name', `name: other-skill\n${header}`],
-    ['duplicate description', `description: Different description.\n${header}`],
-    ['same duplicate metadata version', `${header}\n  version: "1.0.0"`],
-    ['conflicting duplicate metadata version', `${header}\n  version: "2.0.0"`],
-    ['duplicate metadata mapping', `${header}\nmetadata:\n  version: "1.0.0"`],
-    ['version identity mismatch', header.replace('1.0.0', '2.0.0')],
-    ['name identity mismatch', header.replace('repo-test', 'other-skill')],
-    ['numeric metadata version', header.replace('"1.0.0"', '1')],
-    ['nested version is not metadata.version', header.replace('  version:', '  nested:\n    version:')],
-    ['wrong version indentation', header.replace('  version:', ' version:')],
-    ['version after unrelated top-level field', header.replace('metadata:', 'metadata:\nlicense: MIT')],
-    ['tagged name', header.replace('name: repo-test', 'name: !!str repo-test')],
-    ['alias version', header.replace('"1.0.0"', '*version')],
-    ['anchor metadata', header.replace('metadata:', 'metadata: &identity')],
-    ['merge key', `${header}\n  <<: *identity`],
-    ['flow mapping is outside preview subset', header.replace('metadata:\n  version: "1.0.0"', 'metadata: {version: "1.0.0"}')],
-    ['quoted duplicate key cannot bypass detection', `${header}\n"name": repo-test`],
-    ['folded scalar is outside preview subset', header.replace('description: Run authorized tests.', 'description: >\n  Run authorized tests.')],
-    ['control character', header.replace('Run authorized tests.', 'Run\tauthorized tests.')],
-    ['unknown top-level property', `${header}\nunsupported: value`],
-    ['unterminated quote', header.replace('"1.0.0"', '"1.0.0')],
-    ['trailing scalar content', header.replace('"1.0.0"', '"1.0.0" extra')]
-  ]
-  for (const [name, invalidHeader] of cases) {
-    await t.test(name, async () => {
-      const bytes = zip([{ name: 'SKILL.md', data: `---\n${invalidHeader}\n---\n# Fixture\n` }])
-      const runtime = managerRuntime({ packageBytes: bytes })
-      const result = await runtime.manager.execute(dispatch(bytes))
-      assert.equal(result.status, 'failed')
-      assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.IDENTITY_MISMATCH)
-      assert.equal(runtime.manager.getInstallation('si_1'), null)
-      assert.equal(existsSync(resolve(runtime.codexHome, 'skills', 'repo-test')), false)
-      assert.deepEqual(readdirSync(runtime.manager.stagingDir), [])
-      assert.deepEqual(runtime.manager.pendingResults().map(item => item.envelope.status), ['FAILED'])
-    })
-  }
-})
-
-test('six exact W08 metadata.version ZIP packages install with digest and marker identity preserved', async t => {
-  // Immutable source fixture, not regenerated ZIPs or a dependency on another worktree.
-  const fixture = JSON.parse(readFileSync(new URL('./fixtures/w08-metadata-version-packages.json', import.meta.url), 'utf8'))
-  assert.equal(fixture.sourceCommit, '6619aae27fd8a31c9ea1dec429a738236ea8a252')
-  assert.equal(fixture.sourceTree, '0b869eb0acf78068a97790785f50228da06431ff')
-  assert.deepEqual(fixture.packages.map(item => item.skillKey).sort(), [
-    'code-editor', 'code-reviewer', 'deploy-runner', 'repo-inspector', 'repo-test', 'web-builder'
-  ])
-  for (const item of fixture.packages) {
-    await t.test(item.skillKey, async () => {
-      const bytes = Buffer.from(item.packageBase64, 'base64')
-      assert.equal(bytes.toString('base64'), item.packageBase64)
-      assert.equal(String(bytes.length), item.packageSize)
-      assert.equal(digest(bytes), item.packageDigest)
-      const runtime = managerRuntime({ packageBytes: bytes })
-      const message = dispatch(bytes, { skillKey: item.skillKey, skillVersion: item.skillVersion })
-      const result = await runManagedCommand({
-        profile: runtime.profile,
-        message,
-        skillInstallManager: runtime.manager,
-        workspaceManager: { forbidden: true },
-        runCodexFn: async () => { throw new Error('package installation must not execute a skill or Codex') }
-      })
-      assert.equal(result.status, 'completed', result.errorMessage)
-      const target = resolve(runtime.codexHome, 'skills', item.skillKey)
-      assert.equal(digest(readFileSync(resolve(target, 'SKILL.md'))), `sha256:${item.skillMdSha256}`)
-      const marker = JSON.parse(readFileSync(resolve(target, '.cyf-installation.json'), 'utf8'))
-      assert.equal(marker.skillKey, item.skillKey)
-      assert.equal(marker.skillVersion, item.skillVersion)
-      assert.equal(marker.packageDigest, item.packageDigest)
-      assert.equal(runtime.manager.getInstallation('si_1').state, 'ACTIVE')
-      assert.equal(runtime.manager.pendingResults()[0].envelope.status, 'SUCCEEDED')
-      const restarted = managerForExistingState({ profile: runtime.profile, stateRoot: runtime.stateRoot })
-      assert.equal(restarted.initialize().healthy, true)
-      assert.equal((await restarted.execute(message)).idempotent, true)
-    })
-  }
-})
-
-test('verified package activates atomically, records identity, and routes outside Codex/worktrees', async () => {
-  const bytes = validPackage()
-  const sent = []
-  const requests = []
-  const runtime = managerRuntime({
-    packageBytes: bytes,
-    sendResultFn: envelope => { sent.push(envelope); return true },
-    fetchFn: async (url, options) => {
-      requests.push({ url: url.toString(), options })
-      return responseFor(bytes)
-    }
-  })
-  let codexRuns = 0
-  const result = await runManagedCommand({
-    profile: runtime.profile,
-    message: dispatch(bytes),
-    skillInstallManager: runtime.manager,
-    workspaceManager: { forbidden: true },
-    runCodexFn: async () => { codexRuns += 1; throw new Error('must not execute') }
-  })
-
-  assert.equal(result.status, 'completed')
-  assert.equal(codexRuns, 0)
-  assert.equal(requests.length, 1)
-  const target = resolve(runtime.codexHome, 'skills', 'repo-test')
-  assert.equal(readFileSync(resolve(target, 'SKILL.md'), 'utf8').includes('name: repo-test'), true)
-  assert.equal(statSync(resolve(target, 'scripts', 'run.sh')).mode & 0o777, 0o755)
-  const marker = JSON.parse(readFileSync(resolve(target, '.cyf-installation.json'), 'utf8'))
-  assert.equal(marker.installationId, 'si_1')
-  assert.equal(marker.packageDigest, digest(bytes))
-  assert.equal(runtime.manager.getInstallation('si_1').state, 'ACTIVE')
-  assert.equal(runtime.manager.pendingResults().length, 1)
-  assert.equal(runtime.manager.acknowledgedResults().length, 0)
-  assert.equal(sent[0].messageType, 'work.result')
-  assert.equal(sent[0].status, 'SUCCEEDED')
-  assert.equal(runtime.manager.acknowledgeResultReceipt(receiptFor(sent[0])).status, 'acknowledged')
-  assert.equal(runtime.manager.pendingResults().length, 0)
-  assert.equal(runtime.manager.acknowledgedResults().length, 1)
-})
-
-test('processor preserves ACK order and persists work.result before terminal success', async () => {
-  const bytes = validPackage()
-  const root = temporaryDirectory()
-  const codexHome = resolve(root, 'codex-home')
-  mkdirSync(codexHome, { recursive: true })
-  const selectedProfile = profile(codexHome)
-  const wire = []
-  const manager = new SkillInstallManager({
-    profile: selectedProfile,
-    stateRoot: resolve(root, 'skill-state'),
-    wsUrl: 'wss://api.example.test/ws/agent/channel',
-    getRuntimeHeaders: () => runtimeHeaders,
-    enabled: true,
-    fetchFn: async () => responseFor(bytes),
-    sendResultFn: envelope => { wire.push(`RESULT:${envelope.status}`); return true },
-    runtimeInstanceId: 'runtime-test'
-  })
-  manager.initialize()
-  const storageRoot = resolve(root, Buffer.from(selectedProfile.agentId).toString('hex'))
-  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile: selectedProfile })
-  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile: selectedProfile })
-  ledger.initialize()
-  ackOutbox.initialize()
-  let codexRuns = 0
-  const processor = new AgentMessageProcessor({
-    profile: selectedProfile,
-    inbox: new PersistentCommandInbox({ rootDir: root, profile: selectedProfile }),
-    runCommand: message => runManagedCommand({
-      profile: selectedProfile,
-      message,
-      skillInstallManager: manager,
-      workspaceManager: null,
-      runCodexFn: async () => { codexRuns += 1; return { status: 'completed' } }
-    }),
-    runChat: async () => {},
-    onWorkResultReceipt: message => manager.acknowledgeResultReceipt(message),
-    recoverCommandOutcome: message => manager.reconcileCommandOutcome(message),
-    ledger,
-    ackOutbox,
-    sendFn: envelope => { wire.push(`ACK:${envelope.ackStatus}`); return true }
-  })
-  processor.start()
-  await processor.handle(dispatch(bytes))
-  await processor.waitForIdle()
-
-  assert.equal(codexRuns, 0)
-  assert.deepEqual(wire, [
-    `ACK:${ACK_STATUS.RECEIVED}`,
-    `ACK:${ACK_STATUS.STARTED}`,
-    'RESULT:SUCCEEDED',
-    `ACK:${ACK_STATUS.SUCCEEDED}`
-  ])
-  assert.equal(manager.pendingResults().length, 1)
-  assert.equal(manager.acknowledgedResults().length, 0)
-  const resultEnvelope = manager.pendingResults()[0].envelope
-  assert.equal((await processor.handle(receiptFor(resultEnvelope))).kind, 'work-result-receipt')
-  assert.equal(manager.pendingResults().length, 0)
-  assert.equal(manager.acknowledgedResults().length, 1)
-  assert.equal(ledger.getEntry('cmd-install-1').status, ACK_STATUS.SUCCEEDED)
-})
-
-test('restart reuses an exact installation and conflicting installationId/fence fails without download', async () => {
-  const bytes = validPackage()
-  const root = temporaryDirectory()
-  let downloads = 0
-  const first = managerRuntime({
-    root,
-    packageBytes: bytes,
-    sendResultFn: () => true,
-    fetchFn: async () => { downloads += 1; return responseFor(bytes) }
-  })
-  assert.equal((await first.manager.execute(dispatch(bytes))).status, 'completed')
-  assert.equal(downloads, 1)
-
-  const restarted = new SkillInstallManager({
-    profile: first.profile,
-    stateRoot: first.stateRoot,
-    wsUrl: 'wss://api.example.test/ws/agent/channel',
-    getRuntimeHeaders: () => runtimeHeaders,
-    enabled: true,
-    fetchFn: async () => { downloads += 1; return responseFor(bytes) },
-    sendResultFn: () => true,
-    runtimeInstanceId: 'runtime-restart'
-  })
-  restarted.initialize()
-  const replay = await restarted.execute(dispatch(bytes))
-  assert.equal(replay.status, 'completed')
-  assert.equal(replay.idempotent, true)
-  assert.equal(downloads, 1)
-
-  const conflict = await restarted.execute(dispatch(bytes, { fencingToken: '2' }))
-  assert.equal(conflict.status, 'failed')
-  assert.equal(conflict.failureCode, SKILL_INSTALL_FAILURE.CONFLICT)
-  assert.equal(downloads, 1)
-  assert.equal(restarted.getInstallation('si_1').command.fencingToken, '1')
-})
-
-test('durable work.result survives restart and replays the identical envelope', async () => {
-  const bytes = validPackage()
-  const root = temporaryDirectory()
-  const first = managerRuntime({ root, packageBytes: bytes, sendResultFn: () => false })
-  const installed = await first.manager.execute(dispatch(bytes))
-  assert.equal(installed.status, 'completed')
-  const pending = first.manager.pendingResults()
-  assert.equal(pending.length, 1)
-  const expectedEnvelope = pending[0].envelope
-
-  const replayed = []
-  const restarted = new SkillInstallManager({
-    profile: first.profile,
-    stateRoot: first.stateRoot,
-    wsUrl: 'wss://api.example.test/ws/agent/channel',
-    getRuntimeHeaders: () => runtimeHeaders,
-    enabled: true,
-    fetchFn: async () => { throw new Error('network must not be used during result replay') },
-    sendResultFn: envelope => { replayed.push(envelope); return true },
-    runtimeInstanceId: 'runtime-restart'
-  })
-  restarted.initialize()
-  assert.equal(restarted.replayResults(undefined, { replayToken: 'connection-1' }), 1)
-  assert.deepEqual(replayed, [expectedEnvelope])
-  assert.equal(restarted.pendingResults().length, 1)
-  assert.equal(restarted.acknowledgedResults().length, 0)
-  assert.equal(restarted.replayResults(undefined, { replayToken: 'connection-1' }), 0)
-  assert.equal(restarted.replayResults(undefined, { replayToken: 'connection-2' }), 1)
-  assert.equal(replayed.length, 2)
-  assert.throws(
-    () => restarted.acknowledgeResultReceipt(receiptFor(expectedEnvelope, { fencingToken: '999' })),
-    error => error.code === SKILL_INSTALL_FAILURE.CONFLICT
-  )
-  assert.equal(restarted.pendingResults().length, 1)
-  assert.equal(restarted.acknowledgeResultReceipt(receiptFor(expectedEnvelope)).idempotent, false)
-  assert.equal(restarted.acknowledgeResultReceipt(receiptFor(expectedEnvelope)).idempotent, true)
-  assert.equal(restarted.pendingResults().length, 0)
-  assert.equal(restarted.acknowledgedResults().length, 1)
-})
-
-
-test('receipt retirement crash duplicates reconcile, while tampered acknowledged evidence fails closed', async () => {
-  const bytes = validPackage()
-  const root = temporaryDirectory()
-  const first = managerRuntime({ root, packageBytes: bytes, sendResultFn: () => false })
-  assert.equal((await first.manager.execute(dispatch(bytes))).status, 'completed')
-  const envelope = first.manager.pendingResults()[0].envelope
-  const receipt = receiptFor(envelope)
-  const acknowledged = first.manager.acknowledgeResultReceipt(receipt)
-  const acknowledgedPath = first.manager._resultPath(first.manager.resultsAcknowledgedDir, acknowledged.recordId)
-  const pendingPath = first.manager._resultPath(first.manager.resultsPendingDir, acknowledged.recordId)
-
-  writeFileSync(pendingPath, readFileSync(acknowledgedPath))
-  const duplicateRestart = managerForExistingState({ profile: first.profile, stateRoot: first.stateRoot })
-  assert.equal(duplicateRestart.initialize().healthy, true)
-  assert.equal(duplicateRestart.pendingResults().length, 0)
-  assert.equal(duplicateRestart.acknowledgedResults().length, 1)
-
-  const tampered = JSON.parse(readFileSync(acknowledgedPath, 'utf8'))
-  tampered.receipt.fencingToken = '999'
-  writeFileSync(acknowledgedPath, `${JSON.stringify(tampered, null, 2)}\n`)
-  const tamperedRestart = managerForExistingState({ profile: first.profile, stateRoot: first.stateRoot })
-  const health = tamperedRestart.initialize()
-  assert.equal(health.healthy, false)
-  assert.equal(tamperedRestart.pendingResults().length, 1)
-  assert.equal(readdirSync(tamperedRestart.resultsQuarantineDir).some(name => name.endsWith('.json')), true)
-})
-
-test('credentialed package URLs require TLS except exact loopback development origins', () => {
+test('same-origin TLS/loopback package URL rules retain exact canonical path protection', () => {
   const path = '/internal/agent/skill-installations/si_1/package'
   assert.equal(buildSkillDownloadUrl('wss://api.example.test/ws', path).protocol, 'https:')
-  for (const url of ['ws://localhost:8080/ws', 'ws://127.0.0.1:8080/ws', 'ws://127.255.0.1/ws', 'ws://[::1]:8080/ws']) {
+  for (const url of ['ws://localhost:8080/ws', 'ws://127.0.0.1/ws', 'ws://127.255.0.1/ws', 'ws://[::1]/ws'])
     assert.equal(buildSkillDownloadUrl(url, path).protocol, 'http:')
-  }
-  for (const url of ['ws://api.example.test/ws', 'ws://0.0.0.0/ws', 'ws://192.168.1.3/ws', 'ws://localhost.example/ws']) {
-    assert.throws(() => buildSkillDownloadUrl(url, path), error => error.code === SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN)
-  }
+  for (const url of ['ws://api.example.test/ws', 'ws://0.0.0.0/ws', 'ws://192.168.1.3/ws', 'ws://localhost.example/ws'])
+    assert.throws(() => buildSkillDownloadUrl(url, path), { code: 'SKILL_DOWNLOAD_FORBIDDEN' })
+  for (const bad of ['https://evil.test/pkg', `${path}?x=1`, `${path}#x`, '/internal/agent/skill-installations/%2e%2e/package'])
+    assert.throws(() => buildSkillDownloadUrl('wss://api.example.test/ws', bad))
 })
 
-test('archive rejects Unicode normalization and case-folded path collisions', async t => {
+test('download exact length/hash/content-type/redirect and complete session proof fail before extraction', async t => {
+  const pkg = packageFixture()
+  for (const [name, opts, reason] of [
+    ['digest', { bytes: Buffer.from('x'.repeat(pkg.bytes.length)) }, 'PACKAGE_DIGEST_MISMATCH'],
+    ['short-body', { bytes: pkg.bytes.subarray(0, -1), noLength: true }, 'PREPARATION_FAILED'],
+    ['long-body', { bytes: Buffer.concat([pkg.bytes, Buffer.from('x')]), noLength: true }, 'PREPARATION_FAILED'],
+    ['length-header', { length: '1' }, 'PREPARATION_FAILED'],
+    ['content-type', { type: 'text/plain' }, 'DOWNLOAD_FORBIDDEN'],
+    ['redirect', { redirected: true }, 'DOWNLOAD_FORBIDDEN'],
+    ['foreign-final-url', { url: 'https://evil.test/package' }, 'DOWNLOAD_FORBIDDEN'],
+    ['incomplete-proof', { proof: { Authorization: headers(binding).Authorization } }, 'DOWNLOAD_FORBIDDEN']
+  ]) await t.test(name, async t => {
+    let fetched = 0
+    const f = setup(t, { getRuntimeHeaders: () => opts.proof || headers(binding), fetchFn: async (_url, request) => {
+      fetched++; assert.equal(request.redirect, 'error'); assert.equal(Object.hasOwn(request.headers, 'X-Api-Key'), false)
+      const response = new Response(opts.bytes || pkg.bytes, { headers: { 'content-type': opts.type || 'application/octet-stream',
+        ...(opts.noLength ? {} : { 'content-length': opts.length || String(pkg.bytes.length) }) } })
+      if (opts.redirected) Object.defineProperty(response, 'redirected', { value: true })
+      if (opts.url) Object.defineProperty(response, 'url', { value: opts.url })
+      return response
+    } })
+    const result = await f.manager.handle(command(pkg.target))
+    assert.equal(outcome(result), 'FAILED'); assert.equal(result.resultEnvelope.data.evidence.reasonCode, reason)
+    assert.equal(f.manager.getInstallation(pkg.target.skillInstallationId), null)
+    assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
+    if (opts.proof) assert.equal(fetched, 0)
+  })
+})
+
+test('real ZIP traversal, symlink/special files, duplicate/prefix and Unicode aliases never escape staging', async t => {
+  const doc = { name: 'SKILL.md', data: skillDocument() }
   const cases = [
-    ['ASCII case', zip([
-      { name: 'SKILL.md', data: skillDocument() },
-      { name: 'skill.md', data: 'collision' }
-    ])],
-    ['Unicode normalization', zip([
-      { name: 'SKILL.md', data: skillDocument() },
-      { name: 'docs/é.txt', data: 'nfc' },
-      { name: 'docs/e\u0301.txt', data: 'nfd' }
-    ])],
-    ['Unicode case folding', zip([
-      { name: 'SKILL.md', data: skillDocument() },
-      { name: 'docs/Σ.txt', data: 'sigma' },
-      { name: 'docs/ς.txt', data: 'final sigma' }
-    ])],
-    ['case-folded ancestor', zip([
-      { name: 'SKILL.md', data: skillDocument() },
-      { name: 'Docs/a.txt', data: 'upper' },
-      { name: 'docs/b.txt', data: 'lower' }
-    ])],
-    ['case-folded prefix', zip([
-      { name: 'SKILL.md', data: skillDocument() },
-      { name: 'Bin', data: 'file' },
-      { name: 'bin/run.sh', data: 'nested' }
-    ])]
+    ['dotdot', [{ name: '../outside', data: 'bad' }]], ['absolute', [{ name: '/tmp/outside', data: 'bad' }]],
+    ['backslash', [{ name: 'a\\b', data: 'bad' }]], ['symlink', [{ name: 'link', data: '/tmp', mode: 0o120777 }]],
+    ['fifo', [{ name: 'fifo', data: '', mode: 0o010644 }]], ['duplicate', [doc]],
+    ['file-prefix', [{ name: 'a', data: 'file' }, { name: 'a/b', data: 'nested' }]],
+    ['case', [{ name: 'skill.md', data: 'alias' }]],
+    ['NFC', [{ name: 'é.txt', data: 'a' }, { name: 'e\u0301.txt', data: 'b' }]],
+    ['case-fold', [{ name: 'Σ.txt', data: 'a' }, { name: 'ς.txt', data: 'b' }]],
+    ['ancestor-case', [{ name: 'Docs/a', data: 'a' }, { name: 'docs/b', data: 'b' }]],
+    ['directory-metadata', [{ name: 'dir/', mode: 0o100644 }]]
   ]
-  for (const [name, bytes] of cases) {
-    await t.test(name, async () => {
-      const runtime = managerRuntime({ packageBytes: bytes })
-      const result = await runtime.manager.execute(dispatch(bytes))
-      assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.ARCHIVE_INVALID)
-      assert.equal(runtime.manager.getInstallation('si_1'), null)
+  for (const [name, extra] of cases) await t.test(name, async t => {
+    const f = setup(t), pkg = f.add(packageFixture({ entries: [doc, ...extra] }))
+    const result = await f.manager.handle(command(pkg.target))
+    assert.equal(outcome(result), 'FAILED'); assert.equal(result.resultEnvelope.data.evidence.reasonCode, 'ARCHIVE_INVALID')
+    assert.equal(f.manager.listInstalledSkills().length, 0); assert.equal(existsSync(resolve(f.root, 'outside')), false)
+  })
+})
+
+test('bounded frontmatter identities and archive expansion/entry limits remain enforced', async t => {
+  for (const [name, data, options] of [
+    ['wrong-name', skillDocument('other'), {}], ['wrong-version', skillDocument('repo-test', '2.0.0'), {}],
+    ['missing-version', '---\nname: repo-test\ndescription: x\n---\n', {}],
+    ['duplicate-name', skillDocument().replace('name: repo-test', 'name: repo-test\nname: repo-test'), {}],
+    ['conflicting-version', skillDocument().replace('metadata:', 'version: "2.0.0"\nmetadata:'), {}],
+    ['yaml-alias', skillDocument().replace('"1.0.0"', '*untrusted'), {}],
+    ['entry-limit', skillDocument(), { maxEntries: 0 }], ['expanded-limit', skillDocument(), { maxExtractedBytes: 1 }],
+    ['file-limit', skillDocument(), { maxEntryBytes: 1 }]
+  ]) await t.test(name, async t => {
+    const f = setup(t, options), pkg = f.add(packageFixture({ entries: [{ name: 'SKILL.md', data }] }))
+    assert.equal(outcome(await f.manager.handle(command(pkg.target))), 'FAILED')
+    assert.equal(f.manager.listInstalledSkills().length, 0)
+  })
+  // Keep the actual accepted frontmatter parser, not a test-only identity projection.
+  const f = setup(t), pkg = f.add(packageFixture({ entries: [{ name: 'SKILL.md', data: skillDocument().replace('"1.0.0"', "'1.0.0' # approved") }] }))
+  assert.equal(outcome(await f.manager.handle(command(pkg.target))), 'PREPARED')
+})
+
+test('identity is durably installation/owner/tenant/client/profile/origin bound across boots', async t => {
+  const f = setup(t); const { prepare } = await installed(f)
+  const next = restart(f, { runtimeInstanceId: 'boot_next' }); assert.equal(next.isHealthy(), true)
+  for (const scopePatch of [{ ownerJiacn: 'foreign' }, { tenantId: 'foreign' }, { clientId: 'foreign' }])
+    assert.throws(() => next.bindSession({ scope: { ...binding.scope, ...scopePatch }, fence: { ...binding.fence, runtimeInstanceId: 'boot_next' } }), /durable subject/)
+  assert.throws(() => next.bindSession({ scope: binding.scope, fence: { ...binding.fence, runtimeInstanceId: 'boot_next', installationId: 'foreign' } }), /durable subject/)
+  for (const options of [{ wsUrl: 'wss://different.test/ws' }, { profile: { ...f.settings.profile, profileId: 'other' } }])
+    assert.throws(() => restart(f, options), /integrity\/scope/)
+  const wrong = command(prepare.data.target, { tenantId: 'foreign' }); await assert.rejects(next.handle(wrong), /authenticated subject/)
+  assert.equal(f.downloads(), 1)
+})
+
+test('cross-boot deliveryEpoch fencing preserves original ACK/result bytes; only exact committed receipt retires', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), c = command(pkg.target)
+  const result = (await f.manager.handle(c)).resultEnvelope, bytes = JSON.stringify(result)
+  const ack = f.emitted.find(msg => msg.messageType === 'command.ack'), ackBytes = JSON.stringify(ack)
+  const m = restart(f, { runtimeInstanceId: 'boot_next' }), resent = []
+  assert.equal(m.replayAcks(msg => { resent.push(JSON.stringify(msg)); return true }), 1)
+  assert.equal(resent[0], ackBytes)
+  const redelivery = { ...c, messageId: 'message_next', data: { ...c.data, deliveryEpoch: '2' } }
+  assert.equal(JSON.stringify((await m.handle(redelivery)).resultEnvelope), bytes)
+  assert.equal(result.data.executionRuntimeInstanceId, 'boot_demo'); assert.equal(f.downloads(), 1)
+  await assert.rejects(m.handle({ ...c, messageId: 'old_epoch' }), /newer authorized epoch/)
+  await assert.rejects(m.handle(command(pkg.target, { ...c.data, desiredEnabled: !c.data.desiredEnabled })), /identity conflict|changed bytes/)
+  const receipt = receiptFor(result)
+  for (const bad of [{ ...receipt, requestId: 'other' }, { ...receipt, correlationId: 'other' },
+    { ...receipt, data: { ...receipt.data, attempt: 2 } }, { ...receipt, data: { ...receipt.data, skillChangeId: 'other' } }])
+    assert.throws(() => m.acknowledgeResultReceipt(bad), /uncorrelated/)
+  const replayed = []; m.replayResults(msg => { replayed.push(JSON.stringify(msg)); return true }); assert.deepEqual(replayed, [bytes])
+  m.acknowledgeResultReceipt(receipt); m.acknowledgeResultReceipt(receipt)
+  assert.equal(restart(f, { runtimeInstanceId: 'boot_third' }).pendingResults().length, 0)
+  // Corrupting acknowledged evidence, even with a recomputed container hash, cannot invent a receipt correlation.
+  const state = JSON.parse(readFileSync(m.statePath)); const record = Object.values(state.commands)[0]
+  record.receipt.correlationId = 'forged'; delete state.journalSha256; state.journalSha256 = managementDigest('cyf.skill.journal.v2', state)
+  writeFileSync(m.statePath, JSON.stringify(state)); assert.throws(() => restart(f), /receipt integrity/)
+})
+
+test('ACK follows durable receive, reconnect resumes only proven RECEIVED; unknown READ never reexecutes', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), c = command(pkg.target)
+  let seenAck = false
+  f.manager.sendResultFn = msg => {
+    if (msg.messageType === 'command.ack') {
+      const state = JSON.parse(readFileSync(f.manager.statePath)); assert.equal(Object.values(state.commands)[0].state, 'RECEIVED'); seenAck = true
+    }
+    return true
+  }
+  f.manager._receive(c); assert.equal(seenAck, true); assert.equal(f.downloads(), 0)
+  const m = restart(f, { runtimeInstanceId: 'boot_next' }); await m.resumePendingCommands()
+  assert.equal(f.downloads(), 1); assert.equal(m.pendingResults()[0].envelope.data.executionRuntimeInstanceId, 'boot_next')
+  const missing = command(pkg.target, { commandId: 'never_seen' }), read = reconcile(missing)
+  const result = await m.handle(read); assert.equal(outcome(result), 'UNKNOWN')
+  assert.equal(result.resultEnvelope.data.evidence.observedCommandId, 'never_seen'); assert.equal(f.downloads(), 1)
+  await m.resumePendingCommands(); assert.equal(f.downloads(), 1)
+})
+
+test('PREPARED / activation intent / switched view / persisted result crashes recover by observation only', async t => {
+  for (const point of ['intent-persisted', 'prepared-persisted', 'activation-intent-persisted', 'view-switched', 'result-persisted'])
+    await t.test(point, async t => {
+      const f = setup(t), pkg = f.add(packageFixture()), prepare = command(pkg.target)
+      let c = prepare
+      if (point === 'activation-intent-persisted' || point === 'view-switched') {
+        await f.manager.handle(prepare); c = activate(prepare)
+      }
+      f.manager.checkpoint = crashed(point)
+      await assert.rejects(f.manager.handle(c), /crash:/)
+      const count = f.downloads(), m = restart(f, { runtimeInstanceId: 'boot_next' })
+      assert.equal(f.downloads(), count)
+      const read = await m.handle(reconcile(c)), fact = read.resultEnvelope.data.evidence
+      assert.equal(fact.observedCommandId, c.data.commandId)
+      assert.equal(fact.outcome, ['intent-persisted', 'activation-intent-persisted'].includes(point) ? 'UNKNOWN' : point === 'view-switched' ? 'APPLIED' : 'PREPARED')
+      assert.equal(read.resultEnvelope.data.executionRuntimeInstanceId, 'boot_demo')
+      await m.handle(c); await m.resumePendingCommands(); assert.equal(f.downloads(), count)
+      if (point === 'activation-intent-persisted') assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
     })
+})
+
+test('33+ immutable results drain bounded batches once per connection; receipts do not starve later records', async t => {
+  const f = setup(t, { maxReplayBatch: 4 }), pkg = f.add(packageFixture()), c = command(pkg.target)
+  await f.manager.handle(c)
+  // Produce real READ journal/results (no install or provider) rather than fabricating outbox files.
+  for (let i = 0; i < 33; i++) await f.manager.handle(reconcile(c))
+  const sent = [], token = {}; let count
+  do { count = f.manager.replayResults(msg => { sent.push(msg.messageId); return true }, { replayToken: token }) } while (count === 4)
+  assert.equal(sent.length, 34); assert.equal(new Set(sent).size, 34)
+  assert.equal(f.manager.replayResults(() => true, { replayToken: token }), 0)
+  assert.equal(f.manager.replayResults(() => true, { replayToken: {} }), 4)
+  const result = f.manager.pendingResults()[10].envelope; f.manager.acknowledgeResultReceipt(receiptFor(result))
+  assert.equal(f.manager.pendingResults().length, 33); assert.equal(f.downloads(), 1)
+})
+
+test('upgrade and policy keep old tasks on exact immutable installation/package/permissions, not current or management fence', async t => {
+  const f = setup(t), pkg1 = f.add(packageFixture({ executable: true })), prepare1 = command(pkg1.target)
+  await f.manager.handle(prepare1); await f.manager.handle(activate(prepare1))
+  const old = f.manager.listInstalledSkills()[0], runner = { probe: () => ({ ready: true, digest: 'a'.repeat(64) }), run: async ({ descriptor }) => {
+    assert.equal(descriptor.packageRoot, old.packageRoot); assert.equal(descriptor.approvedPermissionsSha256, old.approvedPermissionsSha256)
+    assert.ok(readFileSync(resolve(descriptor.packageRoot, 'SKILL.md'), 'utf8').includes('1.0.0'))
+    return { data: { answer: 'old' }, artifacts: [], inputReceipts: [] }
+  } }
+  const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(),
+    loadRetained: () => f.manager.listInstalledSkills({ includeRetained: true }), runnerRegistry: new Map([['native-model', runner]]) })
+  registry.setSession(binding.fence)
+  const item1 = (await registry.refresh()).skills[0]; assert.equal(item1.readiness, 'READY')
+  const taskBinding = { executionId: 'execution_old', taskGrantId: 'grant_old', taskGrantVersion: '1', agentId: binding.scope.agentId,
+    skillKey: old.skillKey, skillInstallationId: old.skillInstallationId, productVersionId: old.productVersionId,
+    skillVersion: old.skillVersion, packageSha256: old.packageSha256, manifestSha256: old.manifestSha256, approvedPermissionsSha256: old.approvedPermissionsSha256 }
+  const pkg2 = f.add(packageFixture({ version: '2.0.0', executable: true })), upgrade = command(pkg2.target, { action: 'UPGRADE', source: pkg1.target,
+    skillChangeId: 'sc_upgrade', skillRevision: '2', fencingToken: '2' })
+  // Preparation must not block/replace historical execution lookup, even while the installer lock is held.
+  f.manager.verifyCandidate = async () => {
+    assert.equal((await registry.requireExact(item1, { taskBinding })).descriptor.packageRoot, old.packageRoot)
+    return { readiness: 'READY' }
   }
+  assert.equal(outcome(await f.manager.handle(upgrade)), 'PREPARED')
+  assert.equal((await registry.refresh()).skills[0].skillInstallationId, old.skillInstallationId)
+  assert.equal(outcome(await f.manager.handle(activate(upgrade))), 'APPLIED')
+  assert.equal((await registry.refresh()).skills[0].skillVersion, '2.0.0')
+  assert.deepEqual(readdirSync(resolve(f.home, 'skills')), ['repo-test'])
+  assert.equal(outcome(await f.manager.handle(policy(pkg2.target, 3, false))), 'APPLIED')
+  const disabled = (await registry.refresh()).skills[0]; assert.equal(disabled.enabled, false)
+  assert.deepEqual(readdirSync(resolve(f.home, 'skills')), [])
+  await assert.rejects(registry.requireExact(disabled), /SKILL_EXECUTION_BINDING_CHANGED/)
+  const task = { executionProtocolVersion: 4, executionId: taskBinding.executionId, taskId: 'task_old', runId: 'run_old', conversationId: 'conv_old',
+    conversationGeneration: '1', commandId: 'cmd_task_old', messageId: 'msg_task_old', snapshotDigest: 'f'.repeat(64), taskSkillBinding: taskBinding,
+    skill: { key: old.skillKey, version: old.skillVersion, packageSha256: old.packageSha256, manifestSha256: old.manifestSha256 },
+    instruction: 'authorized old task', parameters: {}, inputRefs: [], outputs: old.manifest.outputs }
+  let calls = 0, persisted = null
+  const ctx = { registry, runners: new Map([['native-model', { ...runner, run: async context => { calls++; return runner.run(context) } }]]),
+    claimOrResume: async () => ({}), loadResult: async () => persisted, materializeAuthorizedInputs: async () => [],
+    validateAndPersistResult: async (_command, _descriptor, result) => (persisted = { schemaVersion: 1, executionId: task.executionId, snapshotDigest: task.snapshotDigest, result }),
+    commitResult: async () => ({ state: 'RESULT_COMMITTED' }), persistReceipt: async () => {} }
+  await executeSkill(task, ctx); await executeSkill(task, ctx); assert.equal(calls, 1)
+  await assert.rejects(registry.requireExact(item1, { taskBinding: { ...taskBinding, approvedPermissionsSha256: 'e'.repeat(64) } }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  assert.equal(outcome(await f.manager.handle(policy(pkg2.target, 4, true))), 'APPLIED')
+  const lateDisable = policy(pkg2.target, 3, false)
+  assert.equal(outcome(await f.manager.handle(lateDisable)), 'FAILED')
+  assert.equal(f.manager.listInstalledSkills()[0].enabled, true)
+  assert.equal(f.manager.listInstalledSkills({ includeRetained: true }).length, 2); assert.equal(f.downloads(), 2)
 })
 
-test('installer lock rejects live owners and durably reclaims dead or stale incomplete owners', () => {
-  const liveRoot = temporaryDirectory()
-  const liveHome = resolve(liveRoot, 'codex-home')
-  const liveState = resolve(liveRoot, 'state')
-  mkdirSync(liveHome, { recursive: true })
-  mkdirSync(resolve(liveState, 'installer.lock'), { recursive: true })
-  writeFileSync(resolve(liveState, 'installer.lock', 'owner.json'), `${JSON.stringify({
-    formatVersion: 2, ownerToken: 'live-owner', pid: 44, processStartToken: 'start', bootId: 'boot'
-  })}\n`)
-  const live = managerForExistingState({
-    profile: profile(liveHome), stateRoot: liveState,
-    processIdentityFn: () => ({ pid: 55, processStartToken: 'other', bootId: 'boot' }),
-    lockOwnerAliveFn: () => true
+test('retained manifest/marker/hardlink/symlink tampering cannot override trusted package identity', async t => {
+  for (const kind of ['manifest', 'marker', 'hardlink', 'symlink', 'view']) await t.test(kind, async t => {
+    const f = setup(t), pkg = f.add(packageFixture({ executable: true })), prepare = command(pkg.target)
+    await f.manager.handle(prepare); await f.manager.handle(activate(prepare))
+    const row = f.manager.listInstalledSkills()[0], path = resolve(row.packageRoot, 'SKILL.md')
+    if (kind === 'manifest') writeFileSync(resolve(row.packageRoot, 'manifest.json'), '{}')
+    if (kind === 'marker') writeFileSync(resolve(row.packageRoot, '.cyf-installation.json'), '{}')
+    if (kind === 'hardlink') linkSync(path, resolve(f.root, 'external-hardlink'))
+    if (kind === 'symlink') { renameSync(path, resolve(f.root, 'outside')); symlinkSync(resolve(f.root, 'outside'), path) }
+    if (kind === 'view') writeFileSync(resolve(f.home, 'skills/repo-test/SKILL.md'), 'unmanaged change')
+    assert.throws(() => f.manager.listInstalledSkills())
+    if (kind !== 'view') assert.throws(() => f.manager.listInstalledSkills({ includeRetained: true }))
   })
-  assert.throws(() => live.initialize(), error => error.code === SKILL_INSTALL_FAILURE.CONFLICT)
-  assert.equal(existsSync(resolve(liveState, 'installer.lock')), true)
-
-  const legacyRoot = temporaryDirectory()
-  const legacyHome = resolve(legacyRoot, 'codex-home')
-  const legacyState = resolve(legacyRoot, 'state')
-  mkdirSync(legacyHome, { recursive: true })
-  mkdirSync(resolve(legacyState, 'installer.lock'), { recursive: true })
-  writeFileSync(resolve(legacyState, 'installer.lock', 'owner.json'), `${JSON.stringify({
-    formatVersion: 1, pid: process.pid, operation: 'legacy-live', acquiredAt: 1
-  })}\n`)
-  utimesSync(resolve(legacyState, 'installer.lock'), new Date(0), new Date(0))
-  const legacy = managerForExistingState({
-    profile: profile(legacyHome), stateRoot: legacyState, unownedLockStaleMs: 0,
-    processIdentityFn: () => ({ pid: 99, processStartToken: 'new', bootId: 'boot' })
-  })
-  assert.throws(() => legacy.initialize(), error => error.code === SKILL_INSTALL_FAILURE.CONFLICT)
-  assert.equal(existsSync(resolve(legacyState, 'installer.lock')), true)
-
-  const deadRoot = temporaryDirectory()
-  const deadHome = resolve(deadRoot, 'codex-home')
-  const deadState = resolve(deadRoot, 'state')
-  mkdirSync(deadHome, { recursive: true })
-  mkdirSync(resolve(deadState, 'installer.lock'), { recursive: true })
-  writeFileSync(resolve(deadState, 'installer.lock', 'owner.json'), `${JSON.stringify({
-    formatVersion: 2, ownerToken: 'dead-owner', pid: 66, processStartToken: 'old', bootId: 'boot'
-  })}\n`)
-  const dead = managerForExistingState({
-    profile: profile(deadHome), stateRoot: deadState,
-    processIdentityFn: () => ({ pid: 77, processStartToken: 'new', bootId: 'boot' }),
-    lockOwnerAliveFn: () => false,
-    atomicFs: LINUX_ATOMIC_FS,
-    createId: (() => { let value = 0; return () => `id-${++value}` })()
-  })
-  assert.equal(dead.initialize().healthy, true)
-  assert.equal(existsSync(resolve(deadState, 'installer.lock')), false)
-  assert.equal(readdirSync(resolve(deadState, 'stale-locks')).length, 1)
-
-  const incompleteRoot = temporaryDirectory()
-  const incompleteHome = resolve(incompleteRoot, 'codex-home')
-  const incompleteState = resolve(incompleteRoot, 'state')
-  mkdirSync(incompleteHome, { recursive: true })
-  mkdirSync(resolve(incompleteState, 'installer.lock'), { recursive: true })
-  utimesSync(resolve(incompleteState, 'installer.lock'), new Date(0), new Date(0))
-  const incomplete = managerForExistingState({
-    profile: profile(incompleteHome), stateRoot: incompleteState,
-    now: () => 100_000,
-    unownedLockStaleMs: 10,
-    processIdentityFn: () => ({ pid: 88, processStartToken: 'new', bootId: 'boot' }),
-    lockOwnerAliveFn: () => false,
-    atomicFs: LINUX_ATOMIC_FS,
-    createId: (() => { let value = 0; return () => `id-${++value}` })()
-  })
-  assert.equal(incomplete.initialize().healthy, true)
-  assert.equal(readdirSync(resolve(incompleteState, 'stale-locks')).length, 1)
 })
 
-test('lock release binds the exact owner bytes and never removes a mutated generation', () => {
-  const runtime = managerRuntime()
-  let mutateOnRelease = false
-  runtime.manager.atomicFs = {
-    ...testAtomicFs,
-    renameNoReplace(sourcePath, targetPath, expected) {
-      if (mutateOnRelease && sourcePath === resolve(runtime.stateRoot, 'installer.lock')) {
-        writeFileSync(resolve(sourcePath, 'owner.json'), `${JSON.stringify({
-          formatVersion: 2,
-          ownerToken: 'foreign-owner',
-          pid: process.pid,
-          processStartToken: 'foreign-start',
-          bootId: 'foreign-boot'
-        })}\n`)
+test('publication target/parent inode races preserve foreign content and persist UNKNOWN, never false failure', async t => {
+  for (const kind of ['target', 'parent']) await t.test(kind, async t => {
+    const f = setup(t), pkg = f.add(packageFixture())
+    const c = command(pkg.target); await f.manager.handle(c)
+    let injected = false
+    f.manager.atomicFs = { ...LINUX_ATOMIC_FS, renameNoReplace(source, target, expected) {
+      if (!injected && target === resolve(f.home, 'skills/repo-test')) {
+        injected = true
+        if (kind === 'target') { mkdirSync(target); writeFileSync(resolve(target, 'foreign'), 'preserved') }
+        else { const root = resolve(f.home, 'skills'); renameSync(root, `${root}-old`); mkdirSync(root); writeFileSync(resolve(root, 'foreign'), 'preserved') }
       }
-      return testAtomicFs.renameNoReplace(sourcePath, targetPath, expected)
-    }
-  }
-
-  assert.throws(
-    () => runtime.manager._withLockSync('owner-generation-race', () => { mutateOnRelease = true }),
-    error => error.code === SKILL_INSTALL_FAILURE.CONFLICT
-  )
-  assert.equal(existsSync(resolve(runtime.stateRoot, 'installer.lock')), true)
-  assert.equal(JSON.parse(readFileSync(resolve(runtime.stateRoot, 'installer.lock', 'owner.json'), 'utf8')).ownerToken, 'foreign-owner')
+      return LINUX_ATOMIC_FS.renameNoReplace(source, target, expected)
+    } }
+    const result = await f.manager.handle(activate(c)); assert.equal(outcome(result), 'UNKNOWN')
+    assert.equal(readFileSync(resolve(f.home, kind === 'target' ? 'skills/repo-test/foreign' : 'skills/foreign'), 'utf8'), 'preserved')
+    assert.equal(f.downloads(), 1)
+  })
 })
 
-test('concurrent stale reclaimers bind exchange to inspected owner generation and never move the winner', () => {
-  const seed = managerRuntime()
-  const stalePath = resolve(seed.stateRoot, 'installer.lock')
-  mkdirSync(stalePath)
-  writeFileSync(resolve(stalePath, 'owner.json'), `${JSON.stringify({
-    formatVersion: 2, ownerToken: 'stale-owner', pid: 1, processStartToken: 'stale', bootId: 'stale'
-  })}\n`)
-
-  const winner = managerForExistingState({
-    profile: seed.profile,
-    stateRoot: seed.stateRoot,
-    atomicFs: LINUX_ATOMIC_FS,
-    processIdentityFn: () => ({ pid: process.pid, processStartToken: 'winner-start', bootId: 'winner-boot' }),
-    lockOwnerAliveFn: owner => owner.operation === 'winner'
-  })
-  let winnerAcquired = false
-  const racingAtomicFs = {
-    renameNoReplace: (...args) => LINUX_ATOMIC_FS.renameNoReplace(...args),
-    exchangeIfMatch: (...args) => {
-      if (!winnerAcquired) {
-        winner._acquireLock('winner')
-        winnerAcquired = true
-      }
-      return LINUX_ATOMIC_FS.exchangeIfMatch(...args)
-    }
+test('installer locks reject live/legacy owners, reclaim dead/incomplete generations and fence release bytes', async t => {
+  const f = setup(t), m = f.manager
+  m._acquireLock('live-test')
+  const contender = new SkillInstallManager(f.settings)
+  assert.throws(() => contender.initialize(), /another live process/)
+  m._releaseLock()
+  for (const owner of [{ formatVersion: 1, pid: process.pid },
+    { formatVersion: 2, ownerToken: 'dead', pid: 99999999, processStartToken: 'gone', bootId: 'gone', operation: 'old', runtimeInstanceId: 'old', acquiredAt: 1 }, null]) {
+    mkdirSync(m.lockPath)
+    if (owner) writeFileSync(m.lockOwnerPath, JSON.stringify(owner))
+    utimesSync(m.lockPath, new Date(0), new Date(0))
+    if (owner?.pid === process.pid) { assert.throws(() => contender.initialize(), /legacy process/); rmSync(m.lockPath, { recursive: true }); continue }
+    contender.unownedLockStaleMs = 0; assert.equal(contender.initialize().healthy, true)
   }
-  const loser = managerForExistingState({
-    profile: seed.profile,
-    stateRoot: seed.stateRoot,
-    atomicFs: racingAtomicFs,
-    processIdentityFn: () => ({ pid: process.pid, processStartToken: 'loser-start', bootId: 'loser-boot' }),
-    lockOwnerAliveFn: owner => owner.operation === 'winner'
-  })
+  assert.equal(readdirSync(m.staleLocksDir).length, 2)
+  m._acquireLock('release-test')
+  const original = readFileSync(m.lockOwnerPath, 'utf8'); writeFileSync(m.lockOwnerPath, original + ' ')
+  assert.throws(() => m._releaseLock(), /ownership fence mismatch/); assert.equal(existsSync(m.lockPath), true)
+})
 
-  assert.throws(() => loser._acquireLock('loser'), error => error.code === SKILL_INSTALL_FAILURE.CONFLICT)
-  const observed = JSON.parse(readFileSync(resolve(stalePath, 'owner.json'), 'utf8'))
-  assert.equal(observed.ownerToken, winner.lockOwner.ownerToken)
-  assert.equal(observed.operation, 'winner')
+test('concurrent stale reclaim loser cannot archive or remove the winning generation', t => {
+  const f = setup(t), seed = f.manager
+  mkdirSync(seed.lockPath); writeFileSync(seed.lockOwnerPath, JSON.stringify({ formatVersion: 2, ownerToken: 'stale', pid: 99999999,
+    processStartToken: 'old', bootId: 'old', operation: 'old', runtimeInstanceId: 'old', acquiredAt: 1 }))
+  const options = { ...f.settings, lockOwnerAliveFn: owner => owner.operation === 'winner' }
+  const winner = new SkillInstallManager(options); let won = false
+  const loser = new SkillInstallManager({ ...options, atomicFs: { ...LINUX_ATOMIC_FS, exchangeIfMatch: (...args) => {
+    if (!won) { winner._acquireLock('winner'); won = true }
+    return LINUX_ATOMIC_FS.exchangeIfMatch(...args)
+  } } })
+  assert.throws(() => loser._acquireLock('loser'), /another live process/)
+  assert.equal(JSON.parse(readFileSync(seed.lockOwnerPath)).ownerToken, winner.lockOwner.ownerToken)
   winner._releaseLock()
 })
 
-test('target and parent races fail closed without replacing foreign or replacement-parent content', async t => {
-  const bytes = validPackage()
-  await t.test('target appears at commit', async () => {
-    let injected = false
-    const racingAtomicFs = {
-      ...testAtomicFs,
-      renameNoReplace(sourcePath, targetPath, expected) {
-        if (!injected && targetPath.endsWith('/repo-test')) {
-          injected = true
-          mkdirSync(targetPath)
-          writeFileSync(resolve(targetPath, 'foreign.txt'), 'foreign-target')
-        }
-        return testAtomicFs.renameNoReplace(sourcePath, targetPath, expected)
-      }
-    }
-    const runtime = managerRuntime({ packageBytes: bytes, atomicFs: racingAtomicFs })
-    const result = await runtime.manager.execute(dispatch(bytes))
-    assert.equal(result.status, 'recovery_required')
-    assert.equal(readFileSync(resolve(runtime.codexHome, 'skills', 'repo-test', 'foreign.txt'), 'utf8'), 'foreign-target')
-    assert.equal(runtime.manager.pendingResults().length, 0)
-  })
-
-  await t.test('skills parent inode changes immediately before commit', async () => {
-    let injected = false
-    let displaced = ''
-    const racingAtomicFs = {
-      ...testAtomicFs,
-      renameNoReplace(sourcePath, targetPath, expected) {
-        if (!injected && targetPath.endsWith('/repo-test')) {
-          injected = true
-          const skills = resolve(targetPath, '..')
-          displaced = `${skills}-displaced`
-          renameSync(skills, displaced)
-          mkdirSync(skills)
-          writeFileSync(resolve(skills, 'replacement-parent.txt'), 'replacement-parent')
-        }
-        return testAtomicFs.renameNoReplace(sourcePath, targetPath, expected)
-      }
-    }
-    const runtime = managerRuntime({ packageBytes: bytes, atomicFs: racingAtomicFs })
-    const result = await runtime.manager.execute(dispatch(bytes))
-    assert.equal(result.status, 'recovery_required')
-    assert.equal(existsSync(resolve(runtime.codexHome, 'skills', 'repo-test')), false)
-    assert.equal(readFileSync(resolve(runtime.codexHome, 'skills', 'replacement-parent.txt'), 'utf8'), 'replacement-parent')
-    assert.equal(existsSync(resolve(displaced, 'repo-test')), false)
-  })
+test('HOME/state symlink aliases and journal hardlinks fail closed; arbitrary HOME packages never become capabilities', async t => {
+  const f = setup(t), outside = resolve(f.root, 'outside'); mkdirSync(outside)
+  mkdirSync(resolve(f.home, 'skills/unmanaged'), { recursive: true }); writeFileSync(resolve(f.home, 'skills/unmanaged/SKILL.md'), skillDocument())
+  assert.equal(f.manager.listInstalledSkills().length, 0)
+  const alias = resolve(f.root, 'alias'); symlinkSync(f.home, alias)
+  // A PREPARE may use managed state only; publishing through an aliased HOME is forbidden.
+  const m = new SkillInstallManager({ ...f.settings, profile: profile(alias), stateRoot: resolve(f.root, 'alias-state') }); m.initialize(); m.bindSession(binding)
+  const pkg = f.add(packageFixture()), c = command(pkg.target); await m.handle(c)
+  assert.equal(outcome(await m.handle(activate(c))), 'FAILED')
+  linkSync(f.manager.statePath, resolve(outside, 'journal-link')); assert.equal(f.manager.isHealthy(), false)
+  const stateLink = resolve(f.root, 'state-link'); symlinkSync(outside, stateLink)
+  assert.throws(() => new SkillInstallManager({ ...f.settings, stateRoot: stateLink }).initialize(), /real|unsafe|symlink|canonical/)
+  assert.equal(existsSync(resolve(outside, 'management-v2')), false)
 })
 
-test('durable installer state is bound to canonical API origin and profile scope', async () => {
-  const first = managerRuntime({ sendResultFn: () => false })
-  assert.equal((await first.manager.execute(dispatch(first.packageBytes))).status, 'completed')
-  const foreignOrigin = managerForExistingState({
-    profile: first.profile,
-    stateRoot: first.stateRoot,
-    wsUrl: 'wss://other-origin.example.test/ws'
-  })
-  assert.throws(
-    () => foreignOrigin.initialize(),
-    error => error.code === SKILL_INSTALL_FAILURE.CONFLICT && /different origin\/profile scope/.test(error.message)
-  )
-  const foreignProfile = managerForExistingState({
-    profile: { ...first.profile, profileId: 'profile-b' },
-    stateRoot: first.stateRoot
-  })
-  assert.throws(
-    () => foreignProfile.initialize(),
-    error => error.code === SKILL_INSTALL_FAILURE.CONFLICT && /different origin\/profile scope/.test(error.message)
-  )
-})
-
-test('ACTIVE plus durable FAILED reconciles to quarantined failure and inbox terminal FAILED only', async () => {
-  const first = managerRuntime({ sendResultFn: () => false })
-  const message = dispatch(first.packageBytes)
-  assert.equal((await first.manager.execute(message)).status, 'completed')
-  const active = first.manager.getInstallation('si_1')
-  first.manager._withLockSync('inject-upgrade-failure', () => {
-    first.manager._persistFailureResult(active.command, new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'legacy contradictory failure'))
-  })
-
-  const restarted = managerForExistingState({ profile: first.profile, stateRoot: first.stateRoot })
-  assert.equal(restarted.initialize().healthy, true)
-  const quarantined = restarted.getInstallation('si_1')
-  assert.equal(quarantined.state, 'QUARANTINED')
-  assert.equal(existsSync(quarantined.targetPath), false)
-  assert.equal(existsSync(quarantined.quarantinedPath), true)
-  assert.deepEqual(restarted.pendingResults().map(item => item.envelope.status), ['FAILED'])
-  assert.equal(readdirSync(restarted.resultsSupersededDir).some(name => name.endsWith('.json')), true)
-  assert.equal(restarted.reconcileCommandOutcome(message).status, 'failed')
-
-  const inboxRoot = resolve(first.root, 'inbox-state')
-  const inbox = new PersistentCommandInbox({ rootDir: inboxRoot, profile: first.profile })
-  const profileRoot = resolve(inboxRoot, Buffer.from(first.profile.agentId).toString('hex'))
-  const ledger = new DurableDedupeLedger({ rootDir: profileRoot, profile: first.profile })
-  const ackOutbox = new AckOutbox({ rootDir: profileRoot, profile: first.profile })
-  inbox.initialize(); ledger.initialize(); ackOutbox.initialize()
-  const item = inbox.enqueue(message)
-  const fingerprint = CommandFingerprint.compute(item.normalized)
-  ledger.checkOrRecord(message.commandId, fingerprint, { messageId: message.messageId, commandType: message.commandType, targetAgentId: message.targetAgentId })
-  ledger.recordQueueSequence(message.commandId, item.record.queueSequence)
-  ledger.markStarted(message.commandId)
-  inbox.markRecoveryRequired(inbox.claimNext(), 'upgrade contradiction')
-
-  const wire = []
-  const processor = new AgentMessageProcessor({
-    profile: first.profile,
-    inbox,
-    runCommand: async () => { throw new Error('must not execute') },
-    runChat: async () => {},
-    recoverCommandOutcome: command => restarted.reconcileCommandOutcome(command),
-    ledger,
-    ackOutbox,
-    sendFn: envelope => { wire.push(envelope); return true }
-  })
-  const recovery = processor.start({ drain: false })
-  assert.equal(recovery.failClosedCode, '')
-  assert.equal(ledger.getEntry(message.commandId).status, ACK_STATUS.FAILED)
-  assert.equal(inbox.list('archive')[0].outcome.status, 'failed')
-  assert.deepEqual(wire.filter(item => [ACK_STATUS.SUCCEEDED, ACK_STATUS.FAILED].includes(item.ackStatus)).map(item => item.ackStatus), [ACK_STATUS.FAILED])
-})
-
-test('stable connection drains 33+ results in bounded batches and receipts retire only exact records', () => {
-  const runtime = managerRuntime({ sendResultFn: () => false })
-  runtime.manager._withLockSync('seed-33-results', () => {
-    for (let index = 0; index < 35; index += 1) {
-      runtime.manager._persistFailureResult({
-        ...dispatch(runtime.packageBytes),
-        messageId: `msg-${index}`,
-        commandId: `cmd-${index}`,
-        installationId: `si-${index}`,
-        downloadPath: `/internal/agent/skill-installations/si-${index}/package`,
-        scopeDigest: runtime.manager.scope.digest
-      }, new SkillInstallError(SKILL_INSTALL_FAILURE.DISABLED, 'disabled'))
-    }
-  })
-  const sent = []
-  runtime.manager.sendResultFn = envelope => { sent.push(envelope); return true }
-  const scheduled = []
-  const batches = []
-  const cancel = startBoundedSkillResultReplay({
-    manager: runtime.manager,
-    replayToken: 'stable-connection',
-    isStable: () => true,
-    schedule: callback => scheduled.push(callback),
-    onBatch: count => batches.push(count)
-  })
-  while (scheduled.length) scheduled.shift()()
-  cancel()
-
-  assert.deepEqual(batches, [32, 3])
-  assert.equal(sent.length, 35)
-  assert.equal(new Set(sent.map(item => item.messageId)).size, 35)
-  assert.equal(runtime.manager.pendingResults().length, 35)
-  const later = sent[34]
-  assert.equal(runtime.manager.acknowledgeResultReceipt(receiptFor(later)).status, 'acknowledged')
-  assert.equal(runtime.manager.pendingResults().length, 34)
-  assert.equal(runtime.manager.acknowledgedResults().length, 1)
-})
-
-test('durable PREPARED and activation-boundary persistence faults reconcile forward without false failure', async t => {
-  const bytes = validPackage()
-  for (const faultState of ['PREPARED', 'ACTIVE']) {
-    await t.test(faultState, async () => {
-      const runtime = managerRuntime({ packageBytes: bytes, sendResultFn: () => false })
-      const original = runtime.manager._writeRegistry.bind(runtime.manager)
-      let injected = false
-      runtime.manager._writeRegistry = record => {
-        original(record)
-        if (!injected && record.state === faultState) {
-          injected = true
-          throw new Error(`injected ${faultState} persistence response loss`)
-        }
-      }
-      const reconcilePrepared = runtime.manager._reconcilePreparedRecord.bind(runtime.manager)
-      let reconciledUnderMutex = false
-      runtime.manager._reconcilePreparedRecord = (...args) => {
-        assert.ok(runtime.manager.lockOwner)
-        reconciledUnderMutex = true
-        return reconcilePrepared(...args)
-      }
-      const result = await runtime.manager.execute(dispatch(bytes))
-      assert.equal(result.status, 'completed')
-      assert.equal(result.activationCommitted, true)
-      assert.equal(reconciledUnderMutex, true)
-      assert.equal(runtime.manager.getInstallation('si_1').state, 'ACTIVE')
-      assert.equal(runtime.manager.pendingResults().length, 1)
-      assert.equal(runtime.manager.pendingResults()[0].envelope.status, 'SUCCEEDED')
-    })
+test('lost failure-result persistence stays UNKNOWN; receipt persisted before crash is retired across restart', async t => {
+  const f = setup(t, { getRuntimeHeaders: () => ({}) }), c = command(packageFixture().target)
+  const save = f.manager._save.bind(f.manager)
+  f.manager._save = state => {
+    if (Object.values(state.commands).some(row => row.result?.data.evidence.outcome === 'FAILED')) throw new Error('injected failed-result persistence loss')
+    return save(state)
   }
+  await assert.rejects(f.manager.handle(c), /persistence loss/)
+  const m = restart(f); const result = await m.handle(reconcile(c)); assert.equal(outcome(result), 'UNKNOWN'); assert.equal(f.downloads(), 0)
+  const observed = m.pendingResults().find(row => row.envelope.data.commandId === c.data.commandId).envelope
+  m.checkpoint = crashed('receipt-persisted'); assert.throws(() => m.acknowledgeResultReceipt(receiptFor(observed)), /crash:/)
+  const next = restart(f); assert.equal(next.pendingResults().some(row => row.envelope.messageId === observed.messageId), false)
+  assert.equal(next.acknowledgedResults().some(row => row.envelope.messageId === observed.messageId), true)
 })
 
-test('PREPARED recovery completes both pre-publication and post-publication crash states', async () => {
-  const bytes = validPackage()
-  const root = temporaryDirectory()
-  const first = managerRuntime({ root, packageBytes: bytes, sendResultFn: () => false })
-  assert.equal((await first.manager.execute(dispatch(bytes))).status, 'completed')
-  const active = first.manager.getInstallation('si_1')
-  const registryPath = first.manager._registryPath('si_1')
-
-  renameSync(active.targetPath, active.stagingPath)
-  writeFileSync(registryPath, `${JSON.stringify({ ...active, state: 'PREPARED', activatedAt: null }, null, 2)}\n`)
-  const beforePublish = managerForExistingState({ profile: first.profile, stateRoot: first.stateRoot })
-  assert.equal(beforePublish.initialize().healthy, true)
-  assert.equal(beforePublish.getInstallation('si_1').state, 'ACTIVE')
-  assert.equal(existsSync(active.targetPath), true)
-  assert.equal(existsSync(active.stagingPath), false)
-
-  const recovered = beforePublish.getInstallation('si_1')
-  writeFileSync(registryPath, `${JSON.stringify({ ...recovered, state: 'PREPARED', activatedAt: null }, null, 2)}\n`)
-  const afterPublish = managerForExistingState({ profile: first.profile, stateRoot: first.stateRoot })
-  assert.equal(afterPublish.initialize().healthy, true)
-  assert.equal(afterPublish.getInstallation('si_1').state, 'ACTIVE')
-  assert.equal(afterPublish.pendingResults().length, 1)
-})
-
-test('startup reconciles committed installer evidence with a recovery-required inbox without re-execution', async () => {
-  const bytes = validPackage()
-  const root = temporaryDirectory()
-  const codexHome = resolve(root, 'codex-home')
-  mkdirSync(codexHome, { recursive: true })
-  const selectedProfile = profile(codexHome)
-  const stateRoot = resolve(root, 'skill-state')
-  const manager = new SkillInstallManager({
-    profile: selectedProfile, stateRoot,
-    wsUrl: 'wss://api.example.test/ws', getRuntimeHeaders: () => runtimeHeaders, enabled: true,
-    fetchFn: async () => responseFor(bytes), sendResultFn: () => false,
-    runtimeInstanceId: 'runtime-before-crash'
+test('frozen six W08 metadata.version packages retain exact ZIP, SKILL.md and scoped marker identity under SM-C1', async t => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/w08-metadata-version-packages.json', import.meta.url)))
+  assert.equal(fixture.sourceCommit, '6619aae27fd8a31c9ea1dec429a738236ea8a252')
+  assert.equal(fixture.sourceTree, '0b869eb0acf78068a97790785f50228da06431ff')
+  assert.equal(fixture.packages.length, 6)
+  for (const item of fixture.packages) await t.test(item.skillKey, async t => {
+    const bytes = Buffer.from(item.packageBase64, 'base64'); assert.equal(bytes.toString('base64'), item.packageBase64)
+    assert.equal(String(bytes.length), item.packageSize); assert.equal(`sha256:${hash(bytes)}`, item.packageDigest)
+    const target = { skillInstallationId: `si_${item.skillKey}`, productVersionId: `spv_${item.skillKey}`, skillVersion: item.skillVersion,
+      packageSha256: hash(bytes), manifestSha256: null, byteLength: String(bytes.length), kind: 'INSTRUCTION' }
+    const f = setup(t); f.add({ target, bytes }); const c = command(target, { skillKey: item.skillKey })
+    assert.equal(outcome(await f.manager.handle(c)), 'PREPARED'); assert.equal(outcome(await f.manager.handle(activate(c))), 'APPLIED')
+    assert.equal(hash(readFileSync(resolve(f.home, 'skills', item.skillKey, 'SKILL.md'))), item.skillMdSha256)
+    const marker = JSON.parse(readFileSync(resolve(f.home, 'skills', item.skillKey, '.cyf-installation.json')))
+    assert.deepEqual(marker.target, target); assert.equal(restart(f).listInstalledSkills()[0].skillKey, item.skillKey)
+    assert.equal(f.downloads(), 1)
   })
-  manager.initialize()
-  const inbox = new PersistentCommandInbox({ rootDir: root, profile: selectedProfile })
-  const storageRoot = resolve(root, Buffer.from(selectedProfile.agentId).toString('hex'))
-  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile: selectedProfile })
-  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile: selectedProfile })
-  inbox.initialize(); ledger.initialize(); ackOutbox.initialize()
-  const message = dispatch(bytes)
-  const item = inbox.enqueue(message)
-  const fingerprint = CommandFingerprint.compute(item.normalized)
-  ledger.checkOrRecord(message.commandId, fingerprint, { messageId: message.messageId, commandType: message.commandType, targetAgentId: message.targetAgentId, expiresAt: null })
-  ledger.recordQueueSequence(message.commandId, item.record.queueSequence)
-  ledger.markStarted(message.commandId)
-  const claimed = inbox.claimNext()
-  assert.equal((await manager.execute(message)).status, 'completed')
-  inbox.markRecoveryRequired(claimed, 'simulated crash after activation')
-  ledger.markRecoveryRequired(message.commandId, fingerprint, { messageId: message.messageId, commandType: message.commandType, targetAgentId: message.targetAgentId }, 'simulated crash')
+})
 
-  const restartedManager = managerForExistingState({ profile: selectedProfile, stateRoot })
-  restartedManager.initialize()
-  let executions = 0
-  const processor = new AgentMessageProcessor({
-    profile: selectedProfile, inbox,
-    runCommand: async () => { executions += 1; return { status: 'failed' } },
-    runChat: async () => {}, ledger, ackOutbox, sendFn: () => false,
-    recoverCommandOutcome: command => restartedManager.reconcileCommandOutcome(command),
-    onWorkResultReceipt: receipt => restartedManager.acknowledgeResultReceipt(receipt)
+test('executable malformed manifest, manifest identity and package-local script entrypoint cannot be fabricated', async t => {
+  const parsed = packageFixture({ executable: true }), raw = JSON.parse(readFileSync(new URL('./fixtures/skill-manifest-contract-v1.json', import.meta.url))).cases.find(c => c.id === 'image-edit')
+  for (const kind of ['malformed', 'wrong-identity', 'missing-entrypoint', 'dependency-unavailable']) await t.test(kind, async t => {
+    const doc = JSON.parse(raw.json); doc.skillKey = 'repo-test'; doc.skillVersion = '1.0.0'
+    if (kind === 'wrong-identity') doc.skillVersion = '9.0.0'
+    if (kind === 'missing-entrypoint') { doc.runner = 'local-script'; doc.entrypoint = 'scripts/missing.py'; doc.requirements = {} }
+    const text = kind === 'malformed' ? '{invalid' : JSON.stringify(doc)
+    const bytes = zip([{ name: 'SKILL.md', data: skillDocument() }, { name: 'manifest.json', data: text }])
+    const target = { ...parsed.target, byteLength: String(bytes.length), packageSha256: hash(bytes), manifestSha256: hash(text) }
+    const f = setup(t); f.add({ target, bytes });
+    if (kind === 'dependency-unavailable') f.manager.verifyCandidate = async () => ({ readiness: 'PROVIDER_UNBOUND', reasonCode: 'PROVIDER_UNBOUND' })
+    const result = await f.manager.handle(command(target)); assert.equal(outcome(result), 'FAILED')
+    assert.equal(f.manager.listInstalledSkills().length, 0)
   })
-  const recovery = processor.start({ drain: false })
-  assert.equal(recovery.failClosedCode, '')
-  assert.equal(executions, 0)
-  assert.equal(ledger.getEntry(message.commandId).status, ACK_STATUS.SUCCEEDED)
-  assert.equal(inbox.count('recovery'), 0)
 })
 
-test('profile validation rejects equal, nested, and symlink-aliased CODEX_HOME paths', () => {
-  const root = temporaryDirectory()
-  const homeA = resolve(root, 'home-a')
-  const nested = resolve(homeA, 'nested')
-  const workA = resolve(root, 'work-a')
-  const workB = resolve(root, 'work-b')
-  mkdirSync(nested, { recursive: true })
-  mkdirSync(workA); mkdirSync(workB)
-  const base = (profileId, agentId, codexHome, codexWorkdir) => normalizeProfile({
-    ...profile(codexHome), profileId, agentId, codexHome, codexWorkdir,
-    workspaceNoTaskPolicy: 'reject', workspacePolicyId: '', workspaceNonCodingCommandTypes: [],
-    workspaceFallbackWorkdir: '', workspaceRole: ''
-  })
-  assert.throws(() => ensureProfiles([
-    base('a', 'agent-a', homeA, workA), base('b', 'agent-b', nested, workB)
-  ], 'a', new Map(), false), /must not be equal or overlap/)
-  assert.throws(() => ensureProfiles([
-    base('a', 'agent-a', homeA, workA), base('b', 'agent-b', homeA, workB)
-  ], 'a', new Map(), false), /must not be equal or overlap/)
-  const alias = resolve(root, 'home-alias')
-  symlinkSync(homeA, alias, 'dir')
-  assert.throws(() => ensureProfiles([
-    base('a', 'agent-a', homeA, workA), base('b', 'agent-b', alias, workB)
-  ], 'a', new Map(), false), /must not be equal or overlap/)
-
-  const realParent = resolve(root, 'real-parent')
-  const parentAlias = resolve(root, 'parent-alias')
-  mkdirSync(realParent)
-  symlinkSync(realParent, parentAlias, 'dir')
-  assert.throws(() => ensureProfiles([
-    base('a', 'agent-a', resolve(realParent, 'future-home'), workA),
-    base('b', 'agent-b', resolve(parentAlias, 'future-home', 'nested'), workB)
-  ], 'a', new Map(), false), /must not be equal or overlap/)
-})
-
-test('legacy API key cannot authorize a skill download; incomplete session proof fails before fetch', async () => {
-  const root = temporaryDirectory(); const selected = profile(root)
-  assert.throws(() => new SkillInstallManager({ profile: selected, stateRoot: resolve(root, 'legacy'), wsUrl: 'wss://api.example.test/ws', apiKey: 'retired', enabled: true }), /retired/)
-  let downloads = 0
-  const manager = new SkillInstallManager({ profile: selected, stateRoot: resolve(root, 'incomplete'), wsUrl: 'wss://api.example.test/ws', enabled: true,
-    getRuntimeHeaders: () => ({ Authorization: runtimeHeaders.Authorization }), fetchFn: async () => { downloads++; assert.fail('no incomplete proof fetch') } })
-  manager.initialize(); const result = await manager.execute(dispatch(validPackage()))
-  assert.equal(result.status, 'failed'); assert.equal(downloads, 0)
-})
-
-// SE-2: executable declarations bind exact bytes; ordinary SKILL.md remains valid.
-const executableFixture = () => {
-  const fixtures = JSON.parse(readFileSync(new URL('./fixtures/skill-manifest-contract-v1.json', import.meta.url)))
-  const manifest = JSON.parse(fixtures.cases.find(c => c.id === 'image-edit').json)
-  manifest.skillKey = 'repo-test'
-  return manifest
-}
-const executablePackage = (manifest = executableFixture(), script = null) => zip([
-  { name: 'SKILL.md', data: skillDocument() },
-  { name: 'manifest.json', data: JSON.stringify(manifest) },
-  ...(script ? [{ name: 'scripts/run.py', data: script }] : [])
-])
-test('SE2 executable installation binds manifest bytes to marker, durable receipt and replay', async () => {
-  const manifest = executableFixture(); manifest.costInfo = { mode: 'invalid' }
-  const bytes = executablePackage(manifest), runtime = managerRuntime({ packageBytes: bytes })
-  const result = await runtime.manager.execute(dispatch(bytes))
-  assert.equal(result.status, 'completed')
-  const expectedHash = createHash('sha256').update(JSON.stringify(manifest)).digest('hex')
-  assert.equal(result.resultEnvelope.manifestSha256, expectedHash)
-  const marker = JSON.parse(readFileSync(resolve(runtime.codexHome, 'skills/repo-test/.cyf-installation.json')))
-  assert.equal(marker.manifestSha256, expectedHash)
-  const replay = await runtime.manager.execute(dispatch(bytes))
-  assert.equal(replay.idempotent, true)
-  assert.equal(replay.resultEnvelope.manifestSha256, expectedHash)
-})
-test('SE2 ordinary package has no fabricated executable receipt', async () => {
-  const runtime = managerRuntime(), result = await runtime.manager.execute(dispatch(runtime.packageBytes))
-  assert.equal(result.status, 'completed'); assert.equal(result.resultEnvelope.manifestSha256, undefined)
-})
-test('SE2 malformed executable package does not activate', async () => {
-  const manifest = executableFixture(); manifest.parametersSchema.$ref = 'file:///etc/passwd'
-  const bytes = executablePackage(manifest), runtime = managerRuntime({ packageBytes: bytes })
-  const result = await runtime.manager.execute(dispatch(bytes))
-  assert.equal(result.status, 'failed'); assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.ARCHIVE_INVALID)
-  assert.equal(existsSync(resolve(runtime.codexHome, 'skills/repo-test')), false)
-})
-test('SE2 local-script package requires an actual package-local entrypoint', async () => {
-  const manifest = executableFixture(); manifest.runner = 'local-script'; manifest.entrypoint = 'scripts/run.py'; manifest.requirements = { tools: ['python3'] }
-  const bad = executablePackage(manifest), badRuntime = managerRuntime({ packageBytes: bad })
-  assert.equal((await badRuntime.manager.execute(dispatch(bad))).failureCode, SKILL_INSTALL_FAILURE.ARCHIVE_INVALID)
-  const good = executablePackage(manifest, 'print("fixture")'), goodRuntime = managerRuntime({ packageBytes: good })
-  assert.equal((await goodRuntime.manager.execute(dispatch(good))).status, 'completed')
-})
-test('SE2 changed manifest and forged marker cannot bypass the original registry digest', async () => {
-  const bytes = executablePackage(), runtime = managerRuntime({ packageBytes: bytes })
-  assert.equal((await runtime.manager.execute(dispatch(bytes))).status, 'completed')
-  const root = resolve(runtime.codexHome, 'skills/repo-test'), manifest = executableFixture(); manifest.title = 'tampered'
-  writeFileSync(resolve(root, 'manifest.json'), JSON.stringify(manifest))
-  const marker = JSON.parse(readFileSync(resolve(root, '.cyf-installation.json')))
-  marker.manifestSha256 = createHash('sha256').update(JSON.stringify(manifest)).digest('hex')
-  writeFileSync(resolve(root, '.cyf-installation.json'), JSON.stringify(marker))
-  const result = await runtime.manager.execute(dispatch(bytes))
-  assert.notEqual(result.status, 'completed'); assert.equal(result.failureCode, SKILL_INSTALL_FAILURE.CONFLICT)
-})
-
-test('SE2 installed descriptor source reads only scoped ACTIVE registry and exact published marker', async () => {
-  const bytes = executablePackage(), runtime = managerRuntime({ packageBytes: bytes })
-  assert.deepEqual(runtime.manager.listInstalledSkills(), [])
-  assert.equal((await runtime.manager.execute(dispatch(bytes))).status, 'completed')
-  const descriptors = runtime.manager.listInstalledSkills()
-  assert.equal(descriptors.length, 1); assert.equal(descriptors[0].packageSha256, digest(bytes).slice(7))
-  assert.equal(descriptors[0].manifestSha256, descriptors[0].manifest.manifestSha256)
-  assert.equal(Object.isFrozen(descriptors[0].manifest), true)
-  const manifestPath = resolve(runtime.codexHome, 'skills/repo-test/manifest.json')
-  writeFileSync(manifestPath, JSON.stringify({ ...executableFixture(), title: 'tampered' }))
-  assert.throws(() => runtime.manager.listInstalledSkills(), /durable evidence/)
-})
-test('SE2 ordinary installed descriptor remains non-executable and arbitrary HOME skills are ignored', async () => {
-  const runtime = managerRuntime()
-  assert.equal((await runtime.manager.execute(dispatch(runtime.packageBytes))).status, 'completed')
-  const arbitrary = resolve(runtime.codexHome, 'skills/not-from-market'); mkdirSync(arbitrary)
-  writeFileSync(resolve(arbitrary, 'SKILL.md'), skillDocument('not-from-market'))
-  const descriptors = runtime.manager.listInstalledSkills()
-  assert.equal(descriptors.length, 1); assert.equal(descriptors[0].manifest, null)
-})
-
-// Actual immutable package bytes, not a fake installed descriptor/capability name.
-import { skillPackageTreeDigest } from '../skill-manifest.mjs'
-import { SkillRegistry } from '../skill-registry.mjs'
-import { createNativeModelRunner } from '../skill-runners/native-model.mjs'
-import { createImageProviderRunner } from '../skill-runners/image-provider.mjs'
-const preparedPackages = JSON.parse(readFileSync(new URL('../toolchain/skill-packages-se2/release-inputs.json', import.meta.url)))
-for (const item of preparedPackages.packages) {
-  test(`SE2 prepared ${item.skillKey} installs actual ZIP and readiness requires measured runner/binding`, async () => {
+test('prepared real SE2 archives require measured native/provider readiness; no readiness probe calls a provider', async t => {
+  const { createNativeModelRunner } = await import('../skill-runners/native-model.mjs')
+  const { createImageProviderRunner } = await import('../skill-runners/image-provider.mjs')
+  const inputs = JSON.parse(readFileSync(new URL('../toolchain/skill-packages-se2/release-inputs.json', import.meta.url)))
+  for (const item of inputs.packages) await t.test(item.skillKey, async t => {
     const bytes = readFileSync(new URL(`../toolchain/skill-packages-se2/${item.packageFile}`, import.meta.url))
-    assert.equal(bytes.length, item.packageByteLength); assert.equal(digest(bytes).slice(7), item.packageSha256)
-    const runtime = managerRuntime({ packageBytes: bytes })
-    const result = await runtime.manager.execute(dispatch(bytes, { skillKey: item.skillKey, skillVersion: item.skillVersion }))
-    assert.equal(result.status, 'completed'); assert.equal(result.resultEnvelope.manifestSha256, item.manifestSha256)
-    const rows = runtime.manager.listInstalledSkills()
-    assert.equal(rows[0].manifest.entrypoint, item.entrypoint)
-    assert.equal(rows[0].manifest.skillVersion, item.skillVersion)
-    if (item.runner === 'native-model') assert.deepEqual(rows[0].manifest.inputs.acceptedMimeTypes, ['text/plain', 'text/markdown', 'application/json', 'image/png'])
-    const scope = { tenantId: '0', ownerJiacn: 'owner', clientId: 'client', agentId: 'agent-a' }
-    const runners = new Map(), binding = { ready: true, scope, bindingId: 'fixture-image', revision: '1', digest: 'b'.repeat(64) }
-    const registry = new SkillRegistry({ scope, loadInstalled: () => rows, runnerRegistry: runners, resolveBinding: async () => binding })
-    registry.setSession({ installationId: 'installation-a', hostId: 'host-a', runtimeInstanceId: 'boot-a', sessionGeneration: '1' })
-    let declaration = await registry.refresh()
-    assert.equal(declaration.skills[0].readiness, 'UNAVAILABLE'); assert.equal(declaration.skills[0].reasonCode, 'SKILL_RUNNER_MISSING')
-    const noCall = () => assert.fail('Readiness must never invoke provider/model')
+    assert.equal(bytes.length, item.packageByteLength); assert.equal(hash(bytes), item.packageSha256)
+    const f = setup(t), target = { skillInstallationId: `si_${item.skillKey}`, productVersionId: `spv_${item.skillKey}`, skillVersion: item.skillVersion,
+      packageSha256: item.packageSha256, manifestSha256: item.manifestSha256, byteLength: String(bytes.length), kind: 'EXECUTABLE' }
+    f.add({ target, bytes })
+    const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(), runnerRegistry: new Map() }); registry.setSession(binding.fence)
+    f.manager.verifyCandidate = async row => (await registry.measureInstallation(row)).item
+    assert.equal(outcome(await f.manager.handle(command(target, { skillKey: item.skillKey }))), 'FAILED'); assert.equal(f.manager.listInstalledSkills().length, 0)
+    const noCall = () => assert.fail('install/readiness must not invoke provider/model')
     if (item.runner === 'provider-operation') {
-      registry.runners.set(item.runner, createImageProviderRunner({ bindings: { resolve: async () => binding }, scope, fetchFn: noCall }))
-      binding.ready = false
-      assert.equal((await registry.refresh()).skills[0].readiness, 'UNAVAILABLE')
-      binding.ready = true
-    } else {
-      registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64) }), runModel: noCall }))
-      assert.equal((await registry.refresh()).skills[0].reasonCode, 'MATERIALS_CARRIER_UNAVAILABLE')
-      registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png'] }), runModel: noCall }))
-    }
-    declaration = await registry.refresh(); assert.equal(declaration.skills[0].readiness, 'READY')
-    assert.equal(declaration.skills[0].packageSha256, item.packageSha256)
-    registry.setSession(null); assert.equal(registry.declaration(), null)
+      const bindings = { resolve: async () => ({ ready: true, scope: binding.scope, bindingId: 'test-provider', revision: '1', digest: 'a'.repeat(64) }) }
+      registry.runners.set(item.runner, createImageProviderRunner({ bindings, scope: binding.scope, fetchFn: noCall }))
+      registry.resolveBinding = () => bindings.resolve()
+    } else registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png'] }), runModel: noCall }))
+    const c = command(target, { skillKey: item.skillKey, skillRevision: '2', fencingToken: '2', attempt: 2 })
+    assert.equal(outcome(await f.manager.handle(c)), 'PREPARED'); assert.equal(outcome(await f.manager.handle(activate(c))), 'APPLIED')
+    const descriptor = f.manager.listInstalledSkills()[0]; assert.equal(descriptor.manifest.entrypoint, item.entrypoint)
+    assert.equal((await registry.refresh()).skills[0].readiness, 'READY')
   })
-}
+})
 
-for (const mutation of ['script', 'dependency', 'forged-marker']) {
-  test(`SE2 local-script ${mutation} mutation cannot retain ZIP-verified installation identity`, async () => {
-    const manifest = executableFixture(); manifest.runner = 'local-script'; manifest.entrypoint = 'scripts/run.py'; manifest.requirements = { tools: ['python3'] }
-    const bytes = executablePackage(manifest, 'print("original")'), runtime = managerRuntime({ packageBytes: bytes })
-    assert.equal((await runtime.manager.execute(dispatch(bytes))).status, 'completed')
-    const descriptor = runtime.manager.listInstalledSkills()[0]
-    assert.match(descriptor.packageTreeDigest, /^[a-f0-9]{64}$/)
-    assert.equal(descriptor.packageTreeDigest, skillPackageTreeDigest(descriptor.packageRoot))
-    assert.equal((await runtime.manager.execute(dispatch(bytes))).idempotent, true)
-    const root = descriptor.packageRoot
-    if (mutation === 'dependency') writeFileSync(resolve(root, 'scripts/helper.py'), 'print("injected")', { mode: 0o644 })
-    else writeFileSync(resolve(root, 'scripts/run.py'), 'print("replaced")')
-    if (mutation === 'forged-marker') {
-      const markerPath = resolve(root, '.cyf-installation.json'), marker = JSON.parse(readFileSync(markerPath))
-      marker.packageTreeDigest = skillPackageTreeDigest(root)
-      writeFileSync(markerPath, JSON.stringify(marker))
-    }
-    assert.throws(() => runtime.manager.listInstalledSkills(), /durable evidence/)
-    const replay = await runtime.manager.execute(dispatch(bytes))
-    assert.notEqual(replay.status, 'completed'); assert.equal(replay.failureCode, SKILL_INSTALL_FAILURE.CONFLICT)
-  })
-}
+test('failed upgrade preparation preserves old exact view; explicit new attempt can prepare without replaying failure', async t => {
+  const f = setup(t), { pkg: original } = await installed(f), pkg = f.add(packageFixture({ version: '2.0.0', executable: true }))
+  const oldBytes = readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md'))
+  f.manager.verifyCandidate = async () => ({ readiness: 'DEPENDENCY_MISSING', reasonCode: 'DEPENDENCY_MISSING' })
+  const first = command(pkg.target, { action: 'UPGRADE', source: original.target, skillChangeId: 'sc_retry', skillRevision: '2', fencingToken: '2' })
+  const failure = await f.manager.handle(first); assert.equal(outcome(failure), 'FAILED'); assert.equal(failure.resultEnvelope.data.evidence.reasonCode, 'DEPENDENCY_MISSING')
+  assert.deepEqual(readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md')), oldBytes)
+  assert.equal(f.manager.listInstalledSkills()[0].skillVersion, '1.0.0')
+  await f.manager.handle(first); assert.equal(f.downloads(), 2)
+  f.manager.verifyCandidate = async () => ({ readiness: 'READY' })
+  const next = command(pkg.target, { ...first.data, commandId: 'cmd_retry_next', attempt: 2, skillRevision: '3', fencingToken: '3' })
+  assert.equal(outcome(await f.manager.handle(next)), 'PREPARED'); assert.equal(outcome(await f.manager.handle(activate(next))), 'APPLIED')
+  assert.equal(f.manager.listInstalledSkills()[0].skillVersion, '2.0.0'); assert.equal(f.downloads(), 3)
+})
 
+test('upgrading a disabled skill preserves disabled discovery/policy until explicit higher ENABLE', async t => {
+  const f = setup(t), { pkg } = await installed(f)
+  assert.equal(outcome(await f.manager.handle(policy(pkg.target, 2, false))), 'APPLIED')
+  const next = f.add(packageFixture({ version: '2.0.0' })), c = command(next.target, { action: 'UPGRADE', source: pkg.target,
+    desiredEnabled: false, skillChangeId: 'sc_disabled_upgrade', skillRevision: '3', fencingToken: '3' })
+  assert.equal(outcome(await f.manager.handle(c)), 'PREPARED'); assert.equal(outcome(await f.manager.handle(activate(c))), 'APPLIED')
+  const m = restart(f); assert.equal(m.listInstalledSkills()[0].enabled, false)
+  assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
+  assert.equal(outcome(await m.handle(policy(next.target, 4, true))), 'APPLIED')
+  assert.ok(readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md'), 'utf8').includes('2.0.0'))
+  assert.equal(m.listInstalledSkills({ includeRetained: true }).length, 2); assert.equal(f.downloads(), 2)
+})
 
-test('typed receipt product identity requires exact durable pending or acknowledged scope without mutation', async () => {
-  const bytes = validPackage(), runtime = managerRuntime({ packageBytes: bytes, sendResultFn: () => false });
-  assert.equal((await runtime.manager.execute(dispatch(bytes))).status, 'completed');
-  const envelope = runtime.manager.pendingResults()[0].envelope, receipt = receiptFor(envelope);
-  assert.equal(runtime.manager.matchesDurableResultEnvelope(envelope), true);
-  assert.equal(runtime.manager.matchesDurableResultEnvelope({ ...envelope, runtimeInstanceId: 'foreign' }), false);
-  assert.equal(runtime.manager.matchesDurableResultEnvelope({ ...envelope, messageId: 'foreign' }), false);
-  assert.equal(runtime.manager.matchesDurableResultReceipt(receipt), true);
-  for (const field of ['correlationId', 'commandId', 'fencingToken', 'deliveryEpoch', 'installationId', 'targetAgentId']) {
-    assert.equal(runtime.manager.matchesDurableResultReceipt({ ...receipt, [field]: 'foreign' }), false, field);
+test('READ can prove a formerly UNKNOWN switch from restored exact marker without changing old result bytes or switching again', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), prepare = command(pkg.target); await f.manager.handle(prepare)
+  const view = resolve(f.home, 'skills/repo-test'), markerPath = resolve(view, '.cyf-installation.json')
+  let marker, switches = 0
+  f.manager.atomicFs = { ...LINUX_ATOMIC_FS, renameNoReplace(source, target, expected) {
+    const result = LINUX_ATOMIC_FS.renameNoReplace(source, target, expected)
+    if (target === view && result.ok) { switches++; marker = readFileSync(markerPath); writeFileSync(markerPath, '{}') }
+    return result
+  } }
+  const activation = activate(prepare), result = (await f.manager.handle(activation)).resultEnvelope, original = JSON.stringify(result)
+  assert.equal(result.data.evidence.outcome, 'UNKNOWN')
+  writeFileSync(markerPath, marker)
+  const read = await f.manager.handle(reconcile(activation)); assert.equal(outcome(read), 'APPLIED')
+  assert.equal(JSON.stringify((await f.manager.handle(activation)).resultEnvelope), original)
+  assert.equal(f.manager.listInstalledSkills()[0].skillInstallationId, pkg.target.skillInstallationId)
+  assert.equal(switches, 1); assert.equal(f.downloads(), 1)
+})
+
+test('concurrent local delivery and result receipt queue behind the exact async installer lock without releasing or losing its journal', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), c = command(pkg.target)
+  const prior = (await f.manager.handle(reconcile(c))).resultEnvelope
+  let release, started, downloads = 0
+  const ready = new Promise(done => { started = done }), blocked = new Promise(done => { release = done })
+  f.manager.fetchFn = async () => {
+    downloads++; started(); await blocked
+    return new Response(pkg.bytes, { headers: { 'content-type': 'application/octet-stream', 'content-length': String(pkg.bytes.length) } })
   }
-  assert.equal(runtime.manager.matchesDurableResultReceipt({ ...receipt, schemaVersion: 2 }), false);
-  assert.equal(runtime.manager.matchesDurableResultReceipt({ ...receipt, attempt: 2 }), false);
-  assert.equal(runtime.manager.matchesDurableResultReceipt({ ...receipt, receiptStatus: 'REJECTED' }), false);
-  assert.equal(runtime.manager.pendingResults().length, 1); assert.equal(runtime.manager.acknowledgedResults().length, 0);
-  assert.equal(runtime.manager.acknowledgeResultReceipt(receipt).idempotent, false);
-  assert.equal(runtime.manager.matchesDurableResultReceipt(receipt), true);
-  assert.equal(runtime.manager.matchesDurableResultEnvelope(envelope), false);
-  runtime.manager.healthError = new Error('fixture corruption');
-  assert.equal(runtime.manager.matchesDurableResultReceipt(receipt), false);
-});
+  const first = f.manager.handle(c); await ready
+  const ownerBytes = readFileSync(f.manager.lockOwnerPath, 'utf8')
+  // Direct re-entry is rejected without releasing the outer async operation's lock.
+  assert.throws(() => f.manager._receive(c), /another operation/)
+  assert.equal(readFileSync(f.manager.lockOwnerPath, 'utf8'), ownerBytes)
+  const pendingReceipt = f.manager.handle(receiptFor(prior)), redelivery = f.manager.handle(c)
+  await new Promise(done => setImmediate(done))
+  assert.equal(readFileSync(f.manager.lockOwnerPath, 'utf8'), ownerBytes)
+  assert.equal(f.manager.pendingResults().some(row => row.envelope.messageId === prior.messageId), true)
+  release()
+  const result = (await first).resultEnvelope
+  assert.equal(result.data.evidence.outcome, 'PREPARED')
+  await pendingReceipt; assert.deepEqual((await redelivery).resultEnvelope, result)
+  assert.equal(downloads, 1); assert.equal(f.manager.isHealthy(), true)
+  assert.equal(f.manager.pendingResults().some(row => row.envelope.messageId === prior.messageId), false)
+  assert.equal(restart(f).pendingResults().length, 1)
+})
+
+test('same-revision conflicting policy intent cannot reverse a durably applied DISABLE', async t => {
+  const f = setup(t), { pkg } = await installed(f), disable = policy(pkg.target, 2, false)
+  assert.equal(outcome(await f.manager.handle(disable)), 'APPLIED')
+  const conflicting = command(pkg.target, { ...disable.data, commandId: 'same_revision_conflict', action: 'ENABLE', desiredEnabled: true })
+  const failure = await f.manager.handle(conflicting)
+  assert.equal(outcome(failure), 'FAILED'); assert.equal(failure.resultEnvelope.data.evidence.reasonCode, 'STATE_CHANGED')
+  assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
+  assert.equal(f.manager.listInstalledSkills()[0].enabled, false); assert.equal(f.downloads(), 1)
+})
+
+test('real authenticated session loss during download prevents package publication and does not reexecute on later delivery', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), c = command(pkg.target)
+  let release, started, downloads = 0
+  const ready = new Promise(done => { started = done }), blocked = new Promise(done => { release = done })
+  f.manager.fetchFn = async () => { downloads++; started(); await blocked
+    return new Response(pkg.bytes, { headers: { 'content-type': 'application/octet-stream', 'content-length': String(pkg.bytes.length) } }) }
+  const pending = f.manager.handle(c); await ready
+  f.manager.bindSession(null); release()
+  const result = await pending; assert.equal(outcome(result), 'FAILED')
+  assert.equal(f.manager.getInstallation(pkg.target.skillInstallationId), null)
+  assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
+  f.manager.bindSession(binding); assert.deepEqual(await f.manager.handle(c), result)
+  assert.equal(downloads, 1)
+})
+
+test('POLICY intent and switched-view crashes recover by READ only; disabled and staged copies never remain in skills discovery', async t => {
+  for (const enabled of [false, true]) for (const point of ['policy-intent-persisted', 'view-switched'])
+    await t.test(`${enabled ? 'enable' : 'disable'}:${point}`, async t => {
+      const f = setup(t), { pkg } = await installed(f)
+      if (enabled) await f.manager.handle(policy(pkg.target, 2, false))
+      const c = policy(pkg.target, enabled ? 3 : 2, enabled)
+      f.manager.checkpoint = crashed(point); await assert.rejects(f.manager.handle(c), /crash:/)
+      const m = restart(f, { runtimeInstanceId: 'boot_after_policy' })
+      m.verifyCandidate = () => assert.fail('READ must not probe an engine or provider')
+      const read = await m.handle(reconcile(c))
+      assert.equal(outcome(read), point === 'view-switched' ? 'APPLIED' : 'UNKNOWN')
+      assert.equal(read.resultEnvelope.data.executionRuntimeInstanceId, 'boot_demo')
+      const before = readdirSync(resolve(f.home, 'skills'))
+      assert.deepEqual(before, point === 'view-switched' ? enabled ? ['repo-test'] : [] : enabled ? [] : ['repo-test'])
+      await m.handle(c); await m.resumePendingCommands()
+      assert.deepEqual(readdirSync(resolve(f.home, 'skills')), before); assert.equal(f.downloads(), 1)
+      assert.equal(readdirSync(resolve(f.home, '.cyf-skill-view-staging')).length > 0, enabled || point === 'view-switched')
+    })
+})
+
+test('startup and READ do not recreate a missing discovery parent or repeat an uncertain activation', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), c = command(pkg.target)
+  await f.manager.handle(c); const activation = activate(c)
+  f.manager.checkpoint = crashed('activation-intent-persisted')
+  await assert.rejects(f.manager.handle(activation), /crash:/)
+  const root = resolve(f.home, 'skills'); rmSync(root, { recursive: true })
+  const m = restart(f); assert.equal(existsSync(root), false)
+  assert.equal(outcome(await m.handle(reconcile(activation))), 'UNKNOWN')
+  assert.equal(existsSync(root), false); assert.equal(f.downloads(), 1)
+})
+
+test('cross-parent upgrade exchange treats package owner.json as ordinary bytes, not installer-lock evidence', async t => {
+  const f = setup(t), first = f.add(packageFixture({ entries: [{ name: 'SKILL.md', data: skillDocument() },
+    { name: 'owner.json', data: 'untrusted package content'.repeat(50000) }] })), prepare = command(first.target)
+  await f.manager.handle(prepare); assert.equal(outcome(await f.manager.handle(activate(prepare))), 'APPLIED')
+  const next = f.add(packageFixture({ version: '2.0.0' })), upgrade = command(next.target, { action: 'UPGRADE', source: first.target,
+    skillChangeId: 'sc_upgrade', skillRevision: '2', fencingToken: '2' })
+  assert.equal(outcome(await f.manager.handle(upgrade)), 'PREPARED')
+  assert.equal(outcome(await f.manager.handle(activate(upgrade))), 'APPLIED')
+  assert.deepEqual(readdirSync(resolve(f.home, 'skills')), ['repo-test'])
+  assert.equal(f.manager.listInstalledSkills()[0].skillVersion, '2.0.0'); assert.equal(f.downloads(), 2)
+})

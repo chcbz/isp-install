@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { validateManagement } from './skill-management-wire.mjs'
 import { parseSkillJson, validateSkillParameters } from './skill-manifest.mjs'
 
 const fail = code => { throw Object.assign(new Error(code), { code }) }
@@ -20,7 +21,7 @@ const exact = (value, keys) => object(value) && keys.length === Object.keys(valu
 export function parseSkillCommand(raw) {
   const value = typeof raw === 'string' || Buffer.isBuffer(raw) ? parseSkillJson(raw) : structuredClone(raw)
   const fields = ['executionProtocolVersion', 'executionId', 'taskId', 'runId', 'conversationId', 'conversationGeneration',
-    'commandId', 'messageId', 'skill', 'snapshotDigest', 'parameters', 'instruction', 'inputRefs', 'outputs']
+    'commandId', 'messageId', 'skill', 'taskSkillBinding', 'snapshotDigest', 'parameters', 'instruction', 'inputRefs', 'outputs']
   if (!exact(value, fields) || value.executionProtocolVersion !== 4 || !['executionId', 'taskId', 'runId', 'conversationId', 'commandId', 'messageId'].every(key => skillId(value[key]))
       || typeof value.conversationGeneration !== 'string' || !/^[1-9][0-9]*$/.test(value.conversationGeneration)
       || !exact(value.skill, ['key', 'version', 'packageSha256', 'manifestSha256']) || !skillId(value.skill.key) || !skillId(value.skill.version)
@@ -29,6 +30,9 @@ export function parseSkillCommand(raw) {
       || !Array.isArray(value.inputRefs) || value.inputRefs.length > 32 || !value.inputRefs.every(skillId) || new Set(value.inputRefs).size !== value.inputRefs.length
       || !exact(value.outputs, ['dataSchema', 'mimeTypes', 'multiple', 'artifactsRequired']) || !Array.isArray(value.outputs.mimeTypes)
       || !value.outputs.mimeTypes.every(mime) || typeof value.outputs.multiple !== 'boolean' || typeof value.outputs.artifactsRequired !== 'boolean') fail('SKILL_COMMAND_INVALID')
+  const binding = validateManagement('TaskSkillBinding', value.taskSkillBinding)
+  if (binding.executionId !== value.executionId || binding.skillKey !== value.skill.key || binding.skillVersion !== value.skill.version
+      || binding.packageSha256 !== value.skill.packageSha256 || binding.manifestSha256 !== value.skill.manifestSha256) fail('SKILL_COMMAND_INVALID')
   return value
 }
 
@@ -37,7 +41,7 @@ export function parseSkillCommand(raw) {
 export async function executeSkill(raw, ctx) {
   const command = parseSkillCommand(raw)
   const entry = await ctx.registry.requireExact({ skillKey: command.skill.key, skillVersion: command.skill.version,
-    packageSha256: command.skill.packageSha256, manifestSha256: command.skill.manifestSha256 }, { allowUnavailable: true })
+    packageSha256: command.skill.packageSha256, manifestSha256: command.skill.manifestSha256 }, { allowUnavailable: true, taskBinding: command.taskSkillBinding })
   const descriptor = entry.descriptor
   const parameters = validateSkillParameters(descriptor.manifest.parametersSchema, command.parameters)
   const outputs = descriptor.manifest.outputs

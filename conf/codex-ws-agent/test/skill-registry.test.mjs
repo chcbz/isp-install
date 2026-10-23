@@ -12,7 +12,7 @@ const installed = (overrides = {}) => {
   const raw = JSON.parse(fixtures.cases.find(c => c.id === 'image-edit').json)
   raw.requirements = {}; Object.assign(raw, overrides)
   const manifest = parseSkillManifest(JSON.stringify(raw), { skillKey: raw.skillKey, skillVersion: raw.skillVersion })
-  return { installationId: 'si_a', packageRoot: '/fixture/immutable/package', packageSha256: hash,
+  return { installationId: 'si_a', skillInstallationId: 'si_a', productVersionId: 'spv_a', skillKey: manifest.skillKey, skillVersion: manifest.skillVersion, kind: 'EXECUTABLE', enabled: true, policyRevision: '1', packageRoot: '/fixture/immutable/package', packageSha256: hash,
     manifestSha256: manifest.manifestSha256, manifest }
 }
 const runner = { run() { assert.fail('readiness must not execute a runner') }, probe: () => ({ ready: true, digest: hash }) }
@@ -26,16 +26,16 @@ const binding = overrides => ({ ready: true, scope, bindingId: 'approved', revis
 test('unregistered runners never become READY, even with a valid installed descriptor', async () => {
   const registry = create({ runnerRegistry: new Map() })
   const declaration = await registry.refresh()
-  assert.equal(declaration.skills[0].readiness, 'UNAVAILABLE')
-  assert.equal(declaration.skills[0].reasonCode, 'SKILL_RUNNER_MISSING')
+  assert.equal(declaration.skills[0].readiness, 'DEPENDENCY_MISSING')
+  assert.equal(declaration.skills[0].reasonCode, 'DEPENDENCY_MISSING')
   const probeOnly = create({ runnerRegistry: new Map([['native-model', { probe: runner.probe }]]) })
-  assert.equal((await probeOnly.refresh()).skills[0].readiness, 'UNAVAILABLE')
+  assert.equal((await probeOnly.refresh()).skills[0].readiness, 'DEPENDENCY_MISSING')
 })
 test('local scripts require actual measured tools, not tool names or booleans', async () => {
   const rows = [installed({ runner: 'local-script', entrypoint: 'scripts/run.py', requirements: { tools: ['python3'] } })]
   for (const probe of [undefined, () => ({ ready: true }), () => ({ ready: false, digest: hash })]) {
     const registry = create({ rows, toolProbes: new Map([['python3', probe]]) })
-    const result = await registry.refresh(); assert.equal(result.skills[0].readiness, 'UNAVAILABLE')
+    const result = await registry.refresh(); assert.equal(result.skills[0].readiness, 'DEPENDENCY_MISSING')
   }
   const registry = create({ rows, toolProbes: new Map([['python3', () => ({ ready: true, digest: hash })]]) })
   assert.equal((await registry.refresh()).skills[0].readiness, 'READY')
@@ -44,7 +44,7 @@ test('provider runner requires an explicit current-subject binding and revision'
   const rows = [installed({ requirements: { providerAlias: 'image' } })]
   for (const resolveBinding of [null, () => binding({ ready: false }), () => binding({ revision: null }),
     () => binding({ scope: { ...scope, ownerJiacn: 'foreign' } })]) {
-    assert.equal((await create({ rows, resolveBinding }).refresh()).skills[0].readiness, 'UNAVAILABLE')
+    assert.equal((await create({ rows, resolveBinding }).refresh()).skills[0].readiness, 'PROVIDER_UNBOUND')
   }
   const registry = create({ rows, resolveBinding: ({ scope: supplied, fence: suppliedFence, alias }) => {
     assert.deepEqual(supplied, scope); assert.deepEqual(suppliedFence, fence); assert.equal(alias, 'image')
@@ -54,13 +54,16 @@ test('provider runner requires an explicit current-subject binding and revision'
   assert.equal(declaration.skills[0].bindingRevision, '4')
   assert.equal(JSON.stringify(declaration).includes('DO_NOT_EXPOSE'), false)
   assert.equal(JSON.stringify(declaration).includes('secret-endpoint'), false)
-  assert.equal((await create({ rows: [installed({ requirements: {} })], resolveBinding: () => binding() }).refresh()).skills[0].readiness, 'UNAVAILABLE')
+  assert.equal((await create({ rows: [installed({ requirements: {} })], resolveBinding: () => binding() }).refresh()).skills[0].readiness, 'PROVIDER_UNBOUND')
 })
-test('ordinary SKILL.md packages coexist without fabricated executable capability', async () => {
-  const registry = create({ rows: [{ installationId: 'ordinary', manifest: null }, installed({ runner: 'native-model' })] })
-  assert.equal((await registry.refresh()).skills.length, 1)
-  const plain = create({ rows: [{ installationId: 'ordinary', manifest: null }] })
-  assert.deepEqual((await plain.refresh()).skills, [])
+test('ordinary SKILL.md stays visible as NOT_EXECUTABLE, never fabricated executable capability', async () => {
+  const ordinary = { installationId: 'ordinary', skillInstallationId: 'ordinary', productVersionId: 'spv_instruction',
+    skillKey: 'instruction', skillVersion: '1.0.0', packageSha256: hash, manifestSha256: null, kind: 'INSTRUCTION',
+    enabled: true, policyRevision: '2', manifest: null }
+  const registry = create({ rows: [ordinary, installed({ runner: 'native-model' })] })
+  const skills = (await registry.refresh()).skills
+  assert.equal(skills.length, 2); assert.equal(skills.find(row => row.kind === 'INSTRUCTION').readiness, 'NOT_EXECUTABLE')
+  assert.equal(skills.find(row => row.kind === 'INSTRUCTION').runner, null)
 })
 test('heartbeat is cached; tool probes run once per refresh for a shared tool', async () => {
   let loads = 0, probes = 0
@@ -116,11 +119,10 @@ test('fee-only deployment information does not change readiness or cache identit
   assert.equal(before.catalogRevision, after.catalogRevision); assert.equal(beforeEntry.cacheKey, afterEntry.cacheKey)
   assert.equal(Object.hasOwn(after.skills[0], 'costInfo'), false)
 })
-test('duplicate installations do not pick a callable winner', async () => {
-  const first = installed({ runner: 'native-model' }), second = { ...first, installationId: 'si_b' }
-  const registry = create({ rows: [first, second] }); const result = await registry.refresh()
-  assert.equal(result.skills.length, 1); assert.equal(result.skills[0].reasonCode, 'SKILL_INSTALLATION_AMBIGUOUS')
-  assert.equal(result.skills[0].readiness, 'UNAVAILABLE')
+test('duplicate installations remove the catalog instead of picking a callable winner', async () => {
+  const first = installed({ runner: 'native-model' }), second = { ...first, installationId: 'si_b', skillInstallationId: 'si_b' }
+  const registry = create({ rows: [first, second] })
+  assert.equal(await registry.refresh(), null); assert.equal(registry.lastErrorCode, 'SKILL_CATALOG_UNAVAILABLE')
 })
 test('invalid digest or corrupt source clears the last successful directory without leaking error details', async () => {
   let rows = [installed({ runner: 'native-model' })]
@@ -144,7 +146,7 @@ test('probe hashes and reason codes reject newline suffixes', async () => {
   const registry = create({ runnerRegistry: new Map([['native-model', {
     run: runner.run, probe: () => ({ ready: true, digest: hash + '\n', reasonCode: 'FAKE\n' }) }]]) })
   const item = (await registry.refresh()).skills[0]
-  assert.equal(item.readiness, 'UNAVAILABLE'); assert.equal(item.reasonCode, 'SKILL_DEPENDENCY_UNAVAILABLE')
+  assert.equal(item.readiness, 'DEPENDENCY_MISSING'); assert.equal(item.reasonCode, 'DEPENDENCY_MISSING')
 })
 
 test('session generation rejects old numeric, noncanonical and overflowing fences', () => {

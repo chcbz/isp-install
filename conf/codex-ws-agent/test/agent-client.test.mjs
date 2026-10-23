@@ -1692,65 +1692,17 @@ test('same commandId with different payload causes fingerprint conflict and REJE
   assert.equal(conflicts[0].ackRejectedEmitted, true)
 })
 
-test('SKILL_INSTALL commandId reuse with changed fence or digest is rejected before execution', async () => {
-  const rootDir = temporaryDirectory()
-  const storageRoot = resolve(rootDir, Buffer.from(profile.agentId, 'utf8').toString('hex'))
-  const ledger = new DurableDedupeLedger({ rootDir: storageRoot, profile })
-  const ackOutbox = new AckOutbox({ rootDir: storageRoot, profile })
-  ledger.initialize()
-  ackOutbox.initialize()
-
-  const installCommand = {
-    schemaVersion: 1,
-    messageType: MESSAGE_TYPES.COMMAND_DISPATCH,
-    messageId: 'message-skill-install',
-    requestId: 'message-skill-install',
-    commandId: 'command-skill-install',
-    commandType: 'SKILL_INSTALL',
-    attempt: 1,
-    fencingToken: '1',
-    deliveryEpoch: '1',
-    targetAgentId: profile.agentId,
-    orderId: 'so_1',
-    installationId: 'si_1',
-    productVersionId: 'spv_1',
-    skillKey: 'repo-test',
-    skillVersion: '1.0.0',
-    packageSize: '123',
-    packageDigest: `sha256:${'1'.repeat(64)}`,
-    downloadPath: '/internal/agent/skill-installations/si_1/package'
-  }
-  let runs = 0
-  const rejected = []
-  const processor = new AgentMessageProcessor({
-    profile,
-    inbox: createInbox(rootDir),
-    runCommand: async () => { runs += 1; return { status: 'completed' } },
-    runChat: async () => {},
-    ledger,
-    ackOutbox,
-    sendFn: envelope => {
-      if (envelope.ackStatus === ACK_STATUS.REJECTED) rejected.push(envelope)
-      return true
+test('retired task-shaped SKILL_INSTALL cannot enter generic inbox/TTL/HTTP-ACK execution', async () => {
+  const runtime = unifiedCheckpoint({ run: () => assert.fail('management must use SM-C1 manager') })
+  try {
+    for (const commandType of ['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE']) {
+      const raw = unifiedCommand(9009, { commandType, issuedAt: 1, expiresAt: 2, payload: {} })
+      assert.throws(() => normalizeInboundMessage(raw), { code: 'SKILL_MANAGEMENT_SCHEMA_REQUIRED' })
+      const result = await runtime.processor.handle(raw)
+      assert.equal(result.kind, 'rejected')
+      assert.equal(runtime.ledger.getEntry(raw.commandId), null)
     }
-  })
-  processor.start()
-
-  await processor.handle(installCommand)
-  await processor.waitForIdle()
-  for (const conflict of [
-    { ...installCommand, messageId: 'message-skill-fence', requestId: 'message-skill-fence', fencingToken: '2' },
-    { ...installCommand, messageId: 'message-skill-digest', requestId: 'message-skill-digest', packageDigest: `sha256:${'2'.repeat(64)}` }
-  ]) {
-    const result = await processor.handle(conflict)
-    assert.equal(result.kind, 'rejected')
-    assert.equal(result.error.code, 'COMMAND_FINGERPRINT_CONFLICT')
-  }
-
-  assert.equal(runs, 1)
-  assert.equal(rejected.length, 2)
-  assert.equal(ledger.getEntry(installCommand.commandId).status, ACK_STATUS.SUCCEEDED)
-  assert.equal(ledger.getConflicts(installCommand.commandId).length, 2)
+  } finally { runtime.processor.stop() }
 })
 
 test('completed commandId re-delivery replays terminal ACK only', async () => {
@@ -4009,6 +3961,9 @@ test('E05 incomplete binding/source/subject fails before every existing executor
   ]
   for (const change of changes) {
     const raw = e05Fixture(); change(raw)
+    if (raw.commandType === 'SKILL_INSTALL') {
+      assert.throws(() => normalizeInboundMessage(raw), { code: 'SKILL_MANAGEMENT_SCHEMA_REQUIRED' }); continue
+    }
     await assert.rejects(runManagedCommand({ ...noE05SideEffects(e05Profile()), message: normalizeInboundMessage(raw) }), { code: 'E05_REASSIGNMENT_BINDING_INVALID' })
   }
   for (const field of ['tenantId', 'clientId', 'targetAgentId']) {
@@ -4039,9 +3994,10 @@ test('ordinary six TASK command paths retain existing Codex/workspace adapter; S
     assert.equal(outcome.status, 'completed')
   }
   assert.equal(calls.length, 6) // dispatch-path regression with injected executor, NOT real business acceptance
-  const skill = normalizeInboundMessage(unifiedCommand(7801, { commandType: 'SKILL_INSTALL', payload: {} }))
+  const { command, packageFixture } = await import('./fixtures/skill-management-fixture.mjs')
+  const skill = command(packageFixture().target)
   assert.deepEqual(await runManagedCommand({ profile: selected, message: skill,
-    skillInstallManager: { execute: async message => { assert.equal(message, skill); return { status: 'completed' } } },
+    skillInstallManager: { handle: async message => { assert.equal(message, skill); return { status: 'completed' } } },
     runCodexFn: () => assert.fail('skill cannot select Codex') }), { status: 'completed' })
 })
 
@@ -4929,21 +4885,15 @@ test('runtime ACK completion race: stop during postcommit cleanup await cannot c
 })
 
 
-test('native SKILL_INSTALL retains original wire expiry but defers lifetime to live order authorization', async () => {
-  let runs = 0
-  const runtime = unifiedCheckpoint({ run: async () => { runs++; return { status: 'completed' } } })
-  const raw = unifiedCommand(9009, { commandType: 'SKILL_INSTALL', issuedAt: 1, expiresAt: 2, payload: {} })
-  const normalized = normalizeInboundMessage(raw)
-  const meta = runtime.processor._commandMeta(normalized)
-  assert.equal(meta.expiresAt, null)
-  assert.equal(meta.runtimeCommand.expiresAt, new Date(2).toISOString())
-  assert.equal(runtime.processor._commandMeta(normalizeInboundMessage(unifiedCommand(9010, { expiresAt: 2 }))).expiresAt, 2)
-  const result = await runtime.processor.handle(raw)
-  assert.equal(result.kind, 'command')
-  runtime.processor.resume()
-  await runtime.processor.waitForIdle()
-  assert.equal(runs, 1)
-  assert.equal(runtime.ledger.getEntry(raw.commandId).status, 'SUCCEEDED')
+test('SM-C1 management is taskless and has no task invitation expiry', async () => {
+  const { command, packageFixture } = await import('./fixtures/skill-management-fixture.mjs')
+  const c = command(packageFixture().target)
+  assert.equal(Object.hasOwn(c.data, 'taskId'), false)
+  assert.equal(Object.hasOwn(c.data, 'expiresAt'), false)
+  assert.equal(Object.hasOwn(c.data, 'orderId'), false)
+  const runtime = unifiedCheckpoint()
+  try { assert.equal(runtime.processor._commandMeta(normalizeInboundMessage(unifiedCommand(9010, { expiresAt: 2 }))).expiresAt, 2) }
+  finally { runtime.processor.stop() }
 })
 
 test('Runtime ACK checkpoint preserves Long precision across restart and monotonic comparison', async () => {

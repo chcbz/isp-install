@@ -169,3 +169,56 @@ INSPECT 的 v3 原生输出 schema 进一步固定 `deliverable=false`、`delive
 ### 原生资料读取与执行技能边界（2026-10-22）
 
 Runtime 1.2.6 的定向修正基于 `6c2cadc6`：CHAT 模型输入包含 Context Envelope **及本 turn 实际投递的授权 material carriers**。`availableActions[].inputMimeTypes` 只限制对应技能执行，不限制原生读图/阅读；原始来源仍保留原格式、hash，原生输入可使用已验证的解码派生图。不能因为编辑技能只接受 PNG/JPEG 就要求已投递 AVIF 的用户重新上传。无 carrier 或实际不可读仍需如实提示，不猜内容、不用阅读权限扩大技能权限。回归入口：`test/materials-chat.test.mjs`、`test/juyiting-action-outcome.test.mjs`；本节描述源码，线上是否切换以版本发布记录为准。
+
+## Skill management SM-C1 (source candidate, 2026-10-23)
+
+Task `SKILL-MANAGEMENT-RUNTIME-20261023` builds on source
+`cbc1050825a40378313f283e9f25dc46d44c1ea4` (including its removed Codex
+version/generated-protocol gates). Runtime candidate is **1.3.0**, execution
+library **1.1.0**, not an installed/online release. CYF interface-standard
+**1.2 (2026-10-14)** and the SHA-locked SM-C1 schema are the wire authority;
+public protocolVersion remains 1 and skill management/capabilities schemaVersion
+is 2. Fixture provenance and migrated security/recovery tests are documented in
+`test/fixtures/skill-management/README.md`.
+
+The existing authenticated Runtime execution host routes taskless management
+commands directly to `SkillInstallManager`, outside the task inbox, invitation
+TTL and HTTP task-ACK path. PREPARE validates exact archive length/hash,
+SKILL.md/manifest, safe extraction and actual runner dependencies without
+publishing discovery. ACTIVATE requires its exact PREPARED authorization.
+POLICY enables/disables only the precise active installation for new discovery;
+READ observes the original journal/marker, never redownloads, switches or calls
+a provider. An instruction package explicitly has `manifestSha256:null` and
+`NOT_EXECUTABLE`; it does not become EXECUTE_SKILL capability.
+
+Private facts live under the existing per-subject manager state root's
+`management-v2/`: integrity-checked `journal.json`, `packages/`, `staging/` and
+`stale-locks/`. Packages are immutable, keyed by exact installation identity and
+retained without automatic GC. CODEX_HOME/skills contains only published enabled
+views; publication copies/disabled views are held outside discovery at
+`CODEX_HOME/.cyf-skill-view-staging`. Both parent inode identities are fenced
+on atomic cross-parent switching. Do not manually move these views or restore an
+old journal over newer facts.
+
+A command is durably received before ACK. Receives, execution and receipts are
+serialized under the existing cross-process owner-fenced lock. Exact ACK/result
+bytes persist across boots and authorized delivery epochs; the original
+`executionRuntimeInstanceId` is not the current transport boot. Only an exactly
+correlated committed receipt retires the result. Missing/uncertain switch
+proof yields UNKNOWN and observation-only recovery, not failure/reinstallation.
+Only a proven RECEIVED, never-started command may resume execution. Legacy
+schema1 journals are retained, not decoded or automatically replayed.
+
+The registry publishes its schema2 subobject via authenticated registration and
+`refreshCapabilities`, not presence. Existing protocol4 execution commands carry
+the contract's `taskSkillBinding`: execution/grant/Agent and exact immutable
+installation/product/package/manifest/permission references. Execution and
+committed-result recovery resolve that retained installation, not current;
+new management fencing/policy cannot revoke an already admitted old task. The
+original execution snapshot digest algorithm/content is unchanged. Real new
+admission, grant and economic authorization remain API responsibilities.
+
+This source change does not install, migrate live state, change credentials or
+systemd. CYF's fixed program directory is `app/`, not releases/current; any future
+release must preserve package/commit/tree/file digests, identity, locks and
+recovery under the separately authorized controlled installation process.

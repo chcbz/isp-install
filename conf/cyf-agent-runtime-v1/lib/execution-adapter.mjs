@@ -1,5 +1,6 @@
 // Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
 // Session credentials live only here; outbound work checkpoints hold no proof.
+import { isManagementMessage } from '../../codex-ws-agent/skill-management-wire.mjs';
 import { randomUUID } from 'node:crypto';
 import { toAgentWire, fromAgentWire } from '../../codex-ws-agent/agent-message-wire.mjs';
 import { RuntimeV1Client, classifyRuntimeError, runtimeErrorFacts, runtimeAckWireContext } from './runtime-client.mjs';
@@ -53,17 +54,20 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       const readyWithHealth = healthy => admitted && channelConfirmed && declaredHealthy && healthy && usable() && socket?.readyState === 1;
       const ready = () => admitted && channelConfirmed && declaredHealthy && readyWithHealth(durable());
       const send = envelope => {
-        if (!client.currentSession || socket?.readyState !== 1 || envelope.messageType === 'command.ack') return false;
+        if (!client.currentSession || socket?.readyState !== 1) return false;
+        if (isManagementMessage(envelope)) {
+          if (envelope.messageType === 'command.ack' && executor.matchesSkillManagementAck?.(envelope) !== true) return false;
+          if (envelope.messageType === 'work.result' && executor.matchesSkillInstallResult?.(envelope) !== true) return false;
+          if (!['command.ack', 'work.result'].includes(envelope.messageType)) return false;
+          // Credentials are transport-only; never rewrite immutable management facts.
+          socket.send(JSON.stringify(toAgentWire(envelope))); return true;
+        }
+        if (envelope.messageType === 'command.ack') return false;
         const session = client.currentSession;
-        const businessResult = envelope.messageType === 'work.result' && envelope.resultType === 'SKILL_INSTALL_RESULT';
-        if (businessResult && executor.matchesSkillInstallResult?.(envelope) !== true) return false;
-        const transportIdentity = { tenantId: session.tenantId, clientId: session.clientId,
+        const current = { ...envelope, tenantId: session.tenantId, clientId: session.clientId,
           agentId: session.canonicalAgentId, sourceAgentId: session.canonicalAgentId,
-          hostId: session.hostId, sessionGeneration: session.sessionGeneration };
-        // Never overwrite original execution identity, even transiently.
-        const current = businessResult
-          ? { ...envelope, ...transportIdentity, runtimeInstallationId: session.installationId }
-          : { ...envelope, ...transportIdentity, installationId: session.installationId, runtimeInstanceId: session.runtimeInstanceId };
+          hostId: session.hostId, sessionGeneration: session.sessionGeneration,
+          installationId: session.installationId, runtimeInstanceId: session.runtimeInstanceId };
         socket.send(JSON.stringify(toAgentWire(current, session))); return true;
       };
       const register = () => {
@@ -110,25 +114,21 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             try { frame = fromAgentWire(bytes.toString()); } catch { logger('runtime-frame-rejected', { code: 'INVALID_JSON' }); return; }
             if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
             const payload = frame;
-            if ([frame, payload].some(layer => layer.messageType === 'work.result.receipt'
-                && layer.resultType === 'SKILL_INSTALL_RESULT' && executor.matchesSkillInstallReceipt?.(layer) !== true)) {
-              logger('runtime-frame-rejected', { code: 'RUNTIME_SKILL_RECEIPT_UNCORRELATED' }); return;
-            }
             const proofMismatch = layer => {
-              // Canonical skill command installationId is the PRODUCT binding.
-              // It never substitutes for the authenticated Runtime installation.
-              const productInstall = layer.messageType === 'command.dispatch' && layer.commandType === 'SKILL_INSTALL';
-              const productReceipt = layer.schemaVersion === 1 && layer.messageType === 'work.result.receipt'
-                && layer.resultType === 'SKILL_INSTALL_RESULT' && executor.matchesSkillInstallReceipt?.(layer) === true;
+              if (isManagementMessage(layer)) {
+                if (layer.messageType === 'work.result.receipt') return executor.matchesSkillInstallReceipt?.(layer) === true ? null : 'correlationId';
+                const data = layer.data;
+                return Object.entries({ tenantId: session.tenantId, clientId: session.clientId, agentId: session.canonicalAgentId,
+                  runtimeInstallationId: session.installationId }).find(([key, value]) => data[key] !== value)?.[0] || null;
+              }
               if (Object.hasOwn(layer, 'runtimeInstallationId') && layer.runtimeInstallationId !== session.installationId) return 'runtimeInstallationId';
               if (layer.messageType === 'command.dispatch') {
                 if (layer.tenantId !== session.tenantId) return 'tenantId';
                 if (layer.clientId !== session.clientId) return 'clientId';
                 if (layer.targetAgentId !== session.canonicalAgentId) return 'targetAgentId';
-                if (productInstall && layer.installationId === session.installationId) return 'installationId';
               }
               return ['installationId', 'tenantId', 'clientId', 'canonicalAgentId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
-                .find(key => !((productInstall || productReceipt) && key === 'installationId') && Object.hasOwn(layer, key) && layer[key] !== session[key]);
+                .find(key => Object.hasOwn(layer, key) && layer[key] !== session[key]);
             };
             const mismatchField = proofMismatch(frame) || proofMismatch(payload);
             if (mismatchField) { logger('runtime-frame-rejected', { code: 'RUNTIME_FRAME_GENERATION_MISMATCH', field: mismatchField }); return; }
@@ -318,6 +318,8 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "skill-execution-store.mjs",
   "skill-manifest.mjs",
   "skill-registry.mjs",
+  "skill-management-wire.mjs",
+  "schemas/management-contract-v1.schema.json",
   "schemas/skill-manifest-v1.schema.json",
   "toolchain/delivery_tool.py",
   "toolchain/requirements.txt",

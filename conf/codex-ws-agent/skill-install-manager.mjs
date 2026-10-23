@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
+  cpSync,
+  constants,
   chmodSync,
   closeSync,
   existsSync,
   fsyncSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -13,12 +16,14 @@ import {
   realpathSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
 import yauzl from 'yauzl'
+import { isManagementMessage, parseManagementMessage, managementDigest, managementCanonicalJson, preparedDigest, validateManagement } from './skill-management-wire.mjs'
+import { parseStrictJson } from './api-envelope.mjs'
+import { eventMessage, replyMessage } from './message-envelope.mjs'
 import { parseSkillManifest, resolveSkillEntrypoint, skillPackageTreeDigest } from './skill-manifest.mjs'
 
 export const SKILL_INSTALL_FAILURE = Object.freeze({
@@ -33,10 +38,16 @@ export const SKILL_INSTALL_FAILURE = Object.freeze({
   IO_FAILED: 'SKILL_INSTALL_IO_FAILED'
 })
 
-const RESULT_TYPE = 'SKILL_INSTALL_RESULT'
+// Only the frozen public Reason dictionary crosses the wire; diagnostics stay local.
+const publicFailure = code => ({
+  SKILL_DOWNLOAD_FORBIDDEN: 'DOWNLOAD_FORBIDDEN', SKILL_PACKAGE_DIGEST_MISMATCH: 'PACKAGE_DIGEST_MISMATCH',
+  SKILL_ARCHIVE_INVALID: 'ARCHIVE_INVALID', SKILL_IDENTITY_MISMATCH: 'VERSION_MISMATCH',
+  SKILL_STATE_CONFLICT: 'STATE_CHANGED', SKILL_INSTALL_CONFLICT: 'STATE_CHANGED', SKILL_DELIVERY_FENCED: 'STATE_CHANGED',
+  SKILL_DEPENDENCY_UNAVAILABLE: 'DEPENDENCY_MISSING', DEPENDENCY_MISSING: 'DEPENDENCY_MISSING', PROVIDER_UNBOUND: 'PROVIDER_UNBOUND',
+  SKILL_PERMISSIONS_MISMATCH: 'PERMISSION_REQUIRED'
+}[code] || 'PREPARATION_FAILED')
+
 export const WORK_RESULT_RECEIPT_TYPE = 'work.result.receipt'
-const RESULT_RECEIPT_STATUS = 'ACCEPTED'
-const COMMAND_TYPE = 'SKILL_INSTALL'
 const DOWNLOAD_PREFIX = '/internal/agent/skill-installations/'
 const MARKER_NAME = '.cyf-installation.json'
 const DEFAULT_MAX_PACKAGE_BYTES = 16 * 1024 * 1024
@@ -44,14 +55,7 @@ const DEFAULT_MAX_EXTRACTED_BYTES = 64 * 1024 * 1024
 const DEFAULT_MAX_ENTRY_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_ENTRIES = 256
 const DEFAULT_MAX_REPLAY_BATCH = 32
-const STATE_SCOPE_FILE = 'scope.json'
 const DEFAULT_UNOWNED_LOCK_STALE_MS = 30_000
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const SAFE_SKILL_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/
-const SAFE_SKILL_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
-const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/
-const POSITIVE_DECIMAL = /^[1-9][0-9]*$/
-const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 const readBootId = () => {
@@ -241,40 +245,42 @@ def rename_noreplace(payload):
 
 def exchange_if_match(payload):
     parent = open_parent(payload['parent'])
+    replacement_parent = open_parent(payload['replacementParent'])
     try:
         active = stat_at(parent, payload['activeName'])
-        replacement = stat_at(parent, payload['replacementName'])
+        replacement = stat_at(replacement_parent, payload['replacementName'])
         if not matches(active, payload['activeIdentity']):
             emit(False, 'ACTIVE_CHANGED', 'active lock inode changed'); return
         if not matches(replacement, payload['replacementIdentity']):
             emit(False, 'REPLACEMENT_CHANGED', 'replacement lock inode changed'); return
-        if owner_digest(parent, payload['activeName']) != payload['activeOwnerSha256']:
+        if payload.get('activeOwnerSha256') is not None and owner_digest(parent, payload['activeName']) != payload['activeOwnerSha256']:
             emit(False, 'ACTIVE_CHANGED', 'active lock owner generation changed'); return
-        if owner_digest(parent, payload['replacementName']) != payload['replacementOwnerSha256']:
+        if payload.get('replacementOwnerSha256') is not None and owner_digest(replacement_parent, payload['replacementName']) != payload['replacementOwnerSha256']:
             emit(False, 'REPLACEMENT_CHANGED', 'replacement lock owner generation changed'); return
-        call_rename(parent, payload['activeName'], parent, payload['replacementName'], RENAME_EXCHANGE)
+        call_rename(parent, payload['activeName'], replacement_parent, payload['replacementName'], RENAME_EXCHANGE)
         moved_active = stat_at(parent, payload['activeName'])
-        moved_replacement = stat_at(parent, payload['replacementName'])
-        moved_active_digest = owner_digest(parent, payload['activeName'])
-        moved_replacement_digest = owner_digest(parent, payload['replacementName'])
+        moved_replacement = stat_at(replacement_parent, payload['replacementName'])
+        moved_active_digest = owner_digest(parent, payload['activeName']) if payload.get('replacementOwnerSha256') is not None else None
+        moved_replacement_digest = owner_digest(replacement_parent, payload['replacementName']) if payload.get('activeOwnerSha256') is not None else None
         if (not matches(moved_active, payload['replacementIdentity'])
-                or moved_active_digest != payload['replacementOwnerSha256']
+                or (payload.get('replacementOwnerSha256') is not None and moved_active_digest != payload['replacementOwnerSha256'])
                 or not matches(moved_replacement, payload['activeIdentity'])
-                or moved_replacement_digest != payload['activeOwnerSha256']
-                or not parent_still_current(parent, payload['parent'])):
+                or (payload.get('activeOwnerSha256') is not None and moved_replacement_digest != payload['activeOwnerSha256'])
+                or not parent_still_current(parent, payload['parent'])
+                or not parent_still_current(replacement_parent, payload['replacementParent'])):
             try:
-                call_rename(parent, payload['activeName'], parent, payload['replacementName'], RENAME_EXCHANGE)
-                os.fsync(parent)
+                call_rename(parent, payload['activeName'], replacement_parent, payload['replacementName'], RENAME_EXCHANGE)
+                os.fsync(parent); os.fsync(replacement_parent)
                 emit(False, 'ACTIVE_CHANGED_ROLLED_BACK', 'lock generation changed during exchange; exchange rolled back')
             except Exception as rollback:
                 emit(False, 'ACTIVE_CHANGED_ROLLBACK_FAILED', 'lock generation changed and rollback failed: %s' % rollback)
             return
-        os.fsync(parent)
+        os.fsync(parent); os.fsync(replacement_parent)
         emit(True)
     except Exception as error:
         emit(False, 'IO_ERROR', str(error))
     finally:
-        os.close(parent)
+        os.close(parent); os.close(replacement_parent)
 
 operation = sys.argv[1]
 payload = json.loads(sys.argv[2])
@@ -317,6 +323,7 @@ export const LINUX_ATOMIC_FS = Object.freeze({
   exchangeIfMatch(activePath, replacementPath, expected) {
     return runLinuxAtomicHelper('exchange-if-match', {
       parent: expected.parent || pathIdentity(dirname(activePath)),
+      replacementParent: expected.replacementParent || pathIdentity(dirname(replacementPath)),
       activeIdentity: expected.activeIdentity,
       replacementIdentity: expected.replacementIdentity || pathIdentity(replacementPath),
       activeOwnerSha256: expected.activeOwnerSha256,
@@ -346,7 +353,12 @@ const fsyncDirectory = directory => {
 
 const ensurePrivateDirectory = directory => {
   const existed = existsSync(directory)
+  let ancestor = resolve(directory)
+  while (!existsSync(ancestor)) ancestor = dirname(ancestor)
+  if (realpathSync(ancestor) !== ancestor || lstatSync(ancestor).isSymbolicLink() || !lstatSync(ancestor).isDirectory()) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'private state ancestor must be canonical')
   mkdirSync(directory, { recursive: true, mode: 0o700 })
+  if (lstatSync(directory).isSymbolicLink() || realpathSync(directory) !== resolve(directory) || !lstatSync(directory).isDirectory()) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'private state directory must be canonical')
+  if (lstatSync(directory).uid !== process.geteuid()) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'private state owner changed')
   chmodSync(directory, 0o700)
   fsyncDirectory(directory)
   if (!existed) fsyncDirectory(dirname(directory))
@@ -381,122 +393,16 @@ const atomicWriteJson = (targetPath, value, mode = 0o600) => (
   atomicWriteText(targetPath, `${JSON.stringify(value, null, 2)}\n`, mode)
 )
 
-const durableRename = (sourcePath, targetPath, mode = null) => {
-  const sourceDirectory = dirname(sourcePath)
-  const targetDirectory = dirname(targetPath)
-  renameSync(sourcePath, targetPath)
-  if (mode !== null) chmodSync(targetPath, mode)
-  fsyncDirectory(sourceDirectory)
-  if (sourceDirectory !== targetDirectory) fsyncDirectory(targetDirectory)
-}
-
-const durableUnlink = targetPath => {
-  const directory = dirname(targetPath)
-  unlinkSync(targetPath)
-  fsyncDirectory(directory)
-}
-
-const readJson = path => JSON.parse(readFileSync(path, 'utf8'))
-
-const exactField = (message, field) => {
-  const raw = isObject(message?.rawPayload) ? message.rawPayload : message
-  const nested = isObject(raw?.payload) ? raw.payload : {}
-  const outerPresent = isObject(raw) && hasOwn(raw, field)
-  const nestedPresent = hasOwn(nested, field)
-  if (outerPresent && nestedPresent && JSON.stringify(raw[field]) !== JSON.stringify(nested[field])) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, `${field} conflicts across command layers`)
-  }
-  if (outerPresent) return raw[field]
-  if (nestedPresent) return nested[field]
-  return message?.[field]
-}
-
-const requireSafeId = (value, field) => {
-  if (typeof value !== 'string' || !SAFE_ID.test(value)) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, `${field} must be a safe non-blank identifier`)
-  }
-  return value
-}
-
-const requirePositiveDecimal = (value, field) => {
-  if (typeof value !== 'string' || !POSITIVE_DECIMAL.test(value)) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, `${field} must be a canonical positive decimal string`)
-  }
-  return value
-}
-
-const commandFingerprint = command => `sha256:${sha256Hex(Buffer.from(JSON.stringify({
-  commandType: command.commandType,
-  commandId: command.commandId,
-  attempt: command.attempt,
-  fencingToken: command.fencingToken,
-  deliveryEpoch: command.deliveryEpoch,
-  targetAgentId: command.targetAgentId,
-  orderId: command.orderId,
-  installationId: command.installationId,
-  productVersionId: command.productVersionId,
-  skillKey: command.skillKey,
-  skillVersion: command.skillVersion,
-  packageSize: command.packageSize,
-  packageDigest: command.packageDigest,
-  downloadPath: command.downloadPath
-})))}`
-
-export const validateSkillInstallCommand = (message, profile, maxPackageBytes = DEFAULT_MAX_PACKAGE_BYTES) => {
-  if (!isObject(message)) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'SKILL_INSTALL command must be an object')
-  }
-  const commandType = exactField(message, 'commandType')
-  if (commandType !== COMMAND_TYPE) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, `commandType must be exactly ${COMMAND_TYPE}`)
-  }
-  const targetAgentId = requireSafeId(exactField(message, 'targetAgentId'), 'targetAgentId')
-  if (!profile?.agentId || targetAgentId !== profile.agentId) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'targetAgentId does not match this profile')
-  }
-  const attempt = exactField(message, 'attempt')
-  if (!Number.isSafeInteger(attempt) || attempt <= 0) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'attempt must be a positive safe JSON integer')
-  }
-  const command = {
-    messageId: requireSafeId(exactField(message, 'messageId'), 'messageId'),
-    commandType,
-    commandId: requireSafeId(exactField(message, 'commandId'), 'commandId'),
-    attempt,
-    fencingToken: requirePositiveDecimal(exactField(message, 'fencingToken'), 'fencingToken'),
-    deliveryEpoch: requirePositiveDecimal(exactField(message, 'deliveryEpoch'), 'deliveryEpoch'),
-    targetAgentId,
-    orderId: requireSafeId(exactField(message, 'orderId'), 'orderId'),
-    installationId: requireSafeId(exactField(message, 'installationId'), 'installationId'),
-    productVersionId: requireSafeId(exactField(message, 'productVersionId'), 'productVersionId'),
-    skillKey: exactField(message, 'skillKey'),
-    skillVersion: exactField(message, 'skillVersion'),
-    packageSize: exactField(message, 'packageSize'),
-    packageDigest: exactField(message, 'packageDigest'),
-    downloadPath: exactField(message, 'downloadPath')
-  }
-  if (typeof command.skillKey !== 'string' || !SAFE_SKILL_KEY.test(command.skillKey)) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'skillKey must use lowercase portable skill syntax')
-  }
-  if (typeof command.skillVersion !== 'string' || !SAFE_SKILL_VERSION.test(command.skillVersion)) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'skillVersion must use portable version syntax')
-  }
-  requirePositiveDecimal(command.packageSize, 'packageSize')
-  const packageSizeBigInt = BigInt(command.packageSize)
-  if (packageSizeBigInt > BigInt(maxPackageBytes)) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.PACKAGE_TOO_LARGE, 'declared packageSize exceeds the local installation limit')
-  }
-  command.packageSizeBytes = Number(packageSizeBigInt)
-  if (typeof command.packageDigest !== 'string' || !SHA256_DIGEST.test(command.packageDigest)) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'packageDigest must be canonical lowercase sha256')
-  }
-  const exactDownloadPath = `${DOWNLOAD_PREFIX}${command.installationId}/package`
-  if (typeof command.downloadPath !== 'string' || command.downloadPath !== exactDownloadPath) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'downloadPath must be the exact installation-scoped API path')
-  }
-  command.scopeDigest = profile?.skillInstallScopeDigest || ''
-  command.fingerprint = commandFingerprint(command)
-  return Object.freeze(command)
+const readJson = path => {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const before = fstatSync(fd, { bigint: true })
+    if (!before.isFile() || before.nlink !== 1n || before.uid !== BigInt(process.geteuid()) || before.mode & 0o022n) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'unsafe durable evidence')
+    const bytes = readFileSync(fd), after = fstatSync(fd, { bigint: true }), current = lstatSync(path, { bigint: true })
+    if (before.dev !== current.dev || before.ino !== current.ino || before.size !== BigInt(bytes.length)
+        || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'durable evidence changed')
+    return parseStrictJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { integerTokensOnly: true })
+  } finally { closeSync(fd) }
 }
 
 const isExplicitLoopbackHost = hostname => {
@@ -515,7 +421,7 @@ export const buildSkillDownloadUrl = (wsUrl, downloadPath) => {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'configured WS_URL cannot define a trusted API origin')
   }
   if (endpoint.protocol === 'ws:' && !isExplicitLoopbackHost(endpoint.hostname)) {
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'API-key package download requires TLS except for explicit loopback development endpoints')
+    throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'Runtime-authenticated package download requires TLS except for explicit loopback development endpoints')
   }
   endpoint.protocol = endpoint.protocol === 'wss:' ? 'https:' : 'http:'
   endpoint.pathname = '/'
@@ -841,7 +747,7 @@ const extractArchive = async (buffer, stagingPath, command, limits) => {
   return manifest
 }
 
-const verifyControlledCodexHome = codexHome => {
+const verifyControlledCodexHome = (codexHome, { create = true } = {}) => {
   if (typeof codexHome !== 'string' || !codexHome.trim()) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'profile codexHome is required for skill installation')
   }
@@ -859,7 +765,7 @@ const verifyControlledCodexHome = codexHome => {
     if (!skillsStatus.isDirectory() || skillsStatus.isSymbolicLink() || realpathSync(skills) !== skills) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'CODEX_HOME/skills must be a real non-symlink directory')
     }
-  } else {
+  } else if (create) {
     mkdirSync(skills, { mode: 0o700 })
     chmodSync(skills, 0o700)
     fsyncDirectory(canonical)
@@ -867,559 +773,500 @@ const verifyControlledCodexHome = codexHome => {
   return skills
 }
 
-const validateMarker = (targetPath, command, fingerprint, expectedManifestSha256 = null, expectedPackageTreeDigest = null) => {
-  const markerPath = resolve(targetPath, MARKER_NAME)
-  if (!existsSync(markerPath) || lstatSync(markerPath).isSymbolicLink() || !statSync(markerPath).isFile()) return false
-  let marker
-  try { marker = readJson(markerPath) } catch { return false }
-  const manifestPath = resolve(targetPath, 'manifest.json')
-  if (expectedManifestSha256 !== (marker.manifestSha256 ?? null)) return false
-  if (existsSync(manifestPath)) {
-    if (!expectedManifestSha256 || lstatSync(manifestPath).isSymbolicLink() || !statSync(manifestPath).isFile()) return false
-    try {
-      const manifest = parseSkillManifest(readFileSync(manifestPath), command)
-      if (manifest.manifestSha256 !== expectedManifestSha256) return false
-      if (manifest.runner === 'local-script') {
-        resolveSkillEntrypoint(targetPath, manifest.entrypoint)
-        if (!expectedPackageTreeDigest || marker.packageTreeDigest !== expectedPackageTreeDigest || skillPackageTreeDigest(targetPath) !== expectedPackageTreeDigest) return false
-      }
-    } catch { return false }
-  } else if (expectedManifestSha256) return false
-  return marker?.schemaVersion === 1
-    && marker.installationId === command.installationId
-    && marker.commandId === command.commandId
-    && marker.attempt === command.attempt
-    && marker.fencingToken === command.fencingToken
-    && marker.deliveryEpoch === command.deliveryEpoch
-    && marker.productVersionId === command.productVersionId
-    && marker.packageDigest === command.packageDigest
-    && marker.skillKey === command.skillKey
-    && marker.skillVersion === command.skillVersion
-    && marker.commandFingerprint === fingerprint
-    && marker.scopeDigest === command.scopeDigest
+
+// Copy publication is durable before its intent can authorize a switch.
+const syncTree = root => {
+  for (const name of readdirSync(root)) {
+    const path = resolve(root, name), stat = lstatSync(path)
+    if (stat.isDirectory() && !stat.isSymbolicLink()) syncTree(path)
+    else if (stat.isFile() && stat.nlink === 1) {
+      const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      try { fsyncSync(fd) } finally { closeSync(fd) }
+    } else throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'unsafe discovery copy')
+  }
+  fsyncDirectory(root)
 }
 
-export const buildSkillInstallResultEnvelope = ({ profile, command, status, failureCode = null, installedAt = null, messageId = randomUUID(), runtimeInstanceId, manifestSha256 = null }) => ({
-  schemaVersion: 1,
-  messageType: 'work.result',
-  messageId,
-  resultType: RESULT_TYPE,
-  commandId: command?.commandId || '',
-  attempt: command?.attempt ?? 0,
-  fencingToken: command?.fencingToken || '',
-  deliveryEpoch: command?.deliveryEpoch || '',
-  orderId: command?.orderId || '',
-  installationId: command?.installationId || '',
-  targetAgentId: command?.targetAgentId || profile.agentId,
-  sourceAgentId: profile.agentId,
-  agentId: profile.agentId,
-  runtimeInstanceId,
-  productVersionId: command?.productVersionId || '',
-  status,
-  packageDigest: command?.packageDigest || '',
-  skillKey: command?.skillKey || '',
-  skillVersion: command?.skillVersion || '',
-  installedAt,
-  failureCode,
-  ...(manifestSha256 ? { manifestSha256 } : {})
-})
-
 export class SkillInstallManager {
-  constructor({
-    profile,
-    stateRoot,
-    wsUrl,
-    apiKey,
-    getRuntimeHeaders = null,
-    enabled = false,
-    maxPackageBytes = DEFAULT_MAX_PACKAGE_BYTES,
-    maxExtractedBytes = DEFAULT_MAX_EXTRACTED_BYTES,
-    maxEntryBytes = DEFAULT_MAX_ENTRY_BYTES,
-    maxEntries = DEFAULT_MAX_ENTRIES,
-    fetchFn = globalThis.fetch,
-    sendResultFn = null,
-    now = () => Date.now(),
-    createId = () => randomUUID(),
-    runtimeInstanceId = '',
-    processIdentityFn = currentProcessIdentity,
-    lockOwnerAliveFn = lockOwnerIsAlive,
-    unownedLockStaleMs = DEFAULT_UNOWNED_LOCK_STALE_MS,
-    maxReplayBatch = DEFAULT_MAX_REPLAY_BATCH,
-    atomicFs = LINUX_ATOMIC_FS
-  }) {
-    if (!profile?.agentId || !profile?.profileId) throw new Error('profileId and agentId are required for skill installation')
-    this.scope = durableScope(profile, wsUrl)
-    this.profile = { ...profile, skillInstallScopeDigest: this.scope.digest }
-    this.stateRoot = resolve(stateRoot)
-    this.wsUrl = wsUrl
-    this.scopePath = resolve(this.stateRoot, STATE_SCOPE_FILE)
+  constructor({ profile, stateRoot, wsUrl, apiKey, getRuntimeHeaders = null, enabled = false,
+    maxPackageBytes = DEFAULT_MAX_PACKAGE_BYTES, maxExtractedBytes = DEFAULT_MAX_EXTRACTED_BYTES,
+    maxEntryBytes = DEFAULT_MAX_ENTRY_BYTES, maxEntries = DEFAULT_MAX_ENTRIES,
+    fetchFn = globalThis.fetch, sendResultFn = null, now = Date.now, createId = randomUUID,
+    runtimeInstanceId = '', processIdentityFn = currentProcessIdentity, lockOwnerAliveFn = lockOwnerIsAlive,
+    unownedLockStaleMs = DEFAULT_UNOWNED_LOCK_STALE_MS, maxReplayBatch = DEFAULT_MAX_REPLAY_BATCH,
+    atomicFs = LINUX_ATOMIC_FS, checkpoint = () => {} }) {
+    if (!profile?.agentId || !profile?.profileId) throw new Error('profileId and agentId required')
     if (profile.apiKey || apiKey) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'legacy API-key authorization is retired')
-    this.getRuntimeHeaders = getRuntimeHeaders
-    this.enabled = enabled === true
-    this.maxPackageBytes = maxPackageBytes
-    this.maxExtractedBytes = maxExtractedBytes
-    this.maxEntryBytes = maxEntryBytes
-    this.maxEntries = maxEntries
-    this.fetchFn = fetchFn
-    this.sendResultFn = sendResultFn
-    this.now = now
-    this.createId = createId
-    this.runtimeInstanceId = runtimeInstanceId
-    this.processIdentityFn = processIdentityFn
-    this.lockOwnerAliveFn = lockOwnerAliveFn
-    this.unownedLockStaleMs = unownedLockStaleMs
-    this.maxReplayBatch = maxReplayBatch
-    this.atomicFs = atomicFs
-    this.stagingDir = resolve(this.stateRoot, 'staging')
-    this.registryDir = resolve(this.stateRoot, 'installed-registry')
-    this.resultsPendingDir = resolve(this.stateRoot, 'work-results', 'pending')
-    this.resultsAcknowledgedDir = resolve(this.stateRoot, 'work-results', 'acknowledged')
-    this.resultsSentDir = resolve(this.stateRoot, 'work-results', 'sent')
-    this.resultsQuarantineDir = resolve(this.stateRoot, 'work-results', 'quarantine')
-    this.resultsSupersededDir = resolve(this.stateRoot, 'work-results', 'superseded')
-    this.installationsQuarantineDir = resolve(this.stateRoot, 'installations-quarantine')
-    this.staleLocksDir = resolve(this.stateRoot, 'stale-locks')
-    this.lockPath = resolve(this.stateRoot, 'installer.lock')
-    this.lockOwnerPath = resolve(this.lockPath, 'owner.json')
-    this.lockOwner = null
-    this.lockOwnerSha256 = ''
-    this.healthError = null
+    this.scope = durableScope(profile, wsUrl); this.profile = { ...profile }; this.wsUrl = wsUrl
+    // Old protocol journals are retained but never replayed into SM-C1.
+    this.stateRoot = resolve(stateRoot, 'management-v2')
+    this.stagingDir = resolve(this.stateRoot, 'staging'); this.packagesDir = resolve(this.stateRoot, 'packages')
+    this.staleLocksDir = resolve(this.stateRoot, 'stale-locks'); this.statePath = resolve(this.stateRoot, 'journal.json')
+    this.lockPath = resolve(this.stateRoot, 'installer.lock'); this.lockOwnerPath = resolve(this.lockPath, 'owner.json')
+    Object.assign(this, { getRuntimeHeaders, enabled, maxPackageBytes, maxExtractedBytes, maxEntryBytes, maxEntries,
+      fetchFn, sendResultFn, now, createId, runtimeInstanceId, processIdentityFn, lockOwnerAliveFn,
+      unownedLockStaleMs, maxReplayBatch, atomicFs, checkpoint })
+    this.lockOwner = null; this.lockOwnerSha256 = ''; this.healthError = null; this.session = null
+    this.verifyCandidate = null; this.tail = Promise.resolve(); this.replayToken = null; this.replayed = new Set()
   }
 
   initialize() {
-    for (const directory of [
-      this.stateRoot, this.stagingDir, this.registryDir,
-      this.resultsPendingDir, this.resultsAcknowledgedDir, this.resultsSentDir,
-      this.resultsQuarantineDir, this.resultsSupersededDir,
-      this.installationsQuarantineDir, this.staleLocksDir
-    ]) ensurePrivateDirectory(directory)
-    this._initializeScopeBinding()
+    for (const dir of [this.stateRoot, this.stagingDir, this.packagesDir, this.staleLocksDir]) ensurePrivateDirectory(dir)
     this._withLockSync('initialize', () => {
-      this._scanResultRecords()
-      this._recoverRegistry()
-      this._reconcileActiveFailureContradictions()
+      if (!existsSync(this.statePath)) this._save({ formatVersion: 2, scope: this.scope, identity: null,
+        commands: {}, messages: {}, installations: {}, skills: {}, fences: {} })
+      const state = this._load(); this.boundIdentity = state.identity
+      // Recovery observes durable markers, never performs installation or a switch.
+      for (const record of Object.values(state.commands)) {
+        if (record.result || record.state === 'RECEIVED') continue
+        const evidence = this._observe(state, record)
+        if (evidence.outcome === 'APPLIED') this._applyObserved(state, record)
+        this._finish(state, record, evidence)
+      }
     })
     return { healthy: !this.healthError, errorCode: this.healthError?.code || '' }
   }
 
-  _initializeScopeBinding() {
-    if (existsSync(this.scopePath)) {
-      const existing = readJson(this.scopePath)
-      if (!isObject(existing) || existing.schemaVersion !== 1 || existing.digest !== this.scope.digest
-          || existing.profileId !== this.scope.profileId || existing.agentId !== this.scope.agentId
-          || existing.apiOrigin !== this.scope.apiOrigin) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'skill installer durable state belongs to a different origin/profile scope')
-      }
-      chmodSync(this.scopePath, 0o600)
+  _save(state) {
+    const { journalSha256, ...facts } = state
+    atomicWriteJson(this.statePath, { ...facts, journalSha256: managementDigest('cyf.skill.journal.v2', facts) })
+  }
+  _load() {
+    if (!lstatSync(this.statePath).isFile() || lstatSync(this.statePath).nlink !== 1 || lstatSync(this.statePath).isSymbolicLink() || realpathSync(this.statePath) !== this.statePath) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'unsafe journal')
+    const { journalSha256, ...state } = readJson(this.statePath)
+    if (journalSha256 !== managementDigest('cyf.skill.journal.v2', state) || state.formatVersion !== 2
+        || managementCanonicalJson(state.scope) !== managementCanonicalJson(this.scope)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'journal integrity/scope conflict')
+    for (const record of Object.values(state.commands)) {
+      parseManagementMessage(record.envelope)
+      if (record.result) {
+        parseManagementMessage(record.result)
+        if (record.resultWire !== JSON.stringify(record.result) || record.result.data.commandId !== record.envelope.data.commandId
+            || record.result.data.skillChangeId !== record.envelope.data.skillChangeId || record.result.data.attempt !== record.envelope.data.attempt
+            || record.result.data.executionRuntimeInstanceId !== record.executionRuntimeInstanceId
+            || ['agentId', 'runtimeInstallationId', 'fencingToken', 'deliveryEpoch', 'skillRevision'].some(key => record.result.data[key] !== record.envelope.data[key])
+            || record.result.data.evidence.observedCommandId !== (record.envelope.data.observedCommandId || record.envelope.data.commandId)
+            || record.envelope.data.phase !== 'READ' && record.result.data.evidence.phase !== record.envelope.data.phase
+            || record.result.data.evidence.outcome === 'APPLIED' && (!this._same(record.result.data.evidence.actual, record.envelope.data.target)
+              || record.result.data.evidence.appliedRevision !== record.envelope.data.skillRevision)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'result integrity conflict')
+        if (record.receipt) {
+          parseManagementMessage(record.receipt)
+          if (!this._receiptMatches(record.receipt, record.result)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'receipt integrity conflict')
+        }
+      } else if (record.receipt) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'receipt without result')
+    }
+    return state
+  }
+  _key(value) { return Buffer.from(value, 'utf8').toString('hex') }
+  _packagePath(id) { return resolve(this.packagesDir, this._key(id)) }
+  _command(state, id) { return state.commands[this._key(id)] }
+  _skill(state, key) { return state.skills[this._key(key)] || null }
+  _installation(state, id) { return state.installations[this._key(id)] || null }
+
+  bindSession(binding) {
+    if (!binding) { this.session = null; return }
+    const identity = { ...binding.scope, runtimeInstallationId: binding.fence.installationId }
+    if (identity.agentId !== this.profile.agentId || binding.fence.runtimeInstanceId !== this.runtimeInstanceId) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'authenticated subject mismatch')
+    if (this.boundIdentity) {
+      if (!this._same(this.boundIdentity, identity)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'durable subject cannot be rebound')
+      if (!this._same(this.session, binding)) this.session = structuredClone(binding)
       return
     }
-    const durableEntries = [
-      this.registryDir, this.resultsPendingDir, this.resultsAcknowledgedDir, this.resultsSentDir
-    ].some(directory => readdirSync(directory).some(name => name.endsWith('.json')))
-    if (durableEntries) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'unscoped legacy skill installer state cannot be rebound automatically')
-    }
-    let descriptor
-    try {
-      descriptor = openSync(this.scopePath, 'wx', 0o600)
-      writeFileSync(descriptor, `${JSON.stringify(this.scope, null, 2)}\n`, 'utf8')
-      fsyncSync(descriptor)
-      closeSync(descriptor)
-      descriptor = undefined
-      fsyncDirectory(this.stateRoot)
-    } catch (error) {
-      if (descriptor !== undefined) {
-        try { closeSync(descriptor) } catch {}
-      }
-      if (error?.code === 'EEXIST') return this._initializeScopeBinding()
-      throw error
-    }
-  }
-
-  _registryPath(installationId) {
-    return resolve(this.registryDir, `${Buffer.from(installationId, 'utf8').toString('hex')}.json`)
-  }
-
-  _readRegistry(installationId) {
-    const path = this._registryPath(installationId)
-    if (!existsSync(path)) return null
-    const record = readJson(path)
-    this._validateRegistryRecord(record, installationId)
-    return record
-  }
-
-  _validateRegistryRecord(record, expectedInstallationId = '') {
-    if (!isObject(record) || record.formatVersion !== 2 || !['PREPARED', 'ACTIVE', 'QUARANTINED'].includes(record.state)
-        || typeof record.installationId !== 'string' || typeof record.commandFingerprint !== 'string'
-        || !isObject(record.command) || !isObject(record.resultEnvelope)) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry is corrupt')
-    }
-    if (expectedInstallationId && record.installationId !== expectedInstallationId) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry identity mismatch')
-    }
-    if (record.agentId !== this.profile.agentId || record.profileId !== this.profile.profileId
-        || record.scopeDigest !== this.scope.digest || record.command.installationId !== record.installationId) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry profile mismatch')
-    }
-    const skillsRoot = verifyControlledCodexHome(this.profile.codexHome)
-    const expectedTargetPath = resolve(skillsRoot, record.command.skillKey)
-    if (record.targetPath !== expectedTargetPath || dirname(record.stagingPath) !== this.stagingDir
-        || !basename(record.stagingPath).startsWith(`${record.installationId}-`)
-        || !isObject(record.skillsRootIdentity) || record.skillsRootIdentity.path !== skillsRoot) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry path binding is invalid')
-    }
-    if (record.state === 'QUARANTINED'
-        && (typeof record.quarantinedPath !== 'string' || dirname(record.quarantinedPath) !== this.installationsQuarantineDir)) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'quarantined installation path binding is invalid')
-    }
-    if (record.commandFingerprint !== record.command.fingerprint
-        || record.resultEnvelope.messageType !== 'work.result'
-        || record.resultEnvelope.resultType !== RESULT_TYPE
-        || record.resultEnvelope.status !== 'SUCCEEDED'
-        || record.resultEnvelope.commandId !== record.command.commandId
-        || record.resultEnvelope.installationId !== record.installationId) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed-skill registry command/result binding is invalid')
-    }
-    if (record.packageTreeDigest !== undefined && !/^[a-f0-9]{64}$/.test(record.packageTreeDigest)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'installed script content identity is invalid')
-    return record
-  }
-
-  _listRegistry() {
-    const records = []
-    for (const fileName of readdirSync(this.registryDir).filter(name => name.endsWith('.json')).sort()) {
-      const path = resolve(this.registryDir, fileName)
-      try { records.push(this._validateRegistryRecord(readJson(path))) } catch (error) {
-        this.healthError = error instanceof SkillInstallError
-          ? error
-          : new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, error.message)
-        throw this.healthError
-      }
-    }
-    return records
-  }
-
-  _writeRegistry(record) {
-    atomicWriteJson(this._registryPath(record.installationId), record)
-  }
-
-  _resultPath(directory, recordId) {
-    return resolve(directory, `${recordId}.json`)
-  }
-
-  _validateResultRecord(record, expectedRecordId = '') {
-    if (!isObject(record) || record.formatVersion !== 3 || typeof record.recordId !== 'string'
-        || !isObject(record.envelope) || record.envelope.messageType !== 'work.result'
-        || record.envelope.resultType !== RESULT_TYPE || record.envelope.sourceAgentId !== this.profile.agentId) {
-      throw new Error('invalid skill work.result outbox record')
-    }
-    if (expectedRecordId && record.recordId !== expectedRecordId) throw new Error('skill result record/file mismatch')
-    if (record.profileId !== this.profile.profileId || record.agentId !== this.profile.agentId
-        || record.scopeDigest !== this.scope.digest) {
-      throw new Error('skill result record origin/profile scope mismatch')
-    }
-    if (record.sendAttempts !== undefined && (!Number.isSafeInteger(record.sendAttempts) || record.sendAttempts < 0)) {
-      throw new Error('invalid skill result sendAttempts')
-    }
-    return record
-  }
-
-  _sameResultRecord(left, right) {
-    return left.recordId === right.recordId && JSON.stringify(left.envelope) === JSON.stringify(right.envelope)
-  }
-
-  _validateAcknowledgedResultRecord(record, expectedRecordId = '') {
-    const validated = this._validateResultRecord(record, expectedRecordId)
-    if (!Number.isSafeInteger(validated.acknowledgedAt) || !isObject(validated.receipt)) {
-      throw new Error('acknowledged skill result requires durable application receipt evidence')
-    }
-    const receipt = this._receiptFields(validated.receipt)
-    if (!this._receiptMatchesEnvelope(receipt, validated.envelope)) {
-      throw new Error('acknowledged skill result receipt does not match its envelope')
-    }
-    return validated
-  }
-
-  _quarantineResult(sourcePath, recordId, error) {
-    const targetPath = resolve(this.resultsQuarantineDir, `${recordId}-${this.createId()}.json`)
-    durableRename(sourcePath, targetPath, 0o600)
-    atomicWriteText(`${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${error.message}\n`)
-    this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'skill work.result outbox requires reconciliation')
-  }
-
-  _scanResultRecords() {
-    for (const directory of [this.resultsPendingDir, this.resultsAcknowledgedDir]) {
-      for (const fileName of readdirSync(directory).filter(name => name.endsWith('.json'))) {
-        const sourcePath = resolve(directory, fileName)
-        try {
-          const validator = directory === this.resultsAcknowledgedDir
-            ? this._validateAcknowledgedResultRecord.bind(this)
-            : this._validateResultRecord.bind(this)
-          validator(readJson(sourcePath), fileName.slice(0, -5))
-          chmodSync(sourcePath, 0o600)
-        } catch (error) {
-          this._quarantineResult(sourcePath, fileName.slice(0, -5), error)
-        }
-      }
-    }
-    for (const fileName of readdirSync(this.resultsPendingDir).filter(name => name.endsWith('.json'))) {
-      const recordId = fileName.slice(0, -5)
-      const pendingPath = resolve(this.resultsPendingDir, fileName)
-      const acknowledgedPath = this._resultPath(this.resultsAcknowledgedDir, recordId)
-      if (!existsSync(pendingPath) || !existsSync(acknowledgedPath)) continue
-      try {
-        const pending = this._validateResultRecord(readJson(pendingPath), recordId)
-        const acknowledged = this._validateAcknowledgedResultRecord(readJson(acknowledgedPath), recordId)
-        if (!this._sameResultRecord(pending, acknowledged)) {
-          throw new Error('pending result conflicts with acknowledged receipt evidence')
-        }
-        durableUnlink(pendingPath)
-      } catch (error) {
-        if (existsSync(pendingPath)) this._quarantineResult(pendingPath, recordId, error)
-      }
-    }
-    for (const fileName of readdirSync(this.resultsSentDir).filter(name => name.endsWith('.json'))) {
-      const sourcePath = resolve(this.resultsSentDir, fileName)
-      const recordId = fileName.slice(0, -5)
-      try {
-        const legacy = this._validateResultRecord(readJson(sourcePath), recordId)
-        const pendingPath = this._resultPath(this.resultsPendingDir, recordId)
-        const acknowledgedPath = this._resultPath(this.resultsAcknowledgedDir, recordId)
-        if (existsSync(acknowledgedPath)) {
-          const acknowledged = this._validateAcknowledgedResultRecord(readJson(acknowledgedPath), recordId)
-          if (!this._sameResultRecord(legacy, acknowledged)) throw new Error('legacy-sent result conflicts with acknowledged result')
-          durableUnlink(sourcePath)
-        } else if (existsSync(pendingPath)) {
-          const pending = this._validateResultRecord(readJson(pendingPath), recordId)
-          if (!this._sameResultRecord(legacy, pending)) throw new Error('legacy-sent result conflicts with pending result')
-          durableUnlink(sourcePath)
-        } else {
-          durableRename(sourcePath, pendingPath, 0o600)
-        }
-      } catch (error) {
-        if (existsSync(sourcePath)) this._quarantineResult(sourcePath, recordId, error)
-      }
-    }
-    if (readdirSync(this.resultsQuarantineDir).some(name => name.endsWith('.json'))) {
-      this.healthError ||= new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'skill work.result outbox requires reconciliation')
-    }
-  }
-
-  _ensureResultRecord(recordId, envelope) {
-    const pending = this._resultPath(this.resultsPendingDir, recordId)
-    const acknowledged = this._resultPath(this.resultsAcknowledgedDir, recordId)
-    if (existsSync(pending)) {
-      const record = this._validateResultRecord(readJson(pending), recordId)
-      if (JSON.stringify(record.envelope) !== JSON.stringify(envelope)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'durable work.result record conflicts with registry evidence')
-      }
-      return { recordId, state: 'pending' }
-    }
-    if (existsSync(acknowledged)) {
-      const record = this._validateAcknowledgedResultRecord(readJson(acknowledged), recordId)
-      if (JSON.stringify(record.envelope) !== JSON.stringify(envelope)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'acknowledged work.result record conflicts with registry evidence')
-      }
-      return { recordId, state: 'acknowledged' }
-    }
-    atomicWriteJson(pending, {
-      formatVersion: 3,
-      recordId,
-      profileId: this.profile.profileId,
-      agentId: this.profile.agentId,
-      scopeDigest: this.scope.digest,
-      createdAt: this.now(),
-      sendAttempts: 0,
-      lastSentAt: null,
-      lastReplayToken: '',
-      envelope
+    this._withLockSync('bind-authenticated-skill-subject', () => {
+      const state = this._load()
+      if (state.identity && managementCanonicalJson(state.identity) !== managementCanonicalJson(identity)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'durable subject cannot be rebound')
+      state.identity = identity; this._save(state); this.boundIdentity = identity
     })
-    return { recordId, state: 'pending' }
+    // Equal owner/session bindings must not cancel a legitimate in-progress preparation.
+    if (managementCanonicalJson(this.session || null) !== managementCanonicalJson(binding)) this.session = structuredClone(binding)
+  }
+  _assertIdentity(command, session = this.session) {
+    if (!session || session !== this.session) throw new SkillInstallError('SKILL_DELIVERY_FENCED', 'authenticated skill session changed')
+    const expected = { ...session.scope, runtimeInstallationId: session.fence.installationId }
+    if (Object.entries(expected).some(([key, value]) => command[key] !== value)) throw new SkillInstallError('SKILL_DOWNLOAD_FORBIDDEN', 'command differs from authenticated subject')
+  }
+  _same(left, right) { return managementCanonicalJson(left) === managementCanonicalJson(right) }
+  _assertSource(state, command) {
+    const current = this._skill(state, command.skillKey)
+    if (!this._same(current?.target || null, command.source)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'precise source changed')
+    if (current && command.action === 'UPGRADE' && command.desiredEnabled !== current.enabled) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'upgrade cannot change enabled policy')
+  }
+  _fence(state, command) {
+    const key = this._key(command.skillKey), previous = state.fences[key]
+    const intent = Object.fromEntries(['action', 'source', 'approvedPermissionsSha256', 'desiredEnabled'].map(key => [key, command[key]]))
+    if (previous && (BigInt(command.skillRevision) < BigInt(previous.revision)
+        || command.skillRevision === previous.revision && (command.skillChangeId !== previous.skillChangeId || command.attempt !== previous.attempt
+          || !this._same(command.target, previous.target) || !this._same(intent, previous.intent)))) throw new SkillInstallError('SKILL_DELIVERY_FENCED', 'obsolete management intent')
+    state.fences[key] = { revision: command.skillRevision, skillChangeId: command.skillChangeId, attempt: command.attempt, target: command.target, intent }
+  }
+  _baseEvidence(state, record, outcome, reasonCode = null) {
+    const c = record.envelope.data, current = this._skill(state, c.skillKey)
+    return { observedCommandId: c.commandId, phase: c.phase, outcome, actual: current?.target || null,
+      appliedRevision: current?.revision || '0', preparedSha256: null,
+      readiness: (['PREPARED', 'APPLIED'].includes(outcome) ? c.target.kind : current?.target.kind) === 'INSTRUCTION' ? 'NOT_EXECUTABLE' : 'UNKNOWN', reasonCode, observedAt: this.now() }
+  }
+  _finish(state, record, evidence, executionRuntimeInstanceId = record.executionRuntimeInstanceId) {
+    const c = record.envelope.data
+    const data = { schemaVersion: 2, resultType: 'SKILL_CHANGE_RESULT', skillChangeId: c.skillChangeId, commandId: c.commandId,
+      agentId: c.agentId, runtimeInstallationId: c.runtimeInstallationId, executionRuntimeInstanceId,
+      attempt: c.attempt, fencingToken: c.fencingToken, deliveryEpoch: c.deliveryEpoch, skillRevision: c.skillRevision, evidence }
+    data.resultSha256 = managementDigest('cyf.skill.result.v2', data)
+    const result = eventMessage(record.envelope.requestId, 'work.result', this.createId(), data)
+    parseManagementMessage(result)
+    record.executionRuntimeInstanceId = executionRuntimeInstanceId
+    record.state = evidence.outcome; record.result = result; record.resultWire = JSON.stringify(result); record.receipt = null
+    this._save(state)
+    this.checkpoint('result-persisted', record)
+    return result
   }
 
-  _publishPreparedRecord(record) {
-    let currentParent
-    let currentStaging
-    try {
-      currentParent = pathIdentity(dirname(record.targetPath))
-      currentStaging = pathIdentity(record.stagingPath)
-    } catch (error) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, `prepared publication identity is unavailable: ${error.message}`)
-    }
-    if (!samePathIdentity(currentParent, record.skillsRootIdentity)
-        || !samePathIdentity(currentStaging, record.stagingIdentity)) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared publication parent or staging inode changed')
-    }
-    const result = this.atomicFs.renameNoReplace(record.stagingPath, record.targetPath, {
-      sourceParent: pathIdentity(this.stagingDir),
-      targetParent: record.skillsRootIdentity,
-      sourceIdentity: record.stagingIdentity
+  _receive(envelope) {
+    const c = envelope.data; this._assertIdentity(c)
+    return this._withLockSync(`receive:${c.commandId}`, () => {
+      const state = this._load(), key = this._key(c.commandId), messageKey = this._key(envelope.messageId)
+      const wire = JSON.stringify(envelope), previousMessage = state.messages[messageKey]
+      if (previousMessage && previousMessage.wire !== wire) throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'same messageId changed bytes')
+      let record = state.commands[key]
+      if (record && record.envelope.data.commandSha256 !== c.commandSha256) throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'command identity conflict')
+      if (!record) {
+        record = { envelope, state: 'RECEIVED', executionRuntimeInstanceId: this.runtimeInstanceId, maxDeliveryEpoch: c.deliveryEpoch, result: null }
+        state.commands[key] = record
+      } else if (!previousMessage && BigInt(c.deliveryEpoch) <= BigInt(record.maxDeliveryEpoch)) {
+        throw new SkillInstallError('SKILL_DELIVERY_FENCED', 'new delivery requires a newer authorized epoch')
+      }
+      if (BigInt(c.deliveryEpoch) > BigInt(record.maxDeliveryEpoch)) record.maxDeliveryEpoch = c.deliveryEpoch
+      if (!previousMessage) {
+        const ack = replyMessage(envelope, 'command.ack', this.createId(), 'E0', 'received', {
+          schemaVersion: 2, skillChangeId: c.skillChangeId, commandId: c.commandId, attempt: c.attempt,
+          fencingToken: c.fencingToken, deliveryEpoch: c.deliveryEpoch, ackStatus: 'RECEIVED' })
+        validateManagement('CommandAck', ack)
+        state.messages[messageKey] = { wire, ack }
+        this._save(state) // Receiving is durable before ACK, not before work.result.
+      }
+      this._send(state.messages[messageKey].ack)
+      return record
     })
-    if (!result.ok) throw this._atomicFailure(result, 'skill activation no-replace publication')
-    if (!validateMarker(record.targetPath, record.command, record.commandFingerprint, record.resultEnvelope.manifestSha256, record.packageTreeDigest ?? null)) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'published skill marker failed immediate commit validation')
-    }
   }
+  _send(envelope) { try { return this.sendResultFn?.(envelope) === true } catch { return false } }
 
-  _reconcilePreparedRecord(record, cause = null) {
-    const current = this._readRegistry(record.installationId)
-    if (!current || current.commandFingerprint !== record.commandFingerprint) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared activation cannot be reconciled with its durable registry')
+  async handle(input) {
+    const envelope = parseManagementMessage(input)
+    if (!['command.dispatch', 'work.result.receipt'].includes(envelope.messageType)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'not a management command')
+    if (envelope.messageType === 'command.dispatch' && !this.enabled) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DISABLED, 'managed installation disabled')
+    // Serialize receive, execution and receipts together. The async download/probe
+    // holds the cross-process lock: a concurrent local receive must not re-enter
+    // that lock, release another operation's ownership, or overwrite its snapshot.
+    const run = () => {
+      if (envelope.messageType === 'work.result.receipt') return this.acknowledgeResultReceipt(envelope)
+      this._receive(envelope)
+      return this.execute(envelope)
     }
-    if (current.state === 'QUARANTINED') {
-      return {
-        status: 'failed', exitCode: null,
-        errorMessage: current.quarantineReason || 'durable FAILED result is authoritative; installation was quarantined',
-        failureCode: current.authoritativeFailureCode || SKILL_INSTALL_FAILURE.CONFLICT,
-        resultEnvelope: current.authoritativeFailureEnvelope || null,
-        activationCommitted: false,
-        authoritative: true
+    const pending = this.tail.then(run, run); this.tail = pending.catch(() => {})
+    return pending
+  }
+  async execute(input) {
+    const envelope = parseManagementMessage(input), c = envelope.data, session = this.session
+    this._assertIdentity(c, session)
+    const result = await this._withLock(`execute:${c.commandId}`, async () => {
+      const state = this._load(), record = this._command(state, c.commandId)
+      if (!record || record.envelope.data.commandSha256 !== c.commandSha256) throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'command not durably received')
+      if (record.result) return record.result
+      if (record.state !== 'RECEIVED') {
+        const evidence = this._observe(state, record)
+        if (evidence.outcome === 'APPLIED') this._applyObserved(state, record)
+        return this._finish(state, record, evidence)
       }
+      if (c.phase === 'READ') {
+        const observed = this._command(state, c.observedCommandId)
+        if (observed && !['skillChangeId', 'skillKey', 'attempt', 'fencingToken', 'skillRevision', 'approvedPermissionsSha256'].every(key => observed.envelope.data[key] === c[key])
+            || observed && (!this._same(observed.envelope.data.target, c.target) || !this._same(observed.envelope.data.source, c.source))) throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'READ binding mismatch')
+        // Absence alone proves nothing; READ never downloads, changes policy, or publishes a view.
+        const evidence = observed ? this._observe(state, observed) : {
+          ...this._baseEvidence(state, { ...record, envelope: { ...envelope, data: { ...c, phase: c.action === 'ENABLE' || c.action === 'DISABLE' ? 'POLICY' : 'ACTIVATE' } } }, 'UNKNOWN', 'INTEGRITY_UNPROVEN'), observedCommandId: c.observedCommandId }
+        if (observed && evidence.outcome === 'APPLIED') this._applyObserved(state, observed)
+        return this._finish(state, record, evidence, observed?.executionRuntimeInstanceId || record.executionRuntimeInstanceId)
+      }
+      try {
+        this._fence(state, c); this._assertSource(state, c)
+        if ((c.phase === 'POLICY') && (!this._same(c.source, c.target) || !this._installation(state, c.target.skillInstallationId))) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'policy requires precise installed target')
+        record.state = 'STARTED'; record.executionRuntimeInstanceId = this.runtimeInstanceId; this._save(state); this.checkpoint('intent-persisted', record)
+        if (c.phase === 'PREPARE') return await this._prepare(state, record, session)
+        if (c.phase === 'ACTIVATE') return await this._activate(state, record, session)
+        const installed = this._verifiedInstallation(state, c.target.skillInstallationId)
+        if (installed.approvedPermissionsSha256 !== c.approvedPermissionsSha256) throw new SkillInstallError('SKILL_PERMISSIONS_MISMATCH', 'policy cannot expand installation permissions')
+        if (c.action === 'ENABLE') await this._probe(installed)
+        this._assertIdentity(c, session)
+        this._policyView(state, record)
+        this._applyObserved(state, record)
+        return this._finish(state, record, { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision })
+      } catch (error) {
+        // Once publication may have happened, never turn uncertainty into a refundable failure.
+        if (error?.simulatedCrash) throw error
+        if (record.intent) {
+          const evidence = this._observe(state, record)
+          if (evidence.outcome === 'APPLIED') this._applyObserved(state, record)
+          return this._finish(state, record, evidence)
+        }
+        if (record.result) throw error
+        return this._finish(state, record, this._baseEvidence(state, record, 'FAILED', publicFailure(error.code)))
+      }
+    })
+    this.replayResults()
+    return { status: result.data.evidence.outcome === 'FAILED' ? 'failed' : 'completed', exitCode: 0, resultEnvelope: result }
+  }
+  async _probe(row) {
+    if (!row.manifest) return { readiness: 'NOT_EXECUTABLE' }
+    if (typeof this.verifyCandidate !== 'function') throw new SkillInstallError('SKILL_DEPENDENCY_UNAVAILABLE', 'authenticated runner probe unavailable')
+    const probe = await this.verifyCandidate(row)
+    if (probe?.readiness !== 'READY') throw new SkillInstallError(probe?.reasonCode || 'SKILL_DEPENDENCY_UNAVAILABLE', 'candidate dependency unavailable')
+    return probe
+  }
+  _descriptor(installation, current = null) {
+    const c = installation.command, target = c.target
+    return { installationId: target.skillInstallationId, skillInstallationId: target.skillInstallationId, productVersionId: target.productVersionId,
+      skillKey: c.skillKey, skillVersion: target.skillVersion, kind: target.kind,
+      packageRoot: this._packagePath(target.skillInstallationId), packageSha256: target.packageSha256,
+      manifestSha256: target.manifestSha256, approvedPermissionsSha256: c.approvedPermissionsSha256,
+      packageTreeDigest: installation.packageTreeDigest, manifest: installation.manifest,
+      enabled: current?.enabled ?? false, policyRevision: current?.revision || c.skillRevision }
+  }
+  _verifiedInstallation(state, id) {
+    const installation = this._installation(state, id)
+    if (!installation) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'exact installation missing')
+    const root = this._packagePath(id), markerPath = resolve(root, MARKER_NAME)
+    if (!existsSync(markerPath) || !lstatSync(markerPath).isFile() || lstatSync(markerPath).nlink !== 1 || lstatSync(markerPath).uid !== process.geteuid() || (lstatSync(markerPath).mode & 0o022) || lstatSync(markerPath).isSymbolicLink() || !this._same(readJson(markerPath), installation.marker)
+        || skillPackageTreeDigest(root) !== installation.packageTreeDigest) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'managed immutable package changed')
+    const row = this._descriptor(installation, this._skill(state, installation.command.skillKey))
+    if (row.manifest) {
+      const actual = parseSkillManifest(readFileSync(resolve(root, 'manifest.json')), { skillKey: row.skillKey, skillVersion: row.skillVersion })
+      if (actual.manifestSha256 !== row.manifestSha256) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'manifest changed')
     }
-    const targetExists = existsSync(current.targetPath)
-    const stagingExists = existsSync(current.stagingPath)
-    if (current.state === 'ACTIVE') {
-      if (!targetExists || stagingExists
-          || !samePathIdentity(pathIdentity(dirname(current.targetPath)), current.skillsRootIdentity)
-          || !validateMarker(current.targetPath, current.command, current.commandFingerprint, current.resultEnvelope.manifestSha256, current.packageTreeDigest ?? null)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'active installed-skill registry does not match CODEX_HOME')
-      }
-    } else if (targetExists) {
-      if (stagingExists || !samePathIdentity(pathIdentity(dirname(current.targetPath)), current.skillsRootIdentity)
-          || !validateMarker(current.targetPath, current.command, current.commandFingerprint, current.resultEnvelope.manifestSha256, current.packageTreeDigest ?? null)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared installation has conflicting activation state')
-      }
-    } else if (stagingExists) {
-      const stagingStatus = lstatSync(current.stagingPath)
-      if (!stagingStatus.isDirectory() || stagingStatus.isSymbolicLink()
-          || !validateMarker(current.stagingPath, current.command, current.commandFingerprint, current.resultEnvelope.manifestSha256, current.packageTreeDigest ?? null)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared staging does not match its durable registry')
-      }
-      this._publishPreparedRecord(current)
+    return row
+  }
+  async _prepare(state, record, session) {
+    const c = record.envelope.data, target = c.target, path = this._packagePath(target.skillInstallationId)
+    if (this._installation(state, target.skillInstallationId) || existsSync(path)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'installation identity already exists')
+    if (BigInt(target.byteLength) > BigInt(this.maxPackageBytes)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.PACKAGE_TOO_LARGE, 'declared package exceeds local limit')
+    const command = { ...c, installationId: target.skillInstallationId, skillVersion: target.skillVersion,
+      packageSize: target.byteLength, packageSizeBytes: Number(target.byteLength), packageDigest: `sha256:${target.packageSha256}` }
+    const bytes = await this._download(command)
+    this._assertIdentity(c, session)
+    const stage = resolve(this.stagingDir, this._key(c.commandId))
+    mkdirSync(stage, { mode: 0o700 }); fsyncDirectory(this.stagingDir)
+    const manifest = await extractArchive(bytes, stage, command, this)
+    if ((manifest?.manifestSha256 ?? null) !== target.manifestSha256 || (manifest === null) !== (target.kind === 'INSTRUCTION')) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IDENTITY_MISMATCH, 'approved manifest/kind mismatch')
+    const packageTreeDigest = skillPackageTreeDigest(stage)
+    await this._probe({ installationId: target.skillInstallationId, skillInstallationId: target.skillInstallationId,
+      productVersionId: target.productVersionId, skillKey: c.skillKey, skillVersion: target.skillVersion, kind: target.kind,
+      packageRoot: stage, packageSha256: target.packageSha256, manifestSha256: target.manifestSha256,
+      packageTreeDigest, manifest, enabled: c.desiredEnabled, policyRevision: c.skillRevision })
+    this._assertIdentity(c, session)
+    const marker = { schemaVersion: 2, commandId: c.commandId, preparedSha256: preparedDigest(c),
+      target, approvedPermissionsSha256: c.approvedPermissionsSha256, scopeDigest: this.scope.digest, packageTreeDigest }
+    atomicWriteJson(resolve(stage, MARKER_NAME), marker, 0o644); fsyncDirectory(stage)
+    const move = this.atomicFs.renameNoReplace(stage, path)
+    if (!move.ok) throw this._atomicFailure(move, 'immutable package publication')
+    state.installations[this._key(target.skillInstallationId)] = { command: c, marker, manifest, packageTreeDigest }
+    record.preparedSha256 = marker.preparedSha256; record.state = 'PREPARED'; this._save(state)
+    this.checkpoint('prepared-persisted', record)
+    return this._finish(state, record, { ...this._baseEvidence(state, record, 'PREPARED'), preparedSha256: marker.preparedSha256 })
+  }
+  async _activate(state, record, session) {
+    const c = record.envelope.data, prepared = this._command(state, c.preparedCommandId)
+    if (!prepared || prepared.state !== 'PREPARED' || prepared.preparedSha256 !== c.preparedSha256
+        || c.preparedSha256 !== preparedDigest(c) || !['skillChangeId', 'attempt', 'skillRevision', 'skillKey', 'desiredEnabled', 'approvedPermissionsSha256'].every(k => c[k] === prepared.envelope.data[k])) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'activation lacks matching prepared authorization')
+    const row = this._verifiedInstallation(state, c.target.skillInstallationId)
+    await this._probe(row); this._assertIdentity(c, session)
+    if (!c.desiredEnabled) {
+      if (existsSync(resolve(verifyControlledCodexHome(this.profile.codexHome), c.skillKey))) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'disabled source must not be discoverable')
+      this._applyObserved(state, record)
+      return this._finish(state, record, { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 })
+    }
+    const root = verifyControlledCodexHome(this.profile.codexHome), view = resolve(root, c.skillKey)
+    const stageRoot = this._viewStagingRoot(), stage = resolve(stageRoot, this._key(c.commandId))
+    if (existsSync(stage)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'unresolved discovery stage')
+    if (c.source) this._assertViewSource(state, c, view)
+    else if (existsSync(view)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'unmanaged discovery target')
+    cpSync(row.packageRoot, stage, { recursive: true, errorOnExist: true, force: false, dereference: false })
+    atomicWriteJson(resolve(stage, MARKER_NAME), { ...this._installation(state, c.target.skillInstallationId).marker, viewCommandId: c.commandId }, 0o644)
+    syncTree(stage); fsyncDirectory(stageRoot); fsyncDirectory(root)
+    record.intent = { view, stage, rootIdentity: pathIdentity(root), stageParentIdentity: pathIdentity(stageRoot), stageIdentity: pathIdentity(stage),
+      sourceIdentity: existsSync(view) ? pathIdentity(view) : null }
+    this._save(state); this.checkpoint('activation-intent-persisted', record)
+    this._assertIdentity(c, session)
+    const publication = record.intent.sourceIdentity
+      ? this.atomicFs.exchangeIfMatch(view, stage, { parent: record.intent.rootIdentity, replacementParent: record.intent.stageParentIdentity,
+          activeIdentity: record.intent.sourceIdentity, replacementIdentity: record.intent.stageIdentity })
+      : this.atomicFs.renameNoReplace(stage, view, { sourceParent: record.intent.stageParentIdentity, targetParent: record.intent.rootIdentity,
+          sourceIdentity: record.intent.stageIdentity })
+    if (!publication.ok) throw this._atomicFailure(publication, 'discovery view switch')
+    this.checkpoint('view-switched', record)
+    if (this._observe(state, record).outcome !== 'APPLIED') throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'switched view evidence differs')
+    this._applyObserved(state, record)
+    const evidence = { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 }
+    return this._finish(state, record, evidence)
+  }
+  _viewStagingRoot() {
+    verifyControlledCodexHome(this.profile.codexHome)
+    const root = resolve(this.profile.codexHome, '.cyf-skill-view-staging')
+    ensurePrivateDirectory(root)
+    return root
+  }
+  _viewMatches(state, id, path, commandId = null) {
+    try {
+      const installation = this._installation(state, id)
+      if (!installation || !existsSync(path) || lstatSync(path).isSymbolicLink()) return false
+      const { viewCommandId, ...marker } = readJson(resolve(path, MARKER_NAME))
+      return (!commandId || viewCommandId === commandId) && this._same(marker, installation.marker)
+        && skillPackageTreeDigest(path) === installation.packageTreeDigest
+    } catch { return false }
+  }
+  _assertViewSource(state, command, path) {
+    if (!this._viewMatches(state, command.source.skillInstallationId, path)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'source discovery view does not match managed evidence')
+  }
+  _policyView(state, record) {
+    const c = record.envelope.data, current = this._skill(state, c.skillKey)
+    const root = verifyControlledCodexHome(this.profile.codexHome), view = resolve(root, c.skillKey)
+    if (c.desiredEnabled === current.enabled) {
+      if (c.desiredEnabled) this._assertViewSource(state, c, view)
+      else if (existsSync(view)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'disabled view unexpectedly published')
+      return
+    }
+    if (!c.desiredEnabled) {
+      this._assertViewSource(state, c, view)
+      const stageRoot = this._viewStagingRoot(), stage = resolve(stageRoot, this._key(c.commandId))
+      record.intent = { view, stage, rootIdentity: pathIdentity(root), stageParentIdentity: pathIdentity(stageRoot), sourceIdentity: pathIdentity(view), disabled: true }
+      this._save(state); this.checkpoint('policy-intent-persisted', record)
+      const move = this.atomicFs.renameNoReplace(view, stage, { sourceParent: record.intent.rootIdentity,
+        targetParent: record.intent.stageParentIdentity, sourceIdentity: record.intent.sourceIdentity })
+      if (!move.ok) throw this._atomicFailure(move, 'disable discovery view')
     } else {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'prepared installation lost both staging and activation target')
+      if (existsSync(view)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'enable cannot replace unmanaged view')
+      const stageRoot = this._viewStagingRoot(), stage = resolve(stageRoot, this._key(c.commandId))
+      cpSync(this._packagePath(c.target.skillInstallationId), stage, { recursive: true, errorOnExist: true, force: false })
+      atomicWriteJson(resolve(stage, MARKER_NAME), { ...this._installation(state, c.target.skillInstallationId).marker, viewCommandId: c.commandId }, 0o644)
+      syncTree(stage); fsyncDirectory(stageRoot); fsyncDirectory(root)
+      record.intent = { view, stage, rootIdentity: pathIdentity(root), stageParentIdentity: pathIdentity(stageRoot), stageIdentity: pathIdentity(stage), disabled: false }
+      this._save(state); this.checkpoint('policy-intent-persisted', record)
+      const move = this.atomicFs.renameNoReplace(stage, view, { sourceParent: record.intent.stageParentIdentity,
+        targetParent: record.intent.rootIdentity, sourceIdentity: record.intent.stageIdentity })
+      if (!move.ok) throw this._atomicFailure(move, 'enable discovery view')
     }
-    const active = current.state === 'ACTIVE'
-      ? current
-      : { ...current, state: 'ACTIVE', activatedAt: current.activatedAt || this.now() }
-    if (current.state !== 'ACTIVE') this._writeRegistry(active)
-    this._ensureResultRecord(active.resultRecordId, active.resultEnvelope)
-    return {
-      status: 'completed',
-      exitCode: 0,
-      errorMessage: cause ? `prepared activation reconciled after: ${cause.message}` : '',
-      resultEnvelope: active.resultEnvelope,
-      idempotent: false,
-      activationCommitted: true,
-      authoritative: true
+    this.checkpoint('view-switched', record)
+    if (this._observe(state, record).outcome !== 'APPLIED') throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'policy view evidence differs')
+  }
+  _applyObserved(state, record) {
+    const c = record.envelope.data, current = this._skill(state, c.skillKey)
+    if (current && BigInt(current.revision) > BigInt(c.skillRevision)) return
+    state.skills[this._key(c.skillKey)] = { target: c.target, enabled: c.desiredEnabled, revision: c.skillRevision, commandId: c.commandId }
+    const installation = this._installation(state, c.target.skillInstallationId)
+    if (installation) installation.activated = true
+  }
+  _observe(state, record) {
+    const c = record.envelope.data
+    if (record.result && record.result.data.evidence.outcome !== 'UNKNOWN') return record.result.data.evidence
+    if (c.phase === 'POLICY' && record.intent?.disabled) {
+      try {
+        if (!existsSync(record.intent.view) && this._viewMatches(state, c.target.skillInstallationId, record.intent.stage)
+            && samePathIdentity(pathIdentity(record.intent.stage), { ...record.intent.sourceIdentity, path: realpathSync(record.intent.stage) })) {
+          return { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision }
+        }
+      } catch {}
     }
+    if ((c.phase === 'ACTIVATE' || c.phase === 'POLICY' && !record.intent?.disabled) && record.intent) {
+      try {
+        const row = this._verifiedInstallation(state, c.target.skillInstallationId), view = record.intent.view
+        if (view !== resolve(verifyControlledCodexHome(this.profile.codexHome, { create: false }), c.skillKey) || lstatSync(view).isSymbolicLink()
+            || !this._viewMatches(state, c.target.skillInstallationId, view, c.commandId) || skillPackageTreeDigest(view) !== row.packageTreeDigest) throw new Error('marker')
+        return { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 || null }
+      } catch { /* Unknown is not a reason to switch or roll back. */ }
+    }
+    if (c.phase === 'PREPARE' && record.preparedSha256) {
+      try { this._verifiedInstallation(state, c.target.skillInstallationId)
+        return { ...this._baseEvidence(state, record, 'PREPARED'), preparedSha256: record.preparedSha256 }
+      } catch { /* missing package is not proof of no execution */ }
+    }
+    return this._baseEvidence(state, record, record.state === 'RECEIVED' ? 'NOT_STARTED' : 'UNKNOWN', 'INTEGRITY_UNPROVEN')
   }
 
-  _recoverRegistry() {
-    for (const record of this._listRegistry()) {
-      if (record.state !== 'QUARANTINED') this._reconcilePreparedRecord(record)
-    }
-  }
-
-  _resultMatchesInstallation(resultRecord, registryRecord) {
-    const envelope = resultRecord.envelope
-    const command = registryRecord.command
-    return envelope.commandId === command.commandId
-      && envelope.attempt === command.attempt
-      && envelope.fencingToken === command.fencingToken
-      && envelope.deliveryEpoch === command.deliveryEpoch
-      && envelope.installationId === command.installationId
-      && envelope.targetAgentId === command.targetAgentId
-      && envelope.productVersionId === command.productVersionId
-      && envelope.packageDigest === command.packageDigest
-      && envelope.skillKey === command.skillKey
-      && envelope.skillVersion === command.skillVersion
-      && (envelope.manifestSha256 ?? null) === (registryRecord.resultEnvelope.manifestSha256 ?? null)
-  }
-
-  _listResultFiles(directory, acknowledged = false) {
-    const records = []
-    for (const fileName of readdirSync(directory).filter(name => name.endsWith('.json')).sort()) {
-      const path = resolve(directory, fileName)
-      const record = acknowledged
-        ? this._validateAcknowledgedResultRecord(readJson(path), fileName.slice(0, -5))
-        : this._validateResultRecord(readJson(path), fileName.slice(0, -5))
-      records.push({ path, directory, acknowledged, record })
-    }
-    return records
-  }
-
-  _supersedeResult(item, reason, authoritativeRecordId) {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const targetPath = resolve(this.resultsSupersededDir, `${item.record.recordId}-${this.createId()}.json`)
-      const result = this.atomicFs.renameNoReplace(item.path, targetPath, {
-        sourceParent: pathIdentity(item.directory),
-        targetParent: pathIdentity(this.resultsSupersededDir),
-        sourceIdentity: pathIdentity(item.path)
-      })
-      if (result.ok) {
-        atomicWriteText(`${targetPath}.reason.txt`, `${new Date(this.now()).toISOString()} ${reason}; authoritativeRecordId=${authoritativeRecordId}\n`)
-        return
+  listInstalledSkills({ includeRetained = false, skillInstallationId = null } = {}) {
+    // Atomic journal read + immutable package verification must not block old tasks during PREPARE.
+    const state = this._load(), ids = includeRetained ? Object.values(state.installations).filter(row => row.activated).map(row => row.command.target.skillInstallationId)
+      : Object.values(state.skills).map(row => row.target.skillInstallationId)
+    return ids.filter(id => skillInstallationId === null || id === skillInstallationId).map(id => {
+      const row = this._verifiedInstallation(state, id), current = this._skill(state, row.skillKey)
+      if (!includeRetained) {
+        const view = resolve(verifyControlledCodexHome(this.profile.codexHome, { create: false }), row.skillKey)
+        if (current.enabled ? !this._viewMatches(state, id, view) : existsSync(view)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'current discovery view differs')
       }
-      if (result.code !== 'TARGET_EXISTS') throw this._atomicFailure(result, 'contradictory skill result supersession')
-    }
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'contradictory skill result supersession exhausted unique targets')
+      return { ...row, active: current?.target.skillInstallationId === id }
+    })
   }
 
-  _quarantineActiveInstallation(record, failureItem) {
-    let quarantinedPath = ''
-    if (existsSync(record.targetPath)) {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        quarantinedPath = resolve(this.installationsQuarantineDir, `${record.installationId}-${this.now()}-${this.createId()}`)
-        const result = this.atomicFs.renameNoReplace(record.targetPath, quarantinedPath, {
-          sourceParent: record.skillsRootIdentity,
-          targetParent: pathIdentity(this.installationsQuarantineDir),
-          sourceIdentity: pathIdentity(record.targetPath)
-        })
-        if (result.ok) break
-        quarantinedPath = ''
-        if (result.code !== 'TARGET_EXISTS') throw this._atomicFailure(result, 'contradictory active installation quarantine')
-      }
-      if (!quarantinedPath) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'active installation quarantine exhausted unique targets')
-      }
-    }
-    const failure = failureItem.record.envelope
-    const quarantined = {
-      ...record,
-      state: 'QUARANTINED',
-      quarantinedAt: this.now(),
-      quarantinedPath,
-      quarantineReason: 'DURABLE_FAILED_RESULT_AUTHORITATIVE: usable activation and refundable failure cannot coexist',
-      authoritativeFailureCode: failure.failureCode || SKILL_INSTALL_FAILURE.IO_FAILED,
-      authoritativeFailureRecordId: failureItem.record.recordId,
-      authoritativeFailureEnvelope: failure
-    }
-    this._writeRegistry(quarantined)
-    return quarantined
+  matchesDurableAckEnvelope(envelope) {
+    try { return envelope?.messageType === 'command.ack' && Object.values(this._load().messages).some(row => this._same(row.ack, envelope)) }
+    catch { return false }
   }
-
-  _reconcileActiveFailureContradictions() {
-    const pending = this._listResultFiles(this.resultsPendingDir, false)
-    const acknowledged = this._listResultFiles(this.resultsAcknowledgedDir, true)
-    const all = [...acknowledged, ...pending]
-    for (const registry of this._listRegistry()) {
-      if (registry.state !== 'ACTIVE') continue
-      const exact = all.filter(item => this._resultMatchesInstallation(item.record, registry))
-      const failures = exact.filter(item => item.record.envelope.status === 'FAILED')
-      if (!failures.length) continue
-      const authoritative = failures[0]
-      this._quarantineActiveInstallation(registry, authoritative)
-      for (const item of exact) {
-        if (item.path === authoritative.path) continue
-        this._supersedeResult(
-          item,
-          `superseded by authoritative durable FAILED result for installation ${registry.installationId}`,
-          authoritative.record.recordId
-        )
-      }
+  isHealthy() { try { return !this.healthError && !!this._load() } catch { return false } }
+  pendingResults() { return Object.values(this._load().commands).filter(row => row.result && !row.receipt).map(row => ({ envelope: row.result })) }
+  acknowledgedResults() { return Object.values(this._load().commands).filter(row => row.result && row.receipt).map(row => ({ envelope: row.result })) }
+  sentResults() { return this.acknowledgedResults() }
+  replayResults(sendFn = this.sendResultFn, { limit = this.maxReplayBatch, replayToken = null } = {}) {
+    if (typeof sendFn !== 'function' || this.healthError) return 0
+    if (replayToken !== this.replayToken) { this.replayToken = replayToken; this.replayed.clear() }
+    let sent = 0
+    for (const { envelope } of this.pendingResults()) {
+      if (replayToken && this.replayed.has(envelope.messageId)) continue
+      if (sent >= limit || sendFn(envelope) !== true) break
+      if (replayToken) this.replayed.add(envelope.messageId)
+      sent++
+    }
+    return sent
+  }
+  matchesDurableResultEnvelope(envelope) {
+    try { return isManagementMessage(envelope) && this.pendingResults().some(row => this._same(row.envelope, envelope)) } catch { return false }
+  }
+  matchesDurableResultReceipt(receipt) {
+    try {
+      parseManagementMessage(receipt)
+      return [...this.pendingResults(), ...this.acknowledgedResults()].some(({ envelope }) => this._receiptMatches(receipt, envelope))
+    } catch { return false }
+  }
+  _receiptMatches(receipt, envelope) {
+    return receipt.correlationId === envelope.messageId && receipt.requestId === envelope.requestId
+      && ['skillChangeId', 'commandId', 'attempt'].every(key => receipt.data[key] === envelope.data[key])
+  }
+  replayAcks(sendFn = this.sendResultFn) {
+    if (!this.session || typeof sendFn !== 'function') return 0
+    let sent = 0
+    for (const { ack } of Object.values(this._load().messages)) {
+      if (sendFn(ack) !== true) break
+      sent++
+    }
+    return sent
+  }
+  async resumePendingCommands() {
+    // Only proven not-started durable receives may run. STARTED/UNKNOWN are observation-only.
+    for (const record of Object.values(this._load().commands)) {
+      if (!this.session) break
+      if (record.state === 'RECEIVED' && !record.result) await this.handle(record.envelope)
     }
   }
-
+  acknowledgeResultReceipt(input) {
+    const receipt = parseManagementMessage(input)
+    if (receipt.messageType !== WORK_RESULT_RECEIPT_TYPE) throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'not a result receipt')
+    return this._withLockSync('commit-result-receipt', () => {
+      if (!this.matchesDurableResultReceipt(receipt)) throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'uncorrelated result receipt')
+      const state = this._load(), record = this._command(state, receipt.data.commandId)
+      if (!record.receipt) { record.receipt = receipt; this._save(state); this.checkpoint('receipt-persisted', record) }
+      return { status: 'acknowledged' }
+    })
+  }
+  reconcileCommandOutcome(message) {
+    if (!isManagementMessage(message)) return null
+    const state = this._load(), record = this._command(state, message.data.commandId)
+    return record?.result ? { status: 'completed', authoritative: true, resultEnvelope: record.result } : null
+  }
+  getInstallation(id) { return this._installation(this._load(), id) }
   _validLockOwner(evidence) {
     if (!isObject(evidence) || evidence.formatVersion !== 2 || typeof evidence.ownerToken !== 'string'
         || !Number.isSafeInteger(evidence.pid) || evidence.pid <= 0
@@ -1524,6 +1371,7 @@ export class SkillInstallManager {
   }
 
   _acquireLock(operation) {
+    if (this.lockOwner) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'another operation owns this manager installer lock')
     const identity = this.processIdentityFn()
     const owner = {
       formatVersion: 2,
@@ -1656,7 +1504,7 @@ export class SkillInstallManager {
       response = await this.fetchFn(endpoint, {
         method: 'GET',
         redirect: 'error',
-        headers: { ...headers, Accept: 'application/zip' }
+        headers: { ...headers, Accept: 'application/octet-stream' }
       })
     } catch (error) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `package download failed: ${error.message}`)
@@ -1664,6 +1512,7 @@ export class SkillInstallManager {
     if (!response || response.status !== 200 || response.redirected === true) {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'package endpoint did not return a direct 200 response')
     }
+    if (response.headers?.get?.('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/octet-stream') throw new SkillInstallError(SKILL_INSTALL_FAILURE.DOWNLOAD_FORBIDDEN, 'package content type must be application/octet-stream')
     if (response.url) {
       let observed
       try { observed = new URL(response.url) } catch {
@@ -1685,410 +1534,6 @@ export class SkillInstallManager {
       throw new SkillInstallError(SKILL_INSTALL_FAILURE.PACKAGE_DIGEST_MISMATCH, 'downloaded package SHA-256 does not match packageDigest')
     }
     return bytes
-  }
-
-  _assertNoRegistryConflict(command, targetPath) {
-    const existing = this._readRegistry(command.installationId)
-    if (existing) {
-      if (existing.commandFingerprint !== command.fingerprint) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installationId was reused with a different command fingerprint')
-      }
-      if (existing.state === 'ACTIVE') {
-        if (!validateMarker(existing.targetPath, command, command.fingerprint, existing.resultEnvelope.manifestSha256, existing.packageTreeDigest ?? null)) {
-          throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installed target no longer matches its durable registry')
-        }
-        this._ensureResultRecord(existing.resultRecordId, existing.resultEnvelope)
-        return existing
-      }
-      if (existsSync(existing.targetPath) && validateMarker(existing.targetPath, command, command.fingerprint, existing.resultEnvelope.manifestSha256, existing.packageTreeDigest ?? null)) {
-        const active = { ...existing, state: 'ACTIVE', activatedAt: existing.activatedAt || this.now() }
-        this._writeRegistry(active)
-        this._ensureResultRecord(active.resultRecordId, active.resultEnvelope)
-        return active
-      }
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installationId has an unresolved prepared registry record')
-    }
-    for (const record of this._listRegistry()) {
-      if (record.command.skillKey === command.skillKey) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'skillKey is already owned by another installationId')
-      }
-    }
-    if (existsSync(targetPath)) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'CODEX_HOME skill target already exists without a matching registry')
-    }
-    return null
-  }
-
-  _persistFailureResult(command, error) {
-    const envelope = buildSkillInstallResultEnvelope({
-      profile: this.profile,
-      command,
-      status: 'FAILED',
-      failureCode: error.code,
-      installedAt: null,
-      runtimeInstanceId: this.runtimeInstanceId
-    })
-    const recordId = this.createId()
-    this._ensureResultRecord(recordId, envelope)
-    return envelope
-  }
-
-  _reconcileActivatedRecord(prepared, cause = null) {
-    try {
-      return this._withLockSync(`reconcile-activation:${prepared.installationId}`, () => (
-        this._reconcilePreparedRecord(prepared, cause)
-      ))
-    } catch (error) {
-      this.healthError = error instanceof SkillInstallError
-        ? error
-        : new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, error.message)
-      return {
-        status: 'recovery_required',
-        exitCode: null,
-        errorMessage: `prepared activation requires startup reconciliation: ${cause?.message || error.message}`,
-        failureCode: this.healthError.code,
-        resultEnvelope: prepared.resultEnvelope,
-        activationCommitted: existsSync(prepared.targetPath) && !existsSync(prepared.stagingPath)
-      }
-    }
-  }
-
-  async execute(message) {
-    let command
-    let preparedRecord = null
-    try {
-      command = validateSkillInstallCommand(message, this.profile, this.maxPackageBytes)
-      if (!this.enabled) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DISABLED, 'managed skill installation is disabled')
-      if (this.healthError) throw this.healthError
-      const result = await this._withLock(`install:${command.installationId}`, async () => {
-        const skillsRoot = verifyControlledCodexHome(this.profile.codexHome)
-        const targetPath = resolve(skillsRoot, command.skillKey)
-        const existing = this._assertNoRegistryConflict(command, targetPath)
-        if (existing) {
-          return { status: 'completed', exitCode: 0, errorMessage: '', resultEnvelope: existing.resultEnvelope, idempotent: true }
-        }
-        const packageBytes = await this._download(command)
-        const stagingPath = resolve(this.stagingDir, `${command.installationId}-${this.createId()}`)
-        mkdirSync(stagingPath, { mode: 0o700 })
-        chmodSync(stagingPath, 0o700)
-        fsyncDirectory(this.stagingDir)
-        try {
-          const manifest = await extractArchive(packageBytes, stagingPath, command, {
-            maxEntries: this.maxEntries,
-            maxEntryBytes: this.maxEntryBytes,
-            maxExtractedBytes: this.maxExtractedBytes
-          })
-          const packageTreeDigest = manifest?.runner === 'local-script' ? skillPackageTreeDigest(stagingPath) : null
-          const installedAt = String(this.now())
-          const resultEnvelope = buildSkillInstallResultEnvelope({
-            profile: this.profile,
-            command,
-            status: 'SUCCEEDED',
-            failureCode: null,
-            installedAt,
-            manifestSha256: manifest?.manifestSha256,
-            runtimeInstanceId: this.runtimeInstanceId
-          })
-          const resultRecordId = this.createId()
-          const marker = {
-            schemaVersion: 1,
-            installationId: command.installationId,
-            commandId: command.commandId,
-            attempt: command.attempt,
-            fencingToken: command.fencingToken,
-            deliveryEpoch: command.deliveryEpoch,
-            productVersionId: command.productVersionId,
-            packageDigest: command.packageDigest,
-            skillKey: command.skillKey,
-            skillVersion: command.skillVersion,
-            commandFingerprint: command.fingerprint,
-            scopeDigest: this.scope.digest,
-            installedAt,
-            ...(manifest ? { manifestSha256: manifest.manifestSha256 } : {}),
-            ...(packageTreeDigest ? { packageTreeDigest } : {})
-          }
-          atomicWriteJson(resolve(stagingPath, MARKER_NAME), marker, 0o644)
-          fsyncDirectory(stagingPath)
-          const commitSkillsRoot = verifyControlledCodexHome(this.profile.codexHome)
-          if (commitSkillsRoot !== skillsRoot) {
-            throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'CODEX_HOME/skills parent changed before activation commit')
-          }
-          const prepared = {
-            formatVersion: 2,
-            state: 'PREPARED',
-            profileId: this.profile.profileId,
-            agentId: this.profile.agentId,
-            scopeDigest: this.scope.digest,
-            installationId: command.installationId,
-            commandFingerprint: command.fingerprint,
-            command: { ...command },
-            targetPath,
-            stagingPath,
-            skillsRootIdentity: pathIdentity(commitSkillsRoot),
-            stagingIdentity: pathIdentity(stagingPath),
-            preparedAt: this.now(),
-            activatedAt: null,
-            resultRecordId,
-            resultEnvelope,
-            ...(packageTreeDigest ? { packageTreeDigest } : {})
-          }
-          preparedRecord = prepared
-          this._writeRegistry(prepared)
-          this._publishPreparedRecord(prepared)
-          const active = { ...prepared, state: 'ACTIVE', activatedAt: this.now() }
-          this._writeRegistry(active)
-          this._ensureResultRecord(resultRecordId, resultEnvelope)
-          return { status: 'completed', exitCode: 0, errorMessage: '', resultEnvelope, idempotent: false, activationCommitted: true }
-        } catch (error) {
-          if (!preparedRecord && existsSync(stagingPath)) rmSync(stagingPath, { recursive: true, force: true })
-          throw error
-        }
-      })
-      this.replayResults(this.sendResultFn, { replayToken: `command:${command.commandId}:${this.now()}` })
-      return result
-    } catch (rawError) {
-      if (preparedRecord) {
-        const reconciled = this._reconcileActivatedRecord(preparedRecord, rawError)
-        if (reconciled.status === 'completed') {
-          this.replayResults(this.sendResultFn, { replayToken: `command:${command.commandId}:${this.now()}` })
-        }
-        return reconciled
-      }
-      const error = rawError instanceof SkillInstallError
-        ? rawError
-        : new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, rawError.message || 'skill installation failed')
-      let resultEnvelope = null
-      try {
-        resultEnvelope = this._withLockSync(`persist-failure:${command?.commandId || 'invalid'}`, () => (
-          this._persistFailureResult(command || {}, error)
-        ))
-        this.replayResults(this.sendResultFn, { replayToken: `failure:${command?.commandId || 'invalid'}:${this.now()}` })
-      } catch (resultError) {
-        this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to persist skill failure result: ${resultError.message}`)
-        return {
-          status: 'recovery_required',
-          exitCode: null,
-          errorMessage: this.healthError.message,
-          failureCode: this.healthError.code,
-          resultEnvelope: null,
-          activationCommitted: false
-        }
-      }
-      return {
-        status: 'failed',
-        exitCode: null,
-        errorMessage: `${error.code}: ${error.message}`,
-        failureCode: error.code,
-        resultEnvelope
-      }
-    }
-  }
-
-  /** Local installation evidence only, never server entitlement. No scan of arbitrary HOME
-   * skills: every item must match this manager's durable registry and published marker.
-   * Call on connection/install/configuration changes, not on each heartbeat. */
-  listInstalledSkills() {
-    return this._withLockSync('read-installed-skills', () => {
-      if (this.healthError) throw this.healthError
-      const items = []
-      for (const record of this._listRegistry()) {
-        if (record.state !== 'ACTIVE') continue
-        if (!validateMarker(record.targetPath, record.command, record.commandFingerprint, record.resultEnvelope.manifestSha256, record.packageTreeDigest ?? null)) {
-          throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'installed descriptor no longer matches durable evidence')
-        }
-        const manifest = record.resultEnvelope.manifestSha256
-          ? parseSkillManifest(readFileSync(resolve(record.targetPath, 'manifest.json')), record.command) : null
-        items.push(Object.freeze({ installationId: record.installationId, packageRoot: record.targetPath,
-          packageSha256: record.command.packageDigest.slice('sha256:'.length),
-          manifestSha256: record.resultEnvelope.manifestSha256 ?? null, ...(record.packageTreeDigest ? { packageTreeDigest: record.packageTreeDigest } : {}), manifest }))
-      }
-      return Object.freeze(items)
-    })
-  }
-
-  reconcileCommandOutcome(message) {
-    if (message?.commandType !== COMMAND_TYPE) return null
-    return this._withLockSync(`reconcile-command:${message.installationId || ''}`, () => {
-      const command = validateSkillInstallCommand(message, this.profile, this.maxPackageBytes)
-      const record = this._readRegistry(command.installationId)
-      if (!record || record.commandFingerprint !== command.fingerprint) return null
-      if (record.state === 'QUARANTINED') return this._reconcilePreparedRecord(record)
-      if (record.state !== 'ACTIVE' || !validateMarker(record.targetPath, command, command.fingerprint, record.resultEnvelope.manifestSha256, record.packageTreeDigest ?? null)) return null
-      this._ensureResultRecord(record.resultRecordId, record.resultEnvelope)
-      return { status: 'completed', exitCode: 0, errorMessage: '', activationCommitted: true, authoritative: true }
-    })
-  }
-
-  _replayResultsLocked(sendFn, options = {}) {
-    const limit = Number.isSafeInteger(options.limit) && options.limit > 0
-      ? Math.min(options.limit, this.maxReplayBatch)
-      : this.maxReplayBatch
-    const replayToken = String(options.replayToken || '')
-    let replayed = 0
-    for (const fileName of readdirSync(this.resultsPendingDir).filter(name => name.endsWith('.json')).sort()) {
-      if (replayed >= limit) break
-      const sourcePath = resolve(this.resultsPendingDir, fileName)
-      let record
-      try { record = this._validateResultRecord(readJson(sourcePath), fileName.slice(0, -5)) } catch (error) {
-        this._quarantineResult(sourcePath, fileName.slice(0, -5), error)
-        break
-      }
-      if (replayToken && record.lastReplayToken === replayToken) continue
-      let sent = false
-      try { sent = sendFn(record.envelope) === true } catch { break }
-      if (!sent) break
-      try {
-        atomicWriteJson(sourcePath, {
-          ...record,
-          formatVersion: 3,
-          sendAttempts: Number(record.sendAttempts || 0) + 1,
-          lastSentAt: this.now(),
-          lastReplayToken: replayToken
-        })
-      } catch (error) {
-        this.healthError = new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, `failed to persist work.result send attempt: ${error.message}`)
-        break
-      }
-      replayed += 1
-    }
-    return replayed
-  }
-
-  replayResults(sendFn = this.sendResultFn, options = {}) {
-    if (this.healthError || typeof sendFn !== 'function') return 0
-    try {
-      return this._withLockSync('replay-work-results', () => this._replayResultsLocked(sendFn, options))
-    } catch (error) {
-      if (error?.code === SKILL_INSTALL_FAILURE.IO_FAILED) this.healthError = error
-      return 0
-    }
-  }
-
-  _receiptFields(message) {
-    const receipt = {
-      messageType: exactField(message, 'messageType'),
-      messageId: exactField(message, 'messageId'),
-      correlationId: exactField(message, 'correlationId'),
-      resultType: exactField(message, 'resultType'),
-      receiptStatus: exactField(message, 'receiptStatus'),
-      commandId: exactField(message, 'commandId'),
-      attempt: exactField(message, 'attempt'),
-      fencingToken: exactField(message, 'fencingToken'),
-      deliveryEpoch: exactField(message, 'deliveryEpoch'),
-      installationId: exactField(message, 'installationId'),
-      targetAgentId: exactField(message, 'targetAgentId')
-    }
-    if (receipt.messageType !== WORK_RESULT_RECEIPT_TYPE || receipt.resultType !== RESULT_TYPE
-        || receipt.receiptStatus !== RESULT_RECEIPT_STATUS) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'work.result receipt type/status is invalid')
-    }
-    requireSafeId(receipt.messageId, 'messageId')
-    requireSafeId(receipt.correlationId, 'correlationId')
-    requireSafeId(receipt.commandId, 'commandId')
-    requireSafeId(receipt.installationId, 'installationId')
-    if (!Number.isSafeInteger(receipt.attempt) || receipt.attempt <= 0
-        || requirePositiveDecimal(receipt.fencingToken, 'fencingToken') !== receipt.fencingToken
-        || requirePositiveDecimal(receipt.deliveryEpoch, 'deliveryEpoch') !== receipt.deliveryEpoch
-        || receipt.targetAgentId !== this.profile.agentId) {
-      throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'work.result receipt correlation fields are invalid')
-    }
-    return receipt
-  }
-
-  _receiptMatchesEnvelope(receipt, envelope) {
-    return receipt.correlationId === envelope.messageId
-      && receipt.commandId === envelope.commandId
-      && receipt.attempt === envelope.attempt
-      && receipt.fencingToken === envelope.fencingToken
-      && receipt.deliveryEpoch === envelope.deliveryEpoch
-      && receipt.installationId === envelope.installationId
-      && receipt.targetAgentId === envelope.targetAgentId
-  }
-
-  // Transport identity is separate from the PRODUCT installation in typed results.
-  // Read-only correlation gate; normal acknowledgeResultReceipt still owns the
-  // locked durable transition and rejects any race/conflict on the actual ingress.
-  matchesDurableResultReceipt(message) {
-    if (this.healthError || message?.schemaVersion !== 1) return false
-    try {
-      const receipt = this._receiptFields(message)
-      return [...this.pendingResults(), ...this.acknowledgedResults()]
-        .some(record => this._receiptMatchesEnvelope(receipt, record.envelope))
-    } catch { return false }
-  }
-
-  matchesDurableResultEnvelope(envelope) {
-    if (this.healthError || envelope?.schemaVersion !== 1 || envelope.messageType !== 'work.result'
-        || envelope.resultType !== RESULT_TYPE || envelope.targetAgentId !== this.profile.agentId) return false
-    try {
-      return this.pendingResults().some(record => JSON.stringify(record.envelope) === JSON.stringify(envelope))
-    } catch { return false }
-  }
-
-  acknowledgeResultReceipt(message) {
-    const receipt = this._receiptFields(message)
-    return this._withLockSync(`work-result-receipt:${receipt.correlationId}`, () => (
-      this._acknowledgeResultReceiptLocked(receipt)
-    ))
-  }
-
-  _acknowledgeResultReceiptLocked(receipt) {
-    for (const fileName of readdirSync(this.resultsAcknowledgedDir).filter(name => name.endsWith('.json')).sort()) {
-      const path = resolve(this.resultsAcknowledgedDir, fileName)
-      const record = this._validateAcknowledgedResultRecord(readJson(path), fileName.slice(0, -5))
-      if (record.envelope.messageId !== receipt.correlationId) continue
-      if (!this._receiptMatchesEnvelope(receipt, record.envelope)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'work.result receipt conflicts with acknowledged result')
-      }
-      return { status: 'acknowledged', idempotent: true, recordId: record.recordId }
-    }
-    for (const fileName of readdirSync(this.resultsPendingDir).filter(name => name.endsWith('.json')).sort()) {
-      const sourcePath = resolve(this.resultsPendingDir, fileName)
-      const record = this._validateResultRecord(readJson(sourcePath), fileName.slice(0, -5))
-      if (record.envelope.messageId !== receipt.correlationId) continue
-      if (!this._receiptMatchesEnvelope(receipt, record.envelope)) {
-        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'work.result receipt conflicts with pending result')
-      }
-      const acknowledged = {
-        ...record,
-        formatVersion: 3,
-        acknowledgedAt: this.now(),
-        receipt: { ...receipt }
-      }
-      const targetPath = this._resultPath(this.resultsAcknowledgedDir, record.recordId)
-      atomicWriteJson(targetPath, acknowledged)
-      try {
-        durableUnlink(sourcePath)
-      } catch (error) {
-        this.healthError = new SkillInstallError(
-          SKILL_INSTALL_FAILURE.IO_FAILED,
-          `work.result receipt was persisted but pending retirement requires startup reconciliation: ${error.message}`
-        )
-        throw this.healthError
-      }
-      return { status: 'acknowledged', idempotent: false, recordId: record.recordId }
-    }
-    throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'work.result receipt has no matching durable pending result')
-  }
-
-  getInstallation(installationId) {
-    return this._readRegistry(installationId)
-  }
-
-  pendingResults() {
-    return readdirSync(this.resultsPendingDir).filter(name => name.endsWith('.json')).sort().map(fileName => (
-      this._validateResultRecord(readJson(resolve(this.resultsPendingDir, fileName)), fileName.slice(0, -5))
-    ))
-  }
-
-  acknowledgedResults() {
-    return readdirSync(this.resultsAcknowledgedDir).filter(name => name.endsWith('.json')).sort().map(fileName => (
-      this._validateAcknowledgedResultRecord(readJson(resolve(this.resultsAcknowledgedDir, fileName)), fileName.slice(0, -5))
-    ))
-  }
-
-  sentResults() {
-    return this.acknowledgedResults()
   }
 
 }

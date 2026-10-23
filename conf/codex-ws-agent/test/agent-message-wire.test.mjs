@@ -21,17 +21,10 @@ test('real registration observer only accepts the public correlated reply after 
   assert.equal(observer.observe(fromAgentWire(reply)), 'registered')
   assert.throws(() => fromAgentWire(wire('agent.registered', data)))
 })
-test('result transmission separates current session from immutable execution identity', () => {
-  const result = { schemaVersion: 1, messageType: 'work.result', messageId: 'result', resultType: 'SKILL_INSTALL_RESULT', installationId: 'si_1', runtimeInstallationId: 'rti_1', runtimeInstanceId: 'old-boot', installedAt: '1000', packageDigest: `sha256:${'a'.repeat(64)}` }
-  const saved = JSON.stringify(result), sent = toAgentWire(result, { runtimeInstanceId: 'new-boot' })
-  assert.equal(sent.data.executionRuntimeInstanceId, 'old-boot'); assert.equal(sent.data.runtimeInstanceId, 'new-boot')
-  assert.equal(sent.data.skillInstallationId, 'si_1'); assert.equal(sent.data.runtimeInstallationId, 'rti_1')
-  assert.equal(sent.data.installedAt, 1000); assert.equal(sent.data.packageSha256, 'a'.repeat(64)); assert.equal(JSON.stringify(result), saved)
-})
-test('canonical command public metadata projects to the existing private command parser inputs', () => {
-  const command = fromAgentWire(wire('command.dispatch', { schemaVersion: 1, commandType: 'SKILL_INSTALL', skillInstallationId: 'si_1', packageSha256: 'b'.repeat(64), payload: { privateFact: 'unchanged' } }))
-  assert.equal(command.installationId, 'si_1'); assert.equal(command.packageDigest, `sha256:${'b'.repeat(64)}`)
-  assert.deepEqual(command.payload, { privateFact: 'unchanged' }); assert.equal(command.messageType, 'command.dispatch')
+test('retired skill schema1 command/result never create a parallel wire projection', () => {
+  assert.throws(() => toAgentWire({ messageType: 'work.result', resultType: 'SKILL_INSTALL_RESULT' }))
+  assert.throws(() => fromAgentWire(wire('command.dispatch', { schemaVersion: 1, commandType: 'SKILL_INSTALL' })))
+  assert.throws(() => fromAgentWire(wire('work.result', { resultType: 'SKILL_INSTALL_RESULT' })))
 })
 
 test('workspace queue wire lengths are strict strings while private durable input remains numeric', () => {
