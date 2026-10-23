@@ -410,7 +410,7 @@ Runtime心跳仍使用现有presence协议与30秒默认间隔，不引入第二
 
 ### 版本辨识与目录（2026-10-21）
 
-新制品目录统一`/home/isp/apps/cyf-agent-runtime-v1/releases/<runtime-version>`，版本取本包`package.json`，不使用Web/API版本、功能名或日期。旧目录保留历史名称，禁止在线改名。`current`只标识已核验的unified运行版本，安装器不更新它；systemd固定真实路径。发布记录置于制品外`release-records/`，未知历史来源不得补造。操作和验收规则见`docs/cyf-agent-runtime-v1-self-host.md` §2.1。
+CYF现用程序统一实体目录`/home/isp/apps/cyf-agent-runtime-v1/app/`，不以版本号命名，历史程序归档到`/home/isp/baks/cyf-agent-runtime-v1/<归档批次>/`；包版本、Git来源和制品摘要继续保留。安装器拒绝覆盖已存在目标，不自动启用服务；升级先验证候选、停写备份并归档旧程序，保留身份/会话/业务状态。路径迁移须校验Python生成路径和最终闭包。操作见`docs/cyf-agent-runtime-v1-self-host.md` §2.1、§7.1。
 
 ### 2026-10-21 已有成果提交契约（源码候选，未激活）
 CYF协同任务遵循 `/home/isp/wsps/cyf/AGENTS.md` 与 `api/docs/interface-standard.md` v1.2；单Owner，不修改公共全局规则。

@@ -21,6 +21,8 @@ test('hosting example and tmpfiles use the same canonical private state root', a
 test('both packaged and root service templates use the external configuration root', async () => {
   const service = await read(runtime + 'systemd/cyf-agent-runtime-v1@.service');
   assert.equal(service, await read('systemd/cyf-agent-runtime-v1@.service'));
+  assert.match(service, /^WorkingDirectory=\/home\/isp\/apps\/cyf-agent-runtime-v1\/app$/m);
+  assert.doesNotMatch(service, /\/home\/isp\/apps\/cyf-agent-runtime-v1\/%i/);
   assert.match(service, /^EnvironmentFile=\/home\/isp\/conf\/cyf-agent-runtime-v1\/%i\.conf$/m);
   assert.doesNotMatch(service, /\/etc\/cyf-agent-runtime-v1|\/var\/lib\/cyf/);
 });

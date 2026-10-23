@@ -14,5 +14,5 @@ fi
 # Layout guidance only; this entry never creates config/state or adopts a legacy HOME.
 printf '%s\n' 'Unified Runtime: keep config/policy in conf/cyf-agent-runtime-v1 and per-Agent HOME in state/cyf-agent-runtime-v1/<instance>/agents/<subject>/codex-home.'
 printf '%s\n' 'Existing Runtime relocation: docs/cyf-agent-runtime-v1-self-host.md section 9; no re-enrollment or automatic migration.'
-exec "$ROOT_DIR/conf/cyf-agent-runtime-v1/install.sh" --target "$APP_ROOT/$INSTANCE" \
+exec "$ROOT_DIR/conf/cyf-agent-runtime-v1/install.sh" --target "$APP_ROOT/app" \
     --node "${CYF_RUNTIME_V1_NODE_BIN:-node}" --npm "${CYF_RUNTIME_V1_NPM_CLI:-npm}" --python "${CYF_RUNTIME_V1_PYTHON_BIN:-python3}"

@@ -132,3 +132,15 @@ test('Runtime and execution-package metadata impose no project Node version gate
     assert.equal(JSON.parse(text(path)).engines?.node, undefined, path);
   assert.equal(JSON.parse(text('conf/codex-ws-agent/package-lock.json')).packages[''].engines?.node, undefined);
 });
+
+// Fixed program directory does not use the instance/version as a payload path.
+test('fixed app target refuses an existing artifact before executing toolchain or changing files', t => {
+  const f = fixture(t);
+  const app = resolve(f.appRoot, 'cyf-agent-runtime-v1/app');
+  mkdirSync(app); writeFileSync(resolve(app, 'keep'), 'unchanged');
+  const result = f.run(['--profile', 'agent']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Runtime target exists/);
+  assert.equal(readFileSync(resolve(app, 'keep'), 'utf8'), 'unchanged');
+  assert.equal(existsSync(f.calls), false);
+});

@@ -39,7 +39,8 @@ test "$(git -C "$REPO" rev-parse HEAD)" = "$SOURCE_COMMIT" || exit 1
 test -z "$(git -C "$REPO" status --porcelain)" || exit 1
 git -C "$REPO" rev-parse HEAD HEAD^{tree}
 RUNTIME_VERSION='REPLACE_WITH_RUNTIME_PACKAGE_VERSION'
-ARTIFACT="/home/isp/apps/cyf-agent-runtime-v1/releases/$RUNTIME_VERSION"
+ARTIFACT="/home/isp/apps/cyf-agent-runtime-v1/app"
+# 仅适用于该目录尚不存在；已有安装按§2.1/§7.1先停写归档，不覆盖运行目录。
 # 管理员只在必要时创建父目录并授权给真正的运行用户，不递归chown共享目录。
 # ARTIFACT须为不存在的canonical绝对路径；制品不可直接覆盖运行目录。
 bash "$REPO/conf/cyf-agent-runtime-v1/install.sh" \
@@ -51,24 +52,26 @@ git -C "$REPO" rev-parse HEAD
 
 安装器只准备 `runtime/`、`codex-ws-agent/`（内部执行引擎）、`node/bin/node` 及完整私有依赖。**不安装/启用 systemd、不登记、不迁移配置或状态。** 不借宿主 Python 包掩盖私有环境缺失。记录制品目录、源码SHA、安装回执及摘要，平台工具链验收失败应先归因。
 
-### 2.1 版本目录、发布记录与当前版本标识（2026-10-21）
+### 2.1 CYF固定程序目录、发布记录与历史归档（2026-10-23）
 
-统一布局：
+本节按CYF项目授权更新目录策略；不自动迁移其他主机或修改全局规则。
 
 ```text
 /home/isp/apps/cyf-agent-runtime-v1/
-  releases/<runtime-version>/             # 真实完整制品目录，例如1.2.2
-  release-records/<artifact-directory>.json # 版本/来源/摘要/验证记录，位于制品外
-  current -> releases/<active-directory>  # unified实例的已核验运行版本标识
-  RELEASES.md                             # 当前主机版本说明与历史例外
+  app/                                    # 唯一现用实体程序，runtime/、codex-ws-agent/、node/
+  release-records/                         # 当前与历史版本/源码/摘要/验证记录
+  RELEASES.md                             # 与实际服务/PID一致的当前说明
+/home/isp/baks/cyf-agent-runtime-v1/<归档批次>/ # 历史程序、停写状态快照、恢复信息
 ```
 
-- `<runtime-version>`必须等于制品`runtime/package.json`的version，采用Runtime独立语义版本。新内容必须升版；同版本路径存在即拒绝覆盖，不靠追加功能名或日期规避。版本排序按语义版本，不按目录mtime或字符串大小。预发布版本不得自动视为最新稳定版。
-- `release-records`记录`schemaVersion`、`runtimeVersion`、真实`artifactPath`、完整`sourceCommit/sourceTree`、制品manifest路径及SHA256、安装/核验时间、验证证据。历史缺项写null并说明，不以目录名推断来源，不伪造安装时间；证据文件不包含凭据。记录位于制品外，不为补文档修改已校验制品。部署状态核对真实服务，历史记录不是持续健康承诺。
-- 准备/安装新版本不代表启用。按§7.1完成固定源码、实际配置校验、停写备份、精确unit切换和身份/通道验证后，才原子更新`current`并readback。链接目标必须为本机已核验的真实制品目录；目标存在且`current`原来是链接或不存在，若是实体目录/文件则停止调查，不能覆盖。
-- `current`是便于人查看的标识，**systemd仍固定真实版本目录**。不把启动命令改成跟随可变链接，不从`current`路径直接运行要求canonical路径的安装器/校验器。实际PID的cwd/启动路径优先于链接；两者不一致须报告标识漂移，不能宣称已切换。该根链接只代表unified实例；其他独立实例以各自unit为准，不能让一个链接冒充全主机状态。
-- 已有`runtime-ui-workflow-*`、`runtime-health-*`目录保留为历史例外，记录各自真实Runtime版本；**不在线重命名、不删除旧制品、不重启服务仅为改名**。当前1.2.1目录因此保留旧名；下一次实际升级使用纯版本目录。不建立同版本第二份制品或路径别名冒充规范迁移。
-- 回退必须先确认当前状态可被目标程序读取；不能只改链接假装回退，也不能自动恢复旧DB覆盖新业务事实。成功回退后再更新标识与记录。
+- 不使用版本号、功能名或日期作为现用程序目录，也不新增按版本切换的`current`链接。“最新”是获授权且验收启用的候选，不自动追踪远端；版本号、源码commit/tree、依赖锁与制品SHA仍须完整记录，程序行为变化须升版。
+- 安装器仍拒绝覆盖已存在的目标，不负责停止服务、登记或迁移状态。统一组件入口默认准备`app/`；其他目标必须显式指定且为不存在的canonical实体目录。已有`app/`升级时先在独立位置准备候选，按§7.1完成停写、完整备份并归档旧程序，才能安装至固定目录。
+- 复用已验证制品迁移路径时，先核验来源清单和文件摘要，再用`python3 shell/cyf_runtime_toolchain_rebase.py --root /absolute/candidate --from-root /absolute/original`只读检查；仅在已停写且独占候选时加`--apply`。工具只更改已识别的Python venv生成路径；未知引用/符号链接拒绝，不改源代码或业务状态。随后使用候选`runtime/validate.sh`验证完整依赖闭包及实际配置；不能只搬目录假定可用。
+- 路径迁移不伪造业务代码升级：保留原Runtime版本及源码来源，另记录安装转换、工具源码commit、变更文件前后摘要及新制品清单。重新构建或改变程序行为仍须按真实候选升版、验证。
+- systemd固定`app/`真实路径，不跟随可变链接；保留原User、EnvironmentFile、停止策略及无关drop-in修复。归档批次按时间/任务区分，不以版本号作为目录名；归档记录原路径、真实版本/来源/摘要。历史记录保留原事实，另补归档位置，不将旧证据重标为当前验收。
+- 配置、manifest/installation、HOME、会话、ACK、锁和业务状态不是旧程序，不能按只留最新清除或以旧快照覆盖新事实。停写快照须覆盖启用的managedRoot与各角色完整HOME。回退前核对状态兼容性，走受控恢复安装，不直接启动备份目录或重建身份。
+- 历史目录仅在停用、进程/服务/外部引用核验完成后归档；`current`仅在新固定路径启用验证后移除。存在未迁移状态的混合目录只归档明确的程序文件，保留状态/身份路径，不整目录搬走。
+- 本指南源码适配不等于主机已迁移；每台主机分别记录安装执行、Run（如适用）、通道健康与业务验收。本次目录迁移不授权付费模型调用或API/Web发布。
 
 ## 3. 目标端准备登记材料（首次接入）
 
@@ -198,7 +201,7 @@ CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE="$CANDIDATE/enrollment-secret" \
 3. **准备恢复点**：保存原 unit/drop-in、原制品和私有配置；记录摘要与权限。盘点聊天、指令、租约、ACK、文件/技能执行及结果未知状态；不能通过清队列、清锁、自动重跑或重复付费消除问题。共用实例切换会影响所有 subject，先协调维护窗口。
 4. **候选预检**：候选放独立目录，用实际服务用户、原配置及相同的 Provider/policy 文件路径环境运行候选 `validate`。不执行 `run`，不启动第二 writer。检查新依赖是否真实可用；不得关闭原能力以掩盖缺项。不要 `source` 未审核配置或把 systemd EnvironmentFile 当通用 shell 脚本。
 5. **停写并备份**：按下述授权流程温和停止准确 unit，等待所属引擎/子进程与写者退出、锁正常释放；再完整备份持久状态（包括各 HOME、SQLite/WAL/SHM、授权、registry、ledger、inbox/outbox，以及已启用的 managedRoot）。备份存 `/home/isp/baks/<批次>/` 并按凭据保护，禁止运行中复制单个 DB 冒充一致快照。
-6. **精确切换**：只修改受管 drop-in 的制品 cwd/启动/预检路径，保持原配置、身份和状态路径。若必须改配置，保存前值、固定候选并 readback；先审查已有多个 drop-in 的合并效果，不覆盖无关修复。显式迁移完成后再次预检，再 daemon-reload 并启动准确 unit。
+6. **精确切换**：确认候选及完整停写备份有效，归档旧程序并将候选安装到固定`app/`实体目录；仅修改受管 drop-in 的程序 cwd/启动/预检路径，保持原配置、身份和状态路径。若必须改配置，保存前值、固定候选并 readback；先审查已有多个 drop-in 的合并效果，不覆盖无关修复。显式迁移完成后再次预检，再 daemon-reload 并启动准确 unit。
 7. **逐项验收**：核对实际进程使用候选路径、无重复 writer、每个 subject 的当前注册/在线与实测能力；按第8节做明确授权的新业务验收。旧在线记录、服务 active、inbox completed 或目录存在均不足以证明交付成功。
 8. **失败处置**：保留新状态和日志，先归因；只有确认旧制品能读取当前状态时才恢复旧启动配置。若新版本已写入不可逆状态，不拿旧 DB 快照覆盖新业务事实，不盲回退或再次 enroll；按已制定的恢复方案处理并报告真实阻塞。
 
@@ -212,7 +215,7 @@ CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE="$CANDIDATE/enrollment-secret" \
 
 1. 记录真实旧unit/drop-in及安装/配置/状态备份。配置备份按凭据同等保护，不把内容打到日志。
 2. 没有未处理执行中任务、共用实例影响已确认后，正常停止**准确归属的旧服务**，不按耗时kill，不启动第二writer。
-3. 复用 `systemd/cyf-agent-runtime-v1@.service` 配置新实例。该模板默认 `User=root`、制品 `/home/isp/apps/cyf-agent-runtime-v1/%i`；非root用户或其他制品路径必须覆盖真实User/Group、WorkingDirectory、ExecStartPre、ExecStart和配置路径，不能直接照模板启动。覆盖ExecStart/ExecStartPre时先以空赋值清除原值。
+3. 复用 `systemd/cyf-agent-runtime-v1@.service` 配置新实例。该模板默认 `User=root`、制品 `/home/isp/apps/cyf-agent-runtime-v1/app`；非root用户或其他制品路径必须覆盖真实User/Group、WorkingDirectory、ExecStartPre、ExecStart和配置路径，不能直接照模板启动。覆盖ExecStart/ExecStartPre时先以空赋值清除原值。
 4. `EnvironmentFile`只放 `CYF_RUNTIME_V1_API_BASE_URL`、已审核的策略/Provider**文件路径**等正常设置，不放enrollment secret。显式PATH需包含实际Codex及工具链依赖。
 5. 管理员 `systemctl daemon-reload`，启动真实目标unit；查看精确unit的日志/status。验证无旧新重复进程、身份沿用，确认新服务健康后才设置自启并禁用准确旧unit。
 6. 启动失败先定位；恢复需同时匹配原制品、配置和原状态，不能拿旧二进制读新状态。不得删注册记录或清状态冒充修复。
