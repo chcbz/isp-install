@@ -7,7 +7,7 @@ import {
 import { dirname, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
-  AppServerAdapter, measureCodexAppServerBinary, verifySpawnedAppServerExecutableTree
+  AppServerAdapter, measureCodexAppServerBinaryAsync, verifySpawnedAppServerExecutableTree
 } from './app-server-adapter.mjs'
 import { canonicalSha256 } from './chat-runtime.mjs'
 import { RestrictedProviderEgress, restrictedProviderNetworkPolicy } from './typed-inspection-network.mjs'
@@ -248,14 +248,14 @@ export const loadTypedInspectionCarrierEvidence = ({ path, expectedDigest, bindi
 }
 
 export class TypedInspectionProfileRuntime {
-  constructor({ profile, materializerRoot, stateRoot, bwrapBin = '/usr/bin/bwrap', spawnFn = spawn, measureBinary = measureCodexAppServerBinary, forbidden = [], egressFactory = options => new RestrictedProviderEgress(options) } = {}) {
+  constructor({ profile, materializerRoot, stateRoot, bwrapBin = '/usr/bin/bwrap', spawnFn = spawn, measureBinary = measureCodexAppServerBinaryAsync, forbidden = [], egressFactory = options => new RestrictedProviderEgress(options) } = {}) {
     if (!object(profile) || !nonblank(profile.agentId) || !nonblank(profile.profileId) || !nonblank(profile.codexBin) || !nonblank(profile.codexHome)) fail('TYPED_INSPECTION_PROFILE_CONFIG_INVALID')
     this.profile = profile; this.materializerRoot = ensurePrivateDirectory(materializerRoot); this.stateRoot = ensurePrivateDirectory(stateRoot)
     if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!Number.isSafeInteger(profile.typedInspectionNetworkConnectTimeoutMs) || profile.typedInspectionNetworkConnectTimeoutMs <= 0)) fail('TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_REQUIRED')
     if (overlaps(this.materializerRoot, this.stateRoot)) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
     for (const candidate of forbidden.filter(value => value && existsSync(resolve(value)))) if (overlaps(this.stateRoot, realpathSync(resolve(candidate)))) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
     this.providerCaTrust = profile.typedInspectionProviderNetwork === 'restricted-proxy' ? stageProviderCaTrust(profile, this.stateRoot) : null
-    this.bwrap = bwrapIdentity(bwrapBin); this.spawnFn = spawnFn; this.measureBinary = measureBinary; this.egressFactory = egressFactory; this.measurement = null; this.contractReadback = null; this.nativeReadback = null; this.activeAdapters = new Map()
+    this.bwrap = bwrapIdentity(bwrapBin); this.spawnFn = spawnFn; this.measureBinary = measureBinary; this.egressFactory = egressFactory; this.measurement = null; this.contractReadback = null; this.nativeReadback = null; this.activeAdapters = new Map(); this.disposed = false
   }
   _prepareEphemeralState(label) {
     const root = ensurePrivateDirectory(resolve(this.stateRoot, 'measurement'))
@@ -272,13 +272,13 @@ export class TypedInspectionProfileRuntime {
     ensurePrivateDirectory(directory); const markerPath = stateMarker(directory, binding)
     return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory) }
   }
-  _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '' }) {
+  async _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '' }) {
     const input = realpathSync(inputDirectory); if (!within(this.materializerRoot, input)) fail('TYPED_INSPECTION_INPUT_DIRECTORY_OUTSIDE_ROOT')
     const lexical = lstatSync(input, { bigint: true }); if (lexical.isSymbolicLink() || !lexical.isDirectory() || Number(lexical.mode & 0o777n) !== 0o700) fail('TYPED_INSPECTION_INPUT_DIRECTORY_UNSAFE')
     if (!engineState?.directory || !within(this.stateRoot, engineState.directory) || realpathSync(engineState.directory) !== engineState.directory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: engineState.directory, inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust })
     const spawnWrapped = (_binary, commandArgs, options) => { verifyBwrapIdentity(this.bwrap); return this.spawnFn(this.bwrap.path, [...args, ...commandArgs], { ...options, cwd: '/', env: { LANG: 'C.UTF-8' } }) }
-    const adapter = AppServerAdapter.spawn(this.profile, { cwd: '/inputs', schemaMeasurement, spawnFn: spawnWrapped, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
+    const adapter = await AppServerAdapter.spawnAsync(this.profile, { cwd: '/inputs', schemaMeasurement, spawnFn: spawnWrapped, shouldSpawn: () => !this.disposed, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
     adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
   }
   async _initializeAndSeal(adapter) {
@@ -292,13 +292,15 @@ export class TypedInspectionProfileRuntime {
     return readback
   }
   async measure() {
+    if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
     if (this.measurement) return this.measurement
-    const schemaMeasurement = this.measureBinary(this.profile)
+    const schemaMeasurement = await this.measureBinary(this.profile)
     const probeDirectory = mkdtempSync(resolve(this.materializerRoot, '.profile-probe-')); chmodSync(probeDirectory, 0o700)
     const probePath = resolve(probeDirectory, '.cyf-inspection-profile-probe.txt'); writeFileSync(probePath, 'typed-inspection-profile-probe\n', { mode: 0o400 }); chmodSync(probePath, 0o400)
     const outsideCanary = resolve(tmpdir(), `.cyf-inspection-outside-${randomUUID()}`); writeFileSync(outsideCanary, 'must-not-be-visible\n', { mode: 0o600 })
-    const isolatedState = this._prepareEphemeralState('isolated'); const adapter = this._spawnAdapter({ inputDirectory: probeDirectory, engineState: isolatedState, schemaMeasurement, networkMode: 'isolated' })
+    const isolatedState = this._prepareEphemeralState('isolated'); let adapter
     try {
+      adapter = await this._spawnAdapter({ inputDirectory: probeDirectory, engineState: isolatedState, schemaMeasurement, networkMode: 'isolated' })
       const isolatedReadback = await this._initializeAndSeal(adapter)
       if (!emptyMcpCatalog(isolatedReadback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
       const view = verifyProcessView({ pid: isolatedReadback.processExecutable.pid, inputDirectory: probeDirectory, stateRoot: isolatedState.directory, sourceCodexHome: realpathSync(this.profile.codexHome), outsideCanary })
@@ -309,7 +311,7 @@ export class TypedInspectionProfileRuntime {
         let executionAdapter
         try {
           await egress.start()
-          executionAdapter = this._spawnAdapter({ inputDirectory: probeDirectory, engineState: executionState, schemaMeasurement, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
+          executionAdapter = await this._spawnAdapter({ inputDirectory: probeDirectory, engineState: executionState, schemaMeasurement, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
           await egress.bindOwner(executionAdapter.child, this.bwrap, schemaMeasurement.snapshotIdentity); executionNetworkAttestation = await egress.attach()
           executionReadback = await this._initializeAndSeal(executionAdapter)
           const providerTls = await egress.measureAllowedTls(executionReadback.providerCaTrust)
@@ -337,7 +339,7 @@ export class TypedInspectionProfileRuntime {
       this.measurement = Object.freeze({ schemaVersion: 1, measured: true, binding, supportedInputs, nativeProbe: Object.freeze(nativeProbe), nativeAttestation, nativeAttestationDigest, nativeProbeDigest: nativeAttestationDigest, carrierEvidence, providerExecutionNetwork: executionNetworkAttestation ? 'restricted-proxy-measured-no-paid-turn' : 'isolated-measurement-only', providerExecutionNetworkAttestation: executionNetworkAttestation, providerSystemProxyEnabled: nativeProbe.providerSystemProxyEnabled, providerCaTrustDigest: nativeProbe.providerCaTrust?.sha256 || null, contractReady: Boolean(this.contractReadback) })
       return this.measurement
     } finally {
-      await adapter.shutdown({ timeoutMs: 1000 }).catch(() => {})
+      await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {})
       rmSync(isolatedState.directory, { recursive: true, force: true }); rmSync(probeDirectory, { recursive: true, force: true }); try { rmSync(outsideCanary, { force: true }) } catch {}
     }
   }
@@ -356,7 +358,7 @@ export class TypedInspectionProfileRuntime {
     let adapter
     try {
       await egress.start()
-      adapter = this._spawnAdapter({ inputDirectory, engineState, schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
+      adapter = await this._spawnAdapter({ inputDirectory, engineState, schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
       await egress.bindOwner(adapter.child, this.bwrap, this.nativeReadback.schema.snapshotIdentity); await egress.attach(); await this._initializeAndSeal(adapter)
       if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
       this.activeAdapters.set(requestKey, { adapter, egress, engineState, inputDirectory: realpathSync(inputDirectory) }); adapter.once('exit', () => { if (this.activeAdapters.get(requestKey)?.adapter === adapter) this.activeAdapters.delete(requestKey); void egress.dispose() })
@@ -368,6 +370,7 @@ export class TypedInspectionProfileRuntime {
     this.activeAdapters.delete(requestKey); await active.adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await active.egress?.dispose().catch(() => {}); rmSync(active.engineState.directory, { recursive: true, force: true }); return true
   }
   async dispose() {
+    this.disposed = true
     const active = [...this.activeAdapters.values()]; this.activeAdapters.clear()
     await Promise.all(active.map(async item => { await item.adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await item.egress?.dispose().catch(() => {}) }))
     if (this.providerCaTrust?.directory) rmSync(this.providerCaTrust.directory, { recursive: true, force: true })

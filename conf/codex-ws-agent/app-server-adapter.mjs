@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { Worker } from 'node:worker_threads'
+import { createExecutableInspector, fileStamp } from './executable-integrity.mjs'
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
@@ -33,6 +35,8 @@ export const CODEX_APP_SERVER_SCHEMA_CONTRACTS = Object.freeze({
 })
 
 const binaryMeasurementCache = new Map()
+const verifiedBinaryStates = new WeakMap()
+const inspectExecutable = createExecutableInspector({ cacheResults: false })
 const binarySnapshotDirectories = new Set()
 const failTrust = message => { const error = new Error(message); error.code = 'APP_SERVER_BINARY_UNTRUSTED'; error.trustReason = message; return error }
 const trustCause = error => error?.trustReason || (error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? error?.message : error?.code) || 'UNKNOWN'
@@ -85,8 +89,9 @@ const protectedAncestorPolicy = path => {
   return privateAt >= 0 ? 'owner-private-ancestor' : 'non-world-writable-chain'
 }
 const resolveExecutable = configuredPath => {
-  const configured = realpathSync(configuredPath); const bytes = readFileSync(configured)
-  const textPrefix = bytes.subarray(0, Math.min(bytes.length, 8192)).toString('utf8')
+  const configured = realpathSync(configuredPath); const fd = openSync(configured, constants.O_RDONLY)
+  let textPrefix
+  try { const prefix = Buffer.allocUnsafe(8192); const length = readSync(fd, prefix, 0, prefix.length, 0); textPrefix = prefix.subarray(0, length).toString('utf8') } finally { closeSync(fd) }
   const isCodexNodeLauncher = /^#!.*\bnode\b/m.test(textPrefix) && textPrefix.includes('PLATFORM_PACKAGE_BY_TARGET') && textPrefix.includes('@openai/codex-')
   if (!isCodexNodeLauncher) return { configured, executable: configured, launcher: null }
   const target = targetPlatform(); if (!target) throw failTrust('CODEX_APP_SERVER_PLATFORM_UNSUPPORTED')
@@ -247,16 +252,32 @@ export function cleanupCodexAppServerSnapshots() {
   binaryMeasurementCache.clear()
 }
 
+const binaryIntegrityState = (profile, measurement) => {
+  const paths = new Set([realpathSync(profile.codexBin), measurement.executableIdentity.realpath, measurement.snapshotPath])
+  const visit = path => {
+    if (!existsSync(path)) return
+    paths.add(path); const stat = lstatSync(path)
+    if (stat.isDirectory() && !stat.isSymbolicLink()) for (const name of readdirSync(path).sort()) visit(resolve(path, name))
+  }
+  visit(executableResources(measurement.executableIdentity.realpath)); visit(executableResources(measurement.snapshotPath))
+  const contentPaths = new Set(paths)
+  for (const path of [...paths]) { let parent = dirname(path); while (true) { paths.add(parent); const next = dirname(parent); if (next === parent) break; parent = next } }
+  return [...paths].sort().map(path => { const stat = lstatSync(path, { bigint: true }); return [path, contentPaths.has(path) ? fileStamp(stat) : ['dev', 'ino', 'mode', 'uid', 'gid'].map(key => String(stat[key])).join(':')] })
+}
+export const binaryVerificationState = measurement => verifiedBinaryStates.get(measurement)
+const sameVerificationState = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+
 export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
   try {
     if (!measurement?.measured || !id(measurement.snapshotPath) || process.platform !== 'linux') throw failTrust('CODEX_APP_SERVER_MEASUREMENT_REQUIRED')
+    const before = binaryIntegrityState(profile, measurement)
     const resolved = resolveExecutable(profile.codexBin)
     const configuredIdentity = statIdentity(resolved.configured)
     configuredIdentity.sha256 = hashFile(resolved.configured)
     if (!sameIdentity(configuredIdentity, measurement.configuredIdentity) || configuredIdentity.sha256 !== measurement.configuredIdentity.sha256) throw failTrust('CODEX_APP_SERVER_CONFIGURED_EXECUTABLE_DRIFT')
     if (resolved.executable !== measurement.executableIdentity.realpath) throw failTrust('CODEX_APP_SERVER_EXECUTABLE_TARGET_DRIFT')
     const executableIdentity = statIdentity(resolved.executable)
-    executableIdentity.sha256 = hashFile(resolved.executable)
+    executableIdentity.sha256 = resolved.executable === resolved.configured ? configuredIdentity.sha256 : hashFile(resolved.executable)
     if (!sameIdentity(executableIdentity, measurement.executableIdentity) || executableIdentity.sha256 !== measurement.executableIdentity.sha256) throw failTrust('CODEX_APP_SERVER_EXECUTABLE_IDENTITY_DRIFT')
     const executableResourceManifest = resourceManifest(executableResources(resolved.executable)); const executableResourceTelemetry = resourceTelemetry(executableResourceManifest)
     if (manifestDigest(executableResourceManifest) !== measurement.resourceDigest || executableResourceTelemetry.fileCount !== measurement.resourceFileCount || executableResourceTelemetry.totalBytes !== measurement.resourceBytes) throw failTrust('CODEX_APP_SERVER_RESOURCE_DRIFT')
@@ -270,6 +291,8 @@ export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
     if (snapshotResources.some(entry => ![0o400, 0o500].includes(entry.mode))) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_RESOURCE_MODE_UNSAFE')
     const snapshotResourceTelemetry = resourceTelemetry(snapshotResources)
     if (snapshotIdentity.mode !== 0o500 || snapshotIdentity.sha256 !== executableIdentity.sha256 || manifestDigest(snapshotResources) !== measurement.resourceDigest || snapshotResourceTelemetry.fileCount !== measurement.resourceFileCount || snapshotResourceTelemetry.totalBytes !== measurement.resourceBytes) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_CONTENT_DRIFT')
+    if (!sameVerificationState(before, binaryIntegrityState(profile, measurement))) throw failTrust('CODEX_APP_SERVER_IDENTITY_CHANGED_DURING_RECHECK')
+    verifiedBinaryStates.set(measurement, Object.freeze(before.map(row => Object.freeze(row))))
     return true
   } catch (error) {
     if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') throw error
@@ -288,11 +311,12 @@ const processTree = (rootPid, maxDepth = 4) => {
   }
   return result
 }
-const matchingSpawnedExecutable = (pid, measurement) => {
+const matchingSpawnedExecutable = async (pid, measurement) => {
   try {
     const path = `/proc/${pid}/exe`; const stat = statSync(path, { bigint: true })
     if (String(stat.dev) !== measurement.snapshotIdentity.dev || String(stat.ino) !== measurement.snapshotIdentity.ino || String(stat.size) !== measurement.snapshotIdentity.size) return null
-    const digest = hashFile(path); if (digest !== measurement.snapshotIdentity.sha256) return null
+    const inspected = await inspectExecutable(path); const digest = inspected.sha256.slice('sha256:'.length)
+    if (['dev', 'ino', 'size'].some(key => inspected[key] !== measurement.snapshotIdentity[key]) || fileStamp(statSync(path, { bigint: true })) !== inspected.stamp || digest !== measurement.snapshotIdentity.sha256) return null
     return { measured: true, pid, dev: measurement.snapshotIdentity.dev, ino: measurement.snapshotIdentity.ino, size: measurement.snapshotIdentity.size, sha256: digest }
   } catch { return null }
 }
@@ -305,8 +329,8 @@ export async function verifySpawnedAppServerExecutableTree(child, measurement, {
   if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || !measurement?.snapshotIdentity || !id(measurement.snapshotPath)) return reject('CODEX_APP_SERVER_CHILD_IDENTITY_REQUIRED')
   while (child.exitCode === null && !signal?.aborted) {
     for (const item of processTree(child.pid, maxDepth)) {
-      const matched = matchingSpawnedExecutable(item.pid, measurement)
-      if (matched) return { ...matched, wrapperPid: child.pid, depth: item.depth }
+      const matched = await matchingSpawnedExecutable(item.pid, measurement)
+      if (matched && child.exitCode === null && !signal?.aborted) return { ...matched, wrapperPid: child.pid, depth: item.depth }
     }
     await new Promise(resolveWait => setTimeout(resolveWait, 10))
   }
@@ -329,7 +353,11 @@ export async function verifySpawnedAppServerExecutable(child, measurement, { tim
   }
   if (!matched) return reject('CODEX_APP_SERVER_CHILD_EXECUTABLE_MISMATCH')
   let digest
-  try { digest = hashFile(procExe) } catch (error) { return reject(`CODEX_APP_SERVER_CHILD_EXECUTABLE_PROBE_FAILED:${error.code || error.message}`) }
+  try {
+    const inspected = await inspectExecutable(procExe)
+    if (child.exitCode !== null || ['dev', 'ino', 'size'].some(key => inspected[key] !== measurement.snapshotIdentity[key]) || fileStamp(statSync(procExe, { bigint: true })) !== inspected.stamp) return reject('CODEX_APP_SERVER_CHILD_EXECUTABLE_MISMATCH')
+    digest = inspected.sha256.slice('sha256:'.length)
+  } catch (error) { return reject(`CODEX_APP_SERVER_CHILD_EXECUTABLE_PROBE_FAILED:${error.code || error.message}`) }
   if (digest !== measurement.snapshotIdentity.sha256) return reject('CODEX_APP_SERVER_CHILD_EXECUTABLE_HASH_MISMATCH')
   return { measured: true, pid: child.pid, dev: measurement.snapshotIdentity.dev, ino: measurement.snapshotIdentity.ino, size: measurement.snapshotIdentity.size, sha256: digest }
 }
@@ -341,8 +369,18 @@ export function measureCodexAppServerBinary(profile, {
   let resolved; let configuredIdentity; let executableIdentity; let sourceFd
   try {
     resolved = resolveExecutable(profile.codexBin)
+    // A previously verified immutable measurement needs no new full-file read
+    // while the source, snapshot, resources and protected ancestors are exact.
+    // ctime is included in the verification state, so restoring size/mtime is not
+    // sufficient to reuse trust. Keep the original content-bound cache key/wire.
+    const configuredNow = statIdentity(resolved.configured); const executableNow = statIdentity(resolved.executable)
+    for (const candidate of cache.values()) {
+      if (candidate.cliVersion !== expected.cliVersion || candidate.bundleSha256 !== expected.bundleSha256 || candidate.schemaContractId !== (expected.contractId || null)
+          || !sameIdentity(configuredNow, candidate.configuredIdentity) || !sameIdentity(executableNow, candidate.executableIdentity) || !verifiedBinaryStates.has(candidate)) continue
+      try { if (sameVerificationState(verifiedBinaryStates.get(candidate), binaryIntegrityState(profile, candidate))) return candidate } catch {}
+    }
     configuredIdentity = statIdentity(resolved.configured); configuredIdentity.sha256 = hashFile(resolved.configured)
-    executableIdentity = statIdentity(resolved.executable); executableIdentity.sha256 = hashFile(resolved.executable)
+    executableIdentity = statIdentity(resolved.executable); executableIdentity.sha256 = resolved.executable === resolved.configured ? configuredIdentity.sha256 : hashFile(resolved.executable)
     configuredIdentity.ancestorPolicy = protectedAncestorPolicy(resolved.configured)
     executableIdentity.ancestorPolicy = protectedAncestorPolicy(resolved.executable)
   } catch (error) { if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') throw error; throw failTrust(`CODEX_APP_SERVER_BINARY_MEASUREMENT_FAILED:${error.code || error.message}`) }
@@ -389,9 +427,52 @@ export function measureCodexAppServerBinary(profile, {
   } finally { rmSync(generated, { recursive: true, force: true }) }
 }
 
+let integrityWorker = null; let integritySequence = 0
+const integrityPending = new Map()
+const runBinaryIntegrity = (operation, profile, measurement = null, environment = undefined, expected = undefined) => new Promise((resolveJob, reject) => {
+  if (!integrityWorker) {
+    const worker = new Worker(new URL('./app-server-integrity-worker.mjs', import.meta.url), { execArgv: [] }); integrityWorker = worker
+    const failed = error => {
+      if (integrityWorker !== worker) return
+      integrityWorker = null
+      for (const job of integrityPending.values()) job.reject(error)
+      integrityPending.clear()
+    }
+    worker.on('error', failed); worker.on('exit', code => failed(failTrust(`CODEX_APP_SERVER_INTEGRITY_WORKER_EXIT:${code}`)))
+    worker.on('message', reply => {
+      const job = integrityPending.get(reply.id); if (!job) return
+      integrityPending.delete(reply.id)
+      if (!integrityPending.size) worker.unref()
+      if (reply.error) { job.reject(Object.assign(new Error(reply.error.message), reply.error)); return }
+      const result = reply.result; const snapshotPath = result.snapshotPath; delete result.snapshotPath
+      Object.defineProperty(result, 'snapshotPath', { value: snapshotPath, enumerable: false })
+      for (const key of ['configuredIdentity', 'executableIdentity', 'snapshotIdentity']) Object.freeze(result[key])
+      Object.freeze(result); verifiedBinaryStates.set(result, Object.freeze(reply.verification.map(row => Object.freeze(row)))); job.resolve(result)
+    })
+  }
+  const id = ++integritySequence; integrityPending.set(id, { resolve: resolveJob, reject }); integrityWorker.ref()
+  try { integrityWorker.postMessage({ id, operation, profile: { codexBin: profile.codexBin, codexHome: profile.codexHome, appServerSchemaContractId: profile.appServerSchemaContractId }, measurement: measurement ? { ...measurement, snapshotPath: measurement.snapshotPath } : null, environment, expected }) }
+  catch (error) { integrityPending.delete(id); if (!integrityPending.size) integrityWorker.unref(); reject(error) }
+})
+export const measureCodexAppServerBinaryAsync = (profile, { environment, expected } = {}) => runBinaryIntegrity('measure', profile, null, environment, expected)
+
 export class AppServerAdapter extends EventEmitter {
+  static async spawnAsync(profile, options = {}) {
+    let measurement = options.schemaMeasurement
+    const current = () => { try { return sameVerificationState(verifiedBinaryStates.get(measurement), binaryIntegrityState(profile, measurement)) } catch { return false } }
+    // Reuse only this process's successful measurement while metadata is exact.
+    // No TTL/path-only trust and no async gap between final stat guard and spawn.
+    if (!measurement?.measured) throw failTrust('CODEX_APP_SERVER_MEASUREMENT_REQUIRED')
+    if (!verifiedBinaryStates.has(measurement) || !current()) measurement = await runBinaryIntegrity('verify', profile, measurement)
+    if (!current()) throw failTrust('CODEX_APP_SERVER_IDENTITY_CHANGED_BEFORE_SPAWN')
+    if (options.shouldSpawn && !options.shouldSpawn()) throw Object.assign(new Error('APP_SERVER_START_CANCELLED'), { code: 'APP_SERVER_START_CANCELLED' })
+    return AppServerAdapter.#spawnVerified(profile, { ...options, schemaMeasurement: measurement })
+  }
   static spawn(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000, schemaMeasurement = null, spawnedExecutableVerifier = verifySpawnedAppServerExecutable } = {}) {
     verifyCodexAppServerBinaryIdentity(profile, schemaMeasurement)
+    return AppServerAdapter.#spawnVerified(profile, { spawnFn, cwd, requestTimeoutMs, schemaMeasurement, spawnedExecutableVerifier })
+  }
+  static #spawnVerified(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000, schemaMeasurement, spawnedExecutableVerifier = verifySpawnedAppServerExecutable }) {
     const child = spawnFn(schemaMeasurement.snapshotPath, ['app-server'], {
       cwd, shell: false, stdio: ['pipe', 'pipe', 'pipe'],
       env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome, NO_PROXY: '*', no_proxy: '*' }

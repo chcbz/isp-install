@@ -50,7 +50,8 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false; let registeredAt = null; let serviceReadyAt = null; let replay = null;
       const durable = () => executor.durableStateHealthy() === true;
       const usable = () => executor.readyCommandTypes().length > 0 || executor.chatReady();
-      const ready = () => admitted && channelConfirmed && declaredHealthy && durable() && usable() && socket?.readyState === 1;
+      const readyWithHealth = healthy => admitted && channelConfirmed && declaredHealthy && healthy && usable() && socket?.readyState === 1;
+      const ready = () => admitted && channelConfirmed && declaredHealthy && readyWithHealth(durable());
       const send = envelope => {
         if (!client.currentSession || socket?.readyState !== 1 || envelope.messageType === 'command.ack') return false;
         const session = client.currentSession;
@@ -216,7 +217,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         heartbeat: async () => {
           if (!client.currentSession || socket?.readyState !== 1) return;
           const healthy = durable();
-          if (send(module.buildProtocolEnvelope('agent.presence', { messageId: randomUUID(), status: ready() ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId))) lastPresenceSentAt = Date.now();
+          if (send(module.buildProtocolEnvelope('agent.presence', { messageId: randomUUID(), status: readyWithHealth(healthy) ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId))) lastPresenceSentAt = Date.now();
           // Health revocation never removes authorization to report known outcomes.
           if (!healthy) { declaredHealthy = false; executor.suspendAdmission(); }
           else if (!declaredHealthy) register();
@@ -231,10 +232,10 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           return closed;
         },
         cancelActivation: () => { admitted = false; abort?.abort(); socket?.close(); rejectActivated?.(adapterError('RUNTIME_CHANNEL_STOPPED')); },
-        health: () => ({ subjectKey: options.subjectKey, agentId: options.agent.manifest.canonicalAgentId,
+        health: () => { const isReady = ready(); return ({ subjectKey: options.subjectKey, agentId: options.agent.manifest.canonicalAgentId,
           connected: !!client.currentSession && socket?.readyState === 1, registered: channelConfirmed,
-          ready: ready(), channelState: ready() ? 'ready' : channelState,
-          lastPresenceSentAt, lastPresenceAckAt, lastFailure }),
+          ready: isReady, channelState: isReady ? 'ready' : channelState,
+          lastPresenceSentAt, lastPresenceAckAt, lastFailure }); },
         sessionGeneration: () => client.lastGeneration,
         evidence: () => {
           if (!ready() || !registeredAt || !serviceReadyAt || !client.currentSession) return null;
@@ -264,6 +265,8 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "native-json.mjs",
   "native-poll-diagnostic.mjs",
   "app-server-adapter.mjs",
+  "app-server-integrity-worker.mjs",
+  "executable-integrity.mjs",
   "chat-runtime.mjs",
   "codex-home.example.toml",
   "contracts/api-hosted-wire-v1.json",

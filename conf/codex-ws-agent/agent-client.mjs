@@ -81,7 +81,7 @@ import { emptyManagedChatScopes, loadManagedChatScopes, applyManagedChatScope } 
 import { canResumePreEngineInspection, buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import {
   AppServerAdapter, cleanupCodexAppServerSnapshots, DEFAULT_CODEX_APP_SERVER_SCHEMA_CONTRACT_ID,
-  measureCodexAppServerBinary, resolveCodexAppServerSchemaContract
+  measureCodexAppServerBinary, measureCodexAppServerBinaryAsync, resolveCodexAppServerSchemaContract
 } from './app-server-adapter.mjs'
 import { buildActionOutcomeContract, resolveActionChatRequest, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import {
@@ -6311,11 +6311,9 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       const delay = Math.max(0, state.appServerNotBefore - Date.now())
       state.appServerPromise = new Promise(resolvePromise => setTimeout(resolvePromise, delay)).then(async () => {
         if (shuttingDown || !isCurrent()) return null
-        const schemaMeasurement = measureCodexAppServerBinary(profile, profile.runtimeIdentity ? {
-          spawnSyncFn: (binary, args, options) => spawnSync(binary, args, { ...options, env: buildRuntimeExecutionEnvironment(profile) })
-        } : {})
+        const schemaMeasurement = await measureCodexAppServerBinaryAsync(profile, profile.runtimeIdentity ? { environment: buildRuntimeExecutionEnvironment(profile) } : {})
         if (!isCurrent()) return null
-        const adapter = AppServerAdapter.spawn(profile, { cwd: chatWorkdir, schemaMeasurement,
+        const adapter = await AppServerAdapter.spawnAsync(profile, { cwd: chatWorkdir, schemaMeasurement, shouldSpawn: () => !shuttingDown && isCurrent(),
           ...(profile.runtimeIdentity ? { spawnFn: (binary, args, options) => spawn(binary, args, { ...options, env: { ...buildRuntimeExecutionEnvironment(profile), NO_PROXY: '*', no_proxy: '*' } }) } : {}) })
         state.appServerStartingAdapter = adapter
         try { await adapter.verifySpawnedExecutable(); await adapter.initialize() } catch (error) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); throw error }
@@ -6491,6 +6489,7 @@ export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) =>
   if (state.appServerRestartTimer) clearTimeout(state.appServerRestartTimer)
   state.appServerRestartTimer = null
   state.appServerNotBefore = 0
+  const pendingStart = state.appServerPromise
   const adapter = state.appServerAdapter
   const startingAdapter = state.appServerStartingAdapter
   const exitListener = state.appServerExitListener
@@ -6500,6 +6499,8 @@ export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) =>
   state.appServerStartingAdapter = null
   state.appServerPromise = null
   for (const candidate of new Set([adapter, startingAdapter].filter(Boolean))) await candidate.shutdown({ timeoutMs })
+  // Async integrity work must settle before releasing this subject lifecycle.
+  await pendingStart?.catch(() => {})
 }
 
 // Wait for actual owned-child close, not ChildProcess.killed (signal-sent).

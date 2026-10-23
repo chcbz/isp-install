@@ -203,13 +203,13 @@ test('real bwrap profile performs a non-paid native app-server handshake with pr
       manifestDigest: `sha256:${suffix.repeat(64)}`, requestId: `request-${suffix}`, turnId: `turn-${suffix}`, inputPolicyDigest: `sha256:${suffix.repeat(64)}` })
     const stateA = runtime._prepareRequestState(binding('a')); const stateACanary = resolve(stateA.directory, 'codex-home', 'request-a-sensitive-history')
     writeFileSync(stateACanary, 'request-a-sensitive-history\n', { mode: 0o600 })
-    const adapterA = runtime._spawnAdapter({ inputDirectory: requestAInputs, engineState: stateA, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'isolated' })
+    const adapterA = await runtime._spawnAdapter({ inputDirectory: requestAInputs, engineState: stateA, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'isolated' })
     try {
       const readbackA = await runtime._initializeAndSeal(adapterA); const rootA = `/proc/${readbackA.processExecutable.pid}/root`
       assert.equal(readFileSync(resolve(rootA, 'state', 'codex-home', 'request-a-sensitive-history'), 'utf8'), 'request-a-sensitive-history\n')
       assert.equal(existsSync(resolve(rootA, 'state', 'codex-home', 'auth.json')), false)
     } finally { await adapterA.shutdown({ timeoutMs: 1000 }).catch(() => {}) }
-    const stateB = runtime._prepareRequestState(binding('b')); const adapterB = runtime._spawnAdapter({ inputDirectory: requestBInputs, engineState: stateB, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'isolated' })
+    const stateB = runtime._prepareRequestState(binding('b')); const adapterB = await runtime._spawnAdapter({ inputDirectory: requestBInputs, engineState: stateB, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'isolated' })
     try {
       const readbackB = await runtime._initializeAndSeal(adapterB); const rootB = `/proc/${readbackB.processExecutable.pid}/root`
       assert.equal(existsSync(stateACanary), true)
@@ -222,7 +222,7 @@ test('real bwrap profile performs a non-paid native app-server handshake with pr
     const allowedDirectory = resolve(inputs, 'allowed-connect-probe'); mkdirSync(allowedDirectory, { mode: 0o700 }); chmodSync(allowedDirectory, 0o700)
     const egress = new RestrictedProviderEgress({ providerBaseUrl: `https://127.0.0.1:${target.address().port}`, networkConnectTimeoutMs: profile.typedInspectionNetworkConnectTimeoutMs }); await egress.start()
     const allowedState = runtime._prepareEphemeralState('allowed-connect')
-    const allowedAdapter = runtime._spawnAdapter({ inputDirectory: allowedDirectory, engineState: allowedState, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
+    const allowedAdapter = await runtime._spawnAdapter({ inputDirectory: allowedDirectory, engineState: allowedState, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
     try { await egress.bindOwner(allowedAdapter.child, runtime.bwrap, runtime.nativeReadback.schema.snapshotIdentity); await egress.attach(); await runtime._initializeAndSeal(allowedAdapter); const allowed = await egress.measureAllowedConnect(); assert.equal(allowed.connectEstablished, true) }
     finally { await allowedAdapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose(); rmSync(allowedState.directory, { recursive: true, force: true }); await new Promise(resolveClose => target.close(() => resolveClose())) }
   } finally { await runtime.dispose(); await secondRuntime.dispose(); rmSync(root, { recursive: true, force: true }) }

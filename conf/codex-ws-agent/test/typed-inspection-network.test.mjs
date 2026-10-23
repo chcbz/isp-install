@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { buildProviderTlsProbe, isolatedSlirpCommand, RestrictedProviderEgress, restrictedProviderNetworkPolicy, verifyRestrictedNftReadback } from '../typed-inspection-network.mjs'
+import { buildProviderTlsProbe, buildRestrictedNetworkProbe, isolatedSlirpCommand, RestrictedProviderEgress, restrictedProviderNetworkPolicy, verifyRestrictedNftReadback } from '../typed-inspection-network.mjs'
 
 const hostNs = Object.freeze({ dev: '1', ino: '10', link: 'net:[10]' })
 const privateNs = Object.freeze({ dev: '1', ino: '20', link: 'net:[20]' })
@@ -165,4 +165,34 @@ test('namespace command drains stdout and stderr through close after process exi
       status: 0, signal: null, stdout: 'complete nft readback', stderr: 'complete local diagnostic'
     })
   } finally { await egress.dispose() }
+})
+
+test('owner PID drift while async executable measurement yields fails before namespace command', async () => {
+  const processInspector = inspector(); const egress = egressFor(processInspector)
+  await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  const executable = processInspector.executable
+  processInspector.executable = async pid => {
+    if (pid === 201) { await new Promise(resolve => setImmediate(resolve)); processInspector.stats.set(200, { ppid: 100, startticks: 'reused' }) }
+    return executable(pid)
+  }
+  try { await assert.rejects(egress._nsenter(201, ['must-not-run']), error => error.code === 'TYPED_INSPECTION_EGRESS_OWNER_DRIFT') }
+  finally { await egress.dispose() }
+})
+
+test('cancellation during async owner check never launches namespace command', async () => {
+  const processInspector = inspector(); const egress = egressFor(processInspector); const controller = new AbortController()
+  await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  const executable = processInspector.executable
+  processInspector.executable = async pid => { await new Promise(resolve => setImmediate(resolve)); controller.abort(); return executable(pid) }
+  try { await assert.rejects(egress._nsenter(201, ['must-not-run'], { signal: controller.signal }), error => error.code === 'TYPED_INSPECTION_EGRESS_CANCELLED') }
+  finally { await egress.dispose() }
+})
+
+
+test('negative probe records socket failure phase and accumulates a fragmented HTTP status line', () => {
+  const probe = buildRestrictedNetworkProbe({ timeoutSeconds: 15, proxyPort: 43210, canaryPort: 43211 })
+  assert.match(probe, /phase=recv error=/)
+  assert.match(probe, /while True:/)
+  const parsed = spawnSync('/usr/bin/python3', ['-c', 'import ast,sys; ast.parse(sys.stdin.read())'], { input: probe, encoding: 'utf8' })
+  assert.equal(parsed.status, 0, parsed.stderr)
 })

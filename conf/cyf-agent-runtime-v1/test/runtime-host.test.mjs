@@ -497,7 +497,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
           },
           matchesSkillInstallResult: envelope => state.skillInstallManager?.matchesDurableResultEnvelope(envelope) === true,
           matchesSkillInstallReceipt: receipt => state.skillInstallManager?.matchesDurableResultReceipt(receipt) === true,
-          durableStateHealthy: () => state.healthy, readyCommandTypes: () => state.types, chatReady: () => chatReady,
+          durableStateHealthy: () => { state.healthChecks = (state.healthChecks || 0) + 1; return state.healthy; }, readyCommandTypes: () => state.types, chatReady: () => chatReady,
           registrationPayload: () => ({ runtimeCapabilities: { profiles: { EXECUTE: { available: false } } } }),
           acceptFrame: async frame => { state.accepted.push(frame); if (normalize && !(frame.type === 'agent_message_saved' && !Object.hasOwn(frame, 'messageType'))) state.normalized.push(normalize(frame)); }, resume: async () => { state.resumed++; },
           disconnected: () => { state.paused = true; }, suspendAdmission: () => { state.paused = true; },
@@ -1547,4 +1547,15 @@ test('host health snapshot is private, current-process and observational only', 
   assert.equal(data.pid, process.pid); assert.equal(data.agents[0].ready, false);
   assert.equal((await lstat(file)).mode & 0o777, 0o600);
   assert.equal(data.heartbeatIntervalMs, 30000);
+});
+
+
+test('one health snapshot performs one durable check and never reuses it across calls', async t => {
+  const c = await channelFixture(t); await c.executors[0].activate(); await c.tick();
+  const state = c.states()[0]; const before = state.healthChecks;
+  assert.equal(c.executors[0].health().ready, true);
+  assert.equal(state.healthChecks - before, 1);
+  state.healthy = false;
+  const health = c.executors[0].health(); assert.equal(health.ready, false);
+  assert.notEqual(health.channelState, 'ready'); assert.equal(state.healthChecks - before, 2);
 });
