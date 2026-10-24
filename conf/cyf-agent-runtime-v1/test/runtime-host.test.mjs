@@ -1565,9 +1565,12 @@ test('SM-C1 real host first-install closes authenticated PREPARE ACTIVATE capabi
       queueMicrotask(() => { this.readyState = 1; this.emit('open'); }); }
     send(bytes) {
       const raw = JSON.parse(bytes), frame = fromAgentWire(bytes); sent.push({ raw, bytes, socket: this });
-      if (frame.messageType === 'agent.register') queueMicrotask(() => this.receive(agentMessageFixture({ ...registrationReceipt(frame), runtimeAuth: {
+      if (frame.messageType === 'agent.register') {
+        assert.ok(frame.readyCommandTypes.every(type => !['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE'].includes(type)), 'task readiness excludes taskless SM-C1 even on management-only hosts');
+        queueMicrotask(() => this.receive(agentMessageFixture({ ...registrationReceipt(frame), runtimeAuth: {
         scheme: 'native-runtime-v1', tenantId: frame.tenantId, clientId: frame.clientId, ownerJiacn: 'fixture-owner', agentId: frame.agentId,
         installationId: frame.installationId, hostId: frame.hostId, runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration } })));
+      }
     }
     receive(raw) { this.emit('message', Buffer.from(JSON.stringify(raw))); }
     close(code = 1000) { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.emit('close', code)); }

@@ -6665,6 +6665,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         registrationPayload: () => buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
           true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry),
         readyCommandTypes: () => runtimeReadyCommandTypes(entry.state),
+        skillManagementReady: () => entry.state?.skillInstallManager.enabled === true,
         chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
         acceptFrame: async frame => {
           const state = entry.state

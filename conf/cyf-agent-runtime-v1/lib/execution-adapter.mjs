@@ -50,7 +50,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
       let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false; let registeredAt = null; let serviceReadyAt = null; let replay = null;
       const durable = () => executor.durableStateHealthy() === true;
-      const usable = () => executor.readyCommandTypes().length > 0 || executor.chatReady();
+      const usable = () => executor.readyCommandTypes().length > 0 || executor.chatReady() || executor.skillManagementReady?.() === true;
       const readyWithHealth = healthy => admitted && channelConfirmed && declaredHealthy && healthy && usable() && socket?.readyState === 1;
       const ready = () => admitted && channelConfirmed && declaredHealthy && readyWithHealth(durable());
       const send = envelope => {
