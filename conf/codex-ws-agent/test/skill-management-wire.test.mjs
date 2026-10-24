@@ -18,6 +18,12 @@ test('SM-C1 fixtures are original bytes at locked SHA; all shared schema example
     if (c.valid) validateManagement(c.definition, c.value)
     else assert.throws(() => validateManagement(c.definition, c.value), undefined, c.name)
   }
+  const position = { ...examples.cases.find(c => c.name === 'accepted-offline-install').value.data,
+    price: null, orderId: null, fundingStatus: 'NONE',
+    authorizationSource: { type: 'POSITION', grantId: 'grant_1', grantRevision: '1', bindingId: '1' } }
+  validateManagement('SkillChange', position)
+  delete position.authorizationSource
+  assert.throws(() => validateManagement('SkillChange', position))
   for (const v of examples.digestVectors) {
     assert.equal(managementCanonicalJson(v.value), v.canonicalUtf8)
     assert.equal(managementDigest(v.domain, v.value), v.sha256)

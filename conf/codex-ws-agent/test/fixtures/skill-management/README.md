@@ -5,11 +5,11 @@ Source baseline: `cbc1050825a40378313f283e9f25dc46d44c1ea4`, tree
 `4fa8a81432bc9bc8d16d1fc12ab3c065f8d1979a`. The delivery commit identifies the
 implementation candidate; these are not deployment records.
 
-## Frozen bytes (do not edit independently)
+## Original snapshot and current coordinated schema overlay
 
 Source root: `/home/isp/wsps/cyf/specs/juyiting-skill-execution/`.
-The original `evidence/management-contract-20261023/contract-lock.json` is copied
-here unchanged. `skill-management-wire.test.mjs` verifies each source SHA and
+The original `evidence/management-contract-20261023/contract-lock.json` is the historical baseline.
+The local lock now records the coordinated 2026-10-25 schema overlay; historical source files are not rewritten. `skill-management-wire.test.mjs` verifies each source SHA and
 consumes all 79 schema examples and six domain-digest vectors.
 
 | Original under source root | Runtime copy | SHA-256 |
