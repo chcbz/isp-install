@@ -372,3 +372,10 @@ The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/
 ### 2026-10-24 全代码扫描续修
 
 CYF公共规范v1.4及 `/home/isp/wsps/cyf/api/docs/interface-catalog/validation-policy.md`覆盖本机engine/host：HTTP/消息外层忽略无害扩展、仅投影已知字段；各议事/资料收件箱不再以服务端单页16条策略拒绝较大批次；技能租约/ACK不按额外字段拒绝，但token/代际/摘要/状态核验保留。Provider输入/文件和归档上限未随此取消，数值必要性待逐项核实。不新建框架、不部署；本轮仍是未发布1.3.2候选的续修。
+
+### 2026-10-24 校验必要性续核（候选源码，非安装记录）
+
+统一规则见 `/home/isp/wsps/cyf/api/docs/interface-catalog/validation-policy.md` §4。
+Chat不再默认以256队列/512绑定、快照字节/层数/键数拒绝合法任务；运维显式配置的inbox/dedupe正整数容量仍在持久ACK前背压，未配置不补默认配额。保留身份、原摘要、锁、UNKNOWN不重放及真实IO错误。
+技能包取消默认16MiB压缩/单文件和256entry门槛；解压仅保留总展开64MiB局部防炸弹预算及路径/链接/真实长度/批准摘要保护，不限制普通资料存储。
+资料快照不承担Images Provider16图限制；Provider专属16图/20,971,520字符URL限制仍位于HTTP适配器，取消图片返回16MiB和通用MIME判定16MiB门槛。具体新旧正反例、源码/Flow/发布状态见同任务handoff；不得把这里的候选说明当线上行为。

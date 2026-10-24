@@ -18,7 +18,6 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
 const MATERIALIZED_FIELDS = ['inputRef', 'relativePath', 'source', 'contentType', 'byteLength', 'sha256'].sort().join(',')
 
-export const CONTROLLED_IMAGE_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 export const CONTROLLED_IMAGE_MAX_EDIT_IMAGE_URL_LENGTH = 20_971_520
 
 export class ControlledImageV3FileError extends Error {
@@ -111,9 +110,8 @@ export const readVerifiedControlledImageV3PngOutput = (runDirectory, relativePat
     const before = fstatSync(descriptor, { bigint: true })
     const uid = effectiveUid()
     if (!before.isFile() || before.nlink !== 1n || before.size < BigInt(PNG_SIGNATURE.length)
-        || before.size > BigInt(CONTROLLED_IMAGE_MAX_OUTPUT_BYTES)
         || (uid !== null && Number(before.uid) !== uid)) {
-      fail('CONTROLLED_IMAGE_RESPONSE_INVALID', 'controlled image output is not one bounded private regular file')
+      fail('CONTROLLED_IMAGE_RESPONSE_INVALID', 'controlled image output is not one private regular file')
     }
     const bytes = readFileSync(descriptor)
     const after = fstatSync(descriptor, { bigint: true })

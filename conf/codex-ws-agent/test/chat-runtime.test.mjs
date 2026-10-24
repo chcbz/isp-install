@@ -10,7 +10,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import {
   buildContextEnvelope, canonicalSha256, validateChatDispatch, buildChatDispatchAck, PersistentChatInbox,
-  ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, MAX_CONTEXT_SNAPSHOT_BYTES, verifyHostedWireContract
+  ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, chatFingerprint, MAX_LONG_DECIMAL, verifyHostedWireContract
 } from '../chat-runtime.mjs'
 import {
   AppServerAdapter, measureCodexAppServerBinary,
@@ -73,15 +73,15 @@ test('API-generated hostedWire golden is byte-exact and accepted as schema v1 ad
   assert.equal(buildChatDispatchAck(profile, message).schemaVersion, 1)
 })
 
-test('raw schema token validation checks top-level only and facts object has strict bounds', () => {
+test('schema and identity checks remain but fact counts and nesting are not gates', () => {
   const wire = apiWire(); wire.contextSnapshot.schemaVersion = '1'; wire.payload.contextSnapshot.schemaVersion = '1'
   assert.doesNotThrow(() => normalizeInboundMessage(JSON.stringify(wire)))
   const facts = {}; for (let index = 0; index < 257; index++) facts[`k${index}`] = index
-  assert.throws(() => validateChatDispatch({ ...wire, contextSnapshot: { ...wire.contextSnapshot, facts } }), /CONTEXT_FACTS_INVALID/)
+  assert.throws(() => validateChatDispatch({ ...wire, contextSnapshot: { ...wire.contextSnapshot, facts } }), /CONTEXT_HASH_MISMATCH/)
   assert.throws(() => validateChatDispatch({ ...wire, conversationGeneration: String(MAX_LONG_DECIMAL + 1n) }), /CHAT_GENERATION_INVALID/)
   assert.doesNotThrow(() => validateChatDispatch({ ...wire, conversationGeneration: String(MAX_LONG_DECIMAL) }))
   const deeplyNested = {}; let cursor = deeplyNested; for (let index = 0; index < 9; index++) cursor = cursor.next = {}
-  assert.throws(() => validateChatDispatch({ ...wire, contextSnapshot: { ...wire.contextSnapshot, facts: deeplyNested } }), /CONTEXT_FACTS_DEPTH_INVALID/)
+  assert.throws(() => validateChatDispatch({ ...wire, contextSnapshot: { ...wire.contextSnapshot, facts: deeplyNested } }), /CONTEXT_HASH_MISMATCH/)
   assert.throws(() => validateChatDispatch({ ...wire, dedupeKey: `${wire.tenantId}:${wire.ownerJiacn}:other-client:${wire.dispatchId}` }), /CHAT_DEDUPE_KEY_INVALID/)
 })
 
@@ -790,7 +790,7 @@ test('automatic Agent continuation preserves original user content and never pro
 })
 
 
-test('full snapshot byte boundary replaces nested byte caps without weakening structure or hashes', () => {
+test('large authoritative snapshots keep their complete content and hashes without arbitrary quotas', () => {
   const original = apiWire()
   const wireWith = facts => {
     const wire = structuredClone(original)
@@ -804,14 +804,14 @@ test('full snapshot byte boundary replaces nested byte caps without weakening st
   assert.ok(Buffer.byteLength(facts.actionContinuation.instruction) > 8192)
   assert.equal(buildContextEnvelope(validateChatDispatch(wire)).authoritative.facts.actionContinuation.instruction,
     facts.actionContinuation.instruction)
-  // Fit the actual serialized snapshot exactly, including JSON syntax and metadata.
-  const empty = wireWith({ padding: '' })
-  const capacity = MAX_CONTEXT_SNAPSHOT_BYTES - Buffer.byteLength(JSON.stringify(empty.contextSnapshot))
-  assert.doesNotThrow(() => validateChatDispatch(wireWith({ padding: 'a'.repeat(capacity) })))
-  assert.throws(() => validateChatDispatch(wireWith({ padding: 'a'.repeat(capacity + 1) })), /CONTEXT_SNAPSHOT_TOO_LARGE_OR_INVALID/)
-  // Count UTF-8 bytes, not JS characters; all enclosing facts still share one bound.
-  assert.throws(() => validateChatDispatch(wireWith({ padding: '鸟'.repeat(capacity / 3 + 1) })), /CONTEXT_SNAPSHOT_TOO_LARGE_OR_INVALID/)
-  assert.throws(() => validateChatDispatch(wireWith({ nested: Array.from({ length: 257 }, () => 1) })), /CONTEXT_FACTS_VALUE_TOO_LARGE/)
+  // The former 256 KiB/256 facts/128-byte keys/depth=8 consumer caps are gone.
+  const nested = {}; let cursor = nested
+  for (let index = 0; index < 40; index++) cursor = cursor.next = {}
+  for (const facts of [{ padding: '鸟'.repeat(100_000) }, { nested },
+    { nested: Array.from({ length: 300 }, (_, i) => i) },
+    Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`${'k'.repeat(160)}${i}`, i]))]) {
+    assert.doesNotThrow(() => buildContextEnvelope(validateChatDispatch(wireWith(facts))))
+  }
   assert.throws(() => validateChatDispatch(wireWith({ nested: { invalid: 1.5 } })), /CONTEXT_FACTS_VALUE_INVALID/)
   const changed = structuredClone(wire); changed.factsManifest.actionContinuation.instruction += '改'
   changed.contextSnapshot.facts = changed.factsManifest
@@ -914,5 +914,24 @@ test('version is optional telemetry and runtime never generates or compares prot
       assert.equal(measured.measured, true); assert.equal(measured.schemaContractId, null); assert.equal(measured.bundleSha256, null)
       assert.deepEqual(calls, [['--version']]); assert.equal(verifyCodexAppServerBinaryIdentity({ codexBin: bin }, measured), true)
     }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+
+test('default scheduler accepts more than the historical 256 queued turns', async () => {
+  const lanes = new FairLaneScheduler()
+  const jobs = Array.from({ length: 300 }, (_, i) => lanes.enqueue('chat', `conversation-${i}`, async () => i, `turn-${i}`))
+  assert.equal((await Promise.all(jobs)).length, 300)
+})
+
+test('thread binding load and put preserve all historical entries above 512', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'cyf-binding-compat-'))
+  try {
+    const store = new ThreadBindingStore({ rootDir: root, profile }).initialize()
+    for (let i = 0; i < 513; i++) store.bindings[`k${i}`] = { state: 'HOT', threadKey: `k${i}`, profileId: profile.profileId, agentId: profile.agentId }
+    store.put('next', { state: 'HOT' })
+    const restored = new ThreadBindingStore({ rootDir: root, profile }).initialize()
+    assert.equal(Object.keys(restored.bindings).length, 514)
+    assert.equal(restored.get('next').state, 'HOT')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

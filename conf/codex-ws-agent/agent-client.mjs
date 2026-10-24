@@ -607,13 +607,13 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     typedInspectionCarrierEvidenceDigest: String(profile.typedInspectionCarrierEvidenceDigest ?? fallback.typedInspectionCarrierEvidenceDigest ?? '').trim(),
     typedInspectionBwrapBin: String(profile.typedInspectionBwrapBin ?? fallback.typedInspectionBwrapBin ?? '/usr/bin/bwrap').trim(),
     typedInspectionSupportedInputs: parseJsonArray(profile.typedInspectionSupportedInputs ?? fallback.typedInspectionSupportedInputs, 'typedInspectionSupportedInputs'),
-    chatInboxMaxFiles: parsePositiveInteger(profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles, 1024),
-    chatInboxMaxBytes: parsePositiveInteger(profile.chatInboxMaxBytes ?? fallback.chatInboxMaxBytes, 64 * 1024 * 1024),
+    chatInboxMaxFiles: profile.chatInboxMaxFiles ?? fallback.chatInboxMaxFiles,
+    chatInboxMaxBytes: profile.chatInboxMaxBytes ?? fallback.chatInboxMaxBytes,
     chatArchiveMaxFiles: parsePositiveInteger(profile.chatArchiveMaxFiles ?? fallback.chatArchiveMaxFiles, 256),
     chatArchiveMaxBytes: parsePositiveInteger(profile.chatArchiveMaxBytes ?? fallback.chatArchiveMaxBytes, 16 * 1024 * 1024),
     chatArchiveRetentionMs: parsePositiveInteger(profile.chatArchiveRetentionMs ?? fallback.chatArchiveRetentionMs, 7 * 24 * 60 * 60 * 1000),
-    chatDedupeMaxEntries: parsePositiveInteger(profile.chatDedupeMaxEntries ?? fallback.chatDedupeMaxEntries, 100000),
-    chatDedupeMaxBytes: parsePositiveInteger(profile.chatDedupeMaxBytes ?? fallback.chatDedupeMaxBytes, 128 * 1024 * 1024),
+    chatDedupeMaxEntries: profile.chatDedupeMaxEntries ?? fallback.chatDedupeMaxEntries,
+    chatDedupeMaxBytes: profile.chatDedupeMaxBytes ?? fallback.chatDedupeMaxBytes,
     chatDedupeRetentionMs: parsePositiveInteger(profile.chatDedupeRetentionMs ?? fallback.chatDedupeRetentionMs, 30 * 24 * 60 * 60 * 1000),
     abilities: parseStringList(profile.abilities ?? fallback.abilities),
     skills: parseStringList(profile.skills ?? fallback.skills),
@@ -4935,21 +4935,21 @@ export const profileConfigurationErrors = profile => {
   if (profile.typedInspectionCarrierEvidenceDigest && !/^sha256:[a-f0-9]{64}$/.test(profile.typedInspectionCarrierEvidenceDigest)) errors.push('typedInspectionCarrierEvidenceDigest must be an exact sha256 digest')
   if (profile.typedInspectionCarrierEvidencePath && !(profile.chatModel || profile.codexModel)) errors.push('typedInspectionCarrierEvidencePath requires an explicit chatModel or codexModel')
   if (!profile.typedInspectionBwrapBin) errors.push('typedInspectionBwrapBin is required')
-  const chatInboxMaxFiles = profile.chatInboxMaxFiles ?? 1024
-  const chatInboxMaxBytes = profile.chatInboxMaxBytes ?? 64 * 1024 * 1024
-  if (!Number.isSafeInteger(chatInboxMaxFiles) || chatInboxMaxFiles < 1 || chatInboxMaxFiles > 100000) errors.push('chatInboxMaxFiles must be an integer from 1 to 100000')
-  if (!Number.isSafeInteger(chatInboxMaxBytes) || chatInboxMaxBytes < 4096 || chatInboxMaxBytes > 10737418240) errors.push('chatInboxMaxBytes must be an integer from 4096 to 10737418240')
+  const chatInboxMaxFiles = profile.chatInboxMaxFiles
+  const chatInboxMaxBytes = profile.chatInboxMaxBytes
+  if (chatInboxMaxFiles != null && (!Number.isSafeInteger(chatInboxMaxFiles) || chatInboxMaxFiles <= 0)) errors.push('chatInboxMaxFiles must be a positive safe integer when configured')
+  if (chatInboxMaxBytes != null && (!Number.isSafeInteger(chatInboxMaxBytes) || chatInboxMaxBytes <= 0)) errors.push('chatInboxMaxBytes must be a positive safe integer when configured')
   const chatArchiveMaxFiles = profile.chatArchiveMaxFiles ?? 256
   const chatArchiveMaxBytes = profile.chatArchiveMaxBytes ?? 16 * 1024 * 1024
   const chatArchiveRetentionMs = profile.chatArchiveRetentionMs ?? 7 * 24 * 60 * 60 * 1000
   if (!Number.isSafeInteger(chatArchiveMaxFiles) || chatArchiveMaxFiles < 1 || chatArchiveMaxFiles > 100000) errors.push('chatArchiveMaxFiles must be an integer from 1 to 100000')
   if (!Number.isSafeInteger(chatArchiveMaxBytes) || chatArchiveMaxBytes < 4096 || chatArchiveMaxBytes > 10737418240) errors.push('chatArchiveMaxBytes must be an integer from 4096 to 10737418240')
   if (!Number.isSafeInteger(chatArchiveRetentionMs) || chatArchiveRetentionMs < 1000 || chatArchiveRetentionMs > 31536000000) errors.push('chatArchiveRetentionMs must be an integer from 1000 to 31536000000')
-  const chatDedupeMaxEntries = profile.chatDedupeMaxEntries ?? 100000
-  const chatDedupeMaxBytes = profile.chatDedupeMaxBytes ?? 128 * 1024 * 1024
+  const chatDedupeMaxEntries = profile.chatDedupeMaxEntries
+  const chatDedupeMaxBytes = profile.chatDedupeMaxBytes
   const chatDedupeRetentionMs = profile.chatDedupeRetentionMs ?? 30 * 24 * 60 * 60 * 1000
-  if (!Number.isSafeInteger(chatDedupeMaxEntries) || chatDedupeMaxEntries < 1 || chatDedupeMaxEntries > 10000000) errors.push('chatDedupeMaxEntries must be an integer from 1 to 10000000')
-  if (!Number.isSafeInteger(chatDedupeMaxBytes) || chatDedupeMaxBytes < 4096 || chatDedupeMaxBytes > 10737418240) errors.push('chatDedupeMaxBytes must be an integer from 4096 to 10737418240')
+  if (chatDedupeMaxEntries != null && (!Number.isSafeInteger(chatDedupeMaxEntries) || chatDedupeMaxEntries <= 0)) errors.push('chatDedupeMaxEntries must be a positive safe integer when configured')
+  if (chatDedupeMaxBytes != null && (!Number.isSafeInteger(chatDedupeMaxBytes) || chatDedupeMaxBytes <= 0)) errors.push('chatDedupeMaxBytes must be a positive safe integer when configured')
   if (!Number.isSafeInteger(chatDedupeRetentionMs) || chatDedupeRetentionMs < 60000 || chatDedupeRetentionMs > 31536000000) errors.push('chatDedupeRetentionMs must be an integer from 60000 to 31536000000')
   if (!Number.isSafeInteger(profile.codexTimeoutMs) || profile.codexTimeoutMs < 0 || profile.codexTimeoutMs > 2147483647) {
     errors.push('codexTimeoutMs must be an integer from 0 to 2147483647 (0 disables the timeout)')
@@ -6168,7 +6168,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     localAudio: { supportedMimeTypes: ['audio/wav'], toNativeInput: ({ path }) => ({ type: 'localAudio', path }) }
   }
   const hostedWireContract = profile.fastChatEnabled && profile.appServerEnabled ? verifyHostedWireContract() : null
-  const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 256 })
+  const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1 })
   const legacyExecutionGate = new SerialExecutionGate()
   const sendAckFn = envelope => sendRaw(bindChatDispatchAckToSession(envelope, profile), profile)
   const executionReportOutbox = new ExecutionReportOutbox({

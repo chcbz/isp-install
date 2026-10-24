@@ -48,7 +48,7 @@ export const parseControlledImageV3ConversationCommand = value => {
   if (!object(value) || Object.keys(value).sort().join(',') !== COMMAND_FIELDS || value.schemaVersion !== 3
       || !['executionId', 'taskId', 'runId', 'conversationId', 'commandId', 'messageId', 'outputId'].every(key => id(value[key]))
       || !['GENERATE_IMAGE', 'EDIT_IMAGE'].includes(value.operation)
-      || typeof value.instruction !== 'string' || !value.instruction.trim() || value.instruction.length > 16000
+      || typeof value.instruction !== 'string' || !value.instruction.trim()
       || !HASH.test(value.inputSnapshotDigest || '')
       || value.outputContentMimeType !== 'image/png' || value.outputId !== 'output_1') deny('CONTROLLED_IMAGE_V3_COMMAND_INVALID')
   return Object.freeze({ ...value, providerExecution: parseProviderExecution(value.providerExecution) })

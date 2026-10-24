@@ -20,7 +20,7 @@ const SHA = bytes => createHash('sha256').update(bytes).digest('hex')
 const ascii = (bytes, offset, text) => bytes.length >= offset + text.length && Buffer.from(text).equals(bytes.subarray(offset, offset + text.length))
 const validUtf8 = bytes => { try { const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); return !text.includes('\0') } catch { return false } }
 export const validateNativeConversationOutput = (mime, bytes) => {
-  if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 16 * 1024 * 1024) return false
+  if (!Buffer.isBuffer(bytes) || bytes.length < 1) return false
   if (mime === 'image/png') return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
   if (mime === 'image/jpeg') return bytes.length >= 3 && bytes.subarray(0, 3).equals(Buffer.from([255,216,255]))
   if (mime === 'image/webp') return ascii(bytes,0,'RIFF') && ascii(bytes,8,'WEBP')
@@ -64,7 +64,7 @@ export const parseNativeConversationCommand = value => {
   if (!object(value) || Object.keys(value).sort().join() !==
     ['commandId', 'conversationId', 'instruction', 'messageId', 'outputContentMimeType', 'outputId', 'runId', 'schemaVersion', 'taskId'].sort().join()
     || value.schemaVersion !== 1 || !['taskId', 'runId', 'conversationId', 'commandId', 'messageId', 'outputId'].every(k => id(value[k]))
-    || typeof value.instruction !== 'string' || !value.instruction.trim() || value.instruction.length > 16000
+    || typeof value.instruction !== 'string' || !value.instruction.trim()
     || !MIME.has(value.outputContentMimeType) || value.outputId !== 'output_1') deny('CONVERSATION_COMMAND_INVALID')
   return Object.freeze({ ...value })
 }

@@ -1,6 +1,5 @@
 // Transport codec extracted from controlled-image-http-executor-v3. No consent,
 // binding selection, scheduling or side-effect retry is performed here.
-import { CONTROLLED_IMAGE_MAX_OUTPUT_BYTES } from '../controlled-image-v3-files.mjs'
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }) }
@@ -11,7 +10,7 @@ export const decodeCanonicalPng = value => {
   }
   const bytes = Buffer.from(value, 'base64')
   if (bytes.toString('base64') !== value || bytes.length < PNG_SIGNATURE.length
-      || bytes.length > CONTROLLED_IMAGE_MAX_OUTPUT_BYTES || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+      || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
     fail('CONTROLLED_IMAGE_RESPONSE_INVALID', 'controlled image response is not one bounded PNG')
   }
   return bytes

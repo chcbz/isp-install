@@ -18,7 +18,6 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
 // Match the existing NativeConversationLane wire ceiling; this adapter must not widen it.
-const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 const MAX_EDIT_IMAGE_URL_LENGTH = 20_971_520
 
 export class ControlledImageHttpError extends Error {
@@ -116,7 +115,7 @@ const decodeCanonicalPng = value => {
   }
   const bytes = Buffer.from(value, 'base64')
   if (bytes.toString('base64') !== value || bytes.length < PNG_SIGNATURE.length
-      || bytes.length > MAX_OUTPUT_BYTES || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+      || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
     fail('CONTROLLED_IMAGE_RESPONSE_INVALID', 'controlled image response is not one bounded PNG')
   }
   return bytes

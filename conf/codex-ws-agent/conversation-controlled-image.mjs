@@ -46,7 +46,7 @@ const parseProviderExecution = value => {
 export const parseControlledImageConversationCommand = value => {
   if (!object(value) || Object.keys(value).sort().join(',') !== COMMAND_FIELDS || value.schemaVersion !== 2
       || !['taskId', 'runId', 'conversationId', 'commandId', 'messageId', 'outputId'].every(key => id(value[key]))
-      || typeof value.instruction !== 'string' || !value.instruction.trim() || value.instruction.length > 16000
+      || typeof value.instruction !== 'string' || !value.instruction.trim()
       || value.outputContentMimeType !== 'image/png' || value.outputId !== 'output_1') deny('CONTROLLED_IMAGE_COMMAND_INVALID')
   return Object.freeze({ ...value, providerExecution: parseProviderExecution(value.providerExecution) })
 }
@@ -187,7 +187,7 @@ export class ControlledImageConversationLane {
       const snapshot = await this.#request(`${path}/inputs`, 'POST', fence)
       const grantedInputs = parseNativeConversationInputs(snapshot, lease.executionId, fence.version)
       if (renewalError || Date.now() >= currentExpiry) deny('CONVERSATION_LEASE_UNCERTAIN')
-      if (grantedInputs.length > 16 || grantedInputs.some(input => !['image/jpeg', 'image/png'].includes(input.contentMimeType)))
+      if (grantedInputs.some(input => !['image/jpeg', 'image/png'].includes(input.contentMimeType)))
         deny('CONTROLLED_IMAGE_INPUTS_UNAVAILABLE')
       mkdirSync(this.#root, { recursive: true, mode: 0o700 })
       if (realpathSync(this.#root) !== this.#root) deny('CONVERSATION_RUN_ROOT_UNSAFE')

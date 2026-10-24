@@ -8,10 +8,6 @@ import { dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const CHAT_CONTEXT_ENVELOPE_VERSION = 2
-export const MAX_CONTEXT_SNAPSHOT_BYTES = 256 * 1024
-export const MAX_CONTEXT_FACTS = 256
-export const MAX_CONTEXT_FACT_KEY_BYTES = 128
-export const MAX_CHAT_CONTENT_BYTES = 64 * 1024
 export const MAX_LONG_DECIMAL = 9223372036854775807n
 export const CHAT_ACK_TYPE = 'chat.dispatch.ack'
 export const CHAT_DELIVERY_SEMANTICS = 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'
@@ -19,10 +15,8 @@ export const API_HOSTED_WIRE_COMMIT = '5daf1087595ba033833bd69e852c722f64a9f862'
 export const API_HOSTED_WIRE_SHA256 = '10534e0347fbac81ff5298ad182ee5f8549005c8a6aa73ee874e64ede98a6eb6'
 export const API_HOSTED_WIRE_SOURCE = 'api/chat/jia-chat-service/src/chatDeliberationTest/resources/contracts/api-hosted-wire-v1.json'
 export const API_HOSTED_WIRE_GENERATOR = 'cn.jia.chat.service.ApiHostedWireV1ContractTest'
-const MAX_QUEUE = 256
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-const bytes = value => Buffer.byteLength(JSON.stringify(value), 'utf8')
 const visible = (value, max = 512) => typeof value === 'string' && value.length > 0 && value.trim() === value &&
   Buffer.byteLength(value) <= max && !/[\x00-\x1f\x7f]/u.test(value)
 const identity = (value, max = 512) => visible(value, max) && !value.includes(':')
@@ -92,42 +86,35 @@ export function verifyHostedWireContract({
 }
 export const hostedWireContractReadback = () => verifiedHostedWireContract
 
-// The complete snapshot is byte-bounded before recursion. A second 8 KiB cap on
-// each nested object rejects valid 32-source manifests and long action text.
-// Keep structural/type limits here; never truncate signed facts or raise the wire cap.
-const validateJsonValue = (value, name, depth = 0) => {
-  if (depth > 8) throw new Error(`${name}_DEPTH_INVALID`)
-  if (value === null || typeof value === 'boolean') return
-  if (typeof value === 'number') { if (!Number.isSafeInteger(value)) throw new Error(`${name}_VALUE_INVALID`); return }
-  if (typeof value === 'string') return
-  if (Array.isArray(value)) {
-    if (value.length > MAX_CONTEXT_FACTS) throw new Error(`${name}_VALUE_TOO_LARGE`)
-    for (const item of value) validateJsonValue(item, name, depth + 1)
-    return
-  }
-  if (!object(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new Error(`${name}_VALUE_INVALID`)
-  if (Object.keys(value).length > MAX_CONTEXT_FACTS) throw new Error(`${name}_VALUE_TOO_LARGE`)
-  for (const [key, item] of Object.entries(value)) {
-    if (!visible(key, MAX_CONTEXT_FACT_KEY_BYTES)) throw new Error(`${name}_KEY_INVALID`)
-    validateJsonValue(item, name, depth + 1)
-  }
-}
-
-const validateBoundedObject = (value, name, { maxKeys = MAX_CONTEXT_FACTS, maxBytes = MAX_CONTEXT_SNAPSHOT_BYTES } = {}) => {
-  if (!object(value) || Object.getPrototypeOf(value) !== Object.prototype || bytes(value) > maxBytes || Object.keys(value).length > maxKeys) throw new Error(`${name}_INVALID`)
-  for (const [key, item] of Object.entries(value)) {
-    if (!visible(key, MAX_CONTEXT_FACT_KEY_BYTES)) throw new Error(`${name}_KEY_INVALID`)
-    validateJsonValue(item, name, 1)
+// Facts are JSON data, not a fixed-width record. Counts, key lengths and the old
+// depth=8 cap have no authority meaning. Walk iteratively so nesting is not a gate.
+const validateJsonValue = (value, name) => {
+  const pending = [{ value, exit: false }]
+  const seen = new Set()
+  while (pending.length) {
+    const current = pending.pop()
+    const item = current.value
+    if (current.exit) { seen.delete(item); continue }
+    if (item === null || typeof item === 'boolean' || typeof item === 'string') continue
+    if (typeof item === 'number') {
+      if (!Number.isSafeInteger(item)) throw new Error(`${name}_VALUE_INVALID`)
+      continue
+    }
+    if (!Array.isArray(item) && (!object(item) || Object.getPrototypeOf(item) !== Object.prototype)) throw new Error(`${name}_VALUE_INVALID`)
+    if (seen.has(item)) throw new Error(`${name}_VALUE_INVALID`)
+    seen.add(item)
+    pending.push({ value: item, exit: true })
+    for (const child of Object.values(item)) pending.push({ value: child, exit: false })
   }
 }
 
 export function validateContextSnapshot(snapshot) {
-  if (!object(snapshot) || bytes(snapshot) > MAX_CONTEXT_SNAPSHOT_BYTES) throw new Error('CONTEXT_SNAPSHOT_TOO_LARGE_OR_INVALID')
+  if (!object(snapshot)) throw new Error('CONTEXT_SNAPSHOT_INVALID')
   if (snapshot.schemaVersion !== '1') throw new Error('CONTEXT_SNAPSHOT_SCHEMA_UNSUPPORTED')
   const { contextSnapshotId, contextHash, sourceVector, facts } = snapshot
   if (!visible(contextSnapshotId) || !visible(contextHash) || !object(sourceVector) || !object(facts)) throw new Error('CONTEXT_SNAPSHOT_INVALID')
-  validateBoundedObject(sourceVector, 'CONTEXT_SOURCE_VECTOR')
-  validateBoundedObject(facts, 'CONTEXT_FACTS')
+  validateJsonValue(sourceVector, 'CONTEXT_SOURCE_VECTOR')
+  validateJsonValue(facts, 'CONTEXT_FACTS')
   const expectedHash = canonicalSha256({ sourceVector, facts })
   if (contextHash !== expectedHash) throw new Error('CONTEXT_HASH_MISMATCH')
   return Object.freeze({ schemaVersion: '1', contextSnapshotId, contextHash, sourceVector, facts })
@@ -136,7 +123,7 @@ export function validateContextSnapshot(snapshot) {
 /** API context is authoritative data; filenames and payload text never become instructions. */
 export function buildContextEnvelope(message) {
   const snapshot = validateContextSnapshot(message.contextSnapshot)
-  if (typeof message.content !== 'string' || Buffer.byteLength(message.content) > MAX_CHAT_CONTENT_BYTES) throw new Error('CHAT_CONTENT_INVALID')
+  if (typeof message.content !== 'string') throw new Error('CHAT_CONTENT_INVALID')
   const currentUserMessage = { content: message.content }
   for (const key of ['attachments', 'inputRefs', 'files']) if (message[key] !== undefined) currentUserMessage[key] = message[key]
   const envelope = {
@@ -153,7 +140,6 @@ export function buildContextEnvelope(message) {
     contextSnapshotId: snapshot.contextSnapshotId,
     contextHash: snapshot.contextHash
   }
-  if (bytes(envelope) > MAX_CONTEXT_SNAPSHOT_BYTES + MAX_CHAT_CONTENT_BYTES) throw new Error('CONTEXT_ENVELOPE_TOO_LARGE')
   return Object.freeze(envelope)
 }
 
@@ -219,13 +205,13 @@ export const canResumePreEngineInspection = record => object(record) &&
 export class PersistentChatInbox {
   constructor({
     rootDir, profile,
-    maxFiles = profile.chatInboxMaxFiles || 1024,
-    maxBytes = profile.chatInboxMaxBytes || 64 * 1024 * 1024,
+    maxFiles = profile.chatInboxMaxFiles ?? Infinity,
+    maxBytes = profile.chatInboxMaxBytes ?? Infinity,
     archiveMaxFiles = profile.chatArchiveMaxFiles || 256,
     archiveMaxBytes = profile.chatArchiveMaxBytes || 16 * 1024 * 1024,
     archiveRetentionMs = profile.chatArchiveRetentionMs || 7 * 24 * 60 * 60 * 1000,
-    dedupeMaxEntries = profile.chatDedupeMaxEntries || 100000,
-    dedupeMaxBytes = profile.chatDedupeMaxBytes || 128 * 1024 * 1024,
+    dedupeMaxEntries = profile.chatDedupeMaxEntries ?? Infinity,
+    dedupeMaxBytes = profile.chatDedupeMaxBytes ?? Infinity,
     dedupeRetentionMs = profile.chatDedupeRetentionMs || 30 * 24 * 60 * 60 * 1000,
     lockTimeoutMs = 2000, lockDeadGraceMs = 250, lockMalformedGraceMs = 30000,
     malformedLockMigrationMode = 'disabled', beforeLockPublish = null
@@ -658,7 +644,6 @@ export class PersistentChatInbox {
     const bucket = this._turnIndexBucket(stop)
     if (existsSync(bucket)) {
       const names = readdirSync(bucket).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).sort()
-      if (names.length > 1024) { const error = new Error('CHAT_STOP_INDEX_CAPACITY_EXCEEDED'); error.code = 'CHAT_STOP_AMBIGUOUS'; throw error }
       for (const name of names) {
         const path = resolve(bucket, name); const key = name.slice(0, -5); let indexed = null; let ledger
         try { indexed = JSON.parse(readFileSync(path, 'utf8')) } catch {}
@@ -776,8 +761,8 @@ export function buildThreadKey({ tenantId, clientId, ownerJiacn, profileId, agen
 }
 
 export class ThreadBindingStore {
-  constructor({ rootDir, profile, maxBindings = 512, archivedRetentionMs = 30 * 24 * 60 * 60 * 1000 }) {
-    this.profile = profile; this.maxBindings = maxBindings; this.archivedRetentionMs = archivedRetentionMs
+  constructor({ rootDir, profile, archivedRetentionMs = 30 * 24 * 60 * 60 * 1000 }) {
+    this.profile = profile; this.archivedRetentionMs = archivedRetentionMs
     this.path = resolve(rootDir, 'chat-thread-bindings', `${Buffer.from(profile.agentId).toString('hex')}.json`); this.bindings = {}
   }
   initialize() {
@@ -798,13 +783,11 @@ export class ThreadBindingStore {
       if (binding.state === 'ARCHIVED' && Number.isFinite(binding.updatedAt) && now - binding.updatedAt > this.archivedRetentionMs) delete this.bindings[key]
       else this.bindings[key] = { ...binding, threadKey: key, profileId: this.profile.profileId, agentId: this.profile.agentId }
     }
-    if (Object.keys(this.bindings).length > this.maxBindings) throw new Error('THREAD_BINDING_CAPACITY_EXCEEDED')
     this._persist(); return this
   }
   _persist() { atomicJson(this.path, { schemaVersion: 1, profileId: this.profile.profileId, agentId: this.profile.agentId, bindings: this.bindings }) }
   get(key) { const binding = this.bindings[key]; if (!binding) return null; if (binding.threadKey !== key || binding.profileId !== this.profile.profileId || binding.agentId !== this.profile.agentId) throw new Error('THREAD_BINDING_SELF_BINDING_INVALID'); return binding }
   put(key, binding) {
-    if (!this.bindings[key] && Object.keys(this.bindings).length >= this.maxBindings) throw new Error('THREAD_BINDING_CAPACITY_EXCEEDED')
     const stored = { ...binding, threadKey: key, profileId: this.profile.profileId, agentId: this.profile.agentId }
     this.bindings = { ...this.bindings, [key]: stored }; this._persist(); return stored
   }
@@ -839,7 +822,7 @@ export function prepareChatWorkdir({ rootDir, profile, forbidden = [] }) {
 }
 
 export class FairLaneScheduler {
-  constructor({ chatConcurrency = 1, inspectConcurrency = 1, commandConcurrency = 1, maxQueuedPerLane = MAX_QUEUE } = {}) {
+  constructor({ chatConcurrency = 1, inspectConcurrency = 1, commandConcurrency = 1, maxQueuedPerLane = Infinity } = {}) {
     this.maxQueuedPerLane = maxQueuedPerLane; this.activeTurns = new Set()
     this.lanes = new Map([['chat', chatConcurrency], ['inspect', inspectConcurrency], ['command', commandConcurrency]].map(([name, limit]) => [name, { limit, active: 0, queued: 0, queues: new Map(), order: [], cursor: 0 }]))
   }

@@ -105,7 +105,7 @@ const sourceDescriptorValid = (source, operation, conversationId = null) => {
 }
 
 export const controlledImageV3OperationSourcesValid = (operation, inputs, conversationId = null) => {
-  if (!Array.isArray(inputs) || inputs.length > 16) return false
+  if (!Array.isArray(inputs)) return false
   if (operation === 'GENERATE_IMAGE') {
     return inputs.every(input => sourceDescriptorValid(input?.source, operation, conversationId))
   }
@@ -118,7 +118,7 @@ export const parseControlledImageV3Inputs = (snapshot, command, leaseVersion) =>
       || snapshot.executionId !== command.executionId || snapshot.leaseVersion !== leaseVersion
       || snapshot.operation !== command.operation || snapshot.inputSnapshotDigest !== command.inputSnapshotDigest
       || !HASH.test(snapshot.inputSnapshotDigest || '') || !Array.isArray(snapshot.inputs)
-      || snapshot.inputs.length > 16 || snapshot.noReferencedMaterials !== (snapshot.inputs.length === 0)) deny()
+      || snapshot.noReferencedMaterials !== (snapshot.inputs.length === 0)) deny()
   const sources = new Set()
   const inputs = snapshot.inputs.map((input, index) => {
     if (!exactFields(input, INPUT_FIELDS) || input.inputRef !== `input_${index + 1}`

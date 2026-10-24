@@ -50,10 +50,10 @@ const publicFailure = code => ({
 export const WORK_RESULT_RECEIPT_TYPE = 'work.result.receipt'
 const DOWNLOAD_PREFIX = '/internal/agent/skill-installations/'
 const MARKER_NAME = '.cyf-installation.json'
-const DEFAULT_MAX_PACKAGE_BYTES = 16 * 1024 * 1024
+const DEFAULT_MAX_PACKAGE_BYTES = Number.MAX_SAFE_INTEGER
 const DEFAULT_MAX_EXTRACTED_BYTES = 64 * 1024 * 1024
-const DEFAULT_MAX_ENTRY_BYTES = 16 * 1024 * 1024
-const DEFAULT_MAX_ENTRIES = 256
+const DEFAULT_MAX_ENTRY_BYTES = Infinity
+const DEFAULT_MAX_ENTRIES = Infinity
 const DEFAULT_MAX_REPLAY_BATCH = 32
 const DEFAULT_UNOWNED_LOCK_STALE_MS = 30_000
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)

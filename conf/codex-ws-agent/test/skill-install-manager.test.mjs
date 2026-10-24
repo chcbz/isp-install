@@ -602,3 +602,18 @@ test('cross-parent upgrade exchange treats package owner.json as ordinary bytes,
   assert.deepEqual(readdirSync(resolve(f.home, 'skills')), ['repo-test'])
   assert.equal(f.manager.listInstalledSkills()[0].skillVersion, '2.0.0'); assert.equal(f.downloads(), 2)
 })
+
+
+test('archive file count is not limited to 256 when paths and approved bytes are valid', async t => {
+  const f = setup(t)
+  const pkg = f.add(packageFixture({ entries: [{ name: 'SKILL.md', data: skillDocument() },
+    ...Array.from({ length: 260 }, (_, i) => ({ name: `docs/item-${i}.txt`, data: 'ok' }))] }))
+  assert.equal(outcome(await f.manager.handle(command(pkg.target))), 'PREPARED')
+})
+
+test('default package and single-entry limits no longer reject 16MiB while aggregate extraction remains bounded', async t => {
+  const f = setup(t)
+  assert.ok(f.manager.maxPackageBytes > 16 * 1024 * 1024)
+  assert.equal(f.manager.maxEntryBytes, Infinity)
+  assert.equal(f.manager.maxExtractedBytes, 64 * 1024 * 1024)
+})
