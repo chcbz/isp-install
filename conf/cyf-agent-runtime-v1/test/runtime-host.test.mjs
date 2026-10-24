@@ -453,7 +453,7 @@ test('toolchain validation refuses a host-global interpreter alias instead of fa
 
 // M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
 // lifecycle. Synthetic socket/HTTP only; no server/production claim.
-async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null } = {}) {
+async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null, reconcileSkills = false } = {}) {
   const { EventEmitter } = await import('node:events');
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
   const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
@@ -499,6 +499,10 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
             return true;
           },
           matchesSkillManagementAck: envelope => state.skillInstallManager?.matchesDurableAckEnvelope(envelope) === true,
+          ...(reconcileSkills ? {
+            reconcilePositionSkills: async () => { (state.reconciliation ||= []).push('positions'); if (state.reconcileFailure) throw Object.assign(new Error('private'), {code:'POSITION_TEST_FAILURE'}); },
+            reconcileArchiveJobs: async () => { (state.reconciliation ||= []).push('archive'); }
+          } : {}),
           matchesSkillInstallResult: envelope => state.skillInstallManager?.matchesDurableResultEnvelope(envelope) === true,
           matchesSkillInstallReceipt: receipt => state.skillInstallManager?.matchesDurableResultReceipt(receipt) === true,
           durableStateHealthy: () => { state.healthChecks = (state.healthChecks || 0) + 1; return state.healthy; }, readyCommandTypes: () => state.types, chatReady: () => chatReady,
@@ -1626,4 +1630,18 @@ test('SM-C1 real host first-install closes authenticated PREPARE ACTIVATE capabi
   sockets[1].receive(receipt);
   await settle(() => !state.skillInstallManager.pendingResults().some(row => row.envelope.messageId === result.messageId));
   assert.equal(downloads, 1); assert.ok(logs.every(row => !JSON.stringify(row).includes('rts1_')));
+});
+
+test('archive reconciliation waits for native registration, installs before jobs and isolates failure by Agent', async t => {
+  const c=await channelFixture(t,{reconcileSkills:true});
+  await c.adapters.heartbeat();await c.tick();assert.ok(c.states().every(s=>!s.reconciliation));
+  await Promise.all(c.executors.map(e=>e.activate()));await c.adapters.heartbeat();await c.tick();
+  assert.ok(c.states().every(s=>JSON.stringify(s.reconciliation)===JSON.stringify(['positions','archive'])));
+  c.states()[0].reconciliation=[];c.states()[1].reconciliation=[];c.states()[0].reconcileFailure=true;
+  await c.adapters.heartbeat();await c.tick();
+  assert.deepEqual(c.states()[0].reconciliation,['positions']);assert.deepEqual(c.states()[1].reconciliation,['positions','archive']);
+  assert.equal(c.logs.filter(l=>l.event==='position-skill-reconciliation-deferred').length,1);
+  assert.ok(!JSON.stringify(c.logs).includes('private'));
+  await c.executors[0].close();c.states()[0].reconciliation=[];
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(c.states()[0].reconciliation,[]);
 });

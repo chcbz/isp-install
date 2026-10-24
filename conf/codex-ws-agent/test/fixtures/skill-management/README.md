@@ -158,3 +158,5 @@ actual stdin/stdout process and feeds real original package/command bytes throug
 first install, upgrade, disable, retained old-task lookup, crossboot byte replay,
 real receipt retirement and raw-token rejection. Actual API/MySQL + this Node
 peer remains the main Owner's Flow integration execution, not a local PASS claim.
+
+2026-10-25 position-only integration: the schema lock alone is updated for optional server-owned `SkillChange.authorizationSource` (POSITION grant/revision/binding). Existing wire envelopes, examples, behavior and digest vectors are unchanged. This is candidate-source provenance, not production verification.

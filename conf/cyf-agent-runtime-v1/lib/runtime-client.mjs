@@ -173,6 +173,14 @@ export function validateEnrollmentResult(response, manifest) {
 }
 const enrollmentRecovery = () => Object.assign(fail('RUNTIME_ENROLLMENT_RECOVERY_REQUIRED'), { recoveryRequired: true, retryable: false });
 
+function archiveNativeEndpoint(endpoint, options) {
+  const method=(options.method || 'GET').toUpperCase(), id='[A-Za-z0-9][A-Za-z0-9._:-]{0,99}'
+  if(endpoint.search)return false
+  return method==='GET' && options.body==null && (endpoint.pathname==='/internal/archive/v1/jobs'
+    || new RegExp(`^/internal/archive/v1/jobs/${id}/(?:source|result)$`).test(endpoint.pathname))
+    || method==='POST' && new RegExp(`^/internal/archive/v1/jobs/${id}/result$`).test(endpoint.pathname)
+}
+
 export class RuntimeV1Client {
   constructor({ manifest, apiBaseUrl, stateDir, hostId, runtimeInstanceId, fetchFn = globalThis.fetch }) {
     if (typeof fetchFn !== 'function') throw fail('RUNTIME_FETCH_REQUIRED');
@@ -254,7 +262,7 @@ export class RuntimeV1Client {
   async nativeFetch(url, options = {}) {
     const endpoint = new URL(url);
     if (endpoint.origin !== this.apiBaseUrl || endpoint.username || endpoint.password || endpoint.hash
-        || !(endpoint.pathname.startsWith('/internal/agent/') || isReassignmentLeaseEndpoint(endpoint, options, this.manifest))
+        || !(endpoint.pathname.startsWith('/internal/agent/') || archiveNativeEndpoint(endpoint, options) || isReassignmentLeaseEndpoint(endpoint, options, this.manifest))
         || !e05InternalScope(endpoint, options) || !skillConversationHttpScope(endpoint, options) || !materialsChatHttpScope(endpoint, options)
         || [...endpoint.searchParams.keys()].some(key => /^(?:api[_-]?key|authorization|session[_-]?token|token)$/i.test(key))) throw fail('RUNTIME_NATIVE_SCOPE_INVALID');
     const session = this.currentSession; const proof = this.sessionHeaders();
