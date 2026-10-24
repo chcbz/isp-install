@@ -12,12 +12,12 @@ test('v5 supports answer, clarification and schema-bound material skills, not to
   assert.equal(Object.isFrozen(validateActionFacts(facts()).availableActions[0].inputMimeTypes), true)
 })
 
-test('32 selected sources are complete, 33 is invalid; no-source execution needs no reference-image branch', () => {
+test('selected sources have no generic count gate; no-source execution needs no reference-image branch', () => {
   const f = facts(); f.availableSources = Array.from({ length: 32 }, (_, i) => ({ sourceRefId: `s${i}`, kind: 'TASK_WORKSPACE_FILE', mediaType: ['text', 'image', 'audio', 'file'][i % 4], contentMimeType: ['text/plain', 'image/png', 'audio/wav', 'application/pdf'][i % 4] }))
   const a = action(); a.action.sourceRefIds = f.availableSources.map(s => s.sourceRefId)
   assert.equal(validateActionOutcome(a, f).action.sourceRefIds.length, 32)
   f.availableSources.push({ ...f.availableSources[0], sourceRefId: 's32' })
-  assert.throws(() => validateActionFacts(f), /ACTION_SOURCES_INVALID/)
+  assert.equal(validateActionFacts(f).availableSources.length, 33)
   const empty = facts(); empty.availableSources = []
   const execute = structuredClone(fixture.outcomes[3]); execute.action.sourceRefIds = []
   assert.doesNotThrow(() => validateActionOutcome(execute, empty))
@@ -43,7 +43,7 @@ test('rejects unadvertised action, injected grant/path, wrong branch, source, du
 
 test('capability and read facts are exact; previous reading does not add an unsupported rejection gate', () => {
   for (const mutate of [
-    f => { f.availableActions.push(f.availableActions[0]) }, f => { f.availableActions[0].maxSources = 33 },
+    f => { f.availableActions.push(f.availableActions[0]) }, f => { f.availableActions[0].maxSources = -1 },
     f => { f.availableActions[0].kind = 'INSPECT_INPUTS' }, f => { f.availableActions[0].operation = 'GENERATE_IMAGE' },
     f => { f.availableActions[0].inputMimeTypes = ['shell'] }, f => { f.inspectedSourceRefIds = ['unknown'] },
     f => { f.availableSources.push(f.availableSources[0]) }, f => { f.grant = 'forged' }

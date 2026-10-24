@@ -382,7 +382,7 @@ test('inspection full dispatch and envelope preserve the complete 32-item catalo
   const excess = structuredClone(message); const extra = excess.contextSnapshot.facts.typedInspection
   extra.manifest.sources.push(sourceFor(undefined, { sourceRefId: 'source-32' }))
   extra.manifestDigest = canonicalSha256(extra.manifest)
-  assert.throws(() => resolveTypedInspectionRequest(profile, excess), error => error.code === 'TYPED_INSPECTION_MANIFEST_INVALID')
+  assert.equal(resolveTypedInspectionRequest(profile, excess).manifest.sources.length, 33)
 })
 
 

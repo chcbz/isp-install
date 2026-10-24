@@ -106,9 +106,9 @@ test('unified materials preserves all 32 mixed sources without adding executable
   assert.ok(Object.isFrozen(result.availableSources))
   const answer = { schemaVersion: 1, kind: 'ANSWER', text: '可以先讨论需求。', clarification: null, proposal: null }
   assert.deepEqual(validateTypedInteractionOutcome(answer, result), answer)
-  assert.throws(() => validateTypedDeliberationFacts({ ...input,
+  assert.equal(validateTypedDeliberationFacts({ ...input,
     availableSources: [...input.availableSources, { sourceRefId: 'source_32', kind: 'TASK_WORKSPACE_FILE', mediaType: 'file' }]
-  }), /TYPED_DELIBERATION_SOURCES_INVALID/)
+  }).availableSources.length, 33)
   assert.throws(() => validateTypedDeliberationFacts({ ...input,
     availableSources: [...input.availableSources.slice(0, 31), input.availableSources[0]]
   }), /TYPED_DELIBERATION_SOURCES_INVALID/)

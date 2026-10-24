@@ -133,7 +133,7 @@ const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const mime = value => typeof value === 'string' && /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(value)
 export const validateActionFacts = raw => {
   if (!exact(raw, ['schemaVersion', 'availableActions', 'availableSources', 'inspectedSourceRefIds']) || raw.schemaVersion !== 5) fail('ACTION_FACTS_INVALID')
-  if (!Array.isArray(raw.availableSources) || raw.availableSources.length > 32) fail('ACTION_SOURCES_INVALID')
+  if (!Array.isArray(raw.availableSources)) fail('ACTION_SOURCES_INVALID')
   const ids = new Set()
   const sources = raw.availableSources.map(source => {
     if (!exact(source, ['sourceRefId', 'kind', 'mediaType', 'contentMimeType']) || !scalar(source.sourceRefId, true) || ids.has(source.sourceRefId) ||
@@ -149,7 +149,7 @@ export const validateActionFacts = raw => {
         !scalar(action.actionId, true) || actions.has(action.actionId) || action.kind !== 'EXECUTE' || action.operation !== 'EXECUTE_SKILL' ||
         !exact(action.skill, ['skillKey', 'skillVersion', 'packageSha256', 'manifestSha256']) || !scalar(action.skill.skillKey, true) || !scalar(action.skill.skillVersion, true) ||
         !hash(action.skill.packageSha256) || !hash(action.skill.manifestSha256) || !uniqueStrings(action.inputMimeTypes, mime) || !uniqueStrings(action.outputMimeTypes, mime) ||
-        !Number.isInteger(action.minSources) || !Number.isInteger(action.maxSources) || action.minSources < 0 || action.maxSources < action.minSources || action.maxSources > 32 ||
+        !Number.isSafeInteger(action.minSources) || !Number.isSafeInteger(action.maxSources) || action.minSources < 0 || action.maxSources < action.minSources ||
         (action.maxSources > 0 && action.inputMimeTypes.length === 0)) fail('ACTION_CAPABILITIES_INVALID')
     try { compileSkillSchema(action.parametersSchema) } catch { fail('ACTION_PARAMETERS_SCHEMA_INVALID') }
     actions.add(action.actionId)

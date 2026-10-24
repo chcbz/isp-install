@@ -34,7 +34,7 @@ export function parseSkillCommand(raw) {
       || !required(value.skill, skillFields) || !skillId(value.skill.key) || !skillId(value.skill.version)
       || !skillSha(value.skill.packageSha256) || !skillSha(value.skill.manifestSha256) || !skillSha(value.snapshotDigest)
       || !object(value.parameters) || typeof value.instruction !== 'string' || !value.instruction.trim()
-      || !Array.isArray(value.inputRefs) || value.inputRefs.length > 32 || !value.inputRefs.every(skillId) || new Set(value.inputRefs).size !== value.inputRefs.length
+      || !Array.isArray(value.inputRefs) || !value.inputRefs.every(skillId) || new Set(value.inputRefs).size !== value.inputRefs.length
       || !required(value.outputs, outputFields) || !Array.isArray(value.outputs.mimeTypes)
       || !value.outputs.mimeTypes.every(mime) || typeof value.outputs.multiple !== 'boolean' || typeof value.outputs.artifactsRequired !== 'boolean') fail('SKILL_COMMAND_INVALID')
   const binding = validateManagement('TaskSkillBinding', value.taskSkillBinding)

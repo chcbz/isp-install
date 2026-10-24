@@ -56,3 +56,12 @@ test('executable package tree identity binds every file/directory and rejects wr
     symlinkSync(join(root, 'main.mjs'), join(root, 'alias.mjs')); assert.throws(() => skillPackageTreeDigest(root), /SKILL_PACKAGE_TREE_UNSAFE/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('skill declares its own input count without a generic 32 cap; int overflow still rejected', () => {
+  const c = fixture.cases.find(c => c.id === 'image-edit')
+  const manifest = JSON.parse(c.json)
+  manifest.inputs.maxItems = 129
+  assert.equal(parseSkillManifest(JSON.stringify(manifest), c).inputs.maxItems, 129)
+  manifest.inputs.maxItems = 2147483648
+  assert.throws(() => parseSkillManifest(JSON.stringify(manifest), c))
+})

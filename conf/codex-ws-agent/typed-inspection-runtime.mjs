@@ -105,7 +105,7 @@ export const resolveTypedInspectionRequest = (profile, message) => {
       !object(typed.discussionFacts) || !object(typed.manifest) || !DIGEST.test(typed.manifestDigest) || !AUTHORIZATION.test(typed.authorizationId)) fail('TYPED_INSPECTION_MARKER_INVALID')
   // v3 facts are archived source catalogues, never new action-v4 execution facts.
   const manifest = typed.manifest
-  if (!exactKeys(manifest, ['schemaVersion', 'purpose', 'scope', 'profile', 'sources']) || manifest.schemaVersion !== 1 || manifest.purpose !== 'INSPECT' || !Array.isArray(manifest.sources) || manifest.sources.length === 0 || manifest.sources.length > 32) fail('TYPED_INSPECTION_MANIFEST_INVALID')
+  if (!exactKeys(manifest, ['schemaVersion', 'purpose', 'scope', 'profile', 'sources']) || manifest.schemaVersion !== 1 || manifest.purpose !== 'INSPECT' || !Array.isArray(manifest.sources) || manifest.sources.length === 0) fail('TYPED_INSPECTION_MANIFEST_INVALID')
   assertScope(manifest.scope); assertProfile(manifest.profile)
   let previous = null
   for (const source of manifest.sources) { assertSource(source); if (previous !== null && source.sourceRefId <= previous) fail('TYPED_INSPECTION_SOURCE_ORDER_INVALID'); previous = source.sourceRefId }
