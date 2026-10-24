@@ -174,11 +174,12 @@ test('r2 matches raw complete subject before projection, rejecting nested identi
   }
   const aliasOnly = fixture(); delete aliasOnly.targetAgentId; aliasOnly.receiverAgentId = raw.targetAgentId;
   assert.throws(() => runtimeCommandContext(p, normalizeInboundMessage(aliasOnly)), { code: 'RUNTIME_COMMAND_SCOPE_MISMATCH' });
-  const skill = { ...fixture(), commandType: 'SKILL_INSTALL', installationId: 'synthetic-product-installation' };
-  const skillContext = runtimeCommandContext(p, normalizeInboundMessage(skill));
-  assert.equal(skillContext.installationId, p.runtimeIdentity.installationId);
-  assert.equal(skill.installationId, 'synthetic-product-installation');
-  assert.throws(() => runtimeCommandContext(p, normalizeInboundMessage({ ...skill, installationId: p.runtimeIdentity.installationId })), { code: 'RUNTIME_COMMAND_INSTALLATION_CONFUSION' });
+  // Management has its own SM-C1 schema/journal, never a task-shaped D06 context.
+  for (const commandType of ['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE']) {
+    assert.throws(() => normalizeInboundMessage({ ...fixture(), commandType, installationId: 'synthetic-product-installation' }), { code: 'SKILL_MANAGEMENT_SCHEMA_REQUIRED' })
+  }
+  assert.equal(runtimeCommandContext(p, normalizeInboundMessage({ ...fixture(), installationId: p.runtimeIdentity.installationId })).installationId, p.runtimeIdentity.installationId)
+  assert.throws(() => runtimeCommandContext(p, normalizeInboundMessage({ ...fixture(), installationId: 'synthetic-product-installation' })), { code: 'RUNTIME_COMMAND_SCOPE_MISMATCH' })
   assert.throws(() => runtimeCommandContext(p, normalizeInboundMessage({ ...fixture(), runtimeCommand: expected() })), { code: 'RUNTIME_COMMAND_CONTEXT_FORBIDDEN' });
   assert.equal(fixtureBytes.toString(), before, 'projection never amends codec bytes');
 });
@@ -203,7 +204,7 @@ test('r2 safely normalizes epoch and actual nullable values, never invented refe
   }
 });
 
-test('raw r2 fingerprint binds epoch/product/source/context; same ID changed payload cannot change original D06 checkpoint', async t => {
+test('raw r2 fingerprint binds epoch/source/context; management cannot create a task checkpoint; same ID changed payload cannot change original D06 checkpoint', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: frozenClock });
   const h = await httpFixture(t);
   const runtime = checkpoint(t, { root: h.root, ack: (context, status, version) => h.client.acknowledge(runtimeAckWireContext(context), status, version), run: async () => assert.fail('paused command') });
@@ -220,7 +221,8 @@ test('raw r2 fingerprint binds epoch/product/source/context; same ID changed pay
     assert.equal((await runtime.processor.handle(variant)).kind, 'rejected');
   }
   const skill = { ...fixture(), commandType: 'SKILL_INSTALL', installationId: 'product-one' };
-  assert.notEqual(CommandFingerprint.compute(normalizeInboundMessage(skill)), CommandFingerprint.compute(normalizeInboundMessage({ ...skill, installationId: 'product-two' })));
+  const rejectedManagement = await runtime.processor.handle(skill);
+  assert.equal(rejectedManagement.kind, 'rejected'); assert.equal(rejectedManagement.error.code, 'SKILL_MANAGEMENT_SCHEMA_REQUIRED');
   assert.deepEqual(runtime.ledger.getEntry(raw.commandId), before); assert.equal(h.acks().length, 1);
   assert.equal(runtime.outbox.pendingEnvelopes().length, 0); assert.deepEqual(h.errors, []);
 });
@@ -281,7 +283,7 @@ test('r2 invalid raw subjects/epochs/contexts cannot create a checkpoint or send
     [{ canonicalAgentId: 'foreign' }, 'RUNTIME_COMMAND_SCOPE_MISMATCH'],
     [{ commandType: undefined, payload: { ...raw.payload, commandType: raw.commandType } }, 'RUNTIME_COMMAND_CONTEXT_REQUIRED'],
     [{ installationId: 'foreign-runtime' }, 'RUNTIME_COMMAND_SCOPE_MISMATCH'],
-    [{ commandType: 'SKILL_INSTALL', installationId: manifest().installationId }, 'RUNTIME_COMMAND_INSTALLATION_CONFUSION'],
+    [{ commandType: 'SKILL_INSTALL', installationId: manifest().installationId }, 'SKILL_MANAGEMENT_SCHEMA_REQUIRED'],
     [{ expiresAt: Number.MAX_SAFE_INTEGER }, 'RUNTIME_COMMAND_EXPIRY_INVALID'],
     [{ expiresAt: '3601000' }, 'RUNTIME_COMMAND_EXPIRY_INVALID'],
     [{ workItemId: '' }, 'RUNTIME_COMMAND_WORK_INVALID'],

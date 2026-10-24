@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fromAgentWire } from '../agent-message-wire.mjs'
+import { command, packageFixture } from './fixtures/skill-management-fixture.mjs'
 import { skillSessionBinding } from '../../cyf-agent-runtime-v1/lib/execution-adapter.mjs'
 import { bindMeasuredSkillSession, refreshMeasuredSkills, buildAgentRegistrationPayload, buildAgentPresencePayload, runManagedCommand } from '../agent-client.mjs'
 
@@ -12,7 +13,7 @@ const receipt = (overrides = {}) => ({ runtimeAuth: { scheme: 'native-runtime-v1
 const state = (loadInstalled = () => []) => {
   let publishes = 0
   return { profile: { agentId: 'agent', runtimeIdentity: session, runtimeInstanceId: 'runtime' },
-    skillInstallManager: { listInstalledSkills: loadInstalled }, disposed: false,
+    skillInstallManager: { listInstalledSkills: loadInstalled, bindSession(binding) { this.session = binding } }, disposed: false,
     runtimeTransport: { reportReady: () => true, refreshCapabilities: () => { publishes++; return true } },
     publications: () => publishes }
 }
@@ -54,7 +55,8 @@ test('cached registration is IO free, unavailable before measurement and omitted
   }
   assert.equal(buildAgentRegistrationPayload(current.profile, null, false, null, null, null, current.skillRegistry).skillExecution, undefined)
   assert.equal(loads, 1)
-  assert.equal(buildAgentPresencePayload(current.profile, 'online', { skillRegistry: current.skillRegistry }).skillExecution, current.skillRegistry.declaration())
+  // Presence is status-only; only acknowledged registration publishes the catalog.
+  assert.equal(buildAgentPresencePayload(current.profile, 'online', { skillRegistry: current.skillRegistry }).skillExecution, undefined)
   assert.equal(buildAgentPresencePayload(current.profile, 'offline', { skillRegistry: current.skillRegistry }).skillExecution, undefined)
 })
 test('owner/session replacement invalidates old snapshot; missing receipt cannot retain directory', async () => {
@@ -74,15 +76,23 @@ test('old asynchronous measurement never re-registers after disconnect or a new 
   pending[0]([]); await tick(); assert.equal(current.publications(), 1)
   assert.equal(current.skillRegistry.fence.sessionGeneration, '25')
 })
-test('install lifecycle preserves durable success and failure even when catalog callbacks fail', async () => {
-  const phases = [], output = { status: 'SUCCESS', manifestSha256: 'a'.repeat(64) }
-  const options = { profile: {}, message: { commandType: 'SKILL_INSTALL' },
-    onSkillInstallChanged: phase => { phases.push(phase); throw new Error('catalog failed') } }
-  assert.equal(await runManagedCommand({ ...options, skillInstallManager: { execute: async () => output } }), output)
-  assert.deepEqual(phases, ['changing', 'changed']); phases.length = 0
-  const failure = new Error('actual installation failure')
-  await assert.rejects(runManagedCommand({ ...options, skillInstallManager: { execute: async () => { throw failure } } }), error => error === failure)
-  assert.deepEqual(phases, ['changing', 'changed'])
+test('SM-C1 delegates unchanged to durable manager; retired callbacks never rewrite result or error', async () => {
+  const message = command(packageFixture().target)
+  const output = { resultEnvelope: { data: { evidence: { outcome: 'PREPARED' } } } }
+  let handled = 0
+  const options = { profile: {}, message,
+    runCodexFn: () => assert.fail('management cannot execute as a task'),
+    onSkillInstallChanged: () => assert.fail('retired task callback cannot own management lifecycle') }
+  const manager = { handle: async received => { assert.equal(received, message); handled++; return output },
+    execute: () => assert.fail('management must be durably received before execution') }
+  assert.equal(await runManagedCommand({ ...options, skillInstallManager: manager }), output)
+  assert.equal(handled, 1)
+  const failure = new Error('actual durable management failure')
+  await assert.rejects(runManagedCommand({ ...options, skillInstallManager: { handle: async () => { throw failure } } }), error => error === failure)
+  for (const commandType of ['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE']) {
+    await assert.rejects(runManagedCommand({ ...options, message: { commandType }, skillInstallManager: manager }), { code: 'SKILL_MANAGEMENT_SCHEMA_REQUIRED' })
+  }
+  assert.equal(handled, 1)
 })
 test('refresh errors remove catalog and publication failure does not change measurement', async () => {
   const current = state(); bindMeasuredSkillSession(current, skillSessionBinding(receipt(), session)); await tick()
