@@ -9,7 +9,7 @@ export function protocolError (code = 'PROTOCOL_INVALID_RESPONSE', details = {})
 }
 
 /** Parses JSON with duplicate-member and unsafe-number detection BEFORE information is lost. */
-export function parseStrictJson (text) {
+export function parseStrictJson (text, { integerTokensOnly = false } = {}) {
   if (typeof text !== 'string') throw protocolError()
   let offset = 0
   const bad = () => { throw protocolError() }
@@ -69,6 +69,7 @@ export function parseStrictJson (text) {
     const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u.exec(text.slice(offset))
     if (!match) return bad()
     offset += match[0].length
+    if (integerTokensOnly && !/^(?:0|[1-9][0-9]*)$/.test(match[0])) return bad()
     const number = Number(match[0])
     if (!Number.isFinite(number) || (Number.isInteger(number) && !Number.isSafeInteger(number))) return bad()
     return number

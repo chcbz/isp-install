@@ -2,7 +2,17 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { createExecutionAdapterFactory } from '../lib/execution-adapter.mjs'
+import { examples } from '../../codex-ws-agent/test/fixtures/skill-management-fixture.mjs'
+import { managementDigest } from '../../codex-ws-agent/skill-management-wire.mjs'
 const tick = () => new Promise(resolve => setImmediate(resolve))
+const durableSkillResult = () => {
+  const result = structuredClone(examples.cases.find(c => c.valid && c.definition === 'Result').value)
+  result.data.agentId = 'agent'; result.data.runtimeInstallationId = 'rti_1'
+  result.data.executionRuntimeInstanceId = 'execution-boot'
+  const { resultSha256, ...preimage } = result.data
+  result.data.resultSha256 = managementDigest('cyf.skill.result.v2', preimage)
+  return result
+}
 const session = Object.freeze({ tenantId: '0', clientId: 'client', canonicalAgentId: 'agent', installationId: 'rti_1', hostId: 'host', runtimeInstanceId: 'boot', sessionGeneration: '9007199254740993' })
 async function fixture(t) {
   const accepted = [], sent = [], sockets = [], logs = []
@@ -23,7 +33,7 @@ async function fixture(t) {
         state: () => state, initialize: async () => {}, durableStateHealthy: () => true, readyCommandTypes: () => ['TASK_INVITE'], chatReady: () => true,
         registrationPayload: () => ({}), bindTransport: transport => { state.transport = transport }, attachSocket() {}, disconnected() {}, resume: async () => {},
         acceptFrame: async frame => accepted.push(frame), suspendAdmission() {}, close: async () => {},
-        matchesSkillInstallResult: value => value.messageId === 'result' && value.installationId === 'si_product' && value.runtimeInstanceId === 'execution-boot'
+        matchesSkillInstallResult: value => JSON.stringify(value) === JSON.stringify(durableSkillResult())
       }), close: async () => {} })
     }) })
   t.after(() => factory.close())
@@ -52,14 +62,18 @@ test('actual adapter requires M registration reply and preserves exact session g
 })
 test('actual adapter never changes the durable skill result execution identity on reconnect', async t => {
   const f = await fixture(t); f.socket.receive(f.ack()); await f.activation
-  const result = { schemaVersion: 1, messageType: 'work.result', messageId: 'result', resultType: 'SKILL_INSTALL_RESULT', installationId: 'si_product', runtimeInstanceId: 'execution-boot', packageDigest: `sha256:${'a'.repeat(64)}`, installedAt: '1000' }
+  const result = durableSkillResult()
   const bytes = JSON.stringify(result)
   assert.equal(f.state.transport.send(result), true)
   const wire = f.sent.at(-1)
-  assert.equal(wire.data.executionRuntimeInstanceId, 'execution-boot'); assert.equal(wire.data.runtimeInstanceId, 'boot')
-  assert.equal(wire.data.skillInstallationId, 'si_product'); assert.equal(wire.data.runtimeInstallationId, 'rti_1')
+  assert.deepEqual(wire, result, 'transport cannot inject current boot/session or rewrite durable SM-C1 facts')
+  assert.equal(wire.data.executionRuntimeInstanceId, 'execution-boot')
+  assert.equal(Object.hasOwn(wire.data, 'runtimeInstanceId'), false)
+  assert.equal(wire.data.runtimeInstallationId, 'rti_1')
   assert.equal(JSON.stringify(result), bytes)
-  assert.equal(f.state.transport.send({ ...result, installationId: 'foreign' }), false)
+  for (const data of [{ agentId: 'foreign' }, { runtimeInstallationId: 'foreign' }, { executionRuntimeInstanceId: 'foreign' }, { resultSha256: 'f'.repeat(64) }]) {
+    assert.equal(f.state.transport.send({ ...result, data: { ...result.data, ...data } }), false)
+  }
 })
 test('public ping produces a correlated pong rather than a flat control alias', async t => {
   const f = await fixture(t); f.socket.receive(f.ack()); await f.activation
