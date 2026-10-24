@@ -119,3 +119,23 @@ test('public string session generation reaches measured registration without los
     assert.equal(current.publications(), 1)
   }
 })
+
+
+test('real Runtime task-readiness projection never advertises taskless management as D06 commands', async () => {
+  const { runtimeReadyCommandTypes } = await import('../agent-client.mjs')
+  const current = { processor: {}, skillInstallManager: { enabled: true }, workspaceManager: {}, commandAdapterReady: true }
+  const taskTypes = ['TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH']
+  assert.deepEqual(runtimeReadyCommandTypes(current), taskTypes)
+  current.skillInstallManager.enabled = false
+  assert.deepEqual(runtimeReadyCommandTypes(current), taskTypes)
+  current.commandAdapterReady = false
+  current.skillInstallManager.enabled = true
+  assert.deepEqual(runtimeReadyCommandTypes(current), [], 'management readiness does not grant task adapter readiness')
+  current.commandAdapterReady = true
+  current.processor.failClosedError = new Error('durable inbox unavailable')
+  assert.deepEqual(runtimeReadyCommandTypes(current), [])
+  delete current.processor.failClosedError
+  current.disposed = true
+  assert.deepEqual(runtimeReadyCommandTypes(current), [])
+  assert.deepEqual(runtimeReadyCommandTypes(null), [])
+})

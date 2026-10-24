@@ -4168,6 +4168,15 @@ export const buildAgentPresencePayload = (profile, status, extra = {}) => {
   }
 }
 
+// Task readiness uses the D06 task command contract only. Taskless SM-C1
+// management is declared by skillExecution and handled by its durable manager.
+export const runtimeReadyCommandTypes = state => {
+  if (!state || state.disposed || state.processor.failClosedError) return []
+  // WORK_ITEM_CANCEL has no independently verified exact command cancel adapter.
+  return state.workspaceManager && state.commandAdapterReady
+    ? ['TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH'] : []
+}
+
 export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null,
   typedInspectionProfileRuntime = null, controlledImageV3Runtime = null, skillRegistry = null) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, appServerAdapter)
@@ -6655,16 +6664,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         },
         registrationPayload: () => buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
           true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry),
-        readyCommandTypes: () => {
-          const state = entry.state
-          if (!state || state.disposed || state.processor.failClosedError) return []
-          const types = []
-          if (state.workspaceManager && state.commandAdapterReady) types.push('TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH')
-          // WORK_ITEM_CANCEL has no independently verified exact command cancel
-          // adapter; CHAT cancellation retains its original exact turn contract.
-          if (state.skillInstallManager.enabled) types.push('SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE')
-          return types
-        },
+        readyCommandTypes: () => runtimeReadyCommandTypes(entry.state),
         chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
         acceptFrame: async frame => {
           const state = entry.state
