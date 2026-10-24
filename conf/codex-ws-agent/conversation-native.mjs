@@ -151,8 +151,7 @@ export class NativeConversationLane {
     this.#active = true
     try {
       const envelope = await this.#request(`${BASE}/conversation-executions/commands`, 'GET')
-      if (!object(envelope) || Object.keys(envelope).join() !== 'items' || !Array.isArray(envelope.items)
-          || envelope.items.length > 16) deny('CONVERSATION_INBOX_INVALID')
+      if (!object(envelope) || !Array.isArray(envelope.items)) deny('CONVERSATION_INBOX_INVALID')
       let processed = 0
       for (const raw of envelope.items) {
         const command = parseNativeConversationCommand(raw)

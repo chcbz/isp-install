@@ -207,8 +207,7 @@ export class ControlledImageConversationLaneV3 {
     try {
       const recovered = await this.#recoverRetainedResults()
       const envelope = await this.#request(INBOX, 'GET')
-      if (!object(envelope) || Object.keys(envelope).join() !== 'items' || !Array.isArray(envelope.items)
-          || envelope.items.length > 16) deny('CONVERSATION_INBOX_INVALID')
+      if (!object(envelope) || !Array.isArray(envelope.items)) deny('CONVERSATION_INBOX_INVALID')
       let processed = 0
       for (const raw of envelope.items) {
         const command = parseControlledImageV3ConversationCommand(raw)

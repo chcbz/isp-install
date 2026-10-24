@@ -5609,7 +5609,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
   try { body = await readNativeJson(response) } catch {
     throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_JSON', 'workspace runtime command pickup returned invalid JSON')
   }
-  if (!isObject(body) || Object.keys(body).some(key => key !== 'items') || !Array.isArray(body.items) || body.items.length > 16) {
+  if (!isObject(body) || !Array.isArray(body.items)) {
     throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_ENVELOPE', 'workspace runtime command pickup returned an invalid envelope')
   }
   let dispatched = 0

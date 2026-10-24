@@ -110,11 +110,9 @@ test('native text lane performs one irreversible START and commits the exact out
 })
 
 
-test('Runtime installer payload closure ships the text executor and advances the Runtime package version', () => {
+test('Runtime installer payload closure ships all required text and skill executors independent of the Runtime release number', () => {
   assert.ok(EXECUTION_PAYLOAD_FILES.includes('conversation-text-file.mjs'))
   assert.ok(EXECUTION_PAYLOAD_FILES.includes('conversation-native.mjs'))
   assert.ok(EXECUTION_PAYLOAD_FILES.includes('workspace-file-bridge.mjs'))
-  const runtimePackage = JSON.parse(readFileSync(new URL('../../cyf-agent-runtime-v1/package.json', import.meta.url), 'utf8'))
-  assert.equal(runtimePackage.version, '1.2.0')
   for (const path of ['materials-chat.mjs', 'skill-conversation.mjs', 'skill-runners/local-script.mjs', 'skill-runners/native-model.mjs', 'skill-runners/image-provider.mjs']) assert.ok(EXECUTION_PAYLOAD_FILES.includes(path), path)
 })

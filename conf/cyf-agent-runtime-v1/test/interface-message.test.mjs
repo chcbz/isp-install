@@ -10,7 +10,15 @@ test('event and reply have closed roots and explicit correlation', () => {
 })
 test('legacy aliases, partial replies, duplicates and missing data are rejected', () => {
   const request = eventMessage('r', 'agent.register', 'm', null)
-  for (const value of [{ ...request, type: 'agent.register' }, { ...request, channel: 'agent' }, { ...request, code: 'E0' }, { ...request, messageType: 'agent_registered' }, { ...request, protocolVersion: 2 }]) assert.throws(() => decodeMessage(JSON.stringify(value)))
+  for (const value of [{ ...request, code: 'E0' }, { ...request, messageType: 'agent_registered' }, { ...request, protocolVersion: 2 }]) assert.throws(() => decodeMessage(JSON.stringify(value)))
   assert.throws(() => decodeMessage('{"protocolVersion":1,"requestId":"r","messageType":"agent.register","messageId":"m"}'))
   assert.throws(() => decodeMessage('{"protocolVersion":1,"requestId":"r","messageType":"agent.register","messageId":"m","data":null,"data":{}}'))
+})
+
+import { decodeMessage as decodeEngineMessage } from '../../codex-ws-agent/message-envelope.mjs'
+import { decodeHttpResponse as decodeEngineResponse } from '../../codex-ws-agent/api-envelope.mjs'
+test('engine consumers share additive metadata behavior with the host', () => {
+  const request = eventMessage('r', 'agent.register', 'm', null)
+  assert.deepEqual(decodeEngineMessage(JSON.stringify({ ...request, trace: 'next' })), request)
+  assert.deepEqual(decodeEngineResponse(JSON.stringify({ protocolVersion: 1, requestId: 'r', code: 'E0', msg: 'ok', data: { ok: true }, trace: 'next' }), { status: 200, requestId: 'r' }).value, { ok: true })
 })

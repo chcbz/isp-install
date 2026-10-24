@@ -360,3 +360,27 @@ test('unattempted old records are read without creating recovery state or runnin
   assert.deepEqual(await f.lane.poll(), { processed: 1 })
   assert.deepEqual(readdirSync(store.directory).sort(), before); assert.equal(f.modelCalls(), 1)
 })
+
+test('an authenticated inbox batch larger than sixteen is processed, not rejected by client pagination assumptions', async t => {
+  const f = fixture(t), commands = Array.from({ length: 17 }, (_, i) => {
+    const c = structuredClone(f.c); c.executionId = `pwe_batch_${i}`; c.taskSkillBinding.executionId = c.executionId; return wireCommand(c)
+  })
+  f.lane.fetch = async url => response(url, { items: commands, nextCursor: null })
+  const processed = []
+  f.lane.process = async command => { processed.push(command.executionId) }
+  assert.deepEqual(await f.lane.poll(), { processed: 17 })
+  assert.equal(new Set(processed).size, 17)
+  assert.equal(f.modelCalls(), 0) // scheduler coverage, no synthetic provider invocation
+})
+
+test('lease and effect/commit acknowledgements tolerate metadata without losing identity checks', async t => {
+  const f = fixture(t), fetchFn = f.lane.fetch
+  f.lane.fetch = async (url, options) => {
+    const original = await fetchFn(url, options), envelope = JSON.parse(await original.text())
+    if (/\/(?:lease|start|result)$/.test(url.pathname) || url.pathname.includes('/result-commits/')) envelope.data.trace = 'next-version'
+    return response(url, envelope.data, original.status)
+  }
+  assert.deepEqual(await f.lane.poll(), { processed: 1 }); assert.equal(f.modelCalls(), 1)
+  f.emptyInbox(); assert.deepEqual(await new SkillConversationLane(f.options).poll(), { processed: 0 })
+  assert.equal(f.modelCalls(), 1)
+})

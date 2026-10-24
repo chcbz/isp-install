@@ -13,7 +13,7 @@ const fail = (code, cause = null) => { throw Object.assign(new Error(code), { co
 const localRecoveryError = error => ['SKILL_COMMAND_INVALID', 'SKILL_INSTALL_COMMAND_INVALID', 'SKILL_INVALID_JSON',
   'SKILL_RECOVERY_BINDING_REQUIRED', 'SKILL_RECOVERY_RECORD_INCOMPLETE', 'SKILL_RECOVERY_RECEIPT_INVALID', 'SKILL_RECOVERY_ATTEMPT_INVALID'].includes(error?.code)
 const fenceValid = value => object(value) && nativePositiveLong(value.version) && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value.token || '')
-const leaseValid = (lease, command) => fenceValid(lease) && Object.keys(lease).length === 4 && ['executionId', 'version', 'token', 'expiresAt'].every(key => Object.hasOwn(lease, key)) && lease.executionId === command.executionId && Number.isSafeInteger(lease.expiresAt) && lease.expiresAt > Date.now()
+const leaseValid = (lease, command) => fenceValid(lease) && ['executionId', 'version', 'token', 'expiresAt'].every(key => Object.hasOwn(lease, key)) && lease.executionId === command.executionId && Number.isSafeInteger(lease.expiresAt) && lease.expiresAt > Date.now()
 const originOf = value => {
   let url; try { url = new URL(value) } catch { fail('SKILL_API_ORIGIN_INVALID') }
   if (url.username || url.password || url.search || url.hash || url.pathname !== '/' || !['http:', 'https:'].includes(url.protocol)
@@ -30,17 +30,15 @@ const effectRequest = body => ({ effectSha256: body.effectDigest, providerBindin
   ...(Object.hasOwn(body, 'status') ? { status: body.status, providerRequestId: body.providerRequestId, resultSha256: body.resultDigest } : {}) })
 const effectReceipt = value => {
   const keys = ['schemaVersion', 'disposition', 'status', 'providerRequestId', 'resultSha256']
-  if (!object(value) || Object.keys(value).length !== keys.length || !keys.every(key => Object.hasOwn(value, key)) ||
+  if (!object(value) || !keys.every(key => Object.hasOwn(value, key)) ||
       value.resultSha256 !== null && !skillSha(value.resultSha256)) fail('SKILL_EFFECT_REPORT_UNCONFIRMED')
-  const { resultSha256, ...receipt } = value
-  return { ...receipt, resultDigest: resultSha256 }
+  return { ...Object.fromEntries(keys.filter(key => key !== 'resultSha256').map(key => [key, value[key]])), resultDigest: value.resultSha256 }
 }
 const resultReceipt = value => {
   const keys = ['manifestId', 'state', 'phase', 'resultSha256']
-  if (!object(value) || Object.keys(value).length !== keys.length || !keys.every(key => Object.hasOwn(value, key)) ||
+  if (!object(value) || !keys.every(key => Object.hasOwn(value, key)) ||
       !skillSha(value.resultSha256)) fail('SKILL_COMMIT_UNCONFIRMED')
-  const { resultSha256, ...receipt } = value
-  return { ...receipt, resultDigest: resultSha256 }
+  return { ...Object.fromEntries(keys.filter(key => key !== 'resultSha256').map(key => [key, value[key]])), resultDigest: value.resultSha256 }
 }
 const sourceKinds = new Set(['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'])
 const byteLength = value => {
@@ -162,7 +160,7 @@ export class SkillConversationLane {
     this.active = true
     try {
       const page = await this.request(`${BASE}/conversation-executions/commands`, 'GET')
-      if (!object(page) || !Array.isArray(page.items) || page.items.length > 16) fail('SKILL_INBOX_INVALID')
+      if (!object(page) || !Array.isArray(page.items)) fail('SKILL_INBOX_INVALID')
       const recoveryErrors = []
       const commands = new Map(this.pendingCommands(recoveryErrors).map(command => [command.executionId, command]))
       const blockedIds = new Set(recoveryErrors.map(item => item.executionId))

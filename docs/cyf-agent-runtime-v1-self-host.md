@@ -367,3 +367,8 @@ The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/
 发布前必须用旧已完成、旧UNKNOWN、坏单记录、新合法命令的混合fixture验证升级/重启，验证原字节与摘要不变、新任务继续、模型调用不重复；允许对真实存量只读盘点，但不重放历史数据。记录源码、正式测试、安装、线上业务验收四种独立状态。
 
 核对日期2026-10-24；修复基线Runtime ec9ac757c40466670f0627a1e5486d8df5a4fce3，本轮候选1.3.2/engine1.1.2。50项本机定向测试通过，仅诊断；正式Flow与候选上线尚未完成，不能据此重标旧业务验收。
+
+
+### 2026-10-24 全代码扫描续修
+
+CYF公共规范v1.4及 `/home/isp/wsps/cyf/api/docs/interface-catalog/validation-policy.md`覆盖本机engine/host：HTTP/消息外层忽略无害扩展、仅投影已知字段；各议事/资料收件箱不再以服务端单页16条策略拒绝较大批次；技能租约/ACK不按额外字段拒绝，但token/代际/摘要/状态核验保留。Provider输入/文件和归档上限未随此取消，数值必要性待逐项核实。不新建框架、不部署；本轮仍是未发布1.3.2候选的续修。
