@@ -44,6 +44,34 @@ export function validateSkillInputReceipts(receipts, inputRefs, frozenInputs = n
   }
 }
 
+/** Read-only recovery classification, before applying the current execution DTO.
+ * A historical receipt closes local scheduling only; it neither publishes a new
+ * success nor authorizes replay. Original command/identity/hash bytes never change. */
+export function readSkillRecoveryCheckpoint({ rootDirectory, scope, executionId }) {
+  if (!isAbsolute(rootDirectory || '') || !scope || !skillId(executionId)) fail('SKILL_STORE_CONFIG_INVALID')
+  const scopeDigest = skillDigest(scope), subject = resolve(rootDirectory, scopeDigest), directory = resolve(subject, executionId)
+  for (const path of [resolve(rootDirectory), subject, directory]) privateDirectory(path)
+  const read = name => {
+    const path = resolve(directory, `${name}.json`)
+    return existsSync(path) ? parseSkillJson(readPrivate(path)) : null
+  }
+  const command = read('command'), identity = read('identity')
+  if (!command || !identity) fail('SKILL_RECOVERY_RECORD_INCOMPLETE')
+  if (command.executionId !== executionId || identity.schemaVersion !== 1 || identity.executionId !== executionId ||
+      identity.scopeDigest !== scopeDigest || identity.commandDigest !== skillDigest(command) ||
+      identity.snapshotDigest !== command.snapshotDigest) fail('SKILL_STORE_IDENTITY_CONFLICT')
+  const receipt = read('receipt')
+  if (receipt) {
+    if (receipt.schemaVersion !== 1 || receipt.executionId !== executionId || receipt.snapshotDigest !== command.snapshotDigest ||
+        receipt.state !== 'RESULT_COMMITTED' || !['ARCHIVING', 'COMPLETE'].includes(receipt.phase) ||
+        !skillId(receipt.manifestId) || !skillSha(receipt.localResultDigest) || !skillSha(receipt.resultDigest)) fail('SKILL_RECOVERY_RECEIPT_INVALID')
+    return { command, completed: true, attempted: true }
+  }
+  const attempt = read('attempt')
+  if (attempt && (attempt.schemaVersion !== 1 || attempt.executionId !== executionId)) fail('SKILL_RECOVERY_ATTEMPT_INVALID')
+  return { command, completed: false, attempted: Boolean(attempt) }
+}
+
 export class SkillExecutionStore {
   constructor({ rootDirectory, scope, command }) {
     if (!isAbsolute(rootDirectory || '') || !scope || !skillId(command?.executionId)) fail('SKILL_STORE_CONFIG_INVALID')

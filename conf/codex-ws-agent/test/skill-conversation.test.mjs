@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, readdirSync, writeFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { SkillConversationLane, parseSkillInputSnapshot, validateCommittedSkillResult, skillCommandFromWire } from '../skill-conversation.mjs'
@@ -271,4 +271,92 @@ test('a different recovery error clears UNKNOWN backoff and is not silently swal
   now = 15000; code = 'SKILL_TRANSPORT_UNKNOWN'
   await assert.rejects(lane.poll(), /SKILL_TRANSPORT_UNKNOWN/)
   assert.equal(lane.unknownRetries.size, 0)
+})
+
+// An unsupported historical record is never upgraded or replayed by the poller.
+const oldCheckpoint = f => {
+  const old = { ...structuredClone(f.c), executionId: 'pwe_old' }; delete old.taskSkillBinding
+  const store = new SkillExecutionStore({ rootDirectory: f.lane.root, scope: { ...scope, apiOrigin: f.lane.origin }, command: old })
+  store.write('attempt', { schemaVersion: 1, executionId: old.executionId })
+  return { old, store }
+}
+test('unsupported retained command cannot starve new work or acquire execution authority', async t => {
+  const f = fixture(t), { old, store } = oldCheckpoint(f)
+  store.write('effect-generate', { status: 'START_RECORDED' })
+  const before = Object.fromEntries(readdirSync(store.directory).filter(n => n.endsWith('.json')).map(n => [n, readFileSync(resolve(store.directory, n))]))
+  await assert.rejects(f.lane.poll(), error => {
+    assert.equal(error.code, 'SKILL_RECOVERY_BINDING_REQUIRED'); assert.equal(error.processed, 1)
+    assert.deepEqual(error.executionErrors, [{ executionId: old.executionId, code: 'SKILL_RECOVERY_BINDING_REQUIRED' }]); return true
+  })
+  assert.equal(f.modelCalls(), 1); assert.ok(!f.calls.some(p => p.includes('pwe_old')))
+  for (const [name, bytes] of Object.entries(before)) assert.deepEqual(readFileSync(resolve(store.directory, name)), bytes)
+  f.emptyInbox()
+  await assert.rejects(new SkillConversationLane(f.options).poll(), error => error.code === 'SKILL_RECOVERY_BINDING_REQUIRED' && error.processed === 0)
+  assert.equal(f.modelCalls(), 1)
+})
+test('completed historical commands are read without the new execution binding or replay', async t => {
+  const f = fixture(t), { store, old } = oldCheckpoint(f)
+  store.write('receipt', { schemaVersion: 1, executionId: old.executionId, snapshotDigest: old.snapshotDigest,
+    state: 'RESULT_COMMITTED', phase: 'ARCHIVING', manifestId: 'manifest_old', resultDigest: 'a'.repeat(64), localResultDigest: 'b'.repeat(64) })
+  const before = Object.fromEntries(readdirSync(store.directory).filter(n => n.endsWith('.json')).map(n => [n, readFileSync(resolve(store.directory, n))]))
+  assert.deepEqual(await f.lane.poll(), { processed: 1 }); assert.equal(f.modelCalls(), 1)
+  for (const [name, bytes] of Object.entries(before)) assert.deepEqual(readFileSync(resolve(store.directory, name)), bytes)
+  f.emptyInbox(); assert.deepEqual(await new SkillConversationLane(f.options).poll(), { processed: 0 })
+  assert.equal(f.modelCalls(), 1)
+})
+test('a retained command identity conflict still fails before any new model execution', async t => {
+  const f = fixture(t), { store } = oldCheckpoint(f)
+  const raw = JSON.parse(readFileSync(store.path('command'))); raw.executionId = 'different_execution'; store.write('command', raw)
+  await assert.rejects(f.lane.poll(), /SKILL_STORE_IDENTITY_CONFLICT/); assert.equal(f.modelCalls(), 0)
+})
+test('unsafe retained command still stops the shared poll', async t => {
+  const f = fixture(t), { store } = oldCheckpoint(f)
+  rmSync(store.path('command')); symlinkSync(store.path('attempt'), store.path('command'))
+  await assert.rejects(f.lane.poll()); assert.equal(f.modelCalls(), 0)
+})
+test('a malformed local JSON record is reported without blocking unrelated current work', async t => {
+  const f = fixture(t), { store } = oldCheckpoint(f)
+  writeFileSync(store.path('command'), '{invalid-json', { mode: 0o600 })
+  await assert.rejects(f.lane.poll(), error => error.code === 'SKILL_INVALID_JSON' && error.processed === 1)
+  assert.equal(readFileSync(store.path('command'), 'utf8'), '{invalid-json'); assert.equal(f.modelCalls(), 1)
+})
+test('a current inbox item cannot silently replace an unbound historical command of the same execution', async t => {
+  const f = fixture(t), { old, store } = oldCheckpoint(f), next = structuredClone(f.c)
+  next.executionId = old.executionId; next.taskSkillBinding.executionId = old.executionId
+  f.lane.fetch = async url => response(url, { items: [wireCommand(next)] })
+  f.lane.process = async () => assert.fail('must not overwrite or replay the old unresolved execution')
+  const before = readFileSync(store.path('command'))
+  await assert.rejects(f.lane.poll(), error => error.code === 'SKILL_RECOVERY_BINDING_REQUIRED' && error.processed === 0)
+  assert.deepEqual(readFileSync(store.path('command')), before)
+})
+test('a malformed identified inbox item does not starve a different valid command', async t => {
+  const f = fixture(t), raw = wireCommand(f.c), fetchFn = f.lane.fetch
+  f.lane.fetch = (url, opts) => url.pathname.endsWith('/commands')
+    ? response(url, { items: [{ executionId: 'bad_item' }, raw] }) : fetchFn(url, opts)
+  await assert.rejects(f.lane.poll(), error => error.code === 'SKILL_COMMAND_INVALID' && error.processed === 1)
+  assert.equal(f.modelCalls(), 1)
+})
+test('metadata additions survive a restart without changing original command digest or repeating effects', async t => {
+  const f = fixture(t); f.c.annotation = { release: 'next' }; f.c.skill.title = 'new label'; f.c.outputs.note = 'new label'
+  f.loseStage(); f.c.outputs.artifactsRequired = true
+  await assert.rejects(f.lane.poll(), /SKILL_TRANSPORT_UNKNOWN/)
+  const root = resolve(f.lane.root, skillDigest({ ...scope, apiOrigin: f.lane.origin }), f.c.executionId)
+  const before = readFileSync(resolve(root, 'command.json'))
+  f.emptyInbox(); await new SkillConversationLane(f.options).poll()
+  assert.deepEqual(readFileSync(resolve(root, 'command.json')), before); assert.equal(f.modelCalls(), 1)
+})
+test('an invalid historical receipt is isolated without becoming a completed success', async t => {
+  const f = fixture(t), { store, old } = oldCheckpoint(f)
+  store.write('receipt', { schemaVersion: 1, executionId: old.executionId, snapshotDigest: old.snapshotDigest,
+    state: 'RESULT_COMMITTED', phase: 'ARCHIVING', manifestId: 'manifest_old', resultDigest: 'invalid', localResultDigest: 'b'.repeat(64) })
+  const before = readFileSync(store.path('receipt'))
+  await assert.rejects(f.lane.poll(), error => error.code === 'SKILL_RECOVERY_RECEIPT_INVALID' && error.processed === 1)
+  assert.deepEqual(readFileSync(store.path('receipt')), before); assert.equal(f.modelCalls(), 1)
+})
+test('unattempted old records are read without creating recovery state or running them', async t => {
+  const f = fixture(t), { store } = oldCheckpoint(f)
+  rmSync(store.path('attempt'))
+  const before = readdirSync(store.directory).sort()
+  assert.deepEqual(await f.lane.poll(), { processed: 1 })
+  assert.deepEqual(readdirSync(store.directory).sort(), before); assert.equal(f.modelCalls(), 1)
 })

@@ -4,12 +4,14 @@ import { readNativeJson } from './native-json.mjs'
 import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, readdirSync, writeFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { executeSkill, parseSkillCommand, skillDigest, skillHash, skillId, skillSha } from './skill-executor.mjs'
-import { SkillExecutionStore, SkillEffects, validateSkillInputReceipts } from './skill-execution-store.mjs'
+import { SkillExecutionStore, SkillEffects, validateSkillInputReceipts, readSkillRecoveryCheckpoint } from './skill-execution-store.mjs'
 import { nativeSessionHeaders, nativePositiveLong } from './conversation-native.mjs'
 import { parseSkillJson, validateSkillData } from './skill-manifest.mjs'
 const BASE = '/internal/agent/tasks'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const fail = (code, cause = null) => { throw Object.assign(new Error(code), { code, ...(cause ? { cause } : {}) }) }
+const localRecoveryError = error => ['SKILL_COMMAND_INVALID', 'SKILL_INSTALL_COMMAND_INVALID', 'SKILL_INVALID_JSON',
+  'SKILL_RECOVERY_BINDING_REQUIRED', 'SKILL_RECOVERY_RECORD_INCOMPLETE', 'SKILL_RECOVERY_RECEIPT_INVALID', 'SKILL_RECOVERY_ATTEMPT_INVALID'].includes(error?.code)
 const fenceValid = value => object(value) && nativePositiveLong(value.version) && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value.token || '')
 const leaseValid = (lease, command) => fenceValid(lease) && Object.keys(lease).length === 4 && ['executionId', 'version', 'token', 'expiresAt'].every(key => Object.hasOwn(lease, key)) && lease.executionId === command.executionId && Number.isSafeInteger(lease.expiresAt) && lease.expiresAt > Date.now()
 const originOf = value => {
@@ -134,25 +136,24 @@ export class SkillConversationLane {
     if (String(bytes.length) !== input.byteLength || skillHash(bytes) !== input.sha256) fail('SKILL_INPUT_BYTES_INVALID')
     return bytes
   }
-  pendingCommands() {
-    const subject = resolve(this.root, skillDigest({ ...this.scope, apiOrigin: this.origin }))
+  pendingCommands(recoveryErrors = []) {
+    const scope = { ...this.scope, apiOrigin: this.origin }, subject = resolve(this.root, skillDigest(scope))
     if (!existsSync(subject)) return []
     if (realpathSync(subject) !== subject || !lstatSync(subject).isDirectory()) fail('SKILL_STORE_UNSAFE')
     const pending = []
     for (const id of readdirSync(subject)) {
       if (!skillId(id)) fail('SKILL_STORE_UNSAFE')
-      const directory = resolve(subject, id)
-      if (realpathSync(directory) !== directory || !lstatSync(directory).isDirectory()) fail('SKILL_STORE_UNSAFE')
-      const fd = openSync(resolve(directory, 'command.json'), constants.O_RDONLY | constants.O_NOFOLLOW)
-      let command
       try {
-        const stat = fstatSync(fd)
-        if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.geteuid() || (stat.mode & 0o077)) fail('SKILL_STORE_UNSAFE')
-        command = parseSkillCommand(readFileSync(fd))
-      } finally { closeSync(fd) }
-      if (command.executionId !== id) fail('SKILL_STORE_IDENTITY_CONFLICT')
-      const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
-      if (store.read('attempt') && !store.read('receipt')) pending.push(command)
+        const saved = readSkillRecoveryCheckpoint({ rootDirectory: this.root, scope, executionId: id })
+        // Completed historical records need no current execution fields or model.
+        if (saved.completed || !saved.attempted) continue
+        if (!Object.hasOwn(saved.command, 'taskSkillBinding')) fail('SKILL_RECOVERY_BINDING_REQUIRED')
+        pending.push(parseSkillCommand(saved.command))
+      } catch (error) {
+        if (!localRecoveryError(error)) throw error
+        // Retain original evidence; no fabricated binding, state change or replay.
+        recoveryErrors.push({ executionId: id, error })
+      }
     }
     return pending
   }
@@ -162,17 +163,26 @@ export class SkillConversationLane {
     try {
       const page = await this.request(`${BASE}/conversation-executions/commands`, 'GET')
       if (!object(page) || !Array.isArray(page.items) || page.items.length > 16) fail('SKILL_INBOX_INVALID')
-      const commands = new Map(this.pendingCommands().map(command => [command.executionId, command]))
+      const recoveryErrors = []
+      const commands = new Map(this.pendingCommands(recoveryErrors).map(command => [command.executionId, command]))
+      const blockedIds = new Set(recoveryErrors.map(item => item.executionId))
       for (const raw of page.items) {
-        const command = skillCommandFromWire(raw), previous = commands.get(command.executionId)
-        if (previous && skillDigest(previous) !== skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
-        commands.set(command.executionId, command)
+        if (blockedIds.has(raw?.executionId)) continue
+        try {
+          const command = skillCommandFromWire(raw), previous = commands.get(command.executionId)
+          if (previous && skillDigest(previous) !== skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
+          commands.set(command.executionId, command)
+        } catch (error) {
+          if (!localRecoveryError(error) || !skillId(raw?.executionId)) throw error
+          recoveryErrors.push({ executionId: raw.executionId, error })
+          blockedIds.add(raw.executionId); commands.delete(raw.executionId)
+        }
       }
       // Scheduling only: never an execution admission or a terminal failure.
       for (const id of this.unknownRetries.keys()) if (!commands.has(id)) this.unknownRetries.delete(id)
       let deferred = 0
-      let processed = 0, firstError = null
-      const executionErrors = [], proof = JSON.stringify(this.headers())
+      let processed = 0, firstError = recoveryErrors[0]?.error || null
+      const executionErrors = recoveryErrors.map(({ executionId, error }) => ({ executionId, code: error.code })), proof = JSON.stringify(this.headers())
       for (const command of commands.values()) {
         // A command-local UNKNOWN must not starve unrelated work. A changed
         // subject/session or unsafe shared checkpoint tree ends the whole poll.

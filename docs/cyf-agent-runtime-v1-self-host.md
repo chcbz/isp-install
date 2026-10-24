@@ -343,3 +343,27 @@ The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/
 - 必需RPC真实错误、消息绑定/结果结构、身份/ACL、网络/文件沙箱、摘要、锁和发布完整性保持原行为。未知CLI不等于兼容已验证；实际业务回归仍必要。
 - `schema`历史诊断槽中的`measured`仍指执行文件测量；合同ID/bundle摘要为空，不伪造schema已测量。汇总用`binaryMeasured`/`codexCliVersion`，INSPECT合同ID不再拼接CLI版本；执行策略仍绑定实际binaryIdentityDigest，旧carrier证据不得冒充新文件证据。
 - `CODEX_APP_SERVER_CONFIGURED_EXECUTABLE_DRIFT`是运行期间文件改变的完整性保护，仍拒绝旧测量执行。新程序获授权部署/受控重启后重新测量；不在请求中自动信任漂移、不回放旧请求、不改全局Codex。此源码说明不证明已经安装或多轮图片已验收。
+
+
+## 2026-10-24 执行命令兼容与恢复分类（最新授权）
+
+覆盖此前“一律拒绝未知字段/不兼容旧输入”在下述执行命令范围的解释；管理DTO和TaskSkillBinding仍按原封闭Schema。CYF公共规范 `/home/isp/wsps/cyf/api/docs/interface-standard.md` 为v1.3，公共协议版本未改变。
+
+| 校验/场景 | 规则与实现 |
+| --- | --- |
+| 执行命令顶层、skill、outputs新增字段 | 不再按字段总数拒绝；保留原对象参与摘要，runner只接收已声明字段；输出合同比较已定义4个语义字段 |
+| 必需字段、身份、ACL、绑定、输入授权、包/文件摘要、租约及幂等 | 保留；不以“兼容”默认缺失授权或改写原证据 |
+| 已完成旧记录缺新字段 | readSkillRecoveryCheckpoint先核验原identity/摘要/receipt，只跳过本地已完成调度；不重跑、不发布新的成功 |
+| 旧未完成记录缺taskSkillBinding | SKILL_RECOVERY_BINDING_REQUIRED，保留原记录并隔离本execution；同ID新报文不得替换，其他任务继续 |
+| 已有UNKNOWN副作用 | 原防重放及恢复规则不变，不重新调用模型/Provider |
+| 单记录坏JSON/缺字段/无效回执、带可信ID的坏inbox项 | 收集executionErrors，继续独立合法任务；处理后仍报告错误与processed，不伪报整轮成功 |
+| 目录权限、软链/硬链、主体或命令摘要身份冲突 | 仍fail-closed，终止本轮；不能作为普通版本不兼容吞掉 |
+| 未知执行协议 | 不猜测执行，隔离可识别单条记录；本轮只支持现行协议4执行，不恢复旧写接口 |
+
+恢复扫描顺序：私有目录及原identity → 原command摘要 → 已提交receipt → 未完成attempt → 当前执行DTO。扫描不得调用会创建目录/identity的构造器；只读分类不能迁移/删除数据。新任务通过原服务端claim/授权再执行。
+
+实现落点：Runtime `skill-execution-store.mjs::readSkillRecoveryCheckpoint`、`skill-conversation.mjs::pendingCommands/poll`、`skill-executor.mjs::parseSkillCommand/executionView`。不改Web交互或API管理权限。
+
+发布前必须用旧已完成、旧UNKNOWN、坏单记录、新合法命令的混合fixture验证升级/重启，验证原字节与摘要不变、新任务继续、模型调用不重复；允许对真实存量只读盘点，但不重放历史数据。记录源码、正式测试、安装、线上业务验收四种独立状态。
+
+核对日期2026-10-24；修复基线Runtime ec9ac757c40466670f0627a1e5486d8df5a4fce3，本轮候选1.3.2/engine1.1.2。50项本机定向测试通过，仅诊断；正式Flow与候选上线尚未完成，不能据此重标旧业务验收。

@@ -18,9 +18,9 @@ const fixture = () => {
     persistReceipt: async () => { events.push('receipt') } }
   return { c, ctx, events, manifest }
 }
-test('strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys', () => {
+test('protocol4 retains semantic version, selectors, outputs and duplicate-key checks', () => {
   assert.deepEqual(parseSkillCommand(command()), command())
-  for (const patch of [{ executionProtocolVersion: 3 }, { endpoint: 'https://evil.test' }, { inputRefs: ['a', 'a'] }, { outputs: [{ outputId: '../x', contentMimeType: 'text/plain' }] }])
+  for (const patch of [{ executionProtocolVersion: 3 }, { inputRefs: ['a', 'a'] }, { outputs: [{ outputId: '../x', contentMimeType: 'text/plain' }] }])
     assert.throws(() => parseSkillCommand({ ...command(), ...patch }), /SKILL_COMMAND_INVALID/)
   assert.throws(() => parseSkillCommand('{"executionProtocolVersion":4,"executionProtocolVersion":4}'), /SKILL_INVALID_JSON/)
 })
@@ -71,4 +71,30 @@ test('protocol4 requires the exact shared task binding and rejects substituted e
   }
   const { taskSkillBinding, ...missing } = original
   assert.throws(() => parseSkillCommand(missing), /SKILL_COMMAND_INVALID/)
+})
+
+test('additive metadata is preserved for identity but cannot become runner configuration', async () => {
+  const { c, ctx, manifest, events } = fixture()
+  c.displayTitle = 'new display metadata'; c.endpoint = 'https://not-authorized.invalid'; c.futureFlag = true
+  c.skill.displayName = 'a future label'; c.outputs.description = 'a future annotation'
+  const original = structuredClone(c), digest = skillDigest(c)
+  assert.deepEqual(parseSkillCommand(c), original)
+  ctx.runners.set('native-model', { run: async ({ command, parameters }) => {
+    assert.equal(Object.hasOwn(command, 'endpoint'), false)
+    assert.equal(Object.hasOwn(command, 'futureFlag'), false)
+    assert.equal(Object.hasOwn(command.skill, 'displayName'), false)
+    assert.equal(Object.hasOwn(command.outputs, 'description'), false)
+    assert.deepEqual(parameters, c.parameters); events.push('run'); return manifest.result
+  } })
+  await executeSkill(c, ctx)
+  assert.deepEqual(c, original); assert.equal(skillDigest(c), digest)
+  assert.deepEqual(events, ['claim', 'run', 'persist', 'commit', 'receipt'])
+})
+test('additive field tolerance never defaults a missing requirement or changes output authority', async () => {
+  for (const key of ['instruction', 'inputRefs', 'outputs', 'snapshotDigest', 'taskSkillBinding']) {
+    const c = command(); delete c[key]; c.extra = 'annotation'
+    assert.throws(() => parseSkillCommand(c), /SKILL_COMMAND_INVALID/)
+  }
+  const { c, ctx } = fixture(); c.outputs.artifactsRequired = true; c.outputs.description = 'not authority'
+  await assert.rejects(executeSkill(c, ctx), /SKILL_OUTPUT_CONTRACT_INVALID/)
 })

@@ -16,19 +16,26 @@ export const skillDigest = value => skillHash(skillCanonicalJson(value))
 export const skillId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value)
 export const skillSha = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const mime = value => typeof value === 'string' && /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(value)
-const exact = (value, keys) => object(value) && keys.length === Object.keys(value).length && keys.every(key => Object.hasOwn(value, key))
+const required = (value, keys) => object(value) && keys.every(key => Object.hasOwn(value, key))
+const commandFields = ['executionProtocolVersion', 'executionId', 'taskId', 'runId', 'conversationId', 'conversationGeneration',
+  'commandId', 'messageId', 'skill', 'taskSkillBinding', 'snapshotDigest', 'parameters', 'instruction', 'inputRefs', 'outputs']
+const skillFields = ['key', 'version', 'packageSha256', 'manifestSha256']
+const outputFields = ['dataSchema', 'mimeTypes', 'multiple', 'artifactsRequired']
+const project = (value, keys) => Object.fromEntries(keys.map(key => [key, value[key]]))
+// Additive metadata remains in the immutable command/hash, but is never runner
+// configuration or execution authority. Only the declared semantics reach code.
+const executionView = command => ({ ...project(command, commandFields), skill: project(command.skill, skillFields),
+  outputs: project(command.outputs, outputFields) })
 
 export function parseSkillCommand(raw) {
   const value = typeof raw === 'string' || Buffer.isBuffer(raw) ? parseSkillJson(raw) : structuredClone(raw)
-  const fields = ['executionProtocolVersion', 'executionId', 'taskId', 'runId', 'conversationId', 'conversationGeneration',
-    'commandId', 'messageId', 'skill', 'taskSkillBinding', 'snapshotDigest', 'parameters', 'instruction', 'inputRefs', 'outputs']
-  if (!exact(value, fields) || value.executionProtocolVersion !== 4 || !['executionId', 'taskId', 'runId', 'conversationId', 'commandId', 'messageId'].every(key => skillId(value[key]))
+  if (!required(value, commandFields) || value.executionProtocolVersion !== 4 || !['executionId', 'taskId', 'runId', 'conversationId', 'commandId', 'messageId'].every(key => skillId(value[key]))
       || typeof value.conversationGeneration !== 'string' || !/^[1-9][0-9]*$/.test(value.conversationGeneration)
-      || !exact(value.skill, ['key', 'version', 'packageSha256', 'manifestSha256']) || !skillId(value.skill.key) || !skillId(value.skill.version)
+      || !required(value.skill, skillFields) || !skillId(value.skill.key) || !skillId(value.skill.version)
       || !skillSha(value.skill.packageSha256) || !skillSha(value.skill.manifestSha256) || !skillSha(value.snapshotDigest)
       || !object(value.parameters) || typeof value.instruction !== 'string' || !value.instruction.trim()
       || !Array.isArray(value.inputRefs) || value.inputRefs.length > 32 || !value.inputRefs.every(skillId) || new Set(value.inputRefs).size !== value.inputRefs.length
-      || !exact(value.outputs, ['dataSchema', 'mimeTypes', 'multiple', 'artifactsRequired']) || !Array.isArray(value.outputs.mimeTypes)
+      || !required(value.outputs, outputFields) || !Array.isArray(value.outputs.mimeTypes)
       || !value.outputs.mimeTypes.every(mime) || typeof value.outputs.multiple !== 'boolean' || typeof value.outputs.artifactsRequired !== 'boolean') fail('SKILL_COMMAND_INVALID')
   const binding = validateManagement('TaskSkillBinding', value.taskSkillBinding)
   if (binding.executionId !== value.executionId || binding.skillKey !== value.skill.key || binding.skillVersion !== value.skill.version
@@ -45,7 +52,7 @@ export async function executeSkill(raw, ctx) {
   const descriptor = entry.descriptor
   const parameters = validateSkillParameters(descriptor.manifest.parametersSchema, command.parameters)
   const outputs = descriptor.manifest.outputs
-  if (skillDigest(command.outputs) !== skillDigest(outputs)) fail('SKILL_OUTPUT_CONTRACT_INVALID')
+  if (skillDigest(project(command.outputs, outputFields)) !== skillDigest(project(outputs, outputFields))) fail('SKILL_OUTPUT_CONTRACT_INVALID')
   const claim = await ctx.claimOrResume(command)
   // Recovery consumes the actual persisted result, never invokes the runner again.
   if (claim.resultManifest) {
@@ -61,7 +68,7 @@ export async function executeSkill(raw, ctx) {
     const inputs = await ctx.materializeAuthorizedInputs(command, descriptor)
     if (inputs.length < descriptor.manifest.inputs.minItems || inputs.length > descriptor.manifest.inputs.maxItems
         || inputs.some(input => !descriptor.manifest.inputs.acceptedMimeTypes.includes(input.contentMimeType))) fail('SKILL_INPUT_CONTRACT_INVALID')
-    const result = await runner.run({ command, instruction: command.instruction, parameters, inputs, descriptor,
+    const result = await runner.run({ command: executionView(command), instruction: command.instruction, parameters, inputs, descriptor,
       binding: entry.binding, effects: ctx.effects, outputDirectory: ctx.outputDirectory })
     manifest = await ctx.validateAndPersistResult(command, descriptor, result)
   }
