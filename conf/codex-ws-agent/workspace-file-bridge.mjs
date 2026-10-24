@@ -27,8 +27,6 @@ const SAFE_RUNTIME_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const SHA256 = /^[a-f0-9]{64}$/
 const CONTENT_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/
-const INPUT_LIMIT = 128
-const OUTPUT_LIMIT = 128
 const PATH_LIMIT = 512
 const INPUT_PREFIX = '/internal/agent/tasks'
 const AUTH_MAX_LENGTH = 4096
@@ -116,11 +114,11 @@ export const parseWorkspaceFileCommand = command => {
   assertExactKeys(command, COMMAND_KEYS, 'workspace file command')
   const taskId = parseId(command.taskId, 'taskId')
   const runId = parseId(command.runId, 'runId')
-  if (!Array.isArray(command.inputManifest) || command.inputManifest.length > INPUT_LIMIT) {
-    fail('COMMAND_INVALID', `inputManifest must be an array with at most ${INPUT_LIMIT} entries`)
+  if (!Array.isArray(command.inputManifest)) {
+    fail('COMMAND_INVALID', 'inputManifest must be an array')
   }
-  if (!Array.isArray(command.outputManifest) || command.outputManifest.length > OUTPUT_LIMIT) {
-    fail('COMMAND_INVALID', `outputManifest must be an array with at most ${OUTPUT_LIMIT} entries`)
+  if (!Array.isArray(command.outputManifest)) {
+    fail('COMMAND_INVALID', 'outputManifest must be an array')
   }
 
   const identities = new Set()
