@@ -352,3 +352,11 @@ The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/
 ### 2026-10-25 历史技能命令隔离（1.3.4）
 
 已有private-runs中的旧command可能缺少后来新增的taskSkillBinding；这不能构造或补写为当前执行授权。扫描仍核对私有目录、普通文件、UID/权限、锁及身份完整性。只将命令级SKILL_COMMAND_INVALID记录为该execution的待处理错误，保留全部原始文件/回执，不重放、不标记成功，并继续当前合法命令；共享目录/身份/会话错误仍中止。轮询最终报告原错误、executionErrors及实际processed数，不把隔离误报为旧任务完成。实现skill-conversation.pendingCommands/poll，复用既有“不饿死后续任务”回归包含旧无binding记录，正式Flow结果见CYF协调仓本次handoff。
+
+### 图片技能尺寸契约（2026-10-25，源码候选；安装/业务验证另记）
+
+Runtime 1.3.5 / image-generate、image-edit 1.2.0 增加可选 `parameters.size="800x600"`。只在用户明确尺寸时填写；旧 `{}` 不转换、旧已完成回执不重放。图片runner复用Magick：等比缩放到指定画布内、居中透明留边，不裁切/拉伸，不向未核实尺寸能力的Provider盲传参数。尺寸语法须为正整数宽x高并能被JS安全整数表示；无效值在外部调用前拒绝，防止错误尺寸产生有偿副作用，不加业务像素上限。
+
+Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺寸转换；尺寸及转换标识绑定effect摘要，转换失败仅报告该动作的输出处理错误，不将外部成功改为UNKNOWN、不再次调用Provider。最终成果摘要对应实际输出字节，原输入SHA/DELIVERED不变。仅新尺寸请求加转换摘要字段，旧空参数摘要保持。恢复需原服务端确认、身份/授权/fence不变，不能根据本地文件自行补发旧UNKNOWN。
+
+关键回归复用 `conf/codex-ws-agent/test/skill-runners.test.mjs` 的既有图片broker用例：旧参数、800×600、非同比例透明边、持久effect恢复不重复调用、错误尺寸不调用Provider。Flow同Run测试/打包，新技能包通过维护发布→报价→INSTALL/UPGRADE→目录READY，不以直接写权益替代管理流程。线上尺寸和多轮识图/生图/改图仍须实际图片验收，不以测试通过代替上线。

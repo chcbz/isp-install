@@ -1,4 +1,4 @@
-import { IMAGE_INPUT_MIMES, normalizeImageInput } from '../image-input.mjs'
+import { IMAGE_INPUT_MIMES, normalizeImageInput, parseImageOutputSize, resizeImageOutput, IMAGE_OUTPUT_TRANSFORM_ID } from '../image-input.mjs'
 /** Trusted host broker: packages/model parameters never receive credentials or
  * choose an endpoint. All external generation goes through registered effects. */
 import { responsePng } from './image-http-codec.mjs'
@@ -9,11 +9,12 @@ const adapters = new Set(['image-http.generate', 'image-http.edit'])
 export function createImageProviderRunner({ bindings, scope, fetchFn = globalThis.fetch }) {
   return {
     probe: async context => adapters.has(context.entrypoint) && typeof bindings?.resolve === 'function' && typeof fetchFn === 'function'
-      ? { ready: true, digest: skillDigest({ adapter: 'image-http', codec: 2, entrypoint: context.entrypoint }) }
+      ? { ready: true, digest: skillDigest({ adapter: 'image-http', codec: 3, entrypoint: context.entrypoint }) }
       : { ready: false, reasonCode: 'SKILL_PROVIDER_ADAPTER_MISSING' },
     run: async ({ command, descriptor, binding, inputs, instruction, parameters, effects }) => {
-      if (!adapters.has(descriptor.manifest.entrypoint) || Object.keys(parameters).length !== 0 || !Array.isArray(inputs)
+      if (!adapters.has(descriptor.manifest.entrypoint) || Object.keys(parameters).some(key => key !== 'size') || !Array.isArray(inputs)
           || inputs.length > 16 || (descriptor.manifest.entrypoint === 'image-http.edit' && inputs.length !== 1)) fail('SKILL_IMAGE_REQUEST_INVALID')
+      const outputSize = parseImageOutputSize(parameters.size)
       const current = await bindings.resolve({ scope, alias: descriptor.manifest.requirements.providerAlias })
       if (!current.ready || current.bindingId !== binding?.bindingId || current.revision !== binding.revision || current.digest !== binding.digest) fail('SKILL_PROVIDER_BINDING_CHANGED')
       const images = inputs.map(input => {
@@ -25,7 +26,7 @@ export function createImageProviderRunner({ bindings, scope, fetchFn = globalThi
       })
       const path = inputs.length ? '/v1/images/edits' : '/v1/images/generations'
       const body = { model: current.model, prompt: instruction, ...(images.length ? { images: images.map(({ image_url }) => ({ image_url })) } : {}), n: 1, output_format: 'png' }
-      const request = { adapter: 'image-http', imageTransform: 'magick-wasm-0.0.45-auto-orient-png-v1', entrypoint: descriptor.manifest.entrypoint, instruction, parameters,
+      const request = { adapter: 'image-http', ...(outputSize ? { outputTransform: IMAGE_OUTPUT_TRANSFORM_ID } : {}), imageTransform: 'magick-wasm-0.0.45-auto-orient-png-v1', entrypoint: descriptor.manifest.entrypoint, instruction, parameters,
         inputs: inputs.map(input => ({ inputRef: input.inputRef, sha256: input.sha256, contentMimeType: input.contentMimeType, byteLength: input.byteLength })),
         derivedInputs: images.map(image => image.provenance), bindingId: current.bindingId, bindingDigest: current.digest, model: current.model, path }
       const produced = await effects.invoke('generate', request, async () => {
@@ -37,7 +38,9 @@ export function createImageProviderRunner({ bindings, scope, fetchFn = globalThi
         const bytes = await responsePng(response, endpoint)
         return { bytes, providerRequestId: response.headers?.get?.('x-request-id') || null }
       })
-      return { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'image/png', bytes: produced.bytes }],
+      // Keep provider success durable even if local resizing fails; recovery reuses its bytes.
+      const bytes = resizeImageOutput(produced.bytes, outputSize)
+      return { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'image/png', bytes }],
         inputReceipts: inputs.map(input => ({ inputRef: input.inputRef, sha256: input.sha256, carrier: 'provider-image', delivery: 'DELIVERED' })) }
     }
   }

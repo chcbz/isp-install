@@ -1,14 +1,20 @@
 {
   "schemaVersion": 1,
   "skillKey": "image-generate",
-  "skillVersion": "1.1.0",
+  "skillVersion": "1.2.0",
   "title": "图片生成",
   "description": "根据任务要求生成图片，可带已授权参考图。",
   "runner": "provider-operation",
   "entrypoint": "image-http.generate",
   "parametersSchema": {
     "type": "object",
-    "properties": {},
+    "properties": {
+      "size": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]*x[1-9][0-9]*(?![\\s\\S])",
+        "description": "用户明确指定的输出画布像素，例800x600。等比缩放、居中透明留边，不裁切/拉伸；未指定时省略。"
+      }
+    },
     "required": [],
     "additionalProperties": false,
     "$schema": "https://json-schema.org/draft/2020-12/schema"

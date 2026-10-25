@@ -4,6 +4,8 @@ import { SkillBindings, parseSkillBindings } from '../skill-bindings.mjs'
 import { createImageProviderRunner } from '../skill-runners/image-provider.mjs'
 import { createNativeModelRunner } from '../skill-runners/native-model.mjs'
 import { buildMaterialsInputs } from '../materials-input.mjs'
+import { SkillEffects, SkillExecutionStore } from '../skill-execution-store.mjs'
+import { ImageMagick, MagickFormat, MagickColors } from '@imagemagick/magick-wasm'
 import { skillHash } from '../skill-executor.mjs'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -29,9 +31,9 @@ test('fee metadata changes do not alter binding digest/revision; no approval or 
   const first = await bindings.resolve({ scope, alias: 'image' }); config.costInfoOverrides['image-edit@1.0.0'] = { amount: '9999' }
   const next = await bindings.resolve({ scope, alias: 'image' }); assert.equal(first.digest, next.digest); assert.equal(first.revision, next.revision)
 })
-test('generic image broker reuses exact codec and controlled endpoint without consent', async () => {
+test('generic image broker reuses exact codec and controlled endpoint without consent', async t => {
   const bindings = bindingFixture(), current = await bindings.resolve({ scope, alias: 'image' }); let calls = 0
-  const bytes = Buffer.from([137,80,78,71,13,10,26,10,0])
+  let bytes = Buffer.from([137,80,78,71,13,10,26,10,0])
   const runner = createImageProviderRunner({ bindings, scope, fetchFn: async (url, opts) => {
     calls++; assert.equal(url.href, 'https://images.example.test/v1/images/generations'); assert.equal(opts.redirect, 'error')
     assert.equal(JSON.parse(opts.body).prompt, 'real request'); assert.equal(JSON.parse(opts.body).n, 1)
@@ -40,6 +42,27 @@ test('generic image broker reuses exact codec and controlled endpoint without co
   const result = await runner.run({ descriptor: descriptor('image-http.generate'), binding: current, inputs: [], instruction: 'real request', parameters: {}, effects: effect })
   assert.deepEqual(result.artifacts[0].bytes, bytes); assert.equal(calls, 1)
   assert.equal((await runner.probe({ entrypoint: 'unknown-runner' })).ready, false)
+  // Same production effect store across runner reconstruction: exact output without a second charge.
+  const root = mkdtempSync(resolve(tmpdir(), 'image-sized-effect-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  bytes = ImageMagick.read(MagickColors.Red, 40, 40, image => image.write(MagickFormat.Png, data => Buffer.from(data)))
+  const options = { rootDirectory: root, scope, command: { executionId: 'sized_image', snapshotDigest: 'a'.repeat(64) } }
+  const durable = () => new SkillEffects({ store: new SkillExecutionStore(options), checkLease() {},
+    start: async () => ({ schemaVersion: 1, disposition: 'NEW', status: 'START_RECORDED', providerRequestId: null, resultDigest: null }),
+    report: async (_id, body) => ({ schemaVersion: 1, disposition: 'RECORDED', ...body }) })
+  const request = { descriptor: descriptor('image-http.generate'), binding: current, inputs: [], instruction: 'real request', parameters: { size: '800x600' } }
+  const sized = await runner.run({ ...request, effects: durable() })
+  ImageMagick.read(sized.artifacts[0].bytes, image => {
+    assert.equal(image.width, 800); assert.equal(image.height, 600)
+    image.getPixels(pixels => {
+      assert.equal(pixels.getColor(0, 300).a, 0)
+      assert.ok(pixels.getColor(400, 300).a > 0)
+    })
+  })
+  const recovered = await runner.run({ ...request, effects: durable() })
+  assert.deepEqual(recovered.artifacts[0].bytes, sized.artifacts[0].bytes); assert.equal(calls, 2)
+  await assert.rejects(runner.run({ ...request, parameters: { size: '0x600' }, effects: durable() }), error => error.code === 'SKILL_IMAGE_SIZE_INVALID')
+  assert.equal(calls, 2)
+
 })
 test('image edits actually transmit verified reference bytes; real errors/redirects are not faked', async () => {
   const bindings = bindingFixture(), current = await bindings.resolve({ scope, alias: 'image' }); const fixture = JSON.parse(readFileSync(new URL('./fixtures/mixed-material-api-wire-v3.json', import.meta.url))); const input = material(Buffer.from(fixture.materials.find(item => item.bytesBase64.startsWith('iVBOR')).bytesBase64, 'base64'), 'image/png')

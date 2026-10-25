@@ -2,7 +2,7 @@
  * document formats. Original bytes remain the authority; PNG is a derivative. */
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { ImageMagick, MagickFormat, initializeImageMagick } from '@imagemagick/magick-wasm'
+import { ImageMagick, MagickFormat, MagickGeometry, MagickColors, Gravity, initializeImageMagick } from '@imagemagick/magick-wasm'
 
 await initializeImageMagick(readFileSync(new URL(import.meta.resolve('@imagemagick/magick-wasm/magick.wasm'))))
 export const IMAGE_INPUT_EXTENSIONS = Object.freeze({
@@ -69,5 +69,33 @@ export function normalizeImageInput(bytes, declaredMime) {
   } catch (error) {
     if (error.code?.startsWith('IMAGE_')) throw error
     fail('IMAGE_DECODE_FAILED', '已收到图片，但文件损坏或当前解码器无法读取，请转换为 PNG 或 JPG 后重试')
+  }
+}
+
+// Output-only normalization: preserve the source/effect PNG and input identities.
+export const IMAGE_OUTPUT_TRANSFORM_ID = 'magick-wasm-0.0.45-contain-transparent-png-v1'
+export function parseImageOutputSize(size) {
+  if (size === undefined) return null
+  if (typeof size !== 'string' || !/^[1-9][0-9]*x[1-9][0-9]*(?![\s\S])/.test(size))
+    fail('SKILL_IMAGE_SIZE_INVALID', '图片尺寸须为正整数宽x高，例如800x600')
+  const [width, height] = size.split('x').map(Number)
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height))
+    fail('SKILL_IMAGE_SIZE_INVALID', '图片尺寸超出可准确表示的整数范围')
+  return { width, height }
+}
+export function resizeImageOutput(bytes, size) {
+  if (!size) return bytes
+  try {
+    return ImageMagick.read(bytes, MagickFormat.Png, image => {
+      image.autoOrient()
+      image.resize(size.width, size.height)
+      image.extent(new MagickGeometry(size.width, size.height), Gravity.Center, MagickColors.Transparent)
+      for (const name of ['date:create', 'date:modify', 'date:timestamp']) image.removeAttribute(name)
+      image.settings.setDefine(MagickFormat.Png, 'exclude-chunks', 'date,time')
+      return image.write(MagickFormat.Png, data => Buffer.from(data))
+    })
+  } catch (cause) {
+    throw Object.assign(new Error('图片已生成，但指定尺寸处理失败；保留原始生成结果，不重新调用服务商'),
+      { code: 'SKILL_IMAGE_OUTPUT_RESIZE_FAILED', cause })
   }
 }
