@@ -548,8 +548,8 @@ test('binary integrity is measured and cached without version or generated schem
     const measured = measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp })
     assert.equal(measured.measured, true); assert.equal(measured.cliVersion, 'test-1'); assert.equal(measured.schemaContractId, null); assert.equal(measured.bundleSha256, null); assert.ok(measured.binaryIdentityDigest)
     assert.equal(measured.resourceFileCount, 0); assert.equal(measured.resourceBytes, '0')
-    assert.equal(measured.snapshotKind, 'copy'); assert.equal(statSync(measured.snapshotPath).mode & 0o777, 0o500)
-    assert.notEqual(statSync(measured.snapshotPath).ino, statSync(bin).ino)
+    assert.equal(measured.snapshotKind, 'system'); assert.equal(measured.snapshotPath, bin)
+    assert.equal(statSync(measured.snapshotPath).ino, statSync(bin).ino)
     assert.strictEqual(measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache, temporaryRoot: temp }), measured)
     assert.deepEqual(readdirSync(temp), [])
     assert.strictEqual(measureCodexAppServerBinary({ codexBin: bin, codexHome: root, appServerSchemaContractId: 'unknown-cli' }, { cache, temporaryRoot: temp }), measured)
@@ -558,7 +558,7 @@ test('binary integrity is measured and cached without version or generated schem
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('resource snapshots retain exact trust checks while old count bounds become telemetry only', () => {
+test('system executable resources retain exact trust checks while old count bounds become telemetry only', () => {
   const root = mkdtempSync(resolve(tmpdir(), 'codex-resource-telemetry-'))
   try {
     const binDirectory = resolve(root, 'bin'); const resourceRoot = resolve(root, 'codex-resources'); const temp = resolve(root, 'temporary')
@@ -635,7 +635,7 @@ test('measured executable identity rejects file and symlink replacement before a
     const measuredDirect = measureCodexAppServerBinary(directProfile, { expected, cache: new Map(), temporaryRoot: temp })
     const snapshotBytes = readFileSync(measuredDirect.snapshotPath)
     writeFileSync(direct, script('evil')); chmodSync(direct, 0o700)
-    assert.deepEqual(readFileSync(measuredDirect.snapshotPath), snapshotBytes)
+    assert.notDeepEqual(readFileSync(measuredDirect.snapshotPath), snapshotBytes)
     assert.throws(() => AppServerAdapter.spawn(directProfile, { cwd: root, schemaMeasurement: measuredDirect, spawnFn: () => { spawns++; return fakeChild() } }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
     assert.equal(spawns, 0)
 

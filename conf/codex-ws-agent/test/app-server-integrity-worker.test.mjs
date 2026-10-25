@@ -26,7 +26,8 @@ test('worker measurement yields; exact measured state can spawn; same-size/mtime
     assert.equal(Object.keys(measurement).includes('snapshotPath'), false)
     const copiedCompanion = resolve(measurement.snapshotPath, '..', 'codex-code-mode-host')
     assert.equal(spawnSync(copiedCompanion, [], { encoding: 'utf8' }).stdout.trim(), 'companion-ok')
-    assert.notEqual(statSync(companion).ino, statSync(copiedCompanion).ino)
+    assert.equal(measurement.snapshotKind, 'system'); assert.equal(measurement.snapshotPath, bin)
+    assert.equal(statSync(companion).ino, statSync(copiedCompanion).ino)
     let spawned = 0
     const spawnFn = () => { spawned++; const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough(); child.exitCode = null; return child }
     await assert.rejects(AppServerAdapter.spawnAsync(profile, { schemaMeasurement: measurement, spawnFn, shouldSpawn: () => false }), error => error.code === 'APP_SERVER_START_CANCELLED')

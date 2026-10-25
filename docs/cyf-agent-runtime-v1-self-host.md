@@ -362,12 +362,13 @@ Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺
 关键回归复用 `conf/codex-ws-agent/test/skill-runners.test.mjs` 的既有图片broker用例：旧参数、800×600、非同比例透明边、持久effect恢复不重复调用、错误尺寸不调用Provider。Flow同Run测试/打包，新技能包通过维护发布→报价→INSTALL/UPGRADE→目录READY，不以直接写权益替代管理流程。线上尺寸和多轮识图/生图/改图仍须实际图片验收，不以测试通过代替上线。
 
 
-### 9.5 多 Agent 程序快照空间收口（2026-10-25）
+### 9.5 系统Codex直连与历史快照回收（2026-10-25，1.3.8候选）
 
-核对范围：源码基线 c4688cf，`app-server-adapter.mjs` 的受信测量/回收入口；后续修复源码及受测候选见CYF `docs/implementation/handoffs/RUNTIME-DISK-GROWTH-20261025.md`。本节不代表已部署。
+核对范围：基线0425c11之后的 `app-server-adapter.mjs` 测量/spawn与typed inspection调用链；完整源码、受测及安装事实见CYF `docs/implementation/handoffs/RUNTIME-DISK-GROWTH-20261025.md`，本节不是线上启用证明。用户最终要求直接使用系统Codex，覆盖此前公共目录迁移方案及1.3.3/1.3.7的程序复制描述。
 
-- 同一 Runtime 进程内，同一来源身份且程序/伴随工具/资源完整性一致时，多个 Agent 已共用一个测量缓存和独立程序快照；HOME、auth、会话、SQLite、授权和任务状态仍逐Agent隔离。不同来源/内容不能按同版本号强行合并。
-- 修复前只有创建快照时回收当前HOME：其他Agent命中共享缓存后不再扫描自己的旧快照，重启会遗留旧PID副本。修复后每次测量在返回缓存前扫描本profile精确根；只看`.cyf-app-server-bin-XXXXXX`，不遍历/删除其余HOME内容。
-- 保留属主/权限、PID与startTime、实际可执行进程引用、当前进程已跟踪快照及原5分钟保护窗口。窗口内的孤立快照安排unref延迟回收，回调重查全部保护，不因快速重启而永久遗留；没有候选时不常驻轮询。权限/归属未知的内容保留，不能为省空间绕过保护。
-- 回归用合成fixture覆盖100个独立HOME仍只有一份共享程序、缓存命中根回收、保护窗口后回收/重新成为活owner时保留，以及三个独立进程重启周期。该结论不是100个真实模型会话的容量测试，不承诺业务数据零增长或不同信任范围跨身份共享。
-- `.tmp/plugins`不能仅凭“tmp”命名删除或改成公共可写仓库；当前三份为历史Git副本，新managed HOME不复制旧HOME。若后续确认需清理，分别验证配置/技能引用、任务归属和恢复材料。备份去缓存也须验证完整恢复闭包，不能擅改完整HOME快照要求。
+- 直接解析profile既有`codexBin`（支持系统Node launcher到本平台native程序），执行系统安装中的原生Codex，不创建程序、伴随工具或资源副本，也不新建公共快照目录。版本仅诊断，旧CLI无伴随工具也可运行。同进程测量缓存共享不等于程序副本；HOME、身份、会话、SQLite、授权和任务状态仍逐Agent隔离。
+- 内部`snapshotPath`/`snapshotIdentity`兼容槽现在指向系统程序，`snapshotKind=system`；既有消费者与真实进程/proc校验继续使用实际dev/inode/hash。INSPECT沙箱只读挂载系统native发行根，仍保留HOME、输入和网络隔离，不为直接执行暴露宿主全文件系统。
+- 不再具有独立不可变副本的抗系统更新保证。程序、launcher、助手及资源保留属主/非group/world可写、摘要、路径和祖先目录检查；spawn前重查与spawn后真实/proc程序核验仍执行。系统Codex升级必须协调运行中任务，受控更新后重新测量，不能把旧证据视为新程序或声称完全消除TOCTOU；不自动安装/升级Codex，不回放任务。
+- 测量缓存返回前仍扫描本profile精确HOME的`.cyf-app-server-bin-XXXXXX`历史目录；只删除已过原5分钟窗口、owner PID/startTime不再活动且无真实进程引用的副本。年轻遗留安排unref延迟回收并重查，不按名字清除其余HOME、身份或业务数据。退出维护仅清理计时器与测量缓存，不删除系统程序。
+- 合成fixture覆盖100独立HOME和三轮进程重启均0份新增程序、缓存命中根回收、年轻遗留与活owner保护，以及系统/助手/资源篡改拒绝；不冒充100真实模型会话容量测试，不承诺业务状态零增长。
+- `.tmp/plugins`历史副本需单独核对配置/技能链接/进程引用与恢复材料，不能只凭tmp名删除；本机本次三份已清除并只留一份压缩恢复包。备份仍须保留完整状态恢复闭包，不能借取消程序快照删减身份/SQLite备份。

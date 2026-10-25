@@ -23,7 +23,7 @@ const count = home => readdirSync(home).filter(name => name.startsWith('.cyf-app
 
 // Independent cache instances represent workers/processes, never fake trust from
 // fixtures. The exact executable and companion/resource checks still run.
-test('100 independent Agent HOMEs reuse one measured program, sweep every cached root, and preserve private state', () => {
+test('100 independent Agent HOMEs execute the system program without copies, sweep every cached root, and preserve private state', () => {
   const f = fixture(); const cache = new Map(); const homes = []; let shared
   try {
     for (let i = 0; i < 100; i++) {
@@ -37,8 +37,9 @@ test('100 independent Agent HOMEs reuse one measured program, sweep every cached
       assert.equal(readFileSync(auth, 'utf8'), `private-${i}`); assert.equal(readFileSync(state, 'utf8'), `business-${i}`)
       assert.equal(verifyCodexAppServerBinaryIdentity(profile, measured), true)
     }
-    assert.equal(cache.size, 1); assert.equal(homes.reduce((total, home) => total + count(home), 0), 1)
-    assert.notEqual(statSync(shared.snapshotPath).ino, statSync(f.bin).ino)
+    assert.equal(cache.size, 1); assert.equal(homes.reduce((total, home) => total + count(home), 0), 0)
+    assert.equal(shared.snapshotKind, 'system'); assert.equal(shared.snapshotPath, f.bin)
+    assert.equal(statSync(shared.snapshotPath).ino, statSync(f.bin).ino)
   } finally { cleanupCodexAppServerSnapshots(); rmSync(f.root, { recursive: true, force: true }) }
 })
 
@@ -52,7 +53,7 @@ test('cache hits schedule a young orphan for guarded reclamation after the exist
     assert.equal(existsSync(stale), true)
     context.mock.timers.tick(300_001)
     assert.equal(existsSync(stale), false); assert.equal(existsSync(shared.snapshotPath), true)
-    assert.equal(count(first), 1); assert.equal(count(second), 0)
+    assert.equal(count(first), 0); assert.equal(count(second), 0)
   } finally { cleanupCodexAppServerSnapshots(); context.mock.timers.reset(); rmSync(f.root, { recursive: true, force: true }) }
 })
 
@@ -69,7 +70,7 @@ test('a deferred sweep rechecks the owner and preserves a newly live claim', con
   } finally { cleanupCodexAppServerSnapshots(); context.mock.timers.reset(); rmSync(f.root, { recursive: true, force: true }) }
 })
 
-test('repeated stopped-worker restarts retain one shared snapshot instead of one program per Agent per restart', () => {
+test('repeated stopped-worker restarts create zero program copies across Agents and restarts', () => {
   const f = fixture(); const homes = Array.from({ length: 10 }, (_, i) => f.home(`agent-${i}`))
   const moduleUrl = new URL('../app-server-adapter.mjs', import.meta.url).href
   const program = `import { measureCodexAppServerBinary } from ${JSON.stringify(moduleUrl)};\nconst homes=JSON.parse(process.argv[1]);const bin=process.argv[2];for(const codexHome of homes)measureCodexAppServerBinary({codexBin:bin,codexHome});`
@@ -77,13 +78,13 @@ test('repeated stopped-worker restarts retain one shared snapshot instead of one
     for (let cycle = 0; cycle < 3; cycle++) {
       const child = spawnSync(process.execPath, ['--input-type=module', '-e', program, JSON.stringify(homes), f.bin], { encoding: 'utf8', timeout: 15000 })
       assert.equal(child.status, 0, child.stderr)
-      assert.equal(homes.reduce((sum, home) => sum + count(home), 0), 1)
+      assert.equal(homes.reduce((sum, home) => sum + count(home), 0), 0)
       // Age the stopped process's snapshot, not a live executable or business state.
       for (const home of homes) for (const name of readdirSync(home).filter(name => name.startsWith('.cyf-app-server-bin-'))) {
         const time = new Date(Date.now() - 600_000); utimesSync(resolve(home, name), time, time)
       }
     }
-    assert.equal(homes.reduce((sum, home) => sum + reclaimStaleCodexAppServerSnapshots(home), 0), 1)
+    assert.equal(homes.reduce((sum, home) => sum + reclaimStaleCodexAppServerSnapshots(home), 0), 0)
     assert.equal(homes.reduce((sum, home) => sum + count(home), 0), 0)
   } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
@@ -107,4 +108,36 @@ test('reclamation preserves unsafe owners, symlinks, unrelated directories and a
     assert.equal(reclaimStaleCodexAppServerSnapshots(home), 1)
     assert.equal(existsSync(unsafe), true); assert.equal(existsSync(outside), true)
   } finally { if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); rmSync(f.root, { recursive: true, force: true }) }
+})
+
+
+test('system execution rejects writable sources and shutdown never removes the system program', () => {
+  const f = fixture()
+  try {
+    const profile = { codexBin: f.bin, codexHome: f.home('agent') }
+    chmodSync(f.bin, 0o777)
+    assert.throws(() => measureCodexAppServerBinary(profile, { cache: new Map(), spawnSyncFn: probe }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    chmodSync(f.bin, 0o755)
+    const measured = measureCodexAppServerBinary(profile, { cache: new Map(), spawnSyncFn: probe })
+    assert.equal(measured.snapshotPath, f.bin)
+    assert.equal(measured.snapshotKind, 'system')
+    cleanupCodexAppServerSnapshots()
+    assert.equal(readFileSync(f.bin, 'utf8'), '#!/bin/sh\necho codex-cli fixture\n')
+    assert.equal(count(profile.codexHome), 0)
+  } finally { cleanupCodexAppServerSnapshots(); rmSync(f.root, { recursive: true, force: true }) }
+})
+
+
+test('controlled system binary replacement requires a fresh measurement and creates no program copy', () => {
+  const f = fixture()
+  try {
+    const profile = { codexBin: f.bin, codexHome: f.home('agent') }; const cache = new Map()
+    const before = measureCodexAppServerBinary(profile, { cache, spawnSyncFn: probe })
+    writeFileSync(f.bin, '#!/bin/sh\necho codex-cli new-fixture\n')
+    assert.throws(() => verifyCodexAppServerBinaryIdentity(profile, before), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
+    const after = measureCodexAppServerBinary(profile, { cache, spawnSyncFn: probe })
+    assert.notEqual(after.binarySha256, before.binarySha256)
+    assert.equal(after.snapshotPath, f.bin); assert.equal(verifyCodexAppServerBinaryIdentity(profile, after), true)
+    assert.equal(count(profile.codexHome), 0)
+  } finally { cleanupCodexAppServerSnapshots(); rmSync(f.root, { recursive: true, force: true }) }
 })

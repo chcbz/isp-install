@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { Worker } from 'node:worker_threads'
 import { createExecutableInspector, fileStamp } from './executable-integrity.mjs'
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 
@@ -13,7 +13,6 @@ const terminalMethods = new Set(['turn/failed', 'turn/cancelled', 'turn/interrup
 const binaryMeasurementCache = new Map()
 const verifiedBinaryStates = new WeakMap()
 const inspectExecutable = createExecutableInspector({ cacheResults: false })
-const binarySnapshotDirectories = new Set()
 const snapshotReclamationTimers = new Map()
 const failTrust = message => { const error = new Error(message); error.code = 'APP_SERVER_BINARY_UNTRUSTED'; error.trustReason = message; return error }
 const trustCause = error => error?.trustReason || (error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? error?.message : error?.code) || 'UNKNOWN'
@@ -77,7 +76,6 @@ const resolveExecutable = configuredPath => {
   throw failTrust('CODEX_APP_SERVER_NATIVE_EXECUTABLE_MISSING')
 }
 const executableResources = executable => resolve(dirname(executable), '..', 'codex-resources')
-const SNAPSHOT_PREFIX = '.cyf-app-server-bin-'
 const SNAPSHOT_OWNER_FILE = 'owner.json'
 const processStartTime = pid => {
   try { const raw = readFileSync(`/proc/${pid}/stat`, 'utf8'); return raw.slice(raw.lastIndexOf(') ') + 2).trim().split(/\s+/)[19] || '' } catch { return '' }
@@ -124,37 +122,7 @@ const companionManifest = executable => readdirSync(dirname(executable)).sort()
   })
 const manifestDigest = entries => createHash('sha256').update(JSON.stringify(entries.map(({ relativePath, size, sha256 }) => ({ relativePath, size, sha256 })))).digest('hex')
 const resourceTelemetry = entries => ({ fileCount: entries.length, totalBytes: entries.reduce((total, entry) => total + BigInt(entry.size), 0n).toString() })
-const fsyncFile = path => { const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) } }
 const fsyncDirectory = path => { const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) } }
-const fdStable = (left, right) => ['dev', 'ino', 'size', 'mtimeNs', 'mode', 'uid', 'gid'].every(field => left[field] === right[field])
-const copyOpenedFile = (sourceFd, target, mode) => {
-  const before = fstatSync(sourceFd, { bigint: true }); if (!before.isFile()) throw failTrust('CODEX_APP_SERVER_COPY_SOURCE_NOT_REGULAR')
-  const targetFd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode)
-  try {
-    const buffer = Buffer.allocUnsafe(1024 * 1024); let offset = 0n
-    while (offset < before.size) {
-      const length = Number(before.size - offset > BigInt(buffer.length) ? BigInt(buffer.length) : before.size - offset)
-      const count = readSync(sourceFd, buffer, 0, length, Number(offset)); if (count <= 0) throw failTrust('CODEX_APP_SERVER_COPY_SOURCE_TRUNCATED')
-      let written = 0
-      while (written < count) { const countWritten = writeSync(targetFd, buffer, written, count - written); if (countWritten <= 0) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_WRITE_STALLED'); written += countWritten }
-      offset += BigInt(count)
-    }
-    fsyncSync(targetFd)
-  } finally { closeSync(targetFd) }
-  chmodSync(target, mode); fsyncFile(target)
-  const after = fstatSync(sourceFd, { bigint: true }); const targetStat = statSync(target, { bigint: true })
-  if (!fdStable(before, after)) throw failTrust('CODEX_APP_SERVER_COPY_SOURCE_DRIFT')
-  if (before.dev === targetStat.dev && before.ino === targetStat.ino) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_NOT_NEW_INODE')
-  const sourceHash = hashOpenedFile(sourceFd, before.size); const targetHash = hashFile(target)
-  if (before.size !== targetStat.size || sourceHash !== targetHash) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_COPY_MISMATCH')
-  return { sha256: targetHash, size: String(targetStat.size) }
-}
-const writeSnapshotOwner = directory => {
-  const owner = { schemaVersion: 1, pid: process.pid, startTime: processStartTime(process.pid), nonce: randomUUID() }
-  const path = resolve(directory, SNAPSHOT_OWNER_FILE); const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-  try { writeFileSync(fd, `${JSON.stringify(owner)}\n`); fsyncSync(fd) } finally { closeSync(fd) }
-  chmodSync(path, 0o600); fsyncDirectory(directory); return owner
-}
 const safeSnapshotRoot = snapshotRoot => {
   const root = realpathSync(snapshotRoot); const lexicalRoot = lstatSync(root); const rootStat = statSync(root, { bigint: true })
   const uid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null
@@ -167,7 +135,6 @@ export function reclaimStaleCodexAppServerSnapshots(snapshotRoot, { graceMs = 5 
     const directory = resolve(root, name); let lexical; let stat
     try { lexical = lstatSync(directory); stat = statSync(directory, { bigint: true }) } catch { continue }
     if (lexical.isSymbolicLink() || !lexical.isDirectory() || (uid !== null && stat.uid !== uid) || Number(stat.mode & 0o777n) !== 0o700) continue
-    if (binarySnapshotDirectories.has(directory)) continue
     const age = Date.now() - Number(stat.mtimeMs)
     const ownerPath = resolve(directory, SNAPSHOT_OWNER_FILE); let owner = null; let ownerRaw = ''
     try {
@@ -187,12 +154,12 @@ export function reclaimStaleCodexAppServerSnapshots(snapshotRoot, { graceMs = 5 
     if ((hasProcessIdentity && processStartTime(owner.pid) === owner.startTime) || liveProcessUsesSnapshot(directory)) continue
     if (age < graceMs) { onDeferred(Math.max(1, graceMs - age)); continue }
     // A missing or malformed owner is recoverable only after the private-directory age gate and
-    // only when neither a locally tracked snapshot, recoverable owner identity, nor live executable uses it.
-    rmSync(directory, { recursive: true, force: true }); fsyncDirectory(root); binarySnapshotDirectories.delete(directory); removed++
+    // only when neither a recoverable live owner identity nor live executable uses it.
+    rmSync(directory, { recursive: true, force: true }); fsyncDirectory(root); removed++
   }
   return removed
 }
-// The measurement cache is intentionally shared across profiles: immutable code,
+// The measurement cache is intentionally shared across profiles: measured code,
 // never HOME/auth/session state. A cache hit must still sweep that profile's own
 // root, otherwise every restart strands the other profiles' previous snapshots.
 const reclaimProfileSnapshots = snapshotRoot => {
@@ -208,58 +175,26 @@ const reclaimProfileSnapshots = snapshotRoot => {
   }, deferred)
   timer.unref(); snapshotReclamationTimers.set(root, timer)
 }
-const ensureSnapshotDirectory = (root, target) => {
-  const missing = []; let cursor = target
-  while (cursor !== root && !existsSync(cursor)) { missing.push(cursor); const parent = dirname(cursor); if (parent === cursor) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_DIRECTORY_ESCAPE'); cursor = parent }
-  if (cursor !== root && !cursor.startsWith(`${root}/`)) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_DIRECTORY_ESCAPE')
-  for (const directory of missing.reverse()) { const parent = dirname(directory); mkdirSync(directory, { mode: 0o700 }); chmodSync(directory, 0o700); fsyncDirectory(directory); fsyncDirectory(parent) }
-  const lexical = lstatSync(target); if (lexical.isSymbolicLink() || !lexical.isDirectory()) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_DIRECTORY_UNSAFE')
-}
-const snapshotExecutable = (sourceFd, sourceExecutable, snapshotRoot) => {
-  const root = safeSnapshotRoot(snapshotRoot); reclaimStaleCodexAppServerSnapshots(root)
-  const directory = mkdtempSync(resolve(root, SNAPSHOT_PREFIX)); chmodSync(directory, 0o700); fsyncDirectory(root); writeSnapshotOwner(directory)
-  const binDirectory = resolve(directory, 'bin'); mkdirSync(binDirectory, { mode: 0o700 }); fsyncDirectory(directory)
-  const path = resolve(binDirectory, 'codex')
-  try {
-    copyOpenedFile(sourceFd, path, 0o500); fsyncDirectory(binDirectory)
-    for (const entry of companionManifest(sourceExecutable)) {
-      const fd = openSync(entry.path, constants.O_RDONLY | constants.O_NOFOLLOW)
-      try {
-        const copied = copyOpenedFile(fd, resolve(binDirectory, entry.relativePath), 0o500)
-        if (copied.sha256 !== entry.sha256 || copied.size !== entry.size) throw failTrust('CODEX_APP_SERVER_COMPANION_COPY_MISMATCH')
-      } finally { closeSync(fd) }
-    }
-    fsyncDirectory(binDirectory)
-    const sourceResourceRoot = executableResources(sourceExecutable)
-    if (existsSync(sourceResourceRoot)) {
-      const targetResourceRoot = resolve(directory, 'codex-resources'); mkdirSync(targetResourceRoot, { mode: 0o700 }); fsyncDirectory(directory)
-      for (const entry of resourceManifest(sourceResourceRoot)) {
-        const target = resolve(targetResourceRoot, entry.relativePath); ensureSnapshotDirectory(targetResourceRoot, dirname(target))
-        const resourceFd = openSync(entry.path, constants.O_RDONLY | constants.O_NOFOLLOW)
-        try {
-          const opened = fstatSync(resourceFd, { bigint: true })
-          const openedIdentity = { dev: String(opened.dev), ino: String(opened.ino), size: String(opened.size), mtimeNs: String(opened.mtimeNs), mode: String(opened.mode), uid: String(opened.uid), gid: String(opened.gid) }
-          if (!opened.isFile() || JSON.stringify(openedIdentity) !== JSON.stringify(entry.sourceIdentity)) throw failTrust('CODEX_APP_SERVER_RESOURCE_OPEN_DRIFT')
-          const copied = copyOpenedFile(resourceFd, target, (entry.mode & 0o111) ? 0o500 : 0o400)
-          if (copied.sha256 !== entry.sha256 || copied.size !== entry.size) throw failTrust('CODEX_APP_SERVER_RESOURCE_COPY_MISMATCH')
-        } finally { closeSync(resourceFd) }
-        fsyncDirectory(dirname(target))
-      }
-      fsyncDirectory(targetResourceRoot)
-    }
-    fsyncDirectory(directory)
-    binarySnapshotDirectories.add(directory)
-    return { directory, path, snapshotKind: 'copy' }
-  } catch (error) { rmSync(directory, { recursive: true, force: true }); fsyncDirectory(root); throw error }
-}
-
+// Compatibility entrypoint: no system executable is owned/deleted by Runtime.
 export function cleanupCodexAppServerSnapshots() {
   for (const timer of snapshotReclamationTimers.values()) clearTimeout(timer)
   snapshotReclamationTimers.clear()
-  for (const directory of [...binarySnapshotDirectories]) {
-    try { rmSync(directory, { recursive: true, force: true }); binarySnapshotDirectories.delete(directory) } catch {}
-  }
   binaryMeasurementCache.clear()
+}
+
+// Direct execution no longer has a private immutable copy. Restrict the source
+// and helpers/resources to protected regular files and recheck exact identities
+// before spawn; /proc executable checks bind the process actually launched.
+const verifySystemExecutablePolicy = executable => {
+  protectedAncestorPolicy(executable)
+  const uid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null
+  for (const entry of [{ path: executable, executable: true }, ...companionManifest(executable).map(entry => ({ ...entry, executable: true })), ...resourceManifest(executableResources(executable))]) {
+    const stat = lstatSync(entry.path, { bigint: true })
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o022n) !== 0n
+        || (entry.executable && (stat.mode & 0o111n) === 0n)
+        || (uid !== null && stat.uid !== 0n && stat.uid !== uid)) throw failTrust('CODEX_APP_SERVER_SYSTEM_FILE_UNSAFE')
+    protectedAncestorPolicy(entry.path)
+  }
 }
 
 const binaryIntegrityState = (profile, measurement) => {
@@ -301,11 +236,11 @@ export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
     const snapshotIdentity = statIdentity(measurement.snapshotPath)
     snapshotIdentity.sha256 = hashFile(measurement.snapshotPath)
     if (!sameIdentity(snapshotIdentity, measurement.snapshotIdentity) || snapshotIdentity.sha256 !== measurement.snapshotIdentity.sha256) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_DRIFT')
-    if (measurement.snapshotKind !== 'copy' || (snapshotIdentity.dev === executableIdentity.dev && snapshotIdentity.ino === executableIdentity.ino)) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_NOT_ISOLATED')
-    const snapshotResources = resourceManifest(executableResources(measurement.snapshotPath))
-    if (snapshotResources.some(entry => ![0o400, 0o500].includes(entry.mode))) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_RESOURCE_MODE_UNSAFE')
-    const snapshotResourceTelemetry = resourceTelemetry(snapshotResources)
-    if (snapshotIdentity.mode !== 0o500 || snapshotIdentity.sha256 !== executableIdentity.sha256 || manifestDigest(snapshotResources) !== measurement.resourceDigest || snapshotResourceTelemetry.fileCount !== measurement.resourceFileCount || snapshotResourceTelemetry.totalBytes !== measurement.resourceBytes) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_CONTENT_DRIFT')
+    if (measurement.snapshotKind !== 'system' || measurement.snapshotPath !== resolved.executable
+        || snapshotIdentity.dev !== executableIdentity.dev || snapshotIdentity.ino !== executableIdentity.ino
+        || snapshotIdentity.sha256 !== executableIdentity.sha256) throw failTrust('CODEX_APP_SERVER_SYSTEM_EXECUTABLE_MISMATCH')
+    verifySystemExecutablePolicy(resolved.executable)
+    if (resolved.configured !== resolved.executable) verifySystemExecutablePolicy(resolved.configured)
     if (!sameVerificationState(before, binaryIntegrityState(profile, measurement))) throw failTrust('CODEX_APP_SERVER_IDENTITY_CHANGED_DURING_RECHECK')
     verifiedBinaryStates.set(measurement, Object.freeze(before.map(row => Object.freeze(row))))
     return true
@@ -380,13 +315,13 @@ export async function verifySpawnedAppServerExecutable(child, measurement, { tim
 export function measureCodexAppServerBinary(profile, {
   spawnSyncFn = spawnSync, cache = binaryMeasurementCache, temporaryRoot = tmpdir(), snapshotRoot = profile.codexHome || temporaryRoot
 } = {}) {
-  if (process.platform !== 'linux') throw failTrust('CODEX_APP_SERVER_IMMUTABLE_SNAPSHOT_UNSUPPORTED')
+  if (process.platform !== 'linux') throw failTrust('CODEX_APP_SERVER_EXECUTABLE_MEASUREMENT_UNSUPPORTED')
   reclaimProfileSnapshots(snapshotRoot)
-  let resolved; let configuredIdentity; let executableIdentity; let sourceFd
+  let resolved; let configuredIdentity; let executableIdentity
   try {
     resolved = resolveExecutable(profile.codexBin)
-    // A previously verified immutable measurement needs no new full-file read
-    // while the source, snapshot, resources and protected ancestors are exact.
+    // A previously verified system executable measurement needs no new full-file read
+    // while the executable, resources and protected ancestors are exact.
     // ctime is included in the verification state, so restoring size/mtime is not
     // sufficient to reuse trust. Keep the original content-bound cache key/wire.
     const configuredNow = statIdentity(resolved.configured); const executableNow = statIdentity(resolved.executable)
@@ -402,15 +337,12 @@ export function measureCodexAppServerBinary(profile, {
   const cacheKey = createHash('sha256').update(JSON.stringify({ configuredIdentity, executableIdentity })).digest('hex')
   const cached = cache.get(cacheKey)
   if (cached) { verifyCodexAppServerBinaryIdentity(profile, cached); return cached }
-  try { sourceFd = openSync(resolved.executable, constants.O_RDONLY | constants.O_NOFOLLOW) }
-  catch (error) { throw failTrust(`CODEX_APP_SERVER_EXECUTABLE_OPEN_FAILED:${error.code || error.message}`) }
-  let snapshot
-  try {
-    snapshot = snapshotExecutable(sourceFd, resolved.executable, snapshotRoot)
-  } catch (error) {
-    closeSync(sourceFd); throw failTrust(`CODEX_APP_SERVER_SNAPSHOT_FAILED:${trustCause(error)}`)
-  }
-  closeSync(sourceFd)
+  verifySystemExecutablePolicy(resolved.executable)
+  // snapshotPath/Identity remain internal compatibility field names consumed by
+  // the adapter and read-only inspection mount. They refer to the system binary,
+  // not to a copied file; no program bytes are written into Agent state.
+  if (resolved.configured !== resolved.executable) verifySystemExecutablePolicy(resolved.configured)
+  const snapshot = { path: resolved.executable, snapshotKind: 'system' }
   const snapshotIdentity = statIdentity(snapshot.path); snapshotIdentity.sha256 = hashFile(snapshot.path); snapshotIdentity.ancestorPolicy = protectedAncestorPolicy(snapshot.path)
   try {
     // Version is diagnostic only. Neither its value nor schema generation is a
@@ -432,7 +364,6 @@ export function measureCodexAppServerBinary(profile, {
     Object.defineProperty(measurement, 'snapshotPath', { value: snapshot.path, enumerable: false })
     Object.freeze(measurement); verifyCodexAppServerBinaryIdentity(profile, measurement); cache.set(cacheKey, measurement); return measurement
   } catch (error) {
-    binarySnapshotDirectories.delete(snapshot.directory); rmSync(snapshot.directory, { recursive: true, force: true })
     if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') throw error
     throw failTrust(`CODEX_APP_SERVER_BINARY_MEASUREMENT_FAILED:${error.code || error.message}`)
   }
