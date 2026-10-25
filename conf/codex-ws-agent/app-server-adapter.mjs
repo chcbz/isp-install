@@ -14,6 +14,7 @@ const binaryMeasurementCache = new Map()
 const verifiedBinaryStates = new WeakMap()
 const inspectExecutable = createExecutableInspector({ cacheResults: false })
 const binarySnapshotDirectories = new Set()
+const snapshotReclamationTimers = new Map()
 const failTrust = message => { const error = new Error(message); error.code = 'APP_SERVER_BINARY_UNTRUSTED'; error.trustReason = message; return error }
 const trustCause = error => error?.trustReason || (error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? error?.message : error?.code) || 'UNKNOWN'
 const hashOpenedFile = (fd, size = fstatSync(fd, { bigint: true }).size) => {
@@ -160,13 +161,14 @@ const safeSnapshotRoot = snapshotRoot => {
   if (lexicalRoot.isSymbolicLink() || !rootStat.isDirectory() || (uid !== null && rootStat.uid !== uid)) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_ROOT_UNSAFE')
   protectedAncestorPolicy(resolve(root, '.snapshot-probe')); return root
 }
-export function reclaimStaleCodexAppServerSnapshots(snapshotRoot, { graceMs = 5 * 60 * 1000 } = {}) {
+export function reclaimStaleCodexAppServerSnapshots(snapshotRoot, { graceMs = 5 * 60 * 1000, onDeferred = () => {} } = {}) {
   const root = safeSnapshotRoot(snapshotRoot); const uid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null; let removed = 0
   for (const name of readdirSync(root).filter(value => /^\.cyf-app-server-bin-[A-Za-z0-9]{6}$/.test(value))) {
     const directory = resolve(root, name); let lexical; let stat
     try { lexical = lstatSync(directory); stat = statSync(directory, { bigint: true }) } catch { continue }
     if (lexical.isSymbolicLink() || !lexical.isDirectory() || (uid !== null && stat.uid !== uid) || Number(stat.mode & 0o777n) !== 0o700) continue
-    const age = Date.now() - Number(stat.mtimeMs); if (age < graceMs || binarySnapshotDirectories.has(directory)) continue
+    if (binarySnapshotDirectories.has(directory)) continue
+    const age = Date.now() - Number(stat.mtimeMs)
     const ownerPath = resolve(directory, SNAPSHOT_OWNER_FILE); let owner = null; let ownerRaw = ''
     try {
       const ownerLexical = lstatSync(ownerPath); const ownerStat = statSync(ownerPath, { bigint: true })
@@ -183,11 +185,28 @@ export function reclaimStaleCodexAppServerSnapshots(snapshotRoot, { graceMs = 5 
     }
     const hasProcessIdentity = Number.isInteger(owner?.pid) && owner.pid > 0 && typeof owner.startTime === 'string' && owner.startTime.length > 0
     if ((hasProcessIdentity && processStartTime(owner.pid) === owner.startTime) || liveProcessUsesSnapshot(directory)) continue
+    if (age < graceMs) { onDeferred(Math.max(1, graceMs - age)); continue }
     // A missing or malformed owner is recoverable only after the private-directory age gate and
     // only when neither a locally tracked snapshot, recoverable owner identity, nor live executable uses it.
     rmSync(directory, { recursive: true, force: true }); fsyncDirectory(root); binarySnapshotDirectories.delete(directory); removed++
   }
   return removed
+}
+// The measurement cache is intentionally shared across profiles: immutable code,
+// never HOME/auth/session state. A cache hit must still sweep that profile's own
+// root, otherwise every restart strands the other profiles' previous snapshots.
+const reclaimProfileSnapshots = snapshotRoot => {
+  const root = safeSnapshotRoot(snapshotRoot)
+  let deferred = null
+  reclaimStaleCodexAppServerSnapshots(root, { onDeferred: delay => { deferred = deferred === null ? delay : Math.min(deferred, delay) } })
+  if (deferred === null || snapshotReclamationTimers.has(root)) return
+  const timer = setTimeout(() => {
+    snapshotReclamationTimers.delete(root)
+    // Maintenance must not crash an otherwise serving worker. A subsequent
+    // measurement retries with the same filesystem/owner/live-process guards.
+    try { reclaimProfileSnapshots(root) } catch {}
+  }, deferred)
+  timer.unref(); snapshotReclamationTimers.set(root, timer)
 }
 const ensureSnapshotDirectory = (root, target) => {
   const missing = []; let cursor = target
@@ -235,6 +254,8 @@ const snapshotExecutable = (sourceFd, sourceExecutable, snapshotRoot) => {
 }
 
 export function cleanupCodexAppServerSnapshots() {
+  for (const timer of snapshotReclamationTimers.values()) clearTimeout(timer)
+  snapshotReclamationTimers.clear()
   for (const directory of [...binarySnapshotDirectories]) {
     try { rmSync(directory, { recursive: true, force: true }); binarySnapshotDirectories.delete(directory) } catch {}
   }
@@ -360,6 +381,7 @@ export function measureCodexAppServerBinary(profile, {
   spawnSyncFn = spawnSync, cache = binaryMeasurementCache, temporaryRoot = tmpdir(), snapshotRoot = profile.codexHome || temporaryRoot
 } = {}) {
   if (process.platform !== 'linux') throw failTrust('CODEX_APP_SERVER_IMMUTABLE_SNAPSHOT_UNSUPPORTED')
+  reclaimProfileSnapshots(snapshotRoot)
   let resolved; let configuredIdentity; let executableIdentity; let sourceFd
   try {
     resolved = resolveExecutable(profile.codexBin)

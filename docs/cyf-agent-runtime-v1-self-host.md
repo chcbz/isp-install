@@ -360,3 +360,14 @@ Runtime 1.3.5 / image-generate、image-edit 1.2.0 增加可选 `parameters.size=
 Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺寸转换；尺寸及转换标识绑定effect摘要，转换失败仅报告该动作的输出处理错误，不将外部成功改为UNKNOWN、不再次调用Provider。最终成果摘要对应实际输出字节，原输入SHA/DELIVERED不变。仅新尺寸请求加转换摘要字段，旧空参数摘要保持。恢复需原服务端确认、身份/授权/fence不变，不能根据本地文件自行补发旧UNKNOWN。
 
 关键回归复用 `conf/codex-ws-agent/test/skill-runners.test.mjs` 的既有图片broker用例：旧参数、800×600、非同比例透明边、持久effect恢复不重复调用、错误尺寸不调用Provider。Flow同Run测试/打包，新技能包通过维护发布→报价→INSTALL/UPGRADE→目录READY，不以直接写权益替代管理流程。线上尺寸和多轮识图/生图/改图仍须实际图片验收，不以测试通过代替上线。
+
+
+### 9.5 多 Agent 程序快照空间收口（2026-10-25）
+
+核对范围：源码基线 c4688cf，`app-server-adapter.mjs` 的受信测量/回收入口；后续修复源码及受测候选见CYF `docs/implementation/handoffs/RUNTIME-DISK-GROWTH-20261025.md`。本节不代表已部署。
+
+- 同一 Runtime 进程内，同一来源身份且程序/伴随工具/资源完整性一致时，多个 Agent 已共用一个测量缓存和独立程序快照；HOME、auth、会话、SQLite、授权和任务状态仍逐Agent隔离。不同来源/内容不能按同版本号强行合并。
+- 修复前只有创建快照时回收当前HOME：其他Agent命中共享缓存后不再扫描自己的旧快照，重启会遗留旧PID副本。修复后每次测量在返回缓存前扫描本profile精确根；只看`.cyf-app-server-bin-XXXXXX`，不遍历/删除其余HOME内容。
+- 保留属主/权限、PID与startTime、实际可执行进程引用、当前进程已跟踪快照及原5分钟保护窗口。窗口内的孤立快照安排unref延迟回收，回调重查全部保护，不因快速重启而永久遗留；没有候选时不常驻轮询。权限/归属未知的内容保留，不能为省空间绕过保护。
+- 回归用合成fixture覆盖100个独立HOME仍只有一份共享程序、缓存命中根回收、保护窗口后回收/重新成为活owner时保留，以及三个独立进程重启周期。该结论不是100个真实模型会话的容量测试，不承诺业务数据零增长或不同信任范围跨身份共享。
+- `.tmp/plugins`不能仅凭“tmp”命名删除或改成公共可写仓库；当前三份为历史Git副本，新managed HOME不复制旧HOME。若后续确认需清理，分别验证配置/技能引用、任务归属和恢复材料。备份去缓存也须验证完整恢复闭包，不能擅改完整HOME快照要求。
