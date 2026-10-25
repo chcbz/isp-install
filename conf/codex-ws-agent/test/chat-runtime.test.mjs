@@ -576,7 +576,7 @@ test('system executable resources retain exact trust checks while old count boun
     symlinkSync(resolve(resourceRoot, 'resource-00.txt'), resolve(resourceRoot, 'linked-resource'))
     assert.throws(
       () => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { expected, cache: new Map(), temporaryRoot: temp }),
-      error => error.code === 'APP_SERVER_BINARY_UNTRUSTED' && error.trustReason === 'CODEX_APP_SERVER_SNAPSHOT_FAILED:CODEX_APP_SERVER_RESOURCE_SYMLINK'
+      error => error.code === 'APP_SERVER_BINARY_UNTRUSTED' && error.trustReason === 'CODEX_APP_SERVER_RESOURCE_SYMLINK'
     )
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
