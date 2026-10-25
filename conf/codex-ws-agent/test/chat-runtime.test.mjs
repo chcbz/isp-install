@@ -617,7 +617,7 @@ test('measured executable identity rejects file and symlink replacement before a
   try {
     const bundle = '{"measured":"schema"}\n'; const digest = createHash('sha256').update(bundle).digest('hex')
     const script = version => `#!/usr/bin/env node\nconst fs=require('fs'),p=require('path');if(process.argv[2]==='--version'){process.stdout.write('codex-cli ${version}\\n');process.exit(0)}const i=process.argv.indexOf('--out');if(i<0)process.exit(2);fs.mkdirSync(process.argv[i+1],{recursive:true});fs.writeFileSync(p.join(process.argv[i+1],'codex_app_server_protocol.schemas.json'),${JSON.stringify(bundle)});\n`
-    const good = resolve(root, 'good-codex'); const evil = resolve(root, 'evil-codex'); const link = resolve(root, 'codex-link')
+    const good = resolve(root, 'good-codex'); const evil = resolve(root, 'evil-codex'); const link = resolve(root, 'launcher-link')
     writeFileSync(good, script('test-1')); writeFileSync(evil, script('evil')); chmodSync(good, 0o700); chmodSync(evil, 0o700); symlinkSync(good, link)
     const expected = { cliVersion: 'test-1', bundleSha256: digest }; const temp = resolve(root, 'temporary'); mkdirSync(temp)
     const profileForLink = { codexBin: link, codexHome: root }

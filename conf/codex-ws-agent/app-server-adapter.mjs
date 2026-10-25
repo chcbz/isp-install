@@ -113,6 +113,9 @@ const resourceManifest = root => {
 // installed distribution's codex-* siblings, without requiring them on older CLIs.
 const companionManifest = executable => readdirSync(dirname(executable)).sort()
   .filter(name => /^codex-[A-Za-z0-9_.-]+$/.test(name) && !lstatSync(resolve(dirname(executable), name)).isDirectory())
+  // The configured launcher may itself be a codex-* symlink to this binary.
+  // It is already bound by configuredIdentity, not a companion executable.
+  .filter(name => realpathSync(resolve(dirname(executable), name)) !== executable)
   .map(name => {
     const path = resolve(dirname(executable), name); const stat = lstatSync(path)
     if (!stat.isFile() || stat.isSymbolicLink()) throw failTrust('CODEX_APP_SERVER_COMPANION_TYPE_UNSAFE')
