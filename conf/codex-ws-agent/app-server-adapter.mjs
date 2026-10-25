@@ -109,6 +109,15 @@ const resourceManifest = root => {
   }
   visit(root); return entries
 }
+// Codex resolves companion executables next to its native binary. Preserve the
+// installed distribution's codex-* siblings, without requiring them on older CLIs.
+const companionManifest = executable => readdirSync(dirname(executable)).sort()
+  .filter(name => /^codex-[A-Za-z0-9_.-]+$/.test(name) && !lstatSync(resolve(dirname(executable), name)).isDirectory())
+  .map(name => {
+    const path = resolve(dirname(executable), name); const stat = lstatSync(path)
+    if (!stat.isFile() || stat.isSymbolicLink()) throw failTrust('CODEX_APP_SERVER_COMPANION_TYPE_UNSAFE')
+    return { relativePath: name, path, size: String(stat.size), sha256: hashFile(path) }
+  })
 const manifestDigest = entries => createHash('sha256').update(JSON.stringify(entries.map(({ relativePath, size, sha256 }) => ({ relativePath, size, sha256 })))).digest('hex')
 const resourceTelemetry = entries => ({ fileCount: entries.length, totalBytes: entries.reduce((total, entry) => total + BigInt(entry.size), 0n).toString() })
 const fsyncFile = path => { const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) } }
@@ -191,6 +200,14 @@ const snapshotExecutable = (sourceFd, sourceExecutable, snapshotRoot) => {
   const path = resolve(binDirectory, 'codex')
   try {
     copyOpenedFile(sourceFd, path, 0o500); fsyncDirectory(binDirectory)
+    for (const entry of companionManifest(sourceExecutable)) {
+      const fd = openSync(entry.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      try {
+        const copied = copyOpenedFile(fd, resolve(binDirectory, entry.relativePath), 0o500)
+        if (copied.sha256 !== entry.sha256 || copied.size !== entry.size) throw failTrust('CODEX_APP_SERVER_COMPANION_COPY_MISMATCH')
+      } finally { closeSync(fd) }
+    }
+    fsyncDirectory(binDirectory)
     const sourceResourceRoot = executableResources(sourceExecutable)
     if (existsSync(sourceResourceRoot)) {
       const targetResourceRoot = resolve(directory, 'codex-resources'); mkdirSync(targetResourceRoot, { mode: 0o700 }); fsyncDirectory(directory)
@@ -229,6 +246,10 @@ const binaryIntegrityState = (profile, measurement) => {
     if (stat.isDirectory() && !stat.isSymbolicLink()) for (const name of readdirSync(path).sort()) visit(resolve(path, name))
   }
   visit(executableResources(measurement.executableIdentity.realpath)); visit(executableResources(measurement.snapshotPath))
+  for (const executable of [measurement.executableIdentity.realpath, measurement.snapshotPath]) {
+    // Stat-only cached rechecks: don't hash helper binaries on the main thread.
+    for (const name of readdirSync(dirname(executable)).filter(name => /^codex-[A-Za-z0-9_.-]+$/.test(name) && !lstatSync(resolve(dirname(executable), name)).isDirectory())) visit(resolve(dirname(executable), name))
+  }
   const contentPaths = new Set(paths)
   for (const path of [...paths]) { let parent = dirname(path); while (true) { paths.add(parent); const next = dirname(parent); if (next === parent) break; parent = next } }
   return [...paths].sort().map(path => { const stat = lstatSync(path, { bigint: true }); return [path, contentPaths.has(path) ? fileStamp(stat) : ['dev', 'ino', 'mode', 'uid', 'gid'].map(key => String(stat[key])).join(':')] })
@@ -250,6 +271,7 @@ export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
     if (!sameIdentity(executableIdentity, measurement.executableIdentity) || executableIdentity.sha256 !== measurement.executableIdentity.sha256) throw failTrust('CODEX_APP_SERVER_EXECUTABLE_IDENTITY_DRIFT')
     const executableResourceManifest = resourceManifest(executableResources(resolved.executable)); const executableResourceTelemetry = resourceTelemetry(executableResourceManifest)
     if (manifestDigest(executableResourceManifest) !== measurement.resourceDigest || executableResourceTelemetry.fileCount !== measurement.resourceFileCount || executableResourceTelemetry.totalBytes !== measurement.resourceBytes) throw failTrust('CODEX_APP_SERVER_RESOURCE_DRIFT')
+    if (manifestDigest(companionManifest(resolved.executable)) !== measurement.companionDigest || manifestDigest(companionManifest(measurement.snapshotPath)) !== measurement.companionDigest) throw failTrust('CODEX_APP_SERVER_COMPANION_DRIFT')
     const lexicalSnapshot = lstatSync(measurement.snapshotPath)
     if (lexicalSnapshot.isSymbolicLink() || !lexicalSnapshot.isFile()) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_UNSAFE')
     const snapshotIdentity = statIdentity(measurement.snapshotPath)
@@ -379,7 +401,7 @@ export function measureCodexAppServerBinary(profile, {
     const measurement = {
       measured: true, schemaContractId: null, cliVersion, versionOutput, versionProbeError, bundleSha256: null, snapshotKind: snapshot.snapshotKind,
       binarySha256: executableIdentity.sha256, binaryIdentityDigest: cacheKey, resourceDigest: manifestDigest(resources),
-      resourceFileCount: telemetry.fileCount, resourceBytes: telemetry.totalBytes,
+      resourceFileCount: telemetry.fileCount, resourceBytes: telemetry.totalBytes, companionDigest: manifestDigest(companionManifest(resolved.executable)),
       configuredIdentity: Object.freeze(configuredIdentity), executableIdentity: Object.freeze(executableIdentity), snapshotIdentity: Object.freeze(snapshotIdentity)
     }
     Object.defineProperty(measurement, 'snapshotPath', { value: snapshot.path, enumerable: false })

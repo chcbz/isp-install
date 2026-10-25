@@ -343,3 +343,8 @@ The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/
 - 必需RPC真实错误、消息绑定/结果结构、身份/ACL、网络/文件沙箱、摘要、锁和发布完整性保持原行为。未知CLI不等于兼容已验证；实际业务回归仍必要。
 - `schema`历史诊断槽中的`measured`仍指执行文件测量；合同ID/bundle摘要为空，不伪造schema已测量。汇总用`binaryMeasured`/`codexCliVersion`，INSPECT合同ID不再拼接CLI版本；执行策略仍绑定实际binaryIdentityDigest，旧carrier证据不得冒充新文件证据。
 - `CODEX_APP_SERVER_CONFIGURED_EXECUTABLE_DRIFT`是运行期间文件改变的完整性保护，仍拒绝旧测量执行。新程序获授权部署/受控重启后重新测量；不在请求中自动信任漂移、不回放旧请求、不改全局Codex。此源码说明不证明已经安装或多轮图片已验收。
+
+
+## Codex伴随可执行文件（2026-10-25，1.3.3候选）
+
+基线60ed188。生产任务523暴露：快照只有主程序和codex-resources，遗漏同发行目录的codex-code-mode-host，工具启动ENOENT。快照现在同时复制原生bin目录中实际存在的codex-*常规文件，保留同级布局；旧CLI没有伴随文件也可运行，不新增版本白名单。来源/快照的文件摘要、独立副本及变更检测继续保护真实执行身份；缓存路径只stat，不在主线程反复读取大型助手。符号链接或非常规文件不作为可执行快照复制，作用域限本次App Server启动。复用app-server-integrity-worker既有测试验证助手可执行及篡改拒绝；真实模型/图片验收须另记线上证据。
