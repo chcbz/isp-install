@@ -46,8 +46,21 @@ test('schema binds exact action identity and exact recursive parameter schema wi
     properties: { caption: { type: 'string' }, flags: { type: 'array', items: { type: 'boolean' } } }, required: ['caption', 'flags'] }
   strictObjects(buildActionOutcomeContract(f).outputSchema)
 })
-test('optional/open/unsupported schema fails explicitly, never changes required fields or inserts defaults', () => {
-  for (const schema of [fixture.facts.availableActions[0].parametersSchema,
+test('published optional image size adapts to strict model without changing execution contract', () => {
+  const f = facts(); const manifest = JSON.parse(readFileSync(new URL('../toolchain/skill-packages-se2/image-generate/manifest.json', import.meta.url)))
+  f.availableActions[0].parametersSchema = manifest.parametersSchema
+  const before = JSON.stringify(f); const contract = buildActionOutcomeContract(f); strictObjects(contract.outputSchema)
+  const check = new Ajv2020().compile(contract.outputSchema)
+  const outcome = structuredClone(fixture.outcomes[2]); outcome.action.parameters = { size: '800x600' }
+  assert.equal(check(outcome), true)
+  assert.deepEqual(validateActionOutcome(outcome, f).action.parameters, { size: '800x600' })
+  outcome.action.parameters = { size: null }; assert.equal(check(outcome), true)
+  assert.deepEqual(validateActionOutcome(outcome, f).action.parameters, {})
+  outcome.action.parameters = {}; assert.deepEqual(validateActionOutcome(outcome, f).action.parameters, {})
+  outcome.action.parameters = { size: 'bad' }; assert.throws(() => validateActionOutcome(outcome, f), { code: 'ACTION_PARAMETERS_INVALID' })
+  outcome.action.parameters = { extra: true }; assert.throws(() => validateActionOutcome(outcome, f), { code: 'ACTION_PARAMETERS_INVALID' })
+  assert.equal(JSON.stringify(f), before)
+  for (const schema of [
     { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: {}, additionalProperties: true },
     { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: {}, additionalProperties: false, allOf: [{ type: 'object' }] }]) {
     const f = facts(); f.availableActions[0].parametersSchema = structuredClone(schema)
