@@ -135,6 +135,7 @@ export class SkillConversationLane {
     return bytes
   }
   pendingCommands() {
+    this.pendingCommandErrors = []
     const subject = resolve(this.root, skillDigest({ ...this.scope, apiOrigin: this.origin }))
     if (!existsSync(subject)) return []
     if (realpathSync(subject) !== subject || !lstatSync(subject).isDirectory()) fail('SKILL_STORE_UNSAFE')
@@ -148,7 +149,13 @@ export class SkillConversationLane {
       try {
         const stat = fstatSync(fd)
         if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.geteuid() || (stat.mode & 0o077)) fail('SKILL_STORE_UNSAFE')
-        command = parseSkillCommand(readFileSync(fd))
+        try { command = parseSkillCommand(readFileSync(fd)) } catch (error) {
+          // Historical commands without a current authority binding are not executable.
+          // Preserve them and report their failure, but do not starve unrelated current work.
+          if (error?.code !== 'SKILL_COMMAND_INVALID') throw error
+          this.pendingCommandErrors.push({ executionId: id, error })
+          continue
+        }
       } finally { closeSync(fd) }
       if (command.executionId !== id) fail('SKILL_STORE_IDENTITY_CONFLICT')
       const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
@@ -171,8 +178,8 @@ export class SkillConversationLane {
       // Scheduling only: never an execution admission or a terminal failure.
       for (const id of this.unknownRetries.keys()) if (!commands.has(id)) this.unknownRetries.delete(id)
       let deferred = 0
-      let processed = 0, firstError = null
-      const executionErrors = [], proof = JSON.stringify(this.headers())
+      let processed = 0, firstError = this.pendingCommandErrors?.[0]?.error || null
+      const executionErrors = (this.pendingCommandErrors || []).map(({ executionId, error }) => ({ executionId, code: error.code })), proof = JSON.stringify(this.headers())
       for (const command of commands.values()) {
         // A command-local UNKNOWN must not starve unrelated work. A changed
         // subject/session or unsafe shared checkpoint tree ends the whole poll.

@@ -348,3 +348,7 @@ The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/
 ## Codex伴随可执行文件（2026-10-25，1.3.3候选）
 
 基线60ed188。生产任务523暴露：快照只有主程序和codex-resources，遗漏同发行目录的codex-code-mode-host，工具启动ENOENT。快照现在同时复制原生bin目录中实际存在的codex-*常规文件，保留同级布局；旧CLI没有伴随文件也可运行，不新增版本白名单。来源/快照的文件摘要、独立副本及变更检测继续保护真实执行身份；缓存路径只stat，不在主线程反复读取大型助手。符号链接或非常规文件不作为可执行快照复制，作用域限本次App Server启动。复用app-server-integrity-worker既有测试验证助手可执行及篡改拒绝；真实模型/图片验收须另记线上证据。
+
+### 2026-10-25 历史技能命令隔离（1.3.4）
+
+已有private-runs中的旧command可能缺少后来新增的taskSkillBinding；这不能构造或补写为当前执行授权。扫描仍核对私有目录、普通文件、UID/权限、锁及身份完整性。只将命令级SKILL_COMMAND_INVALID记录为该execution的待处理错误，保留全部原始文件/回执，不重放、不标记成功，并继续当前合法命令；共享目录/身份/会话错误仍中止。轮询最终报告原错误、executionErrors及实际processed数，不把隔离误报为旧任务完成。实现skill-conversation.pendingCommands/poll，复用既有“不饿死后续任务”回归包含旧无binding记录，正式Flow结果见CYF协调仓本次handoff。

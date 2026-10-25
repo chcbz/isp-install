@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { SkillConversationLane, parseSkillInputSnapshot, validateCommittedSkillResult, skillCommandFromWire } from '../skill-conversation.mjs'
@@ -153,6 +153,16 @@ test('a pending UNKNOWN retains its error but does not starve unrelated next inb
   }
   assert.equal(first.modelCalls(), 0); assert.equal(second.modelCalls(), 1)
   assert.equal(second.calls.filter(path => path.includes('/result-commits/')).length, 1)
+  // A saved pre-management command has no binding. Never fabricate one or replay it.
+  const store = new SkillExecutionStore({ rootDirectory: first.lane.root, scope: { ...scope, apiOrigin: first.lane.origin }, command: first.c })
+  const legacy = JSON.parse(readFileSync(store.path('command'), 'utf8')); delete legacy.taskSkillBinding
+  writeFileSync(store.path('command'), JSON.stringify(legacy)); const before = readFileSync(store.path('command'))
+  await assert.rejects(lane.poll(), error => {
+    assert.equal(error.code, 'SKILL_COMMAND_INVALID'); assert.equal(error.processed, 1)
+    assert.deepEqual(error.executionErrors, [{ executionId: first.c.executionId, code: 'SKILL_COMMAND_INVALID' }]); return true
+  })
+  assert.deepEqual(readFileSync(store.path('command')), before)
+  assert.equal(first.modelCalls(), 0); assert.equal(second.modelCalls(), 1)
 })
 
 test('shared store or session failures immediately halt poll instead of crossing the security boundary', async t => {
