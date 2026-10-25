@@ -1,10 +1,11 @@
-/** Installed Node script adapter. No shell, inherited credentials, host HOME or
- * network. Real bubblewrap readback is required before advertising readiness.
- * Packages cannot choose argv, interpreter, environment or sandbox mounts. */
+/** Approved installed Node scripts run as ordinary Runtime-account subprocesses.
+ * No shell or inherited environment credentials; this is NOT a filesystem/network
+ * sandbox. Packages cannot choose interpreter, argv or environment. */
 import { spawn } from 'node:child_process'
-import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { constants, closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 import { skillDigest, skillHash, skillId } from '../skill-executor.mjs'
 import { parseSkillJson, resolveSkillEntrypoint, validateSkillData, skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { validateNativeConversationOutput } from '../conversation-native.mjs'
@@ -46,30 +47,15 @@ function packageIdentity(context) {
   const script = resolveSkillEntrypoint(context.packageRoot, context.entrypoint)
   return { root: context.packageRoot, script, sha256: skillHash(readFileSync(script)), entrypoint: context.entrypoint }
 }
-function toolIdentity(nodeBinary, bwrapBin) {
-  const node = trustedFile(nodeBinary), bwrap = trustedFile(bwrapBin)
-  // Interpreter ABI directories only; never /usr, /etc, HOME or artifact state.
-  const libraries = ['/lib', '/lib64', '/usr/lib', '/usr/lib64'].filter(existsSync).map(target => {
-    const path = realpathSync(target), stat = lstatSync(path)
-    if (!stat.isDirectory() || stat.uid !== 0 || stat.mode & 0o022) fail('SKILL_LOCAL_TOOL_UNTRUSTED')
-    return { path, target, dev: String(stat.dev), ino: String(stat.ino) }
-  })
-  return { node, bwrap, libraries }
-}
-export function buildLocalScriptArgv({ tools, packageRoot, entrypoint, inputs, outputDirectory }) {
-  const args = ['--unshare-all', '--cap-drop', 'ALL', '--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
-    '--dir', '/runtime', '--ro-bind', tools.node.path, '/runtime/node']
-  for (const library of tools.libraries) args.push('--ro-bind', library.path, library.target)
-  args.push('--dir', '/skill', '--ro-bind', packageRoot, '/skill', '--dir', '/inputs')
-  for (const input of inputs) args.push('--ro-bind', input.path, `/inputs/${input.inputRef}`)
-  args.push('--dir', '/outputs', '--bind', outputDirectory, '/outputs', '--setenv', 'HOME', '/tmp', '--setenv', 'PATH', '',
-    '--chdir', '/outputs', '--', '/runtime/node', '--no-addons', '--input-type=module', '-e', 'process.umask(0o077); await import(process.argv[1])', `/skill/${entrypoint}`)
-  return args
+function toolIdentity(nodeBinary) { return { node: trustedFile(nodeBinary) } }
+export function buildLocalScriptArgv({ packageRoot, entrypoint }) {
+  return ['--no-addons', '--input-type=module', '-e', 'process.umask(0o077); await import(process.argv[1])',
+    pathToFileURL(resolve(packageRoot, entrypoint)).href]
 }
 function childResult(spawnFn, tools, args, request) {
   return new Promise((accept, reject) => {
     let child, error = null
-    try { child = spawnFn(tools.bwrap.path, args, { shell: false, cwd: '/', env: environment, stdio: ['pipe', 'pipe', 'pipe'] }) } catch (cause) { reject(cause); return }
+    try { child = spawnFn(tools.node.path, args, { shell: false, cwd: request.outputDirectory, env: { ...environment, HOME: request.outputDirectory, PATH: '' }, stdio: ['pipe', 'pipe', 'pipe'] }) } catch (cause) { reject(cause); return }
     const chunks = []
     child.stdout.on('data', chunk => chunks.push(Buffer.from(chunk)))
     // Drain stderr but never persist or log untrusted script/provider text.
@@ -85,38 +71,28 @@ function childResult(spawnFn, tools, args, request) {
   })
 }
 const probeScript = `import fs from 'node:fs';
-let request = ''; for await (const chunk of process.stdin) request += chunk; const config = JSON.parse(request);
-const denied = path => { try { fs.writeFileSync(path, 'tampered'); return false } catch (e) { return ['EROFS', 'EACCES', 'EPERM'].includes(e.code) } };
-const interfaces = fs.readFileSync('/proc/net/dev', 'utf8').split(/\\r?\\n/).slice(2).filter(Boolean).map(line => line.split(':')[0].trim());
-console.log(JSON.stringify({schemaVersion:1, nodeVersion:process.version,
- inputDelivered:fs.readFileSync('/inputs/probe', 'utf8') === 'local-script-readonly-probe',
- inputReadOnly:denied('/inputs/probe'), packageReadOnly:denied('/skill/probe.mjs'),
- hostHidden:!fs.existsSync(config.hostCanary), secretHomeHidden:!fs.existsSync(config.secretHome),
- networkIsolated:fs.readlinkSync('/proc/self/ns/net') !== config.parentNetwork,
- pidIsolated:fs.readlinkSync('/proc/self/ns/pid') !== config.parentPid,
- capabilitiesDropped:/^CapEff:\\s*0+$/m.test(fs.readFileSync('/proc/self/status','utf8')),
- noRoutes:fs.readFileSync('/proc/net/route', 'utf8').trim().split(/\\r?\\n/).length === 1,
- interfaces, environment:process.env}));`
-export function createLocalScriptRunner({ nodeBinary = process.execPath, bwrapBin = '/usr/bin/bwrap', spawnFn = spawn } = {}) {
+let text=''; for await (const chunk of process.stdin) text+=chunk; const request=JSON.parse(text);
+fs.writeFileSync(request.outputDirectory+'/probe.txt','probe');
+console.log(JSON.stringify({schemaVersion:1,nodeVersion:process.version,
+ inputDelivered:fs.readFileSync(request.input,'utf8')==='local-script-probe',
+ outputWritten:fs.readFileSync(request.outputDirectory+'/probe.txt','utf8')==='probe',
+ privateCwd:process.cwd()===request.outputDirectory,privateHome:process.env.HOME===request.outputDirectory,
+ cleanEnvironment:Object.keys(process.env).every(key=>['LANG','HOME','PATH'].includes(key))&&process.env.PATH===''}));`
+export function createLocalScriptRunner({ nodeBinary = process.execPath, spawnFn = spawn } = {}) {
   let measurement = null
   const measure = async () => {
-    const tools = toolIdentity(nodeBinary, bwrapBin), key = skillDigest(tools)
+    const tools = toolIdentity(nodeBinary), key = skillDigest(tools)
     if (measurement?.key === key) return measurement
     const root = mkdtempSync(resolve(tmpdir(), 'skill-local-probe-'))
     try {
-      for (const dir of ['package', 'outputs', 'private-home']) mkdirSync(resolve(root, dir), { mode: 0o700 })
+      for (const dir of ['package', 'outputs']) mkdirSync(resolve(root, dir), { mode: 0o700 })
       writeFileSync(resolve(root, 'package/probe.mjs'), probeScript, { mode: 0o400 })
-      const input = resolve(root, 'input'), canary = resolve(root, 'canary')
-      writeFileSync(input, 'local-script-readonly-probe', { mode: 0o400 }); writeFileSync(canary, 'host-secret-canary', { mode: 0o400 })
-      const { readlinkSync } = await import('node:fs')
-      const readback = await childResult(spawnFn, tools, buildLocalScriptArgv({ tools, packageRoot: resolve(root, 'package'), entrypoint: 'probe.mjs',
-        inputs: [{ inputRef: 'probe', path: input }], outputDirectory: resolve(root, 'outputs') }),
-      { hostCanary: canary, secretHome: resolve(root, 'private-home'), parentNetwork: readlinkSync('/proc/self/ns/net'), parentPid: readlinkSync('/proc/self/ns/pid') })
-      if (readback.schemaVersion !== 1 || ![readback.inputDelivered, readback.inputReadOnly, readback.packageReadOnly, readback.hostHidden, readback.secretHomeHidden,
-        readback.networkIsolated, readback.pidIsolated, readback.capabilitiesDropped, readback.noRoutes].every(value => value === true) || !Array.isArray(readback.interfaces)
-          || readback.interfaces.some(name => name !== 'lo') || typeof readback.nodeVersion !== 'string'
-          || !object(readback.environment) || Object.keys(readback.environment).some(name => !['LANG', 'HOME', 'PATH', 'PWD'].includes(name))
-          || readback.environment.HOME !== '/tmp' || readback.environment.PATH !== '') fail('SKILL_LOCAL_ISOLATION_UNAVAILABLE')
+      const input = resolve(root, 'input')
+      writeFileSync(input, 'local-script-probe', { mode: 0o400 })
+      const readback = await childResult(spawnFn, tools, buildLocalScriptArgv({ packageRoot: resolve(root, 'package'), entrypoint: 'probe.mjs' }),
+        { input, outputDirectory: resolve(root, 'outputs') })
+      if (readback.schemaVersion !== 1 || typeof readback.nodeVersion !== 'string'
+          || ![readback.inputDelivered, readback.outputWritten, readback.privateCwd, readback.privateHome, readback.cleanEnvironment].every(value => value === true)) fail('SKILL_LOCAL_PROCESS_UNAVAILABLE')
       measurement = { key, tools, readback, digest: skillDigest({ tools, readback }) }; return measurement
     } finally { rmSync(root, { recursive: true, force: true }) }
   }
@@ -124,9 +100,9 @@ export function createLocalScriptRunner({ nodeBinary = process.execPath, bwrapBi
     probe: async context => {
       if (context.inputMimeTypes?.length && !SKILL_INPUT_CARRIERS.includes('local-file')) return { ready: false, reasonCode: 'SKILL_LOCAL_INPUT_CARRIER_UNAVAILABLE' }
       try { const entry = packageIdentity(context), measured = await measure(); return { ready: true, digest: skillDigest({ toolchain: measured.digest, entrypoint: entry.entrypoint, scriptSha256: entry.sha256 }) } }
-      catch { return { ready: false, reasonCode: 'SKILL_LOCAL_ISOLATION_UNAVAILABLE' } }
+      catch { return { ready: false, reasonCode: 'SKILL_LOCAL_PROCESS_UNAVAILABLE' } }
     },
-    probeTool: async () => { try { return { ready: true, digest: (await measure()).digest } } catch { return { ready: false, reasonCode: 'SKILL_LOCAL_ISOLATION_UNAVAILABLE' } } },
+    probeTool: async () => { try { return { ready: true, digest: (await measure()).digest } } catch { return { ready: false, reasonCode: 'SKILL_LOCAL_PROCESS_UNAVAILABLE' } } },
     run: async ({ command, descriptor, inputs, parameters, instruction, effects, outputDirectory }) => {
       const entry = packageIdentity({ packageRoot: descriptor.packageRoot, entrypoint: descriptor.manifest.entrypoint, packageTreeDigest: descriptor.packageTreeDigest }), measured = await measure()
       const seen = new Set()
@@ -138,10 +114,10 @@ export function createLocalScriptRunner({ nodeBinary = process.execPath, bwrapBi
       privateDirectory(outputDirectory)
       const outputRoot = resolve(outputDirectory, 'local-script'); mkdirSync(outputRoot, { recursive: true, mode: 0o700 }); privateDirectory(outputRoot)
       const request = { schemaVersion: 1, executionId: command.executionId, instruction, parameters,
-        inputs: inputs.map(input => ({ inputRef: input.inputRef, sha256: input.sha256, byteLength: String(input.byteLength), contentMimeType: input.contentMimeType, path: `/inputs/${input.inputRef}` })), outputDirectory: '/outputs' }
+        inputs: inputs.map(input => ({ inputRef: input.inputRef, sha256: input.sha256, byteLength: String(input.byteLength), contentMimeType: input.contentMimeType, path: input.path })), outputDirectory: outputRoot }
       const result = await effects.invoke('local-script', { ...request, entrypoint: entry.entrypoint, scriptSha256: entry.sha256, toolchainDigest: measured.digest }, async () => {
         // Recheck tool/package bytes immediately before the only process launch.
-        if (skillDigest(toolIdentity(nodeBinary, bwrapBin)) !== measured.key || packageIdentity({ packageRoot: entry.root, entrypoint: entry.entrypoint, packageTreeDigest: descriptor.packageTreeDigest }).sha256 !== entry.sha256) fail('SKILL_LOCAL_TOOL_CHANGED')
+        if (skillDigest(toolIdentity(nodeBinary)) !== measured.key || packageIdentity({ packageRoot: entry.root, entrypoint: entry.entrypoint, packageTreeDigest: descriptor.packageTreeDigest }).sha256 !== entry.sha256) fail('SKILL_LOCAL_TOOL_CHANGED')
         const value = await childResult(spawnFn, measured.tools, buildLocalScriptArgv({ tools: measured.tools, packageRoot: entry.root, entrypoint: entry.entrypoint, inputs, outputDirectory: outputRoot }), request)
         if (!exact(value, ['data', 'artifacts']) || !Array.isArray(value.artifacts)) fail('SKILL_LOCAL_RESULT_INVALID')
         const output = descriptor.manifest.outputs

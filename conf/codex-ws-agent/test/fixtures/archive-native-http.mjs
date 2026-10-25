@@ -24,7 +24,7 @@ for await (const line of lines) {
    const scope={tenantId:session.tenantId,clientId:session.clientId,ownerJiacn:message.ownerJiacn,agentId:session.canonicalAgentId}
    const fence={installationId:session.installationId,hostId:session.hostId,runtimeInstanceId:session.runtimeInstanceId,sessionGeneration:String(session.sessionGeneration)}
    manager.bindSession({scope,fence})
-   const runner=createLocalScriptRunner({bwrapBin:'/usr/bin/bwrap'})
+   const runner=createLocalScriptRunner()
    registry=new SkillRegistry({scope,loadInstalled:()=>manager.listInstalledSkills(),runnerRegistry:new Map([['local-script',runner]]),toolProbes:new Map([['node',()=>runner.probeTool()]])})
    registry.setSession(fence)
    manager.verifyCandidate=async row=>(await registry.measureInstallation(row)).item
