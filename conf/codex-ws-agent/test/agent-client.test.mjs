@@ -1,3 +1,4 @@
+import { startNativeConversationPoller, stopNativeConversationPoller } from '../agent-client.mjs'
 import { toAgentWire, fromAgentWire } from '../agent-message-wire.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -4929,3 +4930,33 @@ test('public durable dispatch crosses the wire projection and real consumer with
     assert.throws(() => fromAgentWire(JSON.stringify({ ...wire, data: { ...wire.data, occurredAt } })));
   }
 });
+
+
+test('native poller distinguishes partial execution from shared failure and keeps legacy reports', async () => {
+  const ws = await loadWebSocketClient()
+  const originalWarn = console.warn
+  const warnings = []
+  console.warn = message => warnings.push(message)
+  const state = { ws: { readyState: ws.OPEN }, processor: { paused: false },
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'0'.repeat(64)}` }
+  try {
+    state.conversationNativeLane = { poll: async () => ({ status: 'PARTIAL', processed: 1, deferred: 0,
+      executionErrors: [{ executionId: 'pwe_1', code: 'SKILL_RESULT_UNKNOWN' }] }) }
+    startNativeConversationPoller({ profileId: 'fixture' }, state)
+    await state.conversationNativePollPromise; await Promise.resolve()
+    assert.equal(state.conversationNativePollInFlight, false)
+    assert.match(warnings[0], /poll partial.*processed=1.*SKILL_RESULT_UNKNOWN/)
+    assert.equal(warnings[0].includes('unavailable'), false)
+    stopNativeConversationPoller(state)
+    state.conversationNativeLane = { poll: async () => ({ processed: 1 }) }
+    startNativeConversationPoller({ profileId: 'fixture' }, state)
+    await state.conversationNativePollPromise; await Promise.resolve()
+    assert.equal(warnings.length, 1)
+    stopNativeConversationPoller(state)
+    state.conversationNativeLane = { poll: async () => { throw Object.assign(new Error('shared'), { code: 'SKILL_STORE_UNSAFE' }) } }
+    startNativeConversationPoller({ profileId: 'fixture' }, state)
+    await state.conversationNativePollPromise.catch(() => {}); await Promise.resolve()
+    assert.match(warnings[1], /poll unavailable.*SKILL_STORE_UNSAFE/)
+    assert.equal(state.conversationNativePollInFlight, false)
+  } finally { stopNativeConversationPoller(state); console.warn = originalWarn }
+})

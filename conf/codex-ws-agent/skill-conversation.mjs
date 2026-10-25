@@ -164,7 +164,7 @@ export class SkillConversationLane {
     return pending
   }
   async poll() {
-    if (this.active) return { processed: 0, busy: true }
+    if (this.active) return { status: 'BUSY', processed: 0, deferred: 0, executionErrors: [] }
     this.active = true
     try {
       const page = await this.request(`${BASE}/conversation-executions/commands`, 'GET')
@@ -178,7 +178,7 @@ export class SkillConversationLane {
       // Scheduling only: never an execution admission or a terminal failure.
       for (const id of this.unknownRetries.keys()) if (!commands.has(id)) this.unknownRetries.delete(id)
       let deferred = 0
-      let processed = 0, firstError = this.pendingCommandErrors?.[0]?.error || null
+      let processed = 0
       const executionErrors = (this.pendingCommandErrors || []).map(({ executionId, error }) => ({ executionId, code: error.code })), proof = JSON.stringify(this.headers())
       for (const command of commands.values()) {
         // A command-local UNKNOWN must not starve unrelated work. A changed
@@ -199,13 +199,13 @@ export class SkillConversationLane {
             const delay = Math.floor(Math.min(300000, 15000 * 2 ** (attempt - 1)) * (0.8 + 0.2 * this.random()))
             this.unknownRetries.set(command.executionId, { attempt, nextAt: this.now() + delay })
           } else this.unknownRetries.delete(command.executionId)
-          firstError ||= error
           executionErrors.push({ executionId: command.executionId, code })
         }
       }
-      // Preserve the actual first error and cause, not a fake success/failure.
-      if (firstError) { Object.assign(firstError, { processed, executionErrors }); throw firstError }
-      return deferred ? { processed, deferred } : { processed }
+      // Command-local failures remain explicit without misreporting the entire lane as unavailable.
+      // Shared/session/store and unknown exceptions still escape above with their original cause.
+      const status = executionErrors.length ? 'PARTIAL' : processed ? 'PROGRESSED' : deferred ? 'DEFERRED' : 'IDLE'
+      return { status, processed, deferred, executionErrors }
     } finally { this.active = false }
   }
   async process(command) {

@@ -5669,18 +5669,27 @@ const startWorkspaceFilePoller = (profile, state) => {
 
 // Independent timer and in-flight guard: a blocked legacy file queue must never starve
 // native CONVERSATION. Neither timer dispatches through ordinary WS/chat tooling.
-const stopNativeConversationPoller = state => {
+export const stopNativeConversationPoller = state => {
   if (!state) return
   clearInterval(state.conversationNativePollTimer)
   state.conversationNativePollTimer = null
 }
-const startNativeConversationPoller = (profile, state) => {
+export const startNativeConversationPoller = (profile, state) => {
   stopNativeConversationPoller(state)
   if (!state?.conversationNativeLane || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
   const tick = async () => {
     if (state.conversationNativePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.conversationNativePollInFlight = true
-    try { const polling = state.conversationNativeLane.poll(); state.conversationNativePollPromise = polling; await polling } catch (error) {
+    try {
+      const polling = state.conversationNativeLane.poll()
+      state.conversationNativePollPromise = polling
+      const report = await polling
+      if (report?.status === 'PARTIAL') {
+        const errors = report.executionErrors.map(({ executionId, code }) => ({ executionId, code }))
+        console.warn(`native conversation poll partial | profile=${profile.profileId} | processed=${report.processed} | deferred=${report.deferred} | errors=${JSON.stringify(errors)}`)
+      }
+      // Legacy native lanes returning only {processed} retain their original handling.
+    } catch (error) {
       const code = typeof error?.code === 'string' && /^(?:CONVERSATION|SKILL|MATERIALS)_[A-Z_]{1,80}$/.test(error.code)
         ? error.code : 'CONVERSATION_UNAVAILABLE'
       const processed = Number.isSafeInteger(error?.processed) && error.processed >= 0 ? error.processed : 0
