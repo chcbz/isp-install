@@ -813,6 +813,7 @@ async function venvLauncherFixture(t, { longPath = false } = {}) {
   for (const name of ['python', 'platform-python3.6']) {
     // Synthetic interpreter forwarder, explicitly not an installed --copies venv.
     await writeFile(resolve(bin, name), '#!/bin/sh\nexec /usr/bin/python3 "$@"\n', { mode: 0o755 });
+    await chmod(resolve(bin, name), 0o755); // Exact fixture mode, independent of CI umask.
   }
   const body = 'import json, sys\nprint(json.dumps({"file": __file__, "args": sys.argv[1:]}))\n';
   const scripts = ['pip', 'easy_install', 'vba_extract.py', 'distlib-pip'];
@@ -822,6 +823,7 @@ async function venvLauncherFixture(t, { longPath = false } = {}) {
       ? `#!/bin/sh\n'''exec' "${interpreter}" "$0" "$@"\n' '''\n`
       : `#!${interpreter}\n`;
     await writeFile(resolve(bin, name), header + body, { mode: 0o755 });
+    await chmod(resolve(bin, name), 0o755);
   }
   const venv = resolve(stage, 'codex-ws-agent/.toolchain');
   await writeFile(resolve(bin, 'activate'), `VIRTUAL_ENV="${venv}"\nexport VIRTUAL_ENV\n`);
