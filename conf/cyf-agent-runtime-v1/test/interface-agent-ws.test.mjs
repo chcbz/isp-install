@@ -13,7 +13,7 @@ const durableSkillResult = () => {
   result.data.resultSha256 = managementDigest('cyf.skill.result.v2', preimage)
   return result
 }
-const session = Object.freeze({ tenantId: '0', clientId: 'client', canonicalAgentId: 'agent', installationId: 'rti_1', hostId: 'host', runtimeInstanceId: 'boot', sessionGeneration: '9007199254740993' })
+const session = Object.freeze({ tenantId: '1', clientId: 'cyf-local', canonicalAgentId: 'agent', installationId: 'rti_1', hostId: 'host', runtimeInstanceId: 'boot', sessionGeneration: '9007199254740993' })
 async function fixture(t) {
   const accepted = [], sent = [], sockets = [], logs = []
   const state = { profile: { agentId: 'agent' }, processor: { pause() {} } }
@@ -55,7 +55,7 @@ test('actual adapter requires M registration reply and preserves exact session g
   f.socket.receive({ ...f.ack(), correlationId: 'wrong' }); await tick(); assert.equal(f.executor.ready(), false)
   f.socket.receive(f.ack()); await f.activation; assert.equal(f.executor.ready(), true)
   const command = { protocolVersion: 1, requestId: 'command-request', messageId: 'command-message', messageType: 'command.dispatch', data: { schemaVersion: 1,
-    tenantId: '0', clientId: 'client', targetAgentId: 'agent', commandType: 'TASK_INVITE', commandId: 'cmd', payload: { instruction: 'synthetic' } } }
+    tenantId: '1', clientId: 'cyf-local', targetAgentId: 'agent', commandType: 'TASK_INVITE', commandId: 'cmd', payload: { instruction: 'synthetic' } } }
   f.socket.receive(command); await tick(); assert.equal(f.accepted.length, 1); assert.equal(f.accepted[0].commandId, 'cmd')
   f.socket.receive({ ...command, data: { ...command.data, targetAgentId: 'foreign' } }); await tick(); assert.equal(f.accepted.length, 1)
   f.socket.receive({ ...command, data: { ...command.data, sessionGeneration: '9007199254740994' } }); await tick(); assert.equal(f.accepted.length, 1)
