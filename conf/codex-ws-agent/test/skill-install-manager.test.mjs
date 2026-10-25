@@ -12,7 +12,7 @@ const setup = (t, options = {}) => {
   const home = resolve(root, 'home'); mkdirSync(home)
   let downloads = 0; const emitted = [], packages = new Map()
   const settings = { profile: profile(home), stateRoot: resolve(root, 'state'), wsUrl: 'ws://127.0.0.1:8080/ws/agent/channel',
-    enabled: true, runtimeInstanceId: 'boot_demo', getRuntimeHeaders: () => headers(binding),
+    runtimeInstanceId: 'boot_demo', getRuntimeHeaders: () => headers(binding),
     fetchFn: async url => { downloads++; const bytes = packages.get(url.pathname); assert.ok(bytes, url.pathname)
       return new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.length), 'content-type': 'application/octet-stream' } }) },
     sendResultFn: msg => { emitted.push(structuredClone(msg)); return true }, ...options }
@@ -69,11 +69,8 @@ const installed = async f => {
 }
 const crashed = name => (stage => { if (stage === name) throw Object.assign(new Error(`crash:${name}`), { simulatedCrash: true }) })
 
-test('management disabled, strict target/path/hash/size and API-key rejection precede fetch/ACK', async t => {
-  const f = setup(t, { enabled: false }), c = command(packageFixture().target)
-  await assert.rejects(f.manager.handle(c), { code: 'SKILL_INSTALL_DISABLED' })
-  assert.equal(f.emitted.length, 0); assert.equal(f.downloads(), 0)
-  f.manager.enabled = true
+test('strict target/path/hash/size and API-key rejection precede fetch/ACK without feature gate', async t => {
+  const f = setup(t), c = command(packageFixture().target)
   for (const patch of [{ downloadPath: '/internal/agent/skill-installations/other/package' },
     { target: { ...c.data.target, byteLength: '01' } }, { target: { ...c.data.target, skillInstallationId: '../escape' } },
     { target: { ...c.data.target, manifestSha256: 'x' } }, { taskId: 'order_not_task' }]) {
@@ -602,3 +599,12 @@ test('cross-parent upgrade exchange treats package owner.json as ordinary bytes,
   assert.deepEqual(readdirSync(resolve(f.home, 'skills')), ['repo-test'])
   assert.equal(f.manager.listInstalledSkills()[0].skillVersion, '2.0.0'); assert.equal(f.downloads(), 2)
 })
+
+for (const legacyFlag of [undefined, false, true]) {
+  test(`installation needs no hidden opt-in (legacy enabled=${legacyFlag})`, async t => {
+    const f = setup(t, { enabled: legacyFlag })
+    await installed(f)
+    assert.equal(f.downloads(), 1)
+    assert.equal(Object.hasOwn(f.manager, 'enabled'), false)
+  })
+}

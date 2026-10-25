@@ -65,8 +65,12 @@ Each sealed manifest contains exact `installationId`, `tenantId`, `clientId`,
 `manifestSha256` (`sha256:` + SHA256 of recursively key-sorted unsigned JSON).
 Each profile explicitly selects the same `agentId`, a `profileId`, `codexBin`,
 `codexHome`, `codexWorkdir`, and existing per-operation executor policies. For
-example, `appServerEnabled`, `fastChatEnabled`, and `skillInstallEnabled` are
-explicit booleans; none imply readiness without the real adapter. No profile may
+example, `appServerEnabled` and `fastChatEnabled` select execution adapters;
+none imply readiness without the real adapter. Skill management is built in: no
+`skillInstallEnabled` opt-in is required (historical values are ignored). Installation,
+position reconciliation and archive reconciliation still require a bound authenticated
+session, intact durable state and their existing command authorization. Per-skill
+enable/disable remains a user policy, not a host feature gate. No profile may
 supply API keys, installation/session credentials or reserved Runtime identity.
 
 Pre-create private state roots (0700, current UID). Config/manifest/profile files

@@ -27,7 +27,6 @@ import { eventMessage, replyMessage } from './message-envelope.mjs'
 import { parseSkillManifest, resolveSkillEntrypoint, skillPackageTreeDigest } from './skill-manifest.mjs'
 
 export const SKILL_INSTALL_FAILURE = Object.freeze({
-  DISABLED: 'SKILL_INSTALL_DISABLED',
   COMMAND_INVALID: 'SKILL_INSTALL_COMMAND_INVALID',
   DOWNLOAD_FORBIDDEN: 'SKILL_DOWNLOAD_FORBIDDEN',
   PACKAGE_TOO_LARGE: 'SKILL_PACKAGE_TOO_LARGE',
@@ -788,7 +787,7 @@ const syncTree = root => {
 }
 
 export class SkillInstallManager {
-  constructor({ profile, stateRoot, wsUrl, apiKey, getRuntimeHeaders = null, enabled = false,
+  constructor({ profile, stateRoot, wsUrl, apiKey, getRuntimeHeaders = null,
     maxPackageBytes = DEFAULT_MAX_PACKAGE_BYTES, maxExtractedBytes = DEFAULT_MAX_EXTRACTED_BYTES,
     maxEntryBytes = DEFAULT_MAX_ENTRY_BYTES, maxEntries = DEFAULT_MAX_ENTRIES,
     fetchFn = globalThis.fetch, sendResultFn = null, now = Date.now, createId = randomUUID,
@@ -803,7 +802,7 @@ export class SkillInstallManager {
     this.stagingDir = resolve(this.stateRoot, 'staging'); this.packagesDir = resolve(this.stateRoot, 'packages')
     this.staleLocksDir = resolve(this.stateRoot, 'stale-locks'); this.statePath = resolve(this.stateRoot, 'journal.json')
     this.lockPath = resolve(this.stateRoot, 'installer.lock'); this.lockOwnerPath = resolve(this.lockPath, 'owner.json')
-    Object.assign(this, { getRuntimeHeaders, enabled, maxPackageBytes, maxExtractedBytes, maxEntryBytes, maxEntries,
+    Object.assign(this, { getRuntimeHeaders, maxPackageBytes, maxExtractedBytes, maxEntryBytes, maxEntries,
       fetchFn, sendResultFn, now, createId, runtimeInstanceId, processIdentityFn, lockOwnerAliveFn,
       unownedLockStaleMs, maxReplayBatch, atomicFs, checkpoint })
     this.lockOwner = null; this.lockOwnerSha256 = ''; this.healthError = null; this.session = null
@@ -951,7 +950,6 @@ export class SkillInstallManager {
   async handle(input) {
     const envelope = parseManagementMessage(input)
     if (!['command.dispatch', 'work.result.receipt'].includes(envelope.messageType)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.COMMAND_INVALID, 'not a management command')
-    if (envelope.messageType === 'command.dispatch' && !this.enabled) throw new SkillInstallError(SKILL_INSTALL_FAILURE.DISABLED, 'managed installation disabled')
     // Serialize receive, execution and receipts together. The async download/probe
     // holds the cross-process lock: a concurrent local receive must not re-enter
     // that lock, release another operation's ownership, or overwrite its snapshot.

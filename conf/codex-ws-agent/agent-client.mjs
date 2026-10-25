@@ -619,7 +619,6 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     chatDedupeRetentionMs: parsePositiveInteger(profile.chatDedupeRetentionMs ?? fallback.chatDedupeRetentionMs, 30 * 24 * 60 * 60 * 1000),
     abilities: parseStringList(profile.abilities ?? fallback.abilities),
     skills: parseStringList(profile.skills ?? fallback.skills),
-    skillInstallEnabled: parseEnabledFlag(profile.skillInstallEnabled ?? fallback.skillInstallEnabled),
     workspacePolicyId: profile.workspacePolicyId || fallback.workspacePolicyId || '',
     workspaceRole: profile.workspaceRole || fallback.workspaceRole || 'coder',
     workspaceNoTaskPolicy: profile.workspaceNoTaskPolicy || fallback.workspaceNoTaskPolicy || 'reject',
@@ -6182,7 +6181,6 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     profile,
     stateRoot: defaultSkillInstallStateRoot(profileConfig.commandInboxDir, profile, profileConfig.wsUrl),
     wsUrl: profileConfig.wsUrl,
-    enabled: profile.runtimeIdentity ? profile.skillInstallEnabled === true : profileConfig.skillInstallEnabled,
     getRuntimeHeaders: profile.runtimeIdentity ? () => getProfileState(profile)?.runtimeTransport?.headers() : null,
     maxPackageBytes: profileConfig.skillInstallMaxBytes,
     maxExtractedBytes: profileConfig.skillInstallMaxExtractedBytes,
@@ -6599,7 +6597,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
   engineOrigin.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:'
   config = { wsUrl: engineOrigin.origin, apiKey: '', profiles, defaultProfileId: '', workspacePolicies,
     commandInboxSuccessPolicy: 'archive', registrationAckTimeoutMs: 10000,
-    skillInstallEnabled: false, skillInstallMaxBytes: 16 * 1024 * 1024, skillInstallMaxExtractedBytes: 64 * 1024 * 1024 }
+    skillInstallMaxBytes: 16 * 1024 * 1024, skillInstallMaxExtractedBytes: 64 * 1024 * 1024 }
   runtimeExecutionOwner = owner
   let closing = null
   // Binary/schema trust measurements are synchronous. Do not let another
@@ -6656,7 +6654,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         },
         reconcilePositionSkills: async () => {
           const state = entry.state, transport = state?.runtimeTransport
-          if (!state || entry.closed || !state.profile.skillInstallEnabled || !transport?.ready?.()) return
+          if (!state || entry.closed || !transport?.ready?.()) return
           if (!state.positionSkillReconciler || state.positionSkillTransport !== transport) {
             state.positionSkillTransport = transport
             state.positionSkillReconciler = new PositionSkillReconciler({ manager: state.skillInstallManager,
@@ -6669,7 +6667,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         },
         reconcileArchiveJobs: async () => {
           const state=entry.state, transport=state?.runtimeTransport
-          if(!state || entry.closed || !state.profile.skillInstallEnabled || !transport?.ready?.())return
+          if(!state || entry.closed || !transport?.ready?.())return
           if(!state.archiveJobReconciler || state.archiveJobTransport!==transport){
             state.archiveJobTransport=transport
             state.archiveJobReconciler=new ArchiveJobReconciler({manager:state.skillInstallManager,
@@ -6691,7 +6689,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         registrationPayload: () => buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
           true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry),
         readyCommandTypes: () => runtimeReadyCommandTypes(entry.state),
-        skillManagementReady: () => entry.state?.skillInstallManager.enabled === true,
+        skillManagementReady: () => Boolean(entry.state && !entry.closed && !entry.state.disposed && entry.state.skillInstallManager.isHealthy()),
         chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
         acceptFrame: async frame => {
           const state = entry.state

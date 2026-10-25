@@ -1557,10 +1557,11 @@ test('one health snapshot performs one durable check and never reuses it across 
 // No fake executor/installer here: actual Runtime client -> full wire -> mature
 // execution host -> journal/extractor -> authenticated capability re-registration.
 // The HTTP server and WS peer are isolated API boundary doubles, not API acceptance.
-test('SM-C1 real host first-install closes authenticated PREPARE ACTIVATE capability and receipt lifecycle', async t => {
+for (const legacyFlag of [undefined, false, true]) test(`SM-C1 real host first-install closes authenticated lifecycle without opt-in (${legacyFlag})`, async t => {
   const { EventEmitter } = await import('node:events');
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
-  const f = await fixture(t, { count: 1 }); await f.profile(0, { skillInstallEnabled: true });
+  const f = await fixture(t, { count: 1 });
+  if (legacyFlag !== undefined) await f.profile(0, { skillInstallEnabled: legacyFlag });
   const config = await f.config(), agent = config.agents[0], identity = agent.manifest, pkg = managementPackage();
   await f.json(resolve(agent.stateRoot, 'runtime-authorization.json'), { installationId: identity.installationId, runtimeAuthorization: 'synthetic-only' });
   const sockets = [], sent = [], logs = []; let downloads = 0, generation = 0;
