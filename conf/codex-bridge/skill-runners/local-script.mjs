@@ -2,6 +2,7 @@
  * No shell or inherited environment credentials; this is NOT a filesystem/network
  * sandbox. Packages cannot choose interpreter, argv or environment. */
 import { spawn } from 'node:child_process'
+import { measureLocalToolFile } from './local-tool-measurement.mjs'
 import { constants, closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -21,16 +22,6 @@ function privateDirectory(path) {
   if (!stat.isDirectory() || stat.uid !== process.geteuid() || stat.mode & PRIVATE_MODE) fail('SKILL_LOCAL_PATH_UNSAFE')
   return path
 }
-function trustedFile(path) {
-  const absolute = realpathSync(path), stat = lstatSync(absolute)
-  if (!stat.isFile() || ![0, process.geteuid()].includes(stat.uid) || stat.mode & 0o022) fail('SKILL_LOCAL_TOOL_UNTRUSTED')
-  for (let parent = dirname(absolute); ; parent = dirname(parent)) {
-    const stat = lstatSync(parent)
-    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.mode & 0o002) fail('SKILL_LOCAL_TOOL_UNTRUSTED')
-    if (dirname(parent) === parent) break
-  }
-  return { path: absolute, sha256: skillHash(readFileSync(absolute)), dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size) }
-}
 function readPrivateFile(path) {
   if (!isAbsolute(path || '') || realpathSync(path) !== path) fail('SKILL_LOCAL_PATH_UNSAFE')
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
@@ -47,7 +38,7 @@ function packageIdentity(context) {
   const script = resolveSkillEntrypoint(context.packageRoot, context.entrypoint)
   return { root: context.packageRoot, script, sha256: skillHash(readFileSync(script)), entrypoint: context.entrypoint }
 }
-function toolIdentity(nodeBinary) { return { node: trustedFile(nodeBinary) } }
+async function toolIdentity(nodeBinary) { return { node: await measureLocalToolFile(nodeBinary) } }
 export function buildLocalScriptArgv({ packageRoot, entrypoint }) {
   return ['--no-addons', '--input-type=module', '-e', 'process.umask(0o077); await import(process.argv[1])',
     pathToFileURL(resolve(packageRoot, entrypoint)).href]
@@ -81,7 +72,7 @@ console.log(JSON.stringify({schemaVersion:1,nodeVersion:process.version,
 export function createLocalScriptRunner({ nodeBinary = process.execPath, spawnFn = spawn } = {}) {
   let measurement = null
   const measure = async () => {
-    const tools = toolIdentity(nodeBinary), key = skillDigest(tools)
+    const tools = await toolIdentity(nodeBinary), key = skillDigest(tools)
     if (measurement?.key === key) return measurement
     const root = mkdtempSync(resolve(tmpdir(), 'skill-local-probe-'))
     try {
@@ -117,7 +108,7 @@ export function createLocalScriptRunner({ nodeBinary = process.execPath, spawnFn
         inputs: inputs.map(input => ({ inputRef: input.inputRef, sha256: input.sha256, byteLength: String(input.byteLength), contentMimeType: input.contentMimeType, path: input.path })), outputDirectory: outputRoot }
       const result = await effects.invoke('local-script', { ...request, entrypoint: entry.entrypoint, scriptSha256: entry.sha256, toolchainDigest: measured.digest }, async () => {
         // Recheck tool/package bytes immediately before the only process launch.
-        if (skillDigest(toolIdentity(nodeBinary)) !== measured.key || packageIdentity({ packageRoot: entry.root, entrypoint: entry.entrypoint, packageTreeDigest: descriptor.packageTreeDigest }).sha256 !== entry.sha256) fail('SKILL_LOCAL_TOOL_CHANGED')
+        if (skillDigest(await toolIdentity(nodeBinary)) !== measured.key || packageIdentity({ packageRoot: entry.root, entrypoint: entry.entrypoint, packageTreeDigest: descriptor.packageTreeDigest }).sha256 !== entry.sha256) fail('SKILL_LOCAL_TOOL_CHANGED')
         const value = await childResult(spawnFn, measured.tools, buildLocalScriptArgv({ tools: measured.tools, packageRoot: entry.root, entrypoint: entry.entrypoint, inputs, outputDirectory: outputRoot }), request)
         if (!exact(value, ['data', 'artifacts']) || !Array.isArray(value.artifacts)) fail('SKILL_LOCAL_RESULT_INVALID')
         const output = descriptor.manifest.outputs

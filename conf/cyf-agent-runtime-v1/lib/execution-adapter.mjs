@@ -351,6 +351,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "skill-bindings.mjs",
   "skill-runners/native-model.mjs",
   "skill-runners/local-script.mjs",
+  "skill-runners/local-tool-measurement.mjs",
   "skill-runners/image-http-codec.mjs",
   "skill-runners/image-provider.mjs",
   "skill-config-candidate.mjs",
