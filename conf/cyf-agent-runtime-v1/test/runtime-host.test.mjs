@@ -507,7 +507,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
           matchesSkillInstallReceipt: receipt => state.skillInstallManager?.matchesDurableResultReceipt(receipt) === true,
           durableStateHealthy: () => { state.healthChecks = (state.healthChecks || 0) + 1; return state.healthy; }, readyCommandTypes: () => state.types, chatReady: () => chatReady,
           registrationPayload: () => ({ runtimeCapabilities: { profiles: { EXECUTE: { available: false } } } }),
-          acceptFrame: async frame => { state.accepted.push(frame); if (normalize && !(frame.type === 'agent_message_saved' && !Object.hasOwn(frame, 'messageType'))) state.normalized.push(isManagementMessage(frame) ? parseManagementMessage(frame) : normalize(frame)); }, resume: async () => { state.resumed++; },
+          acceptFrame: async frame => { state.accepted.push(frame); if (normalize && !(frame.type === 'agent_message_saved' && !Object.hasOwn(frame, 'messageType'))) state.normalized.push(isManagementMessage(frame) ? parseManagementMessage(frame) : normalize(frame)); return state.handleFrame?.(frame); }, resume: async () => { state.resumed++; },
           disconnected: () => { state.paused = true; }, suspendAdmission: () => { state.paused = true; },
           close: async () => { state.closed = true; }, state: () => state
         };
@@ -1715,4 +1715,88 @@ test('catalog re-registration heartbeat cannot revoke the pending server binding
   assert.equal(socket.sent.at(-1).durableStateHealthy, false);
   assert.equal(state.paused, true); // Real health loss must still revoke admission.
   assert.equal(c.executors[0].ready(), false);
+});
+
+const receiptSchedulingFixture = async t => {
+  // Actual wire decoder/adapter and manager; no unrelated task normalizer/image engine.
+  const c = await channelFixture(t, { measureSkills: true });
+  await c.executors[0].activate();
+  const { SkillInstallManager } = await import('../../codex-bridge/skill-install-manager.mjs');
+  const state = c.states()[0], binding = state.skillBinding;
+  const manager = new SkillInstallManager({ profile: state.profile, stateRoot: resolve(c.f.root, 'receipt-scheduling'),
+    wsUrl: 'wss://api.example.test/ws', runtimeInstanceId: binding.fence.runtimeInstanceId,
+    getRuntimeHeaders: () => ({}), sendResultFn: () => false, fetchFn: async () => { throw new Error('synthetic offline fixture'); } });
+  manager.initialize(); manager.bindSession(binding); state.skillInstallManager = manager;
+  const command = managementCommand(managementPackage().target, { ...binding.scope, runtimeInstallationId: binding.fence.installationId });
+  const makeReceipt = result => replyMessage(result, 'work.result.receipt', 'receipt-scheduling', 'E0', 'committed', {
+    schemaVersion: 2, skillChangeId: result.data.skillChangeId, commandId: result.data.commandId, attempt: result.data.attempt, receiptStatus: 'ACCEPTED' });
+  return { ...c, state, manager, command, makeReceipt, socket: c.sockets[0] };
+};
+const deferredReceiptTest = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+
+test('skill receipt bypasses catalog wait but not the durable manager; later commands stay ordered', { timeout: 15000 }, async t => {
+  const c = await receiptSchedulingFixture(t), catalog = deferredReceiptTest(), durable = deferredReceiptTest();
+  let commands = 0, receiptHandled = false;
+  c.state.handleFrame = async frame => {
+    if (frame.messageType === 'command.dispatch') {
+      commands++; const result = await c.manager.handle(frame);
+      durable.resolve(result.resultEnvelope);
+      await catalog.promise; // Same location as the real executor: after durable work.result, before catalog completion.
+      return result;
+    }
+    const result = await c.manager.handle(frame); receiptHandled = true; return result;
+  };
+  try {
+    c.socket.receive(c.command); const result = await durable.promise;
+    assert.equal(c.manager.pendingResults().length, 1);
+    const receipt = c.makeReceipt(result);
+    c.socket.receive({ ...receipt, correlationId: 'not-this-result' });
+    c.socket.receive(receipt); c.socket.receive(c.command);
+    await c.tick(); await c.tick();
+    assert.equal(receiptHandled, true, 'durable receipt must not wait for the unrelated catalog gate');
+    assert.equal(c.manager.pendingResults().length, 0);
+    assert.equal(commands, 1, 'ordinary command ingress must remain serial');
+    assert.equal(c.state.accepted.filter(f => f.messageType === 'work.result.receipt').length, 1);
+    catalog.resolve(); await c.tick(); await c.tick();
+    assert.equal(commands, 2); assert.equal(c.manager.pendingResults().length, 0);
+  } finally { catalog.resolve(); }
+});
+
+test('skill receipt scheduled before disconnect is rejected if the session ends before admission', { timeout: 15000 }, async t => {
+  const c = await receiptSchedulingFixture(t);
+  const result = (await c.manager.handle(c.command)).resultEnvelope;
+  c.state.handleFrame = frame => c.manager.handle(frame);
+  c.socket.receive(c.makeReceipt(result)); c.socket.close(1008);
+  await c.tick(); await c.tick();
+  assert.equal(c.state.accepted.length, 0);
+  assert.equal(c.manager.pendingResults().length, 1);
+});
+
+test('skill receipt in flight is drained before executor close', { timeout: 15000 }, async t => {
+  const c = await receiptSchedulingFixture(t), admitted = deferredReceiptTest(), release = deferredReceiptTest();
+  const result = (await c.manager.handle(c.command)).resultEnvelope;
+  c.state.handleFrame = async frame => { admitted.resolve(); await release.promise; return c.manager.handle(frame); };
+  let closed = false;
+  try {
+    c.socket.receive(c.makeReceipt(result)); await admitted.promise;
+    const closing = c.executors[0].close().then(() => { closed = true; });
+    await c.tick(); assert.equal(closed, false); assert.notEqual(c.state.closed, true);
+    release.resolve(); await closing;
+    assert.equal(c.manager.pendingResults().length, 0); assert.equal(c.state.closed, true);
+  } finally { release.resolve(); }
+});
+
+test('skill receipt bypass never bypasses the manager transaction tail', { timeout: 15000 }, async t => {
+  const c = await receiptSchedulingFixture(t), transaction = deferredReceiptTest();
+  const result = (await c.manager.handle(c.command)).resultEnvelope;
+  // Hold the exact serialization primitive used for an in-flight durable write.
+  c.manager.tail = transaction.promise;
+  c.state.handleFrame = frame => c.manager.handle(frame);
+  try {
+    c.socket.receive(c.makeReceipt(result)); await c.tick(); await c.tick();
+    assert.equal(c.state.accepted.length, 1);
+    assert.equal(c.manager.pendingResults().length, 1, 'receipt cannot mutate a journal owned by a preceding transaction');
+    transaction.resolve(); await c.tick(); await c.tick();
+    assert.equal(c.manager.pendingResults().length, 0);
+  } finally { transaction.resolve(); }
 });

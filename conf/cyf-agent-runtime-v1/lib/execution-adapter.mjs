@@ -59,6 +59,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
       let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
       let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
+      const inFlightSkillReceipts = new Set();
       let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false; let registeredAt = null; let serviceReadyAt = null; let replay = null;
       const durable = () => executor.durableStateHealthy() === true;
       const usable = () => executor.readyCommandTypes().length > 0 || executor.chatReady() || executor.skillManagementReady?.() === true;
@@ -208,8 +209,8 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             if (frame.messageType === 'command.ack') return;
             if (managementFacts) logger('runtime-management-queued', managementFacts);
             const queuedAt = performance.now();
-            ingress = ingress.catch(() => {}).then(async () => {
-              if (socket === current && client.currentSession === session && (channelConfirmed || managementAuthorized()) && !signal.aborted) {
+            const acceptCurrentFrame = async () => {
+              if (socket === current && current.readyState === 1 && client.currentSession === session && (channelConfirmed || managementAuthorized()) && !signal.aborted) {
                 const beganAt = performance.now();
                 const result = await executor.acceptFrame(frame);
                 if (managementFacts) { try { logger('runtime-management-timing', { ...managementFacts, queueWaitMs: beganAt - queuedAt, handlerMs: performance.now() - beganAt }); } catch {} }
@@ -217,7 +218,20 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
                 return result;
               }
               if (managementFacts) logger('runtime-management-not-admitted', { ...managementFacts, code: 'SESSION_NO_LONGER_CURRENT' });
-            }).catch(error => logger('runtime-frame-rejected', { code: error.code || 'INVALID_FRAME', ...(managementFacts || {}) }));
+            };
+            const rejected = error => logger('runtime-frame-rejected', { code: error.code || 'INVALID_FRAME', ...(managementFacts || {}) });
+            if (managementFacts && frame.messageType === 'work.result.receipt') {
+              // Exact durable-result correlation and session gates were checked above.
+              // Catalog refresh is outside the manager transaction: do not make an
+              // already committed receipt wait for it. The manager's own tail/lock
+              // still serializes receipt writes with downloads, switches and commands.
+              const pending = Promise.resolve().then(acceptCurrentFrame).catch(rejected);
+              inFlightSkillReceipts.add(pending);
+              const retire = () => inFlightSkillReceipts.delete(pending);
+              void pending.then(retire, retire);
+            } else {
+              ingress = ingress.catch(() => {}).then(acceptCurrentFrame).catch(rejected);
+            }
           });
           if (signal.aborted) current.close();
         });
@@ -267,7 +281,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         close: () => {
           if (!closed) closed = (async () => {
             admitted = false; abort?.abort(); socket?.close(); rejectActivated?.(adapterError('RUNTIME_CHANNEL_STOPPED'));
-            await loop; await ingress; await replay; await executor.close(); client.invalidateSession();
+            await loop; await ingress; await Promise.allSettled([...inFlightSkillReceipts]); await replay; await executor.close(); client.invalidateSession();
             if (attached.get(options.subjectKey) === api) { attached.delete(options.subjectKey); known.delete(options.subjectKey); }
           })();
           return closed;
