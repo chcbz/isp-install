@@ -107,3 +107,39 @@ test('shared skill binding references reuse only existing private full-subject c
   await writeFile(path, JSON.stringify({ configVersion: 1, subjects: { [a.subjectKey]: { IMAGE_TOKEN: 'synthetic-a', HOME: 'injection' } } }))
   await assert.rejects(readRuntimeProviderEnvironments(path, [a, b]), /RUNTIME_PROVIDER_CONFIG_INVALID/)
 })
+
+test('installed skill service defaults cover future Agents in the same tenant/client without individual enrollment', async t => {
+  const make = (name, tenantId = 't', clientId = 'c') => ({ subjectKey: createHash('sha256').update(name).digest('hex'),
+    manifest: { tenantId, clientId, canonicalAgentId: name }, profile: { agentId: name } })
+  const a = make('a'), b = make('future-agent'), foreignTenant = make('foreign', 'other'), foreignClient = make('other-client', 't', 'other')
+  const { root, path } = await fixture(t, { [a.subjectKey]: { IMAGE_TOKEN: 'synthetic-own' } })
+  const file = join(root, 'bindings.json')
+  const binding = { adapter: 'image-http', endpoint: 'https://image.example.invalid', model: 'image-model', credentialEnv: 'IMAGE_TOKEN', revision: '1' }
+  const publicConfig = { schemaVersion: 1, providers: { shared: binding, private: { ...binding, revision: '2' } }, subjects: {},
+    scopes: [{ tenantId: 't', clientId: 'c', providerAliases: { image: 'shared' } }] }
+  await writeFile(file, JSON.stringify(publicConfig), { mode: 0o600 })
+  const privateConfig = { configVersion: 1, subjects: { [a.subjectKey]: { IMAGE_TOKEN: 'synthetic-own' } },
+    scopes: [{ tenantId: 't', clientId: 'c', environment: { IMAGE_TOKEN: 'synthetic-shared' } }] }
+  await writeFile(path, JSON.stringify(privateConfig))
+  const agents = [a, b, foreignTenant, foreignClient]; agents.forEach(agent => { agent.profile.skillBindingsFile = file })
+  const environments = await readRuntimeProviderEnvironments(path, agents)
+  assert.equal(environments.get(a.subjectKey).IMAGE_TOKEN, 'synthetic-own')
+  assert.equal(environments.get(b.subjectKey).IMAGE_TOKEN, 'synthetic-shared')
+  assert.equal(environments.has(foreignTenant.subjectKey), false)
+  assert.equal(environments.has(foreignClient.subjectKey), false)
+  const { SkillBindings, parseSkillBindings } = await import('../../codex-bridge/skill-bindings.mjs')
+  const resolve = async agent => new SkillBindings({ file, credentialEnvironment: environments.get(agent.subjectKey) }).resolve({ scope: { ...agent.manifest, agentId: agent.profile.agentId }, alias: 'image' })
+  assert.equal((await resolve(b)).ready, true)
+  assert.equal((await resolve(foreignTenant)).ready, false)
+  assert.equal((await resolve(foreignClient)).ready, false)
+  assert.notEqual((await resolve(a)).digest, (await resolve(b)).digest)
+  publicConfig.subjects[b.profile.agentId] = { providerAliases: { image: 'private' } }
+  await writeFile(file, JSON.stringify(publicConfig))
+  assert.equal((await readRuntimeProviderEnvironments(path, agents)).has(b.subjectKey), false, 'private override must not borrow shared provider credential')
+  const duplicate = structuredClone(publicConfig); duplicate.scopes.push(duplicate.scopes[0])
+  assert.throws(() => parseSkillBindings(duplicate), /SKILL_BINDINGS_INVALID/)
+  privateConfig.scopes.push(privateConfig.scopes[0]); await writeFile(path, JSON.stringify(privateConfig))
+  await assert.rejects(readRuntimeProviderEnvironments(path, agents), /RUNTIME_PROVIDER_CONFIG_INVALID/)
+  privateConfig.scopes.pop(); privateConfig.scopes[0].environment.HOME = 'injection'; await writeFile(path, JSON.stringify(privateConfig))
+  await assert.rejects(readRuntimeProviderEnvironments(path, agents), /RUNTIME_PROVIDER_CONFIG_INVALID/)
+})

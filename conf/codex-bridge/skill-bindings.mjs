@@ -9,7 +9,7 @@ const fields = (value, keys) => object(value) && Object.keys(value).length === k
 export function parseSkillBindings(raw) {
   const value = typeof raw === 'string' || Buffer.isBuffer(raw) ? parseSkillJson(raw) : structuredClone(raw)
   if (!object(value) || !['schemaVersion', 'providers', 'subjects'].every(key => Object.hasOwn(value, key))
-      || Object.keys(value).some(key => !['schemaVersion', 'providers', 'subjects', 'costInfoOverrides'].includes(key))
+      || Object.keys(value).some(key => !['schemaVersion', 'providers', 'subjects', 'costInfoOverrides', 'scopes'].includes(key))
       || value.schemaVersion !== 1 || !object(value.providers) || !object(value.subjects)) fail('SKILL_BINDINGS_INVALID')
   // Price metadata is not a readiness gate. API owns display/fallback semantics;
   // missing or malformed overrides cannot disable otherwise valid bindings.
@@ -29,7 +29,26 @@ export function parseSkillBindings(raw) {
       if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(alias) || !id(target) || !Object.hasOwn(value.providers, target)) fail('SKILL_BINDINGS_INVALID')
     }
   }
+  value.scopes ??= []
+  if (!Array.isArray(value.scopes)) fail('SKILL_BINDINGS_INVALID')
+  const seen = new Set()
+  for (const scope of value.scopes) {
+    if (!fields(scope, ['tenantId', 'clientId', 'providerAliases']) || !id(scope.tenantId) || !id(scope.clientId)
+        || !object(scope.providerAliases)) fail('SKILL_BINDINGS_INVALID')
+    const key = JSON.stringify([scope.tenantId, scope.clientId])
+    if (seen.has(key)) fail('SKILL_BINDINGS_INVALID')
+    seen.add(key)
+    for (const [alias, target] of Object.entries(scope.providerAliases))
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(alias) || !id(target) || !Object.hasOwn(value.providers, target)) fail('SKILL_BINDINGS_INVALID')
+  }
   return value
+}
+
+// Scope defaults are operator-configured once, not inferred from another Agent.
+// An explicit Agent binding takes precedence; no cross-tenant/client fallback.
+export function skillProviderAliases(config, scope) {
+  const shared = config.scopes?.find(item => item.tenantId === scope.tenantId && item.clientId === scope.clientId)
+  return { ...(shared?.providerAliases || {}), ...(config.subjects[scope.agentId]?.providerAliases || {}) }
 }
 
 /** Exactly one shared public binding file, secrets continue through the host's
@@ -45,7 +64,7 @@ export class SkillBindings {
   async resolve({ scope, alias }) {
     try {
       const config = parseSkillBindings(await this.load())
-      const bindingId = config.subjects[scope.agentId]?.providerAliases[alias]
+      const bindingId = skillProviderAliases(config, scope)[alias]
       if (!bindingId) return { ready: false, reasonCode: 'SKILL_PROVIDER_BINDING_MISSING' }
       const binding = config.providers[bindingId], credential = this.credentials[binding.credentialEnv]
       if (typeof credential !== 'string' || !credential || credential !== credential.trim() || /[\r\n\0]/.test(credential)) return { ready: false, reasonCode: 'SKILL_PROVIDER_CREDENTIAL_UNAVAILABLE' }

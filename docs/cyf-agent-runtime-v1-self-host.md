@@ -378,3 +378,6 @@ Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺
 ### 9.6 技能管理内置能力（2026-10-25，1.3.9候选，未部署）
 
 技能安装/升级/启停管理不再需要profile的`skillInstallEnabled`，历史缺字段、false、true均不决定管理能力。岗位技能与归档同步也不依赖这个开关；它们仍只在已绑定且ready的当前Runtime通道上执行。用户对单个技能的启停、身份/会话/命令授权、包摘要、幂等日志、锁和恢复原样保留。真实ready依据生命周期与持久状态健康，不凭配置声称就绪。此处是源码行为说明，不代表线上林冲原安装已恢复；正式回归与部署证据在CYF技能管理handoff。
+
+### 2026-10-26 技能服务共享作用域（候选，部署单独核对）
+技能安装选择即授权固定版本所需权限，不再逐Agent开通。skill-bindings.json新增可选scopes数组，每项为{tenantId,clientId,providerAliases}；providers.json新增可选scopes数组，每项为{tenantId,clientId,environment}。同一完整tenant/client所属范围的已绑定Agent自动取得已配置别名及其引用的凭据名。显式主体配置优先，不读取全局env、不跨作用域借用；显式覆盖为另一Provider时不得借用共享Provider的同名凭据。新Agent无需修改subject清单。现有无scopes配置继续兼容；依赖未配置仍按真实失败回传，不产生虚假就绪。安装不自动执行，原任务授权、技能启停、摘要、锁和幂等不变。配置必须与支持scopes的Runtime一起受控启用，旧程序回退前先恢复这两份配置的原值，不能恢复业务journal/ACK。回归入口：conf/cyf-agent-runtime-v1/test/provider-environments.test.mjs。

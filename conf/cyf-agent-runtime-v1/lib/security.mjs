@@ -108,15 +108,18 @@ export async function readRuntimeProviderEnvironments(path, agents) {
     document = await readPrivateJson(path, null);
   } catch { fail(); }
   const object = value => value && typeof value === 'object' && !Array.isArray(value);
-  if (!object(document) || Object.keys(document).sort().join(',') !== 'configVersion,subjects'
+  if (!object(document) || !['configVersion', 'subjects'].every(key => Object.hasOwn(document, key))
+      || Object.keys(document).some(key => !['configVersion', 'subjects', 'scopes'].includes(key))
       || document.configVersion !== 1 || !object(document.subjects)) fail();
   const known = new Map(agents.map(agent => [agent.subjectKey, agent]));
   const allowed = new Map();
+  const sharedAllowed = new Map();
   // Shared public binding config supplies only credential names. Preserve the
   // existing private full-subject secret source; never read process.env.
   const configs = new Map();
   for (const agent of agents) {
     const keys = new Set();
+    const sharedKeys = new Set();
     if (required.includes(agent)) keys.add(agent.profile.controlledImageHttpApiKeyEnv);
     const file = agent.profile.skillBindingsFile;
     if (file) {
@@ -127,10 +130,15 @@ export async function readRuntimeProviderEnvironments(path, agents) {
         } catch { fail(); }
       }
       const bindings = configs.get(file);
-      for (const bindingId of Object.values(bindings.subjects[agent.manifest?.canonicalAgentId || agent.profile.agentId]?.providerAliases || {}))
-        keys.add(bindings.providers[bindingId].credentialEnv);
+      const { skillProviderAliases } = await import('../../codex-bridge/skill-bindings.mjs');
+      const aliases = skillProviderAliases(bindings, { ...agent.manifest, agentId: agent.manifest?.canonicalAgentId || agent.profile.agentId });
+      for (const bindingId of Object.values(aliases)) keys.add(bindings.providers[bindingId].credentialEnv);
+      const shared = bindings.scopes.find(item => item.tenantId === agent.manifest?.tenantId && item.clientId === agent.manifest?.clientId);
+      for (const [alias, bindingId] of Object.entries(shared?.providerAliases || {}))
+        if (aliases[alias] === bindingId) sharedKeys.add(bindings.providers[bindingId].credentialEnv);
     }
     allowed.set(agent.subjectKey, keys);
+    sharedAllowed.set(agent.subjectKey, sharedKeys);
   }
   const result = new Map();
   for (const [subject, values] of Object.entries(document.subjects)) {
@@ -140,6 +148,33 @@ export async function readRuntimeProviderEnvironments(path, agents) {
     for (const value of Object.values(values))
       if (typeof value !== 'string' || !value || value !== value.trim() || /[\x00-\x1f\x7f]/u.test(value)) fail();
     result.set(subject, Object.freeze({ ...values }));
+  }
+  // Shared secrets are deliberately scoped by the immutable manifest identity.
+  // Only names referenced by that Agent's bindings enter its private environment.
+  const scopes = document.scopes ?? [];
+  if (!Array.isArray(scopes)) fail();
+  const seen = new Set();
+  for (const scope of scopes) {
+    if (!object(scope) || Object.keys(scope).sort().join(',') !== 'clientId,environment,tenantId'
+        || ![scope.tenantId, scope.clientId].every(value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value))
+        || !object(scope.environment) || !Object.keys(scope.environment).length) fail();
+    const identity = JSON.stringify([scope.tenantId, scope.clientId]);
+    if (seen.has(identity)) fail();
+    seen.add(identity);
+    const declared = new Set();
+    for (const config of configs.values()) {
+      const bindingScope = config.scopes.find(item => item.tenantId === scope.tenantId && item.clientId === scope.clientId);
+      for (const bindingId of Object.values(bindingScope?.providerAliases || {})) declared.add(config.providers[bindingId].credentialEnv);
+    }
+    for (const [key, value] of Object.entries(scope.environment)) {
+      if (!/^[A-Z][A-Z0-9_]*$/.test(key) || !declared.has(key)
+          || typeof value !== 'string' || !value || value !== value.trim() || /[\x00-\x1f\x7f]/u.test(value)) fail();
+    }
+    for (const agent of agents) {
+      if (agent.manifest?.tenantId !== scope.tenantId || agent.manifest?.clientId !== scope.clientId) continue;
+      const values = Object.fromEntries(Object.entries(scope.environment).filter(([key]) => sharedAllowed.get(agent.subjectKey).has(key)));
+      if (Object.keys(values).length) result.set(agent.subjectKey, Object.freeze({ ...values, ...(result.get(agent.subjectKey) || {}) }));
+    }
   }
   if (required.some(agent => !result.has(agent.subjectKey))) fail();
   return result;
