@@ -12,6 +12,7 @@ import { PassThrough } from 'node:stream'
 import test, { afterEach } from 'node:test'
 
 import {
+  observeRuntimePhase,
   ACK_STATUS,
   AckOutbox,
   AgentMessageProcessor,
@@ -4960,3 +4961,17 @@ test('native poller distinguishes partial execution from shared failure and keep
     assert.equal(state.conversationNativePollInFlight, false)
   } finally { stopNativeConversationPoller(state); console.warn = originalWarn }
 })
+
+
+test('runtime phase observations preserve results/errors and never expose operation content', async () => {
+  const rows = [], logger = (event, facts) => rows.push({event, ...facts});
+  const secret = { credential: 'private-test-material' };
+  assert.equal(await observeRuntimePhase(logger, 'subject', 'skill-command-handle', () => secret, 'cmd-fixture'), secret);
+  const failure = new Error('private-test-material');
+  await assert.rejects(observeRuntimePhase(logger, 'subject', 'skill-catalog-refresh', () => { throw failure }), e => e === failure);
+  assert.equal(await observeRuntimePhase(() => { throw new Error('logger failed') }, 'subject', 'app-server-initialize', () => 7), 7);
+  assert.deepEqual(rows.map(r => r.stage), ['start','finish','start','finish']);
+  assert.deepEqual(rows.filter(r => r.stage === 'finish').map(r => r.outcome), ['completed','failed']);
+  assert.ok(rows.filter(r => r.stage === 'finish').every(r => Number.isFinite(r.durationMs) && r.durationMs >= 0));
+  assert.equal(JSON.stringify(rows).includes('private-test-material'), false);
+});

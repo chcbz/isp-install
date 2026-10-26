@@ -44,7 +44,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
   const Socket = socketFactory || await module.loadWebSocketClient();
   const { RegistrationAckObserver } = await import('../../codex-bridge/registration-ack.mjs');
   const engine = module.createRuntimeExecutionHost({ agents: config.agents, runtimeInstanceId: instanceId,
-    apiOrigin, workspacePolicies, providerEnvironments, webSocketClient: Socket });
+    apiOrigin, workspacePolicies, providerEnvironments, webSocketClient: Socket, logger });
   const attached = new Map();
   const known = new Set(config.agents.map(agent => agent.subjectKey));
   let closing = false;
@@ -207,9 +207,12 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             // Commands go through the existing durable processor, never a new queue.
             if (frame.messageType === 'command.ack') return;
             if (managementFacts) logger('runtime-management-queued', managementFacts);
+            const queuedAt = performance.now();
             ingress = ingress.catch(() => {}).then(async () => {
               if (socket === current && client.currentSession === session && (channelConfirmed || managementAuthorized()) && !signal.aborted) {
+                const beganAt = performance.now();
                 const result = await executor.acceptFrame(frame);
+                if (managementFacts) { try { logger('runtime-management-timing', { ...managementFacts, queueWaitMs: beganAt - queuedAt, handlerMs: performance.now() - beganAt }); } catch {} }
                 if (managementFacts) logger('runtime-management-handled', managementFacts);
                 return result;
               }

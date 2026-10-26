@@ -385,3 +385,7 @@ Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺
 ### 2026-10-26 技能目录重注册心跳语义（1.3.16）
 
 技能安装/卸载后的目录刷新需要匹配的新注册 ACK 才能恢复准入；等待期间不代表 Agent 断线。健康、未暂停且有可用执行器时暂停该窗口的 presence，避免发送 offline 撤销服务端刚建立的会话绑定。实际持久状态异常或暂停仍发送 offline 并停止准入；不放宽身份、会话代次或 ACK 匹配，不重放历史 UNKNOWN。定向回归入口：`runtime-host.test.mjs` 的 `catalog re-registration heartbeat`，以及既有 health revocation、stale generation、skill measurement 测试。此段记录源码行为，发布/线上核验单独记录。
+
+### 技能管理/冷启动分段耗时（1.3.17源码候选）
+
+`runtime-phase-timing`只记录subjectKey、commandId（若有）、固定阶段、开始/结束、单调时钟耗时和completed/failed；不记录输入/凭据/错误正文。阶段包括profile-state-initialize、input-carriers-measure、app-server-initialize、skill-command-handle、skill-receipt-handle、skill-catalog-refresh。`runtime-management-timing`区分原有入站队列等待与实际handler耗时。日志失败不改变操作结果或抛出的原错误，不增加超时、并发或准入门禁。此段仅为源码候选，不能据此宣称线上已生效或性能已改善。

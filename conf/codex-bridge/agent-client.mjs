@@ -6577,7 +6577,17 @@ export const buildRuntimeExecutionEnvironment = (profile, overrides = {}) => {
   return { ...inherited, ...managedProvider, ...overrides, HOME: profile.codexHome, CODEX_HOME: profile.codexHome }
 }
 
-export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigin, workspacePolicies = new Map(), providerEnvironments = new Map(), webSocketClient = null }) => {
+// Observation only: no payload/error text, timeout, admission decision, or new queue.
+export const observeRuntimePhase = async (logger, subjectKey, phase, operation, commandId = null) => {
+  const started = performance.now()
+  const emit = facts => { try { logger('runtime-phase-timing', { subjectKey, phase, ...(commandId ? { commandId } : {}), ...facts }) } catch {} }
+  emit({ stage: 'start' })
+  let outcome = 'failed'
+  try { const result = await operation(); outcome = 'completed'; return result }
+  finally { emit({ stage: 'finish', outcome, durationMs: performance.now() - started }) }
+}
+
+export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigin, workspacePolicies = new Map(), providerEnvironments = new Map(), webSocketClient = null, logger = () => {} }) => {
   if (runtimeExecutionOwner || profileStates.size) throw new AgentProtocolError('RUNTIME_EXECUTOR_HOST_BUSY', 'Only one execution host may own this process')
   if (!Array.isArray(agents) || !agents.length || typeof runtimeInstanceId !== 'string' || !runtimeInstanceId) throw new AgentProtocolError('RUNTIME_EXECUTOR_CONFIG_REQUIRED', 'Explicit Runtime configuration is required')
   const origin = new URL(apiOrigin)
@@ -6648,11 +6658,11 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
       return {
         initialize: () => nativeInitializationGate.run(async () => {
           if (entry.state || entry.closed || runtimeExecutionOwner !== owner) throw new AgentProtocolError('RUNTIME_EXECUTOR_OWNERSHIP_LOST', 'Runtime executor ownership changed')
-          entry.state = createProfileState(entry.profile, { ...config, commandInboxDir: resolve(entry.agent.stateRoot, 'inbox') }, { deferNativeStartup: true })
+          entry.state = await observeRuntimePhase(logger, subjectKey, 'profile-state-initialize', () => createProfileState(entry.profile, { ...config, commandInboxDir: resolve(entry.agent.stateRoot, 'inbox') }, { deferNativeStartup: true }))
           profileStates.set(profileStateKey(entry.profile), entry.state)
           if (entry.state.processor.failClosedError) throw entry.state.processor.failClosedError
-          await entry.state.ensureTypedInspectionProfile?.()
-          await entry.state.ensureAppServer?.()
+          await observeRuntimePhase(logger, subjectKey, 'input-carriers-measure', () => entry.state.ensureTypedInspectionProfile?.())
+          await observeRuntimePhase(logger, subjectKey, 'app-server-initialize', () => entry.state.ensureAppServer?.())
           return { initialized: true, authenticated: false }
         }),
         // No raw JSON session is trusted here. The wire adapter supplies a bound
@@ -6703,8 +6713,9 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         acceptFrame: async frame => {
           const state = entry.state
           if (!isManagementMessage(frame)) return state.processor.handle(frame)
-          const result = await state.skillInstallManager.handle(frame)
-          if (frame.messageType === 'command.dispatch') await refreshMeasuredSkills(state)
+          const commandId = frame.data?.commandId
+          const result = await observeRuntimePhase(logger, subjectKey, frame.messageType === 'command.dispatch' ? 'skill-command-handle' : 'skill-receipt-handle', () => state.skillInstallManager.handle(frame), commandId)
+          if (frame.messageType === 'command.dispatch') await observeRuntimePhase(logger, subjectKey, 'skill-catalog-refresh', () => refreshMeasuredSkills(state), commandId)
           return result
         },
         resume: async () => {
