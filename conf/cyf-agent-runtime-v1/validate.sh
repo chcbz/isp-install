@@ -35,13 +35,13 @@ done
   const { pathToFileURL } = await import("node:url");
   const { validateExecutionPayload } = await import(pathToFileURL(process.argv[1]));
   await validateExecutionPayload(process.argv[2]);
-' "$PACKAGE_ROOT/runtime/lib/execution-adapter.mjs" "$PACKAGE_ROOT/codex-ws-agent"
+' "$PACKAGE_ROOT/runtime/lib/execution-adapter.mjs" "$PACKAGE_ROOT/codex-bridge"
 # A healthy Python import does not validate relocated generated CLI launchers.
 # Reject stale staging paths in launchers/activation/config without importing
 # host modules, activating the venv or running a retired authentication entry.
-"$PACKAGE_ROOT/codex-ws-agent/.toolchain/bin/python" -I -S -B - "$PACKAGE_ROOT" <<'PY_RUNTIME_LAUNCHER_VALIDATE'
+"$PACKAGE_ROOT/codex-bridge/.toolchain/bin/python" -I -S -B - "$PACKAGE_ROOT" <<'PY_RUNTIME_LAUNCHER_VALIDATE'
 import os, sys
-venv = os.path.join(sys.argv[1], 'codex-ws-agent', '.toolchain')
+venv = os.path.join(sys.argv[1], 'codex-bridge', '.toolchain')
 paths = [os.path.join(venv, 'pyvenv.cfg')]
 paths.extend(os.path.join(venv, 'bin', name) for name in os.listdir(os.path.join(venv, 'bin')))
 for path in paths:
@@ -59,7 +59,7 @@ PY_RUNTIME_LAUNCHER_VALIDATE
 "$NODE_BIN" --input-type=module -e '
   const { resolve } = await import("node:path");
   const { pathToFileURL } = await import("node:url");
-  const engine = await import(pathToFileURL(resolve(process.argv[1], "codex-ws-agent/agent-client.mjs")));
+  const engine = await import(pathToFileURL(resolve(process.argv[1], "codex-bridge/agent-client.mjs")));
   if (typeof engine.createRuntimeExecutionHost !== "function") throw new Error("Runtime execution host export is missing");
 ' "$PACKAGE_ROOT"
 if [ -n "$CONFIG" ]; then

@@ -89,7 +89,7 @@ is claimed by these source tests. Exact run totals and logs accompany delivery.
 Entry, from this repository root:
 
 ```bash
-node conf/codex-ws-agent/test/fixtures/skill-management-node-peer.mjs
+node conf/codex-bridge/test/fixtures/skill-management-node-peer.mjs
 ```
 
 No server, bundler, new runner framework, model or installed Runtime is needed.
@@ -153,7 +153,7 @@ is called. This is evidence of management/registration binding, **not actual
 production dependency or provider readiness**.
 
 Bridge regression: `node --test --test-concurrency=1
-conf/codex-ws-agent/test/skill-management-node-peer.test.mjs`. It launches this
+conf/codex-bridge/test/skill-management-node-peer.test.mjs`. It launches this
 actual stdin/stdout process and feeds real original package/command bytes through
 first install, upgrade, disable, retained old-task lookup, crossboot byte replay,
 real receipt retirement and raw-token rejection. Actual API/MySQL + this Node

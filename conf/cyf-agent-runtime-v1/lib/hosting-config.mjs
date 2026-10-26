@@ -92,7 +92,7 @@ export async function readHostingConfig(path, hostConfig) {
     const stat = await binary.stat();
     if (!stat.isFile() || !(stat.mode & 0o111) || stat.mode & 0o022 || ![0, process.getuid()].includes(stat.uid)) throw hostingError('HOSTING_TEMPLATE_BINARY_UNSAFE');
   } finally { await binary.close(); }
-  const { normalizeProfile, profileConfigurationErrors } = await import('../../codex-ws-agent/agent-client.mjs');
+  const { normalizeProfile, profileConfigurationErrors } = await import('../../codex-bridge/agent-client.mjs');
   try {
     const profile = normalizeProfile({ ...value.template.profile, profileId: 'managed-template-validation', agentId: 'managed-template-validation',
       codexHome: resolve(value.managedRoot, '.template-home'), codexWorkdir: resolve(value.managedRoot, '.template-work') }, {}, 0, { isolated: true });

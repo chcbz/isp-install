@@ -83,7 +83,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const config = await readRuntimeHostConfig(resolve(options.config));
   const providerEnvironments = await readRuntimeProviderEnvironments(env.CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE, config.agents);
   if (providerEnvironments.size) {
-    const { resolveControlledImageHttpConfig } = await import('../codex-ws-agent/controlled-image-http-config.mjs');
+    const { resolveControlledImageHttpConfig } = await import('../codex-bridge/controlled-image-http-config.mjs');
     for (const agent of config.agents) if (providerEnvironments.has(agent.subjectKey))
       resolveControlledImageHttpConfig(agent.profile, { env: providerEnvironments.get(agent.subjectKey) });
   }
@@ -101,7 +101,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     logger('runtime-enrolled', { subjectKey: agent.subjectKey }); return 0;
   }
   const policyFile = options['workspace-policies'] || env.CYF_RUNTIME_WORKSPACE_POLICIES_FILE;
-  const workspacePolicies = policyFile ? (await import('../codex-ws-agent/workspace-manager.mjs')).loadWorkspacePolicies({ CODEX_WORKSPACE_POLICIES_FILE: policyFile }) : new Map();
+  const workspacePolicies = policyFile ? (await import('../codex-bridge/workspace-manager.mjs')).loadWorkspacePolicies({ CODEX_WORKSPACE_POLICIES_FILE: policyFile }) : new Map();
   const interval = Number(env.CYF_RUNTIME_V1_HEARTBEAT_INTERVAL_MS || 30000);
   if (!Number.isSafeInteger(interval) || interval < 1) throw failure('RUNTIME_HEARTBEAT_INTERVAL_INVALID');
   const controller = new AbortController(); const stop = () => controller.abort();

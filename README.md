@@ -180,7 +180,7 @@ conf/
 ├── cyf-agent-runtime-v1/
 │   ├── runtime.env.example
 │   └── manifest.example.json
-├── codex-ws-agent/  # Runtime 内嵌执行库模板，不是独立安装/服务
+├── codex-bridge/  # Runtime 内嵌执行库模板，不是独立安装/服务
 │   └── codex-home.example.toml
 ├── xray/
 │   └── config.json.template
@@ -278,7 +278,7 @@ vpn
 只使用统一 Runtime 制品中的 `runtime/agent-runtime.mjs validate`，完整参数及所需真实环境见下方指南。
 校验不会登记或启动服务；image-enabled 实例必须带实际 provider environments 文件，
 不能用遗漏环境的失败判断线上配置损坏。Codex HOME 的模型认证单独配置，勿提交密钥。
-仓内 `conf/codex-ws-agent/` 是内嵌执行库，历史优化文档不再作为第二套安装入口。
+仓内 `conf/codex-bridge/` 是内嵌执行库，历史优化文档不再作为第二套安装入口。
 
 ## 聚义厅自家接应 / Runtime 升级（2026-10-12）
 

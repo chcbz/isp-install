@@ -11,7 +11,7 @@ TARGET=''
 NODE_BIN="${CYF_RUNTIME_V1_NODE_BIN:-node}"
 NPM_CLI="${CYF_RUNTIME_V1_NPM_CLI:-npm}"
 PYTHON_BIN="${CYF_RUNTIME_V1_PYTHON_BIN:-python3}"
-ENGINE_ROOT="$(dirname "$SOURCE_DIR")/codex-ws-agent"
+ENGINE_ROOT="$(dirname "$SOURCE_DIR")/codex-bridge"
 while [ "$#" -gt 0 ]; do
     [ "$#" -ge 2 ] || usage
     case "$1" in
@@ -57,23 +57,23 @@ done
   const { pathToFileURL } = await import("node:url");
   const { collateExecutionPayload } = await import(pathToFileURL(process.argv[1]));
   await collateExecutionPayload(process.argv[2], process.argv[3]);
-' "$SOURCE_DIR/lib/execution-adapter.mjs" "$ENGINE_ROOT" "$STAGE/codex-ws-agent"
+' "$SOURCE_DIR/lib/execution-adapter.mjs" "$ENGINE_ROOT" "$STAGE/codex-bridge"
 # Fixed lockfile, no install scripts, no host/global npm installation.
-(cd "$STAGE/codex-ws-agent" && "$STAGE/node/bin/node" "$(readlink -f "$NPM_CLI")" ci --ignore-scripts --no-audit --no-fund)
-"$PYTHON_BIN" -m venv --copies "$STAGE/codex-ws-agent/.toolchain"
-"$STAGE/codex-ws-agent/.toolchain/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir --upgrade 'pip<22'
-"$STAGE/codex-ws-agent/.toolchain/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir \
-    -r "$STAGE/codex-ws-agent/toolchain/requirements.txt"
+(cd "$STAGE/codex-bridge" && "$STAGE/node/bin/node" "$(readlink -f "$NPM_CLI")" ci --ignore-scripts --no-audit --no-fund)
+"$PYTHON_BIN" -m venv --copies "$STAGE/codex-bridge/.toolchain"
+"$STAGE/codex-bridge/.toolchain/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir --upgrade 'pip<22'
+"$STAGE/codex-bridge/.toolchain/bin/python" -m pip install --disable-pip-version-check --no-input --no-cache-dir \
+    -r "$STAGE/codex-bridge/toolchain/requirements.txt"
 # Prepare generated venv launchers and cfg audit metadata BEFORE validating the stage. Python
 # --copies relocates the interpreter, not pip's absolute shebangs or activation.
 # Relative shell/Python trampolines work both before and after mv, including long
 # paths; no base-interpreter/stdlib portability or production compiler claim.
-"$STAGE/codex-ws-agent/.toolchain/bin/python" -I -S -B - "$STAGE" "$TARGET" <<'PY_RUNTIME_RELOCATE'
+"$STAGE/codex-bridge/.toolchain/bin/python" -I -S -B - "$STAGE" "$TARGET" <<'PY_RUNTIME_RELOCATE'
 import base64, csv, hashlib, io, os, re, shlex, sys
 stage, target = sys.argv[1:]
-venv = os.path.join(stage, 'codex-ws-agent', '.toolchain')
+venv = os.path.join(stage, 'codex-bridge', '.toolchain')
 bin_dir = os.path.join(venv, 'bin')
-final_venv = os.path.join(target, 'codex-ws-agent', '.toolchain')
+final_venv = os.path.join(target, 'codex-bridge', '.toolchain')
 changed = {}
 def save(path, data):
     # Preserve original executable/ownership modes; all paths are in our stage.

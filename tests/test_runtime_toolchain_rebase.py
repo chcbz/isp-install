@@ -14,13 +14,13 @@ class RebaseTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / 'app'
         self.old = Path(self.tmp.name) / 'old'
-        self.venv = self.root / 'codex-ws-agent/.toolchain'
+        self.venv = self.root / 'codex-bridge/.toolchain'
         (self.venv / 'bin').mkdir(parents=True)
         self.paths = {'pyvenv.cfg': 'command = /base/python -m venv --copies ',
                       'bin/activate': 'VIRTUAL_ENV=', 'bin/activate.csh': 'setenv VIRTUAL_ENV ',
                       'bin/activate.fish': 'set -gx VIRTUAL_ENV '}
         for name, prefix in self.paths.items():
-            (self.venv / name).write_text(prefix + str(self.old / 'codex-ws-agent/.toolchain') + '\n')
+            (self.venv / name).write_text(prefix + str(self.old / 'codex-bridge/.toolchain') + '\n')
 
     def test_readonly_then_apply_and_idempotence(self):
         before = (self.venv / 'pyvenv.cfg').read_bytes()

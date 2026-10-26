@@ -122,7 +122,7 @@ export async function readRuntimeProviderEnvironments(path, agents) {
     if (file) {
       if (!configs.has(file)) {
         try {
-          const { parseSkillBindings } = await import('../../codex-ws-agent/skill-bindings.mjs');
+          const { parseSkillBindings } = await import('../../codex-bridge/skill-bindings.mjs');
           configs.set(file, parseSkillBindings(await readPrivateJson(file, null)));
         } catch { fail(); }
       }

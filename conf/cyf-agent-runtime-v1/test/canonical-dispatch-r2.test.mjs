@@ -8,9 +8,9 @@ import { resolve } from 'node:path';
 import { once } from 'node:events';
 import { RuntimeV1Client, runtimeAckWireContext } from '../lib/runtime-client.mjs';
 import { digestManifest } from '../lib/manifest.mjs';
-import { canonicalSha256 } from '../../codex-ws-agent/chat-runtime.mjs';
+import { canonicalSha256 } from '../../codex-bridge/chat-runtime.mjs';
 import { PersistentCommandInbox, DurableDedupeLedger, AckOutbox, AgentMessageProcessor,
-  normalizeInboundMessage, runtimeCommandContext, CommandFingerprint } from '../../codex-ws-agent/agent-client.mjs';
+  normalizeInboundMessage, runtimeCommandContext, CommandFingerprint } from '../../codex-bridge/agent-client.mjs';
 
 // Actual codec bytes from APIa2dbe650, not a hand-authored dispatch or amended expiry.
 // Local HTTP/engine injection is client-boundary evidence, NOT Java D06/MySQL/Provider acceptance.

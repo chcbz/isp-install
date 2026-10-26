@@ -65,7 +65,7 @@ afterEach(() => {
 })
 
 const temporaryDirectory = () => {
-  const directory = mkdtempSync(resolve(tmpdir(), 'codex-ws-agent-a05-'))
+  const directory = mkdtempSync(resolve(tmpdir(), 'codex-bridge-a05-'))
   temporaryDirectories.push(directory)
   return directory
 }

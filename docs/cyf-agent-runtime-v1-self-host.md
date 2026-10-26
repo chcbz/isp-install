@@ -17,7 +17,7 @@
 `ownerJiacn` 是所有者，不是 tenant。不能从历史任务的 tenant、机器目录名或角色名猜身份。旧 API Key 不能代替用户登录授权或新 installation 授权。不要在聊天、浏览器导入文件或普通日志传递密钥/JWT。
 
 **两种情况分开：**
-- 旧 `codex-ws-agent` 首次转入统一 Runtime：先查是否已有新 installation；没有才按下文登记/enroll，保留角色绑定，不除名再入伙。
+- 旧 `codex-bridge` 首次转入统一 Runtime：先查是否已有新 installation；没有才按下文登记/enroll，保留角色绑定，不除名再入伙。
 - 已有统一 Runtime 升级：沿用原 manifest、installation、hostId、状态及授权，跳过第3～4、6节的首次注册，不重复生成身份。
 
 已有统一Runtime仅做目录收口时，按第9节完整迁移本角色HOME与路径索引，仍不重新登记。
@@ -50,7 +50,7 @@ bash "$REPO/conf/cyf-agent-runtime-v1/install.sh" \
 git -C "$REPO" rev-parse HEAD
 ```
 
-安装器只准备 `runtime/`、`codex-ws-agent/`（内部执行引擎）、`node/bin/node` 及完整私有依赖。**不安装/启用 systemd、不登记、不迁移配置或状态。** 不借宿主 Python 包掩盖私有环境缺失。记录制品目录、源码SHA、安装回执及摘要，平台工具链验收失败应先归因。
+安装器只准备 `runtime/`、`codex-bridge/`（内部执行引擎）、`node/bin/node` 及完整私有依赖。**不安装/启用 systemd、不登记、不迁移配置或状态。** 不借宿主 Python 包掩盖私有环境缺失。记录制品目录、源码SHA、安装回执及摘要，平台工具链验收失败应先归因。
 
 ### 2.1 CYF固定程序目录、发布记录与历史归档（2026-10-23）
 
@@ -58,7 +58,7 @@ git -C "$REPO" rev-parse HEAD
 
 ```text
 /home/isp/apps/cyf-agent-runtime-v1/
-  app/                                    # 唯一现用实体程序，runtime/、codex-ws-agent/、node/
+  app/                                    # 唯一现用实体程序，runtime/、codex-bridge/、node/
   release-records/                         # 当前与历史版本/源码/摘要/验证记录
   RELEASES.md                             # 与实际服务/PID一致的当前说明
 /home/isp/baks/cyf-agent-runtime-v1/<归档批次>/ # 历史程序、停写状态快照、恢复信息
@@ -205,7 +205,7 @@ CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE="$CANDIDATE/enrollment-secret" \
 7. **逐项验收**：核对实际进程使用候选路径、无重复 writer、每个 subject 的当前注册/在线与实测能力；按第8节做明确授权的新业务验收。旧在线记录、服务 active、inbox completed 或目录存在均不足以证明交付成功。
 8. **失败处置**：保留新状态和日志，先归因；只有确认旧制品能读取当前状态时才恢复旧启动配置。若新版本已写入不可逆状态，不拿旧 DB 快照覆盖新业务事实，不盲回退或再次 enroll；按已制定的恢复方案处理并报告真实阻塞。
 
-### 7.2 从旧独立 codex-ws-agent 迁移
+### 7.2 从旧独立 codex-bridge 迁移
 
 先查是否已有统一 Runtime installation：已有则沿用，没有才执行首次登记/enroll。保留原角色绑定，不除名重绑、不复用旧 API Key。旧协议队列不自动导入，逐项处理在途/未知结果；完整 HOME 和路径索引的迁移按第9节执行。旧服务确认停止后才启动统一服务，不把制品中的内嵌执行库当成另一套需启用的服务。
 
@@ -277,7 +277,7 @@ KillSignal=SIGTERM
 
 托管控制仅用于本机 API → Runtime 的 prepare/ensure 等指定 subject 操作，不是模型聊天或公网入口。API 的 socket-path 与 Runtime 的 socketPath 必须一致，详见 [托管控制说明](../conf/cyf-agent-runtime-v1/HOSTING-CONTROL.md) 和 [tmpfiles 模板](../conf/cyf-agent-runtime-v1/systemd/cyf-agent-runtime-v1-hosting.tmpfiles.conf.example)。安装器不自动应用该规则、不创建生产控制目录；运行中不得手删 socket，未知旧端点/锁须先确认归属和写者停止，不自动抢占或清理。
 
-制品中的`codex-ws-agent/`是内嵌执行库，不能全局改名或删掉。安装器仍**只准备制品**；不自动搬HOME、接管锁、改身份、停服务或启用旧服务，也不把目录更新当作升级完成。
+制品中的`codex-bridge/`是内嵌执行库，不能全局改名或删掉。安装器仍**只准备制品**；不自动搬HOME、接管锁、改身份、停服务或启用旧服务，也不把目录更新当作升级完成。
 
 管理员在明确授权的目标机上逐项执行，不把CYF主机路径/角色直接套到其他账号：
 
@@ -359,7 +359,7 @@ Runtime 1.3.5 / image-generate、image-edit 1.2.0 增加可选 `parameters.size=
 
 Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺寸转换；尺寸及转换标识绑定effect摘要，转换失败仅报告该动作的输出处理错误，不将外部成功改为UNKNOWN、不再次调用Provider。最终成果摘要对应实际输出字节，原输入SHA/DELIVERED不变。仅新尺寸请求加转换摘要字段，旧空参数摘要保持。恢复需原服务端确认、身份/授权/fence不变，不能根据本地文件自行补发旧UNKNOWN。
 
-关键回归复用 `conf/codex-ws-agent/test/skill-runners.test.mjs` 的既有图片broker用例：旧参数、800×600、非同比例透明边、持久effect恢复不重复调用、错误尺寸不调用Provider。Flow同Run测试/打包，新技能包通过维护发布→报价→INSTALL/UPGRADE→目录READY，不以直接写权益替代管理流程。线上尺寸和多轮识图/生图/改图仍须实际图片验收，不以测试通过代替上线。
+关键回归复用 `conf/codex-bridge/test/skill-runners.test.mjs` 的既有图片broker用例：旧参数、800×600、非同比例透明边、持久effect恢复不重复调用、错误尺寸不调用Provider。Flow同Run测试/打包，新技能包通过维护发布→报价→INSTALL/UPGRADE→目录READY，不以直接写权益替代管理流程。线上尺寸和多轮识图/生图/改图仍须实际图片验收，不以测试通过代替上线。
 
 
 ### 9.5 系统Codex直连与历史快照回收（2026-10-25，1.3.8候选）

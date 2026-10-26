@@ -115,8 +115,8 @@ An initialized instance does reject a rollback relative to its observed high-wat
 Targeted regression command (disposable fixtures only):
 
 ```bash
-node --test /absolute/path/to/source/conf/codex-ws-agent/test/ack-checkpoint.test.mjs \
-  /absolute/path/to/source/conf/codex-ws-agent/test/agent-client.test.mjs
+node --test /absolute/path/to/source/conf/codex-bridge/test/ack-checkpoint.test.mjs \
+  /absolute/path/to/source/conf/codex-bridge/test/agent-client.test.mjs
 ```
 ## Native text-file executor (核对日 2026-10-12; source baseline `5b902c1b`)
 

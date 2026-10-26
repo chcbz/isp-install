@@ -15,7 +15,7 @@
       "controlledImageHttpModelId": "gpt-image-2.5",
       "controlledImageHttpBindingId": "replace-with-explicit-binding-id",
       "controlledImageHttpBindingEpoch": "1",
-      "controlledImageHttpLedgerRoot": "/home/isp/apps/codex-ws-agent/data/managed-image-ledgers/replace-with-exact-scope",
+      "controlledImageHttpLedgerRoot": "/home/isp/apps/codex-bridge/data/managed-image-ledgers/replace-with-exact-scope",
       "controlledImageExecutorKind": "GPT_IMAGE_CLI_V1",
       "controlledImageCliPython": "/replace/with/venv/bin/python",
       "controlledImageCliPythonSha256": "0000000000000000000000000000000000000000000000000000000000000000",

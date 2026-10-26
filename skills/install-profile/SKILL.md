@@ -39,7 +39,7 @@ and supply an executable Node without a project version restriction, npm and com
 installer variables. No existing target, old env/profile or credential is adopted.
 
 See `conf/cyf-agent-runtime-v1/README.md` and
-`skills/codex-ws-agent-install/SKILL.md` for explicit sealed multi-Agent config and
+`skills/codex-bridge-install/SKILL.md` for explicit sealed multi-Agent config and
 per-subject private roots. Execution is the artifact-local Node (actual version in `runtime/node-version.txt`) plus
 `runtime/agent-runtime.mjs run --config HOST_JSON`, not an old launcher alias.
 Installation credentials remain private; derived execution sessions stay in memory

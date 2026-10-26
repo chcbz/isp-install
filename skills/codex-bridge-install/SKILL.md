@@ -1,6 +1,6 @@
 ---
-name: codex-ws-agent-install
-description: Install the latest unified multi-Agent Runtime artifact from this repository, with pinned toolchain and explicit installation/configuration boundaries. The old codex-ws-agent service/API-key provisioning entry is retired.
+name: codex-bridge-install
+description: Install the latest unified multi-Agent Runtime artifact from this repository, with pinned toolchain and explicit installation/configuration boundaries. The old codex-bridge service/API-key provisioning entry is retired.
 ---
 
 # Unified Agent Runtime installation

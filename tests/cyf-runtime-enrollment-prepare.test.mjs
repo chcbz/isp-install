@@ -113,6 +113,6 @@ test('guide profile/host snippet and prepared secret are accepted by actual Runt
 
 test('existing Runtime relocation guide preserves identity, indexes and activation boundaries', async () => {
   const guide=await readFile(new URL('../docs/cyf-agent-runtime-v1-self-host.md',import.meta.url),'utf8');
-  for(const expected of ['## 9.', '不重新登记', 'rollout_path', 'cwd', 'PRAGMA integrity_check', 'WAL/SHM', '不手工删锁', 'CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE', '禁止用旧DB快照覆盖当前状态', 'codex-ws-agent/']) assert.ok(guide.includes(expected),expected);
+  for(const expected of ['## 9.', '不重新登记', 'rollout_path', 'cwd', 'PRAGMA integrity_check', 'WAL/SHM', '不手工删锁', 'CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE', '禁止用旧DB快照覆盖当前状态', 'codex-bridge/']) assert.ok(guide.includes(expected),expected);
   assert.ok(guide.includes('state/cyf-agent-runtime-v1/<instance>/agents/<subject>/codex-home'));
 });

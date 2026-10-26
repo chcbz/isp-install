@@ -58,11 +58,11 @@ test('native transport wraps once, verifies correlation, and preserves Response/
   api.sessionAbort = new AbortController()
   const result = await api.nativeFetch('https://api.test/internal/agent/tasks/task/runs/run/start', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: 'untrusted' }, body: JSON.stringify({ commandId: 'cmd', messageId: 'm' }) })
   assert.equal(result, original)
-  const { readNativeJson } = await import('../../codex-ws-agent/native-json.mjs')
+  const { readNativeJson } = await import('../../codex-bridge/native-json.mjs')
   assert.deepEqual(await readNativeJson(result), { state: 'STARTED' })
 })
 
 test('engine and Runtime share identical codec source bytes', async () => {
   const { readFile } = await import('node:fs/promises')
-  assert.deepEqual(await readFile(new URL('../lib/api-envelope.mjs', import.meta.url)), await readFile(new URL('../../codex-ws-agent/api-envelope.mjs', import.meta.url)))
+  assert.deepEqual(await readFile(new URL('../lib/api-envelope.mjs', import.meta.url)), await readFile(new URL('../../codex-bridge/api-envelope.mjs', import.meta.url)))
 })

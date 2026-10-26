@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { createExecutionAdapterFactory } from '../lib/execution-adapter.mjs'
-import { examples } from '../../codex-ws-agent/test/fixtures/skill-management-fixture.mjs'
-import { managementDigest } from '../../codex-ws-agent/skill-management-wire.mjs'
+import { examples } from '../../codex-bridge/test/fixtures/skill-management-fixture.mjs'
+import { managementDigest } from '../../codex-bridge/skill-management-wire.mjs'
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const durableSkillResult = () => {
   const result = structuredClone(examples.cases.find(c => c.valid && c.definition === 'Result').value)

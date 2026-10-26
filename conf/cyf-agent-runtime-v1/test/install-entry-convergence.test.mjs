@@ -38,7 +38,7 @@ function fixture(t) {
 
 test('registry/profile/list converge only the Agent entry; unrelated component mappings and profile order remain', () => {
   const source = text('install.sh'); const mapping = dictionary(source, 'COMPONENT_SCRIPTS'); const profiles = dictionary(source, 'PROFILES');
-  assert.equal(mapping['codex-ws-agent'], undefined); assert.equal(mapping.codex, undefined);
+  assert.equal(mapping['codex-bridge'], undefined); assert.equal(mapping.codex, undefined);
   assert.equal(mapping['cyf-agent-runtime-v1'], 'cyf_agent_runtime_v1_install.sh'); assert.equal(mapping['runtime-v1'], mapping['cyf-agent-runtime-v1']);
   const unrelated = { jdk: 'jdk', java: 'jdk', maven: 'maven', mvn: 'maven', node: 'node', nodejs: 'node', python: 'python', py: 'python',
     git: 'git', mysql: 'mysql', redis: 'redis', nginx: 'nginx', php: 'php', rabbitmq: 'rabbitmq', openldap: 'openldap', ldap: 'openldap',
@@ -54,7 +54,7 @@ test('registry/profile/list converge only the Agent entry; unrelated component m
 
 test('legacy dispatcher names fail before any component call even in a mixed request', t => {
   const f = fixture(t);
-  for (const args of [['codex'], ['codex-ws-agent'], ['nginx', 'codex'], ['codex-ws-agent', 'nginx']]) {
+  for (const args of [['codex'], ['codex-bridge'], ['nginx', 'codex'], ['codex-bridge', 'nginx']]) {
     const result = f.run(args);
     assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`); assert.match(result.stderr, /UNIFIED_RUNTIME_ENTRY_REQUIRED/);
     assert.equal(existsSync(f.calls), false); assert.deepEqual(readdirSync(resolve(f.appRoot, 'cyf-agent-runtime-v1')), []);
@@ -82,7 +82,7 @@ test('interactive Runtime rejection and unrelated component failure propagate wi
   const menu = f.run(['--select'], {}, '');
   const selection = menu.stdout.match(/(?:^|\n)\s*(\d+)\) cyf-agent-runtime-v1(?:\n|$)/);
   assert.ok(selection, menu.stdout);
-  assert.equal(menu.stdout.includes('codex-ws-agent'), false);
+  assert.equal(menu.stdout.includes('codex-bridge'), false);
   const failed = f.run(['--select'], {}, `${selection[1]}\ny\n`);
   assert.equal(failed.status, 1, `${failed.stdout}\n${failed.stderr}`);
   assert.match(failed.stderr, /fixture Node execution failure/);
@@ -98,39 +98,39 @@ test('help/list expose current Runtime prerequisites without installing anything
     const result = f.run(args); assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /agent/); assert.match(result.stdout, /Runtime/);
     assert.equal(existsSync(f.calls), false); assert.deepEqual(readdirSync(resolve(f.appRoot, 'cyf-agent-runtime-v1')), []);
-    assert.equal(result.stdout.includes('codex-ws-agent'), false);
+    assert.equal(result.stdout.includes('codex-bridge'), false);
   }
 });
 
 test('no legacy unit source remains; current single-artifact units and installation guides name only the unified path', () => {
-  for (const name of ['systemd/codex-ws-agent.service', 'systemd/codex-ws-agent@.service']) assert.equal(existsSync(resolve(repo, name)), false);
+  for (const name of ['systemd/codex-bridge.service', 'systemd/codex-bridge@.service']) assert.equal(existsSync(resolve(repo, name)), false);
   const current = text('systemd/cyf-agent-runtime-v1@.service');
   assert.equal(current, text('conf/cyf-agent-runtime-v1/systemd/cyf-agent-runtime-v1@.service'));
   assert.match(current, /^ExecStart=.*\/node\/bin\/node .*\/runtime\/agent-runtime\.mjs run --config .*%i\.host\.json$/m);
   assert.equal(current.includes('/usr/bin/env node'), false); assert.equal(current.includes('agent-client.mjs'), false);
-  const guide = text('skills/codex-ws-agent-install/SKILL.md'); assert.match(guide, /shell\/cyf_agent_runtime_v1_install\.sh/);
+  const guide = text('skills/codex-bridge-install/SKILL.md'); assert.match(guide, /shell\/cyf_agent_runtime_v1_install\.sh/);
   assert.equal(guide.includes('shell/codex_ws_agent_install.sh'), false); assert.equal(guide.includes('/home/isp/bin/codex_ws_agent.sh start'), false);
   const grouped = text('skills/install-profile/SKILL.md');
   assert.match(grouped, /`agent`: `cyf-agent-runtime-v1`/);
   assert.match(grouped, /shell\/cyf_agent_runtime_v1_install\.sh/);
-  assert.equal(grouped.includes('node codex-ws-agent'), false); assert.equal(grouped.includes('OPENCLAW_API_KEY'), false);
+  assert.equal(grouped.includes('node codex-bridge'), false); assert.equal(grouped.includes('OPENCLAW_API_KEY'), false);
   assert.match(grouped, /MYSQL_ROOT_PASSWORD/); assert.match(grouped, /nginx php mysql redis/);
   for (const removed of [
     'shell/codex_ws_agent_install.sh', 'bin/codex_ws_agent.sh',
-    'conf/codex-ws-agent/env.example', 'conf/codex-ws-agent/codex-profiles.conf',
-    'conf/codex-ws-agent/install-policy-check.mjs', 'conf/codex-ws-agent/install-candidate',
-    'conf/codex-ws-agent/contracts/probes'
+    'conf/codex-bridge/env.example', 'conf/codex-bridge/codex-profiles.conf',
+    'conf/codex-bridge/install-policy-check.mjs', 'conf/codex-bridge/install-candidate',
+    'conf/codex-bridge/contracts/probes'
   ]) assert.equal(existsSync(resolve(repo, removed)), false, removed);
-  const engine = text('conf/codex-ws-agent/agent-client.mjs');
+  const engine = text('conf/codex-bridge/agent-client.mjs');
   for (const removed of ['loadRuntimeConfig', 'legacyProfile', 'parseSectionProfiles', 'loadProfilesRaw', 'observeTypedRuntimeAuthentication'])
     assert.equal(engine.includes(removed), false, removed);
 
 });
 
 test('Runtime and execution-package metadata impose no project Node version gate', () => {
-  for (const path of ['conf/cyf-agent-runtime-v1/package.json', 'conf/codex-ws-agent/package.json'])
+  for (const path of ['conf/cyf-agent-runtime-v1/package.json', 'conf/codex-bridge/package.json'])
     assert.equal(JSON.parse(text(path)).engines?.node, undefined, path);
-  assert.equal(JSON.parse(text('conf/codex-ws-agent/package-lock.json')).packages[''].engines?.node, undefined);
+  assert.equal(JSON.parse(text('conf/codex-bridge/package-lock.json')).packages[''].engines?.node, undefined);
 });
 
 // Fixed program directory does not use the instance/version as a payload path.

@@ -101,7 +101,7 @@ test('shared skill binding references reuse only existing private full-subject c
   const environments = await readRuntimeProviderEnvironments(path, [a, b])
   assert.equal(environments.get(a.subjectKey).IMAGE_TOKEN, 'synthetic-a')
   assert.equal(environments.get(b.subjectKey), undefined)
-  const { SkillBindings } = await import('../../codex-ws-agent/skill-bindings.mjs')
+  const { SkillBindings } = await import('../../codex-bridge/skill-bindings.mjs')
   const missing = new SkillBindings({ file: bindings, credentialEnvironment: environments.get(b.subjectKey) })
   assert.equal((await missing.resolve({ scope: { agentId: 'agent-b' }, alias: 'image' })).ready, false)
   await writeFile(path, JSON.stringify({ configVersion: 1, subjects: { [a.subjectKey]: { IMAGE_TOKEN: 'synthetic-a', HOME: 'injection' } } }))

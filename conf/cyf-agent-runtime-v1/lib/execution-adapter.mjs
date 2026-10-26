@@ -1,8 +1,8 @@
 // Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
 // Session credentials live only here; outbound work checkpoints hold no proof.
-import { isManagementMessage } from '../../codex-ws-agent/skill-management-wire.mjs';
+import { isManagementMessage } from '../../codex-bridge/skill-management-wire.mjs';
 import { randomUUID } from 'node:crypto';
-import { toAgentWire, fromAgentWire } from '../../codex-ws-agent/agent-message-wire.mjs';
+import { toAgentWire, fromAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
 import { RuntimeV1Client, classifyRuntimeError, runtimeErrorFacts, runtimeAckWireContext } from './runtime-client.mjs';
 const adapterError = code => Object.assign(new Error(code), { code });
 const wait = (ms, signal) => new Promise(resolve => {
@@ -30,9 +30,9 @@ export function skillSessionBinding(receipt, session) {
 
 export async function createExecutionAdapterFactory({ config, instanceId, apiOrigin, workspacePolicies,
   providerEnvironments, loadEngine, socketFactory, clientFactory, logger = () => {} } = {}) {
-  const module = await (loadEngine || (() => import('../../codex-ws-agent/agent-client.mjs')))();
+  const module = await (loadEngine || (() => import('../../codex-bridge/agent-client.mjs')))();
   const Socket = socketFactory || await module.loadWebSocketClient();
-  const { RegistrationAckObserver } = await import('../../codex-ws-agent/registration-ack.mjs');
+  const { RegistrationAckObserver } = await import('../../codex-bridge/registration-ack.mjs');
   const engine = module.createRuntimeExecutionHost({ agents: config.agents, runtimeInstanceId: instanceId,
     apiOrigin, workspacePolicies, providerEnvironments, webSocketClient: Socket });
   const attached = new Map();
@@ -350,7 +350,7 @@ export const RETIRED_EXECUTION_PAYLOAD_PATHS = Object.freeze([
 const payloadError = code => Object.assign(new Error(code), { code });
 
 // Offline collation only. Does not install packages, initialize an engine or
-// adopt an existing release. Layout: artifact/runtime + artifact/codex-ws-agent.
+// adopt an existing release. Layout: artifact/runtime + artifact/codex-bridge.
 export async function collateExecutionPayload(sourceRoot, targetRoot) {
   const { constants, lstat, mkdir, open, realpath } = await import('node:fs/promises');
   const { dirname, resolve } = await import('node:path');

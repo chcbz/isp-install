@@ -1,5 +1,5 @@
 // runtime-hosting-v1: frozen 2026-10-10. No credentials/paths/commands accepted.
-import { parseStrictTypedOutcomeJson } from '../../codex-ws-agent/juyiting-typed-outcome.mjs';
+import { parseStrictTypedOutcomeJson } from '../../codex-bridge/juyiting-typed-outcome.mjs';
 import { validateMessage, replyMessage } from './message-envelope.mjs';
 import { randomUUID } from 'node:crypto';
 import { hostingError, exactHostingId } from './hosting-config.mjs';

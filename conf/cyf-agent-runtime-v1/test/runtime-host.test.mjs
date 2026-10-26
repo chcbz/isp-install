@@ -1,7 +1,7 @@
-import { isManagementMessage, parseManagementMessage } from '../../codex-ws-agent/skill-management-wire.mjs';
-import { command as managementCommand, packageFixture as managementPackage, activate as managementActivate, policy as managementPolicy } from '../../codex-ws-agent/test/fixtures/skill-management-fixture.mjs';
-import { replyMessage } from '../../codex-ws-agent/message-envelope.mjs';
-import { fromAgentWire } from '../../codex-ws-agent/agent-message-wire.mjs';
+import { isManagementMessage, parseManagementMessage } from '../../codex-bridge/skill-management-wire.mjs';
+import { command as managementCommand, packageFixture as managementPackage, activate as managementActivate, policy as managementPolicy } from '../../codex-bridge/test/fixtures/skill-management-fixture.mjs';
+import { replyMessage } from '../../codex-bridge/message-envelope.mjs';
+import { fromAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
 import { agentMessageFixture, httpFixture } from './agent-wire-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -22,7 +22,7 @@ import { collateExecutionPayload, createExecutionAdapterFactory, EXECUTION_PAYLO
 // mature catalog, literal import closure and no private-state wildcard copies.
 // Wire/D06 ACK/CHAT-result confirmations are separate, not claimed by this suite.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-const engineSource = resolve(repo, 'conf/codex-ws-agent');
+const engineSource = resolve(repo, 'conf/codex-bridge');
 const code = expected => cause => cause?.code === expected;
 
 async function fixture(t, { count = 3, sameAgentId = false, firstIdentity = {} } = {}) {
@@ -257,7 +257,7 @@ test('unified library catalog closes actual engine imports without retired provi
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('skill-manifest.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('juyiting-review-basis.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('schemas/skill-manifest-v1.schema.json'), true);
-  const target = resolve(f.root, 'codex-ws-agent');
+  const target = resolve(f.root, 'codex-bridge');
   const result = await collateExecutionPayload(engineSource, target);
   assert.equal(result.payloadCount, EXECUTION_PAYLOAD_FILES.length); assert.equal(result.dependenciesValidated, false);
   await assert.rejects(collateExecutionPayload(engineSource, target), cause => cause.code === 'EEXIST');
@@ -369,15 +369,15 @@ test('validator checks full artifact-local dependency/toolchain graph instead of
   const f = await fixture(t, { count: 1 });
   const artifact = resolve(f.root, 'artifact'); await mkdir(artifact);
   await cp(resolve(repo, 'conf/cyf-agent-runtime-v1'), resolve(artifact, 'runtime'), { recursive: true });
-  await collateExecutionPayload(engineSource, resolve(artifact, 'codex-ws-agent'));
+  await collateExecutionPayload(engineSource, resolve(artifact, 'codex-bridge'));
   await mkdir(resolve(artifact, 'node/bin'), { recursive: true }); await cp(process.execPath, resolve(artifact, 'node/bin/node')); await chmod(resolve(artifact, 'node/bin/node'), 0o755);
   const validator = resolve(artifact, 'runtime/validate.sh');
   assert.throws(() => execFileSync('bash', [validator, '--root', artifact], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /node_modules/.test(cause.stderr));
-  await cp(resolve(engineSource, 'node_modules'), resolve(artifact, 'codex-ws-agent/node_modules'), { recursive: true, dereference: true });
+  await cp(resolve(engineSource, 'node_modules'), resolve(artifact, 'codex-bridge/node_modules'), { recursive: true, dereference: true });
   assert.throws(() => execFileSync('bash', [validator, '--root', artifact], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /\.toolchain/.test(cause.stderr));
-  const ws = resolve(artifact, 'codex-ws-agent/node_modules/ws/package.json');
+  const ws = resolve(artifact, 'codex-bridge/node_modules/ws/package.json');
   const packageJson = JSON.parse(await readFile(ws, 'utf8')); packageJson.version = '0.0.0'; await writeFile(ws, JSON.stringify(packageJson));
-  await assert.rejects(validateExecutionPayload(resolve(artifact, 'codex-ws-agent'), { toolchain: false }), code('RUNTIME_DEPENDENCY_VERSION_MISMATCH'));
+  await assert.rejects(validateExecutionPayload(resolve(artifact, 'codex-bridge'), { toolchain: false }), code('RUNTIME_DEPENDENCY_VERSION_MISMATCH'));
 });
 
 // Exercise the validator's exact eval command with real collated source and an
@@ -387,7 +387,7 @@ async function validatorImportFixture(t) {
   const root = await mkdtemp(resolve(tmpdir(), 'ur01-validator import-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const artifact = resolve(root, 'artifact'); await mkdir(artifact);
-  const engine = resolve(artifact, 'codex-ws-agent');
+  const engine = resolve(artifact, 'codex-bridge');
   await collateExecutionPayload(engineSource, engine);
   await cp(resolve(engineSource, 'node_modules'), resolve(engine, 'node_modules'), { recursive: true, dereference: true });
   await validateExecutionPayload(engine, { toolchain: false });
@@ -458,7 +458,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
   const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
   const requests = []; const sockets = []; const engines = new Map(); const logs = [];
-  const normalize = validateBusiness ? (await import('../../codex-ws-agent/agent-client.mjs')).normalizeInboundMessage : null;
+  const normalize = validateBusiness ? (await import('../../codex-bridge/agent-client.mjs')).normalizeInboundMessage : null;
   const socketEvents = new EventEmitter();
   class Socket extends EventEmitter {
     constructor(url, options) {
@@ -805,11 +805,11 @@ async function venvLauncherFixture(t, { longPath = false } = {}) {
   const parent = longPath ? resolve(root, 'nested-' + 'a'.repeat(110), 'nested-' + 'b'.repeat(110)) : root;
   const stage = resolve(parent, '.cyf-agent-runtime.stage.fixture');
   const target = resolve(parent, 'target "quote $value !');
-  const relativeBin = 'codex-ws-agent/.toolchain/bin';
+  const relativeBin = 'codex-bridge/.toolchain/bin';
   const bin = resolve(stage, relativeBin); await mkdir(bin, { recursive: true });
-  const metadata = resolve(stage, 'codex-ws-agent/.toolchain/lib/python3.6/site-packages/fixture.dist-info');
+  const metadata = resolve(stage, 'codex-bridge/.toolchain/lib/python3.6/site-packages/fixture.dist-info');
   await mkdir(metadata, { recursive: true });
-  await writeFile(resolve(stage, 'codex-ws-agent/.toolchain/pyvenv.cfg'), 'home = /explicit-test-base\n');
+  await writeFile(resolve(stage, 'codex-bridge/.toolchain/pyvenv.cfg'), 'home = /explicit-test-base\n');
   for (const name of ['python', 'platform-python3.6']) {
     // Synthetic interpreter forwarder, explicitly not an installed --copies venv.
     await writeFile(resolve(bin, name), '#!/bin/sh\nexec /usr/bin/python3 "$@"\n', { mode: 0o755 });
@@ -825,7 +825,7 @@ async function venvLauncherFixture(t, { longPath = false } = {}) {
     await writeFile(resolve(bin, name), header + body, { mode: 0o755 });
     await chmod(resolve(bin, name), 0o755);
   }
-  const venv = resolve(stage, 'codex-ws-agent/.toolchain');
+  const venv = resolve(stage, 'codex-bridge/.toolchain');
   await writeFile(resolve(bin, 'activate'), `VIRTUAL_ENV="${venv}"\nexport VIRTUAL_ENV\n`);
   await writeFile(resolve(bin, 'activate.csh'), `setenv VIRTUAL_ENV "${venv}"\n`);
   await writeFile(resolve(bin, 'activate.fish'), `set -gx VIRTUAL_ENV "${venv}"\n`);
@@ -860,7 +860,7 @@ test('venv generated launchers preserve direct CLI, argv, modes and RECORD integ
   const recordBefore = await readFile(resolve(f.metadata, 'RECORD'), 'utf8');
   assert.match(recordBefore, /untouched\.py,sha256=unchanged,7/);
   const verifyRecord = `import base64, csv, hashlib, os, sys
-venv = os.path.join(sys.argv[1], 'codex-ws-agent', '.toolchain')
+venv = os.path.join(sys.argv[1], 'codex-bridge', '.toolchain')
 site = os.path.join(venv, 'lib', 'python3.6', 'site-packages')
 with open(os.path.join(site, 'fixture.dist-info', 'RECORD'), newline='') as stream:
     for row in csv.reader(stream):
@@ -879,11 +879,11 @@ with open(os.path.join(site, 'fixture.dist-info', 'RECORD'), newline='') as stre
   }
   const activation = resolve(f.target, f.relativeBin, 'activate');
   const activated = execFileSync('bash', ['--noprofile', '--norc', '-c', '. "$1"; printf "%s" "$VIRTUAL_ENV"', 'activation-test', activation], f.options);
-  assert.equal(activated, resolve(f.target, 'codex-ws-agent/.toolchain'));
+  assert.equal(activated, resolve(f.target, 'codex-bridge/.toolchain'));
   for (const name of ['activate', 'activate.csh', 'activate.fish']) {
     assert.equal((await readFile(resolve(f.target, f.relativeBin, name), 'utf8')).includes(f.stage), false);
   }
-  assert.equal(await readFile(resolve(f.target, 'codex-ws-agent/.toolchain/lib/python3.6/site-packages/fixture.dist-info/RECORD'), 'utf8'), recordBefore);
+  assert.equal(await readFile(resolve(f.target, 'codex-bridge/.toolchain/lib/python3.6/site-packages/fixture.dist-info/RECORD'), 'utf8'), recordBefore);
 });
 
 test('venv publication fails closed for unknown stage references, launcher bodies and stale links', async t => {
@@ -902,9 +902,9 @@ test('venv validator rejects stale shell trampolines and activation even when im
   for (const kind of ['trampoline', 'activation', 'link', 'config']) {
     const f = await venvLauncherFixture(t); f.prepare();
     if (kind === 'trampoline') await writeFile(resolve(f.bin, 'pip'), `#!/bin/sh\n'''exec' "${f.bin}/python" "$0" "$@"\n' '''\n${f.body}`);
-    if (kind === 'activation') await writeFile(resolve(f.bin, 'activate'), `VIRTUAL_ENV="${f.stage}/codex-ws-agent/.toolchain"\n`);
+    if (kind === 'activation') await writeFile(resolve(f.bin, 'activate'), `VIRTUAL_ENV="${f.stage}/codex-bridge/.toolchain"\n`);
     if (kind === 'link') await symlink(resolve(f.bin, 'python'), resolve(f.bin, 'bad-link'));
-    if (kind === 'config') await writeFile(resolve(f.stage, 'codex-ws-agent/.toolchain/pyvenv.cfg'), `home = ${f.stage}\n`);
+    if (kind === 'config') await writeFile(resolve(f.stage, 'codex-bridge/.toolchain/pyvenv.cfg'), `home = ${f.stage}\n`);
     assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_(?:LAUNCHER_OR_ACTIVATION|SYMLINK)/.test(cause.stderr));
   }
 });
@@ -918,9 +918,9 @@ const cfgBaseFields = 'home = /explicit-test-base\ninclude-system-site-packages 
 test('Python 3.11 cfg command audit maps only its exact venv operand preserving every base field, quotes, modes and stage-to-target bytes', async t => {
   for (const quoted of [false, true]) for (const withoutPip of [false, true]) {
     const f = await venvLauncherFixture(t, { longPath: true });
-    const cfg = resolve(f.stage, 'codex-ws-agent/.toolchain/pyvenv.cfg');
-    const beforeVenv = resolve(f.stage, 'codex-ws-agent/.toolchain');
-    const finalVenv = resolve(f.target, 'codex-ws-agent/.toolchain');
+    const cfg = resolve(f.stage, 'codex-bridge/.toolchain/pyvenv.cfg');
+    const beforeVenv = resolve(f.stage, 'codex-bridge/.toolchain');
+    const finalVenv = resolve(f.target, 'codex-bridge/.toolchain');
     assert.ok(beforeVenv.length > 256, 'exercise a genuine long synthetic path, not a fake version probe');
     const prefix = '/explicit-test-base/python3.11 -m venv --copies' + (withoutPip ? ' --without-pip' : '') + ' ';
     const quote = quoted ? cfgPosixQuote : value => value;
@@ -938,10 +938,10 @@ test('Python 3.11 cfg command audit maps only its exact venv operand preserving 
     await rename(f.stage, f.target);
     await assert.rejects(lstat(f.stage), cause => cause.code === 'ENOENT');
     f.check(f.target);
-    const finalCfg = resolve(f.target, 'codex-ws-agent/.toolchain/pyvenv.cfg');
+    const finalCfg = resolve(f.target, 'codex-bridge/.toolchain/pyvenv.cfg');
     assert.equal(await readFile(finalCfg, 'utf8'), expected);
     assert.equal((await lstat(finalCfg)).mode & 0o777, 0o640);
-    assert.equal(await readFile(resolve(f.target, 'codex-ws-agent/.toolchain/lib/python3.6/site-packages/fixture.dist-info/RECORD'), 'utf8'), record);
+    assert.equal(await readFile(resolve(f.target, 'codex-bridge/.toolchain/lib/python3.6/site-packages/fixture.dist-info/RECORD'), 'utf8'), record);
     const pip = resolve(f.target, f.relativeBin, 'pip');
     assert.deepEqual(JSON.parse(execFileSync(pip, ['synthetic cfg path', '$not-expanded'], f.options)),
       { file: pip, args: ['synthetic cfg path', '$not-expanded'] });
@@ -952,7 +952,7 @@ test('Python 3.11 cfg relocation rejects unknown command, stale home/base/body/f
   for (const kind of ['extra-option', 'wrong-module', 'wrong-operand', 'extra-tail', 'foreign-stage',
     'duplicate-command', 'stale-home', 'stale-base', 'unknown-field', 'missing-command', 'cfg-symlink']) {
     const f = await venvLauncherFixture(t);
-    const venv = resolve(f.stage, 'codex-ws-agent/.toolchain');
+    const venv = resolve(f.stage, 'codex-bridge/.toolchain');
     const cfg = resolve(venv, 'pyvenv.cfg');
     const command = `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`;
     let text = cfgBaseFields + command;
@@ -960,7 +960,7 @@ test('Python 3.11 cfg relocation rejects unknown command, stale home/base/body/f
     if (kind === 'wrong-module') text = cfgBaseFields + command.replace('-m venv', '-m unrelated');
     if (kind === 'wrong-operand') text = cfgBaseFields + command.replace(`${venv}\n`, `${venv}-not-the-venv\n`);
     if (kind === 'extra-tail') text = cfgBaseFields + command.trimEnd() + ' extra-operand\n';
-    if (kind === 'foreign-stage') text = cfgBaseFields + command.replace(venv, '/tmp/.cyf-agent-runtime.stage.foreign/codex-ws-agent/.toolchain');
+    if (kind === 'foreign-stage') text = cfgBaseFields + command.replace(venv, '/tmp/.cyf-agent-runtime.stage.foreign/codex-bridge/.toolchain');
     if (kind === 'duplicate-command') text += command;
     if (kind === 'stale-home') text = text.replace('/explicit-test-base\n', `${f.stage}\n`);
     if (kind === 'stale-base') text = cfgBaseFields + command.replace('/explicit-test-base/python3.11', resolve(f.stage, 'untrusted-base/python3.11'));
@@ -981,8 +981,8 @@ test('Python 3.11 cfg relocation rejects unknown command, stale home/base/body/f
 });
 
 test('Python 3.11 cfg command remains subject to the ORIGINAL strict stale validator after successful preparation', async t => {
-  const f = await venvLauncherFixture(t); const cfg = resolve(f.stage, 'codex-ws-agent/.toolchain/pyvenv.cfg');
-  const venv = resolve(f.stage, 'codex-ws-agent/.toolchain');
+  const f = await venvLauncherFixture(t); const cfg = resolve(f.stage, 'codex-bridge/.toolchain/pyvenv.cfg');
+  const venv = resolve(f.stage, 'codex-bridge/.toolchain');
   await writeFile(cfg, cfgBaseFields + `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`);
   f.prepare(); f.check(f.stage);
   await writeFile(cfg, cfgBaseFields + `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`);
@@ -1338,7 +1338,7 @@ async function workspaceCliUnit(t) {
   const { createLogger, readRuntimeProviderEnvironments } = await import('../lib/security.mjs');
   const loaderUrl = pathToFileURL(resolve(engineSource, 'workspace-manager.mjs')).href;
   let mainSource = source.slice(mainStart, mainEnd).replace('export async function main(', 'async function main(');
-  const loaderImport = "import('../codex-ws-agent/workspace-manager.mjs')";
+  const loaderImport = "import('../codex-bridge/workspace-manager.mjs')";
   assert.equal(mainSource.split(loaderImport).length, 2, 'one original workspace loader import');
   // Only resolve the original loader URL in the source slice, never replace its
   // call/validation or the CLI selection/precedence/control flow under test.
@@ -1471,7 +1471,7 @@ test('unmatched ACK and presence cannot supply a skill subject to the executor',
 test('SM-C1 exact durable result crosses current authenticated channel without rewriting original boot; receipt retires after commit', async t => {
   const c = await channelFixture(t, { validateBusiness: true, types: ['SKILL_INSTALL'], measureSkills: true });
   await c.executors[0].activate();
-  const { SkillInstallManager } = await import('../../codex-ws-agent/skill-install-manager.mjs');
+  const { SkillInstallManager } = await import('../../codex-bridge/skill-install-manager.mjs');
   const state = c.states()[0], identity = c.config.agents[0].manifest;
   const manager = new SkillInstallManager({ profile: state.profile, stateRoot: resolve(c.f.root, 'skill-result-test'),
     wsUrl: 'wss://api.example.test/ws', enabled: true, runtimeInstanceId: 'original-executing-boot',

@@ -1,4 +1,4 @@
-import { fromAgentWire } from '../../codex-ws-agent/agent-message-wire.mjs';
+import { fromAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
 import { agentMessageFixture, httpFixture } from './agent-wire-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -9,7 +9,7 @@ import { resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { hostingFixture, candidateRequest, tick, code } from './hosting-fixture.mjs';
 import { digestManifest, runtimeSubjectKey } from '../lib/manifest.mjs';
-import { createRuntimeExecutionHost, buildRuntimeExecutionEnvironment } from '../../codex-ws-agent/agent-client.mjs';
+import { createRuntimeExecutionHost, buildRuntimeExecutionEnvironment } from '../../codex-bridge/agent-client.mjs';
 import { createExecutionAdapterFactory } from '../lib/execution-adapter.mjs';
 import { RuntimeV1Client } from '../lib/runtime-client.mjs';
 import { writePrivateJson } from '../lib/security.mjs';

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { hostingFixture, code } from './hosting-fixture.mjs';
 import { canonicalHostingPath, readHostingConfig, validateHostingConfig } from '../lib/hosting-config.mjs';
 import { readRuntimeHostConfig } from '../lib/manifest.mjs';
-import { normalizeProfile, profileConfigurationErrors } from '../../codex-ws-agent/agent-client.mjs';
+import { normalizeProfile, profileConfigurationErrors } from '../../codex-bridge/agent-client.mjs';
 const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
 
 async function configFixture(t) {

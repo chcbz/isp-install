@@ -80,3 +80,19 @@ test('production clarification and revision failures are excluded by the model s
   assert.ok(linked.outputSchema.properties.deliveryRelation.anyOf)
   assert.notEqual(linked.contractDigest, unlinked.contractDigest)
 })
+
+test('media replacement uses the same frozen target in model schema and runtime validation', () => {
+  const f = facts(); const parent = { outcomeId: 'red', finalDigest: 'sha256:' + 'a'.repeat(64) }
+  const targets = [{ ...parent, outputSource: { requestId: 'execute-red', stepId: 'step-red', outputId: 'image', sha256: 'b'.repeat(64) } }]
+  const outcome = structuredClone(fixture.outcomes[2])
+  outcome.deliveryRelation = { mode: 'REPLACE', parentOutcomeId: parent.outcomeId, parentFinalDigest: parent.finalDigest,
+    targetOutcomeId: parent.outcomeId, targetFinalDigest: parent.finalDigest }
+  const check = new Ajv2020().compile(buildActionOutcomeContract(f, null, parent, targets).outputSchema)
+  assert.equal(check(outcome), true)
+  assert.deepEqual(validateActionOutcome(outcome, f, parent, targets), outcome)
+  const textTarget = [{ ...parent, text: 'keep this text' }]
+  assert.throws(() => validateActionOutcome(outcome, f, parent, textTarget), /ACTION_DELIVERY_TARGET_INVALID/)
+  outcome.deliveryRelation.targetFinalDigest = 'sha256:' + 'c'.repeat(64)
+  assert.equal(check(outcome), false)
+  assert.throws(() => validateActionOutcome(outcome, f, parent, targets), /ACTION_DELIVERY_TARGET_INVALID/)
+})

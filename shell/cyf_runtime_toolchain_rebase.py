@@ -22,8 +22,8 @@ def plan(root, old_root):
         raise ValueError('CANDIDATE_ROOT_UNSAFE')
     if root == old_root or old_root in root.parents or root in old_root.parents:
         raise ValueError('ROOTS_MUST_BE_DISTINCT_NON_NESTED')
-    venv = root / 'codex-ws-agent/.toolchain'
-    old_venv = str(old_root / 'codex-ws-agent/.toolchain')
+    venv = root / 'codex-bridge/.toolchain'
+    old_venv = str(old_root / 'codex-bridge/.toolchain')
     new_venv = str(venv)
     if venv.resolve() != venv or not venv.is_dir():
         raise ValueError('VENV_UNSAFE')

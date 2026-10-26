@@ -1,6 +1,6 @@
 # Codex WebSocket Agent 配置优化方案
 
-审计日期：2026-09-09。依据安装仓库、部署目录 `/home/isp/apps/codex-ws-agent`、
+审计日期：2026-09-09。依据安装仓库、部署目录 `/home/isp/apps/codex-bridge`、
 本机 Codex CLI 0.153.4 的校验与历史会话。模型标识由实际网关决定，不在本轮更换模型。
 不包含真实 Agent API Key、模型认证或私人 Codex Home 副本。
 
@@ -61,7 +61,7 @@ codexModel=
 
 ### config.toml：网关、模型能力、推理档位与本地信任
 
-使用 `/home/isp/apps/codex-ws-agent/codex-home.example.toml` 作为结构参考，不能原样启用其中占位值。
+使用 `/home/isp/apps/codex-bridge/codex-home.example.toml` 作为结构参考，不能原样启用其中占位值。
 
 1. 在配置副本中删除顶层 `writable_roots` 和 `preferred_auth_method`：本机 CLI 0.153.4 严格校验不识别它们。
    不要用 grep 全局删除相同名字，其他合法表下可能有同名字段。
@@ -110,8 +110,8 @@ codexModel=
 ```bash
 cd /home/isp/wsps/chcbz/isp-install
 for script in install.sh shell/*.sh bin/*.sh; do bash -n "$script" || exit 1; done
-node --check conf/codex-ws-agent/agent-client.mjs
-node --test conf/codex-ws-agent/test/*.test.mjs
+node --check conf/codex-bridge/agent-client.mjs
+node --test conf/codex-bridge/test/*.test.mjs
 ```
 
 新增用例覆盖三种 sandbox 的新建/恢复一致性、模型覆盖/回退、非法参数、0/有限超时、
@@ -148,7 +148,7 @@ profile 文件默认每 5 秒检查；`.env` 不热加载。更新正在执行�
 ## 7. 第二轮线上发布记录（2026-09-09）
 
 - 发布完成：`2026-09-09T10:31:36.270618+08:00`。
-- 实际 release：`/home/isp/apps/codex-ws-agent/releases/20260909102948-3657004`。
+- 实际 release：`/home/isp/apps/codex-bridge/releases/20260909102948-3657004`。
 - 服务验证：active，MainPID 3657704，NRestarts=0；三个 profile 均收到注册确认。
 - 249 项完整回归测试通过；三个候选 Home 通过 CLI 0.153.4 `--strict-config` 和 config/read。
 - 使用隔离 Home 做两次真实模型请求（新建、恢复），仅回复测试短语，不执行工具/文件/业务动作。
@@ -163,7 +163,7 @@ profile 文件默认每 5 秒检查；`.env` 不热加载。更新正在执行�
 2. 清除不识别的顶层 writable_roots、preferred_auth_method，以及冲突的 default_permissions。
    去掉自定义 provider 不使用的顶层 openai_base_url，保留实际 provider 地址和认证机制。
 3. Agent 指定的模型保持 Luna 不变，Home 的直连 CLI fallback 同步为 Luna；推理档位保持 medium。
-4. 自定义模型目录复制到受管理的共享文件 `/home/isp/apps/codex-ws-agent/shared/model-catalog.json`，
+4. 自定义模型目录复制到受管理的共享文件 `/home/isp/apps/codex-bridge/shared/model-catalog.json`，
    三个 Home 不再依赖 `/root/.codex/model-catalog.json`。没有修改模型目录内容。
 5. 林冲改用专用工作目录，缩小项目 trusted 条目；吴用保留 CYF 工作目录。
 6. 吴用绑定 CYF workspace policy，以既有仓库为可信 repository、独立 worktree root，固定 master 和既有 HTTPS origin。
@@ -176,7 +176,7 @@ profile 文件默认每 5 秒检查；`.env` 不热加载。更新正在执行�
 
 ### 回滚与验证说明
 
-私有备份：`/root/backups/codex-ws-agent/20260909101412`（root-only，含配置及部署证据，不进入 Git）。
+私有备份：`/root/backups/codex-bridge/20260909101412`（root-only，含配置及部署证据，不进入 Git）。
 首次切换因健康检查使用的 ISO 时间格式不被本机 journalctl 接受，自动恢复了旧配置和旧 release。
 随后改为兼容时间格式并按新进程 PID 过滤日志，第二次切换及三 Agent 注册验证成功。
 首次尝试和最终成功状态分别保留在私有备份中，未隐藏首次回滚。

@@ -37,7 +37,7 @@ afterEach(() => {
 })
 
 const temporaryDirectory = () => {
-  const directory = mkdtempSync(resolve(tmpdir(), 'codex-ws-agent-a07-'))
+  const directory = mkdtempSync(resolve(tmpdir(), 'codex-bridge-a07-'))
   temporaryDirectories.push(directory)
   return directory
 }
@@ -868,7 +868,7 @@ test('archive verifies a published HEAD through a fresh sanitized HTTPS verifica
         fetches += 1
         verificationDirectory = input.cwd
         assert.notEqual(input.cwd, fixture.repository)
-        assert.match(input.cwd, /^\/tmp\/codex-ws-agent-publish-/)
+        assert.match(input.cwd, /^\/tmp\/codex-bridge-publish-/)
         assert.equal(input.args.at(-2), fixture.policy.trustedRemoteUrl)
         assert.equal(
           input.args.at(-1),

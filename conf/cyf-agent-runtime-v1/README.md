@@ -1,6 +1,6 @@
 # Unified Agent Runtime (UR-01, 2026-10-08)
 
-One Runtime host reuses `codex-ws-agent`; it is not a heartbeat sidecar or a new
+One Runtime host reuses `codex-bridge`; it is not a heartbeat sidecar or a new
 model executor. Current package source is the **Runtime 1.1.0 candidate** (2026-10-13, skill-execution
 base `b79558e4`); source availability does not prove a particular host is installed,
 activated or business-accepted. The old engine CLI/API-key execution entry is
@@ -16,7 +16,7 @@ evidence/gates, not a current declaration that all deployed hosts are unaccepted
 ## Artifact and configuration
 
 `install.sh --target ABSOLUTE_NEW_DIRECTORY` prepares a new artifact containing
-`runtime/`, `codex-ws-agent/` and supplied `node/bin/node`, npm lock graph
+`runtime/`, `codex-bridge/` and supplied `node/bin/node`, npm lock graph
 and release-local Python delivery tools. It neither enables services nor adopts,
 rewrites, enrolls or deletes existing Agent state. Python still needs a compatible
 target ABI/stdlib; mocked installer tests do not prove clean-target installation.
@@ -233,14 +233,14 @@ release gates. Current task is incomplete: **do not publish or switch production
 ## Legacy provisioning source retirement (UR-01, 2026-10-08)
 
 The unified artifact does **not** generate an API-key Agent execution entry.
-`codex-ws-agent` is an execution library, not a second service/provisioner:
+`codex-bridge` is an execution library, not a second service/provisioner:
 
 | Exact source path | Minimal convergence |
 | --- | --- |
 | `shell/codex_ws_agent_install.sh`, `bin/codex_ws_agent.sh` | Deleted on 2026-10-09; no diagnostic wrapper or old launcher remains. The main dispatcher still rejects removed component names. |
-| `conf/codex-ws-agent/managed-host.mjs` | Deleted: no API-key broker, ensure/observe admission, credential restore/copy, generation creation or Unix provisioning socket remains. Historical association/journal/credential files are not touched. |
-| `conf/codex-ws-agent/agent-client.mjs` | Remove dead broker references; standalone CLI remains retired. Only the injected Runtime execution host is used. |
-| `conf/codex-ws-agent/package.json` | No `start` script; not an alternate executable package. Model/provider credentials remain distinct from Agent authentication. |
+| `conf/codex-bridge/managed-host.mjs` | Deleted: no API-key broker, ensure/observe admission, credential restore/copy, generation creation or Unix provisioning socket remains. Historical association/journal/credential files are not touched. |
+| `conf/codex-bridge/agent-client.mjs` | Remove dead broker references; standalone CLI remains retired. Only the injected Runtime execution host is used. |
+| `conf/codex-bridge/package.json` | No `start` script; not an alternate executable package. Model/provider credentials remain distinct from Agent authentication. |
 | `conf/cyf-agent-runtime-v1/lib/execution-adapter.mjs` | Authoritative explicit execution-library catalog and import closure. Excludes/rejects the old broker, API-key env/profile templates, old engine execution README, old install-candidate/policy tools, offline ACK migration and diagnostic probes; also rejects reintroduced package start/prestart/poststart/bin entries and retired-path symlinks. |
 | `shell/cyf_agent_runtime_v1_install.sh`, `conf/cyf-agent-runtime-v1/install.sh` | Existing sole artifact staging path retained: fresh canonical target only, no old `.env` or profile adoption, no enrollment, service activation or state migration. |
 
@@ -256,7 +256,7 @@ contracts and execution tests remain; no old installer fixture is shipped.
 `install.sh` advertises only `cyf-agent-runtime-v1`/`runtime-v1` for Agent artifacts;
 profile `agent` selects the canonical Runtime component without a generic Node
 upgrade. Other component mappings and full-profile order are preserved, with only
-the retired Agent component replaced. `codex-ws-agent`/`codex` are rejected before
+the retired Agent component replaced. `codex-bridge`/`codex` are rejected before
 any component installation, even in a mixed argument list. `shell/sh_list.txt`
 lists only the current Runtime installer. Explicit instance, prepared canonical
 parent and executable Node prerequisites still apply; no identity is inferred.
@@ -418,5 +418,5 @@ CYF现用程序统一实体目录`/home/isp/apps/cyf-agent-runtime-v1/app/`，�
 
 ### 2026-10-21 已有成果提交契约（源码候选，未激活）
 CYF协同任务遵循 `/home/isp/wsps/cyf/AGENTS.md` 与 `api/docs/interface-standard.md` v1.2；单Owner，不修改公共全局规则。
-`codex-ws-agent` 现行v5 typed union增加 `SUBMISSION_REQUEST`，注册outcomeKinds同步。只有用户明确要求提交、存在冻结deliveryParent及非空deliveryTargets、没有待验收reviewBasis时可返回；SUBMIT引用原成果，deliverable=false、action/revision/clarification=null。操作说明不得成为文字RESULT；不得重新生成媒体，不得代验收。不按MIME决定主流程。
-同步fixture `../codex-ws-agent/test/fixtures/existing-delivery-submit-v5.json`；API同内容fixture在chat-service tests/contracts。需要Web、API（含CHECK约束迁移）、Runtime同批协调就绪；源码更新/测试通过不等于主机runtime安装更新。发布必须固定runtime制品及实例版本并验注册/业务链，本次尚未激活。
+`codex-bridge` 现行v5 typed union增加 `SUBMISSION_REQUEST`，注册outcomeKinds同步。只有用户明确要求提交、存在冻结deliveryParent及非空deliveryTargets、没有待验收reviewBasis时可返回；SUBMIT引用原成果，deliverable=false、action/revision/clarification=null。操作说明不得成为文字RESULT；不得重新生成媒体，不得代验收。不按MIME决定主流程。
+同步fixture `../codex-bridge/test/fixtures/existing-delivery-submit-v5.json`；API同内容fixture在chat-service tests/contracts。需要Web、API（含CHECK约束迁移）、Runtime同批协调就绪；源码更新/测试通过不等于主机runtime安装更新。发布必须固定runtime制品及实例版本并验注册/业务链，本次尚未激活。
