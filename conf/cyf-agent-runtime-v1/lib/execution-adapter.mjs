@@ -58,6 +58,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let socket = null; let observer = null; let abort = null; let loop = null; let channelConfirmed = false;
       let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
       let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
+      let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
       let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false; let registeredAt = null; let serviceReadyAt = null; let replay = null;
       const durable = () => executor.durableStateHealthy() === true;
       const usable = () => executor.readyCommandTypes().length > 0 || executor.chatReady() || executor.skillManagementReady?.() === true;
@@ -101,7 +102,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         replay = Promise.resolve().then(() => executor.resume()).catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' }));
         void replay.finally(() => { replay = null; });
       };
-      const disconnect = () => { channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const disconnect = () => { channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
       const connectOnce = async signal => {
         channelState = 'connecting';
         const session = await client.session({ signal });
@@ -155,9 +156,9 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             const observed = typeOnlyControl || registrationError ? observer.observe(frame) : null;
             if (observed === 'registered') {
               if (payload.readyCommandTypes.length !== requestTypes.length || payload.readyCommandTypes.some(type => !requestTypes.includes(type)) || payload.durableStateHealthy !== declaredHealthy) {
-                channelConfirmed = false; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
+                channelConfirmed = false; managementSession = null; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
               }
-              channelConfirmed = true; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null;
+              channelConfirmed = true; managementSession = session; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null;
               // The first ACK supplies owner scope. If it starts a catalog measurement,
               // activation waits for the follow-up catalog registration ACK; otherwise the
               // shared host could freeze INITIALIZED while re-registration is in flight.
@@ -165,10 +166,19 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               if (!measuring) { resolveActivated?.(); resume(); }
               return;
             }
-            if (observed === 'rejected') { rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 })); current.close(1008); return; }
+            if (observed === 'rejected') { channelConfirmed = false; managementSession = null; rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 })); current.close(1008); return; }
             if (typeOnlyControl && (frame.type === 'connected' || frame.type === 'agent_registered')) return;
             if (typeOnlyControl && frame.type === 'ping') { send({ schemaVersion: 1, messageType: 'pong', messageId: randomUUID(), correlationId: frame.messageId, requestId: frame.requestId }); return; }
-            if (!channelConfirmed) return;
+            // Skill management keeps its existing authenticated subject while capability ACK is pending.
+            // This never grants task readiness or admits a never-confirmed/replaced session.
+            const managementFacts = isManagementMessage(frame) ? { subjectKey: options.subjectKey,
+              wireSha256: createHash('sha256').update(bytes).digest('hex'), messageType: frame.messageType,
+              commandId: frame.data.commandId } : null;
+            const managementAuthorized = () => managementSession === session && !!managementFacts;
+            if (!channelConfirmed && !managementAuthorized()) {
+              if (managementFacts) logger('runtime-management-not-admitted', { ...managementFacts, code: 'CHANNEL_NOT_CONFIRMED' });
+              return;
+            }
             // AgentWebSocketHandler.updateAgentStatus sends copyTrace(presence)
             // plus agentId/status as agent_status_updated, without messageType.
             // Consume ONLY this receipt, after session gates, without granting
@@ -196,7 +206,15 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             // Results/CHAT persistence receipts remain WS business confirmations.
             // Commands go through the existing durable processor, never a new queue.
             if (frame.messageType === 'command.ack') return;
-            ingress = ingress.catch(() => {}).then(() => { if (socket === current && client.currentSession === session && channelConfirmed && !signal.aborted) return executor.acceptFrame(frame); }).catch(error => logger('runtime-frame-rejected', { code: error.code || 'INVALID_FRAME' }));
+            if (managementFacts) logger('runtime-management-queued', managementFacts);
+            ingress = ingress.catch(() => {}).then(async () => {
+              if (socket === current && client.currentSession === session && (channelConfirmed || managementAuthorized()) && !signal.aborted) {
+                const result = await executor.acceptFrame(frame);
+                if (managementFacts) logger('runtime-management-handled', managementFacts);
+                return result;
+              }
+              if (managementFacts) logger('runtime-management-not-admitted', { ...managementFacts, code: 'SESSION_NO_LONGER_CURRENT' });
+            }).catch(error => logger('runtime-frame-rejected', { code: error.code || 'INVALID_FRAME', ...(managementFacts || {}) }));
           });
           if (signal.aborted) current.close();
         });

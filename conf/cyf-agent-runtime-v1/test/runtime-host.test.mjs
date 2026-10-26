@@ -1660,3 +1660,34 @@ test('wire rejection facts correlate exact bytes and subject without logging pay
   assert.equal(JSON.stringify([known, unknown]).includes('synthetic-secret-never-log'), false);
   assert.notEqual(rejectedWireFacts(Buffer.concat([raw, Buffer.from(' ')]), null, 'subject-test').wireSha256, known.wireSha256);
 });
+
+test('skill command admitted on authenticated session is not lost during capability re-registration', async t => {
+  const c = await channelFixture(t, { ackRegistration: false, types: ['SKILL_INSTALL'] });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0]; socket.receive(registrationReceipt(socket.sent[0])); await activating;
+  const identity = c.config.agents[0].manifest;
+  const state = c.states().find(value => value.profile.agentId === identity.canonicalAgentId);
+  const raw = managementCommand(managementPackage().target, { tenantId: identity.tenantId, clientId: identity.clientId,
+    agentId: identity.canonicalAgentId, runtimeInstallationId: identity.installationId });
+  socket.receive(raw);
+  // Actual capability refresh resets channelConfirmed while the same session is still authenticated.
+  state.transport.refreshCapabilities(); await c.tick();
+  socket.receive(raw); await c.tick(); // A same-message retry during refresh still reaches durable deduplication.
+  assert.equal(c.executors[0].ready(), false); // No task readiness is granted before its catalog ACK.
+  socket.receive(registrationReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.register'))); await c.tick();
+  assert.deepEqual(state.accepted, [raw, raw]);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-management-handled').length, 2);
+});
+
+test('management refresh compatibility never admits an unconfirmed or disconnected session', async t => {
+  const c = await channelFixture(t, { ackRegistration: false, types: ['SKILL_INSTALL'] });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0]; const identity = c.config.agents[0].manifest;
+  const state = c.states().find(value => value.profile.agentId === identity.canonicalAgentId);
+  const raw = managementCommand(managementPackage().target, { tenantId: identity.tenantId, clientId: identity.clientId,
+    agentId: identity.canonicalAgentId, runtimeInstallationId: identity.installationId });
+  socket.receive(raw); await c.tick(); assert.deepEqual(state.accepted, []);
+  socket.receive(registrationReceipt(socket.sent[0])); await activating;
+  socket.receive(raw); socket.close(); await c.tick(); assert.deepEqual(state.accepted, []);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-management-handled').length, 0);
+});
