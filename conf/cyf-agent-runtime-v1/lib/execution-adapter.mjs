@@ -1,10 +1,20 @@
 // Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
 // Session credentials live only here; outbound work checkpoints hold no proof.
 import { isManagementMessage } from '../../codex-bridge/skill-management-wire.mjs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { toAgentWire, fromAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
 import { RuntimeV1Client, classifyRuntimeError, runtimeErrorFacts, runtimeAckWireContext } from './runtime-client.mjs';
 const adapterError = code => Object.assign(new Error(code), { code });
+// Correlate rejected transport bytes without logging payloads, identities or credentials.
+// Keep the existing event code for consumers; decoderCode is an explicit safe allowlist.
+const WIRE_REJECTION_CODES = new Set(['AGENT_MESSAGE_INVALID', 'SKILL_INSTALL_COMMAND_INVALID',
+  'SKILL_RESULT_CONFLICT', 'SKILL_DOWNLOAD_FORBIDDEN', 'PROTOCOL_INVALID_MESSAGE',
+  'PROTOCOL_VERSION_UNSUPPORTED', 'PROTOCOL_INVALID_JSON']);
+export function rejectedWireFacts(bytes, error, subjectKey) {
+  return { code: 'INVALID_JSON', decoderCode: WIRE_REJECTION_CODES.has(error?.code) ? error.code : 'WIRE_DECODE_FAILED',
+    subjectKey, byteLength: Buffer.byteLength(bytes), wireSha256: createHash('sha256').update(bytes).digest('hex') };
+}
+
 const wait = (ms, signal) => new Promise(resolve => {
   if (signal.aborted) return resolve();
   const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
@@ -111,7 +121,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           current.on('message', bytes => {
             if (socket !== current || signal.aborted) return;
             let frame;
-            try { frame = fromAgentWire(bytes.toString()); } catch { logger('runtime-frame-rejected', { code: 'INVALID_JSON' }); return; }
+            try { frame = fromAgentWire(bytes.toString()); } catch (error) { logger('runtime-frame-rejected', rejectedWireFacts(bytes, error, options.subjectKey)); return; }
             if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
             const payload = frame;
             const proofMismatch = layer => {

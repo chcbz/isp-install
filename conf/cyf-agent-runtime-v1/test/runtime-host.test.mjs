@@ -13,7 +13,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { digestManifest, readRuntimeHostConfig, runtimeSubjectKey } from '../lib/manifest.mjs';
 import { acquireRuntimeOwnership, RuntimeHost } from '../lib/runtime-host.mjs';
-import { collateExecutionPayload, createExecutionAdapterFactory, EXECUTION_PAYLOAD_FILES, RETIRED_EXECUTION_PAYLOAD_PATHS, validateExecutionPayload } from '../lib/execution-adapter.mjs';
+import { collateExecutionPayload, createExecutionAdapterFactory, rejectedWireFacts, EXECUTION_PAYLOAD_FILES, RETIRED_EXECUTION_PAYLOAD_PATHS, validateExecutionPayload } from '../lib/execution-adapter.mjs';
 
 // Frozen offline acceptance coverage, before implementation: config -> identity,
 // installation/path collisions and credential allowlist; host -> readiness,
@@ -1647,4 +1647,16 @@ test('archive reconciliation waits for native registration, installs before jobs
   assert.ok(!JSON.stringify(c.logs).includes('private'));
   await c.executors[0].close();c.states()[0].reconciliation=[];
   await c.adapters.heartbeat();await c.tick();assert.deepEqual(c.states()[0].reconciliation,[]);
+});
+
+
+test('wire rejection facts correlate exact bytes and subject without logging payload or arbitrary errors', () => {
+  const raw = Buffer.from('{"token":"synthetic-secret-never-log"}');
+  const known = rejectedWireFacts(raw, { code: 'SKILL_RESULT_CONFLICT', message: raw.toString() }, 'subject-test');
+  assert.deepEqual(known, { code: 'INVALID_JSON', decoderCode: 'SKILL_RESULT_CONFLICT', subjectKey: 'subject-test',
+    byteLength: raw.length, wireSha256: createHash('sha256').update(raw).digest('hex') });
+  const unknown = rejectedWireFacts(raw, { code: 'synthetic-secret-never-log', stack: raw.toString() }, 'subject-test');
+  assert.equal(unknown.decoderCode, 'WIRE_DECODE_FAILED');
+  assert.equal(JSON.stringify([known, unknown]).includes('synthetic-secret-never-log'), false);
+  assert.notEqual(rejectedWireFacts(Buffer.concat([raw, Buffer.from(' ')]), null, 'subject-test').wireSha256, known.wireSha256);
 });
