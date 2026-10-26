@@ -381,3 +381,7 @@ Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺
 
 ### 2026-10-26 技能服务共享作用域（候选，部署单独核对）
 技能安装选择即授权固定版本所需权限，不再逐Agent开通。skill-bindings.json新增可选scopes数组，每项为{tenantId,clientId,providerAliases}；providers.json新增可选scopes数组，每项为{tenantId,clientId,environment}。同一完整tenant/client所属范围的已绑定Agent自动取得已配置别名及其引用的凭据名。显式主体配置优先，不读取全局env、不跨作用域借用；显式覆盖为另一Provider时不得借用共享Provider的同名凭据。新Agent无需修改subject清单。现有无scopes配置继续兼容；依赖未配置仍按真实失败回传，不产生虚假就绪。安装不自动执行，原任务授权、技能启停、摘要、锁和幂等不变。配置必须与支持scopes的Runtime一起受控启用，旧程序回退前先恢复这两份配置的原值，不能恢复业务journal/ACK。回归入口：conf/cyf-agent-runtime-v1/test/provider-environments.test.mjs。
+
+### 2026-10-26 技能目录重注册心跳语义（1.3.16）
+
+技能安装/卸载后的目录刷新需要匹配的新注册 ACK 才能恢复准入；等待期间不代表 Agent 断线。健康、未暂停且有可用执行器时暂停该窗口的 presence，避免发送 offline 撤销服务端刚建立的会话绑定。实际持久状态异常或暂停仍发送 offline 并停止准入；不放宽身份、会话代次或 ACK 匹配，不重放历史 UNKNOWN。定向回归入口：`runtime-host.test.mjs` 的 `catalog re-registration heartbeat`，以及既有 health revocation、stale generation、skill measurement 测试。此段记录源码行为，发布/线上核验单独记录。

@@ -1691,3 +1691,28 @@ test('management refresh compatibility never admits an unconfirmed or disconnect
   socket.receive(raw); socket.close(); await c.tick(); assert.deepEqual(state.accepted, []);
   assert.equal(c.logs.filter(row => row.event === 'runtime-management-handled').length, 0);
 });
+
+
+test('catalog re-registration heartbeat cannot revoke the pending server binding', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0], state = c.states()[0];
+  socket.receive(registrationReceipt(socket.sent[0])); await activating;
+  assert.equal(c.executors[0].ready(), true);
+  state.transport.refreshCapabilities();
+  const registration = socket.sent.at(-1), before = socket.sent.length;
+  assert.equal(registration.messageType, 'agent.register');
+  assert.equal(c.executors[0].ready(), false); // No premature admission while ACK is pending.
+  await c.executors[0].heartbeat();
+  assert.equal(socket.sent.length, before, 'pending healthy registration must not emit offline presence');
+  socket.receive(registrationReceipt(registration)); await c.tick();
+  await c.executors[0].heartbeat();
+  assert.equal(socket.sent.at(-1).status, 'online');
+  assert.equal(c.executors[0].ready(), true);
+  state.transport.refreshCapabilities(); state.healthy = false;
+  await c.executors[0].heartbeat();
+  assert.equal(socket.sent.at(-1).status, 'offline');
+  assert.equal(socket.sent.at(-1).durableStateHealthy, false);
+  assert.equal(state.paused, true); // Real health loss must still revoke admission.
+  assert.equal(c.executors[0].ready(), false);
+});
