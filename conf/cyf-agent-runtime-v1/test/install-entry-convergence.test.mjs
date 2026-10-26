@@ -54,7 +54,7 @@ test('registry/profile/list converge only the Agent entry; unrelated component m
 
 test('legacy dispatcher names fail before any component call even in a mixed request', t => {
   const f = fixture(t);
-  for (const args of [['codex'], ['codex-bridge'], ['nginx', 'codex'], ['codex-bridge', 'nginx']]) {
+  for (const args of [['codex'], ['codex-bridge'], ['codex-ws-agent'], ['nginx', 'codex'], ['codex-bridge', 'nginx'], ['nginx', 'codex-ws-agent']]) {
     const result = f.run(args);
     assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`); assert.match(result.stderr, /UNIFIED_RUNTIME_ENTRY_REQUIRED/);
     assert.equal(existsSync(f.calls), false); assert.deepEqual(readdirSync(resolve(f.appRoot, 'cyf-agent-runtime-v1')), []);

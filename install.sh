@@ -278,7 +278,7 @@ main() {
             -v|--verbose)
                 VERBOSE=true
                 ;;
-            codex|codex-bridge)
+            codex|codex-ws-agent|codex-bridge)
                 echo 'UNIFIED_RUNTIME_ENTRY_REQUIRED: retired Agent component; use cyf-agent-runtime-v1 with explicit installation configuration' >&2
                 return 2
                 ;;

@@ -1,5 +1,7 @@
 # 聚义厅「自家接应」：统一 Runtime 安装、登记与升级
 
+> 2026-10-26：源码候选Runtime1.3.11/bridge1.1.5内部目录改为codex-bridge；本节新路径不代表旧主机已迁移。线上1.3.10仍使用codex-ws-agent，必须受控安装新制品并核验后再更新主机记录。不可直接mv运行目录、沿用旧绝对路径venv或迁移业务state。
+
 核对：**2026-10-20**。本次仅更新安装/升级流程与目录约定；核对源码为 `2f0518de38eef3b33dc6498865c35f266133a7e6`，覆盖安装器、Runtime 入口、systemd/环境模板、托管控制说明及执行引擎配置校验。该提交的 Runtime `package.json` 声明为 **1.2.0**；包版本、制品目录名、CYF Web/API 版本不是同一版本标识，不相互推断。
 
 本文不是最新发布清单，也不证明目标主机已经安装或验收。每次操作固定实际候选 commit/tree、制品路径/摘要、原安装基线和验证证据；远端未查询时不声称本地 HEAD 是远端最新。2026-10-12 的 1.0.3 接入与目录迁移结论只保留为历史范围，不作为新版本兼容性证明。
@@ -17,7 +19,7 @@
 `ownerJiacn` 是所有者，不是 tenant。不能从历史任务的 tenant、机器目录名或角色名猜身份。旧 API Key 不能代替用户登录授权或新 installation 授权。不要在聊天、浏览器导入文件或普通日志传递密钥/JWT。
 
 **两种情况分开：**
-- 旧 `codex-bridge` 首次转入统一 Runtime：先查是否已有新 installation；没有才按下文登记/enroll，保留角色绑定，不除名再入伙。
+- 旧 `codex-ws-agent` 首次转入统一 Runtime：先查是否已有新 installation；没有才按下文登记/enroll，保留角色绑定，不除名再入伙。
 - 已有统一 Runtime 升级：沿用原 manifest、installation、hostId、状态及授权，跳过第3～4、6节的首次注册，不重复生成身份。
 
 已有统一Runtime仅做目录收口时，按第9节完整迁移本角色HOME与路径索引，仍不重新登记。
@@ -58,7 +60,7 @@ git -C "$REPO" rev-parse HEAD
 
 ```text
 /home/isp/apps/cyf-agent-runtime-v1/
-  app/                                    # 唯一现用实体程序，runtime/、codex-bridge/、node/
+  app/                                    # 唯一实体程序；新候选为runtime/、codex-bridge/、node/
   release-records/                         # 当前与历史版本/源码/摘要/验证记录
   RELEASES.md                             # 与实际服务/PID一致的当前说明
 /home/isp/baks/cyf-agent-runtime-v1/<归档批次>/ # 历史程序、停写状态快照、恢复信息
@@ -205,7 +207,7 @@ CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE="$CANDIDATE/enrollment-secret" \
 7. **逐项验收**：核对实际进程使用候选路径、无重复 writer、每个 subject 的当前注册/在线与实测能力；按第8节做明确授权的新业务验收。旧在线记录、服务 active、inbox completed 或目录存在均不足以证明交付成功。
 8. **失败处置**：保留新状态和日志，先归因；只有确认旧制品能读取当前状态时才恢复旧启动配置。若新版本已写入不可逆状态，不拿旧 DB 快照覆盖新业务事实，不盲回退或再次 enroll；按已制定的恢复方案处理并报告真实阻塞。
 
-### 7.2 从旧独立 codex-bridge 迁移
+### 7.2 从旧独立 codex-ws-agent 迁移
 
 先查是否已有统一 Runtime installation：已有则沿用，没有才执行首次登记/enroll。保留原角色绑定，不除名重绑、不复用旧 API Key。旧协议队列不自动导入，逐项处理在途/未知结果；完整 HOME 和路径索引的迁移按第9节执行。旧服务确认停止后才启动统一服务，不把制品中的内嵌执行库当成另一套需启用的服务。
 
