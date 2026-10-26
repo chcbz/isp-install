@@ -433,6 +433,9 @@ export class AppServerAdapter extends EventEmitter {
     this.send = send || (frame => child.stdin.write(`${JSON.stringify(frame)}\n`))
     child.stdout.on('data', chunk => this._onData(chunk.toString('utf8')))
     child.stderr?.on('data', chunk => { this.stderrBytes += chunk.length; if (this.stderrBytes > this.maxStderrBytes) this.close(new Error('APP_SERVER_STDERR_LIMIT')) })
+    // A service stop can close the child's pipe before its exit event. Stream errors
+    // do not bubble to ChildProcess; settle pending RPCs instead of crashing the host.
+    child.stdin?.on('error', error => this.close(error))
     child.on('error', error => this.close(error)); child.on('exit', () => this.close(new Error('APP_SERVER_EXITED')))
   }
   request(method, params = {}, timeoutMs = this.requestTimeoutMs) {
