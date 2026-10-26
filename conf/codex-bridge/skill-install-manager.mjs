@@ -392,7 +392,7 @@ const atomicWriteJson = (targetPath, value, mode = 0o600) => (
   atomicWriteText(targetPath, `${JSON.stringify(value, null, 2)}\n`, mode)
 )
 
-const readJson = path => {
+const readDurableBytes = path => {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const before = fstatSync(fd, { bigint: true })
@@ -400,9 +400,14 @@ const readJson = path => {
     const bytes = readFileSync(fd), after = fstatSync(fd, { bigint: true }), current = lstatSync(path, { bigint: true })
     if (before.dev !== current.dev || before.ino !== current.ino || before.size !== BigInt(bytes.length)
         || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'durable evidence changed')
-    return parseStrictJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { integerTokensOnly: true })
+    return bytes
   } finally { closeSync(fd) }
 }
+
+const parseDurableBytes = bytes => parseStrictJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { integerTokensOnly: true })
+const readJson = path => parseDurableBytes(readDurableBytes(path))
+// Private, bounded to one fully validated snapshot per manager. Never populated by _save.
+const validatedJournals = new WeakMap()
 
 const isExplicitLoopbackHost = hostname => {
   const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase()
@@ -832,7 +837,16 @@ export class SkillInstallManager {
   }
   _load() {
     if (!lstatSync(this.statePath).isFile() || lstatSync(this.statePath).nlink !== 1 || lstatSync(this.statePath).isSymbolicLink() || realpathSync(this.statePath) !== this.statePath) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'unsafe journal')
-    const { journalSha256, ...state } = readJson(this.statePath)
+    // Always perform the complete safe read, even when validation can be reused.
+    const bytes = readDurableBytes(this.statePath), scope = managementCanonicalJson(this.scope)
+    const previous = validatedJournals.get(this)
+    if (previous?.path === this.statePath && previous.scope === scope && previous.bytes.equals(bytes)) return structuredClone(previous.state)
+    const state = this._validateJournal(parseDurableBytes(bytes))
+    validatedJournals.set(this, { path: this.statePath, scope, bytes, state: structuredClone(state) })
+    return state
+  }
+  _validateJournal(journal) {
+    const { journalSha256, ...state } = journal
     if (journalSha256 !== managementDigest('cyf.skill.journal.v2', state) || state.formatVersion !== 2
         || managementCanonicalJson(state.scope) !== managementCanonicalJson(this.scope)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'journal integrity/scope conflict')
     for (const record of Object.values(state.commands)) {
