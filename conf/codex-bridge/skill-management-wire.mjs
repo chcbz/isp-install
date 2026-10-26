@@ -59,7 +59,7 @@ export function parseManagementMessage(input) {
     if (commandSha256 !== managementDigest('cyf.skill.command.v2', preimage) || value.data.fencingToken !== value.data.skillRevision) fail('SKILL_RESULT_CONFLICT')
     const c = value.data
     if ((c.action === 'INSTALL' ? c.source !== null : c.source === null)
-      || (c.action === 'ENABLE' && !c.desiredEnabled) || (c.action === 'DISABLE' && c.desiredEnabled)) fail()
+      || (c.action === 'ENABLE' && !c.desiredEnabled) || (['DISABLE', 'UNINSTALL'].includes(c.action) && c.desiredEnabled)) fail()
     for (const ref of [c.source, c.target].filter(Boolean)) {
       // Installation IDs become one path segment exactly once; never URL-normalize aliases.
       if (/[\\/%?#]/u.test(ref.skillInstallationId) || ref.skillInstallationId === '.' || ref.skillInstallationId === '..') fail('SKILL_DOWNLOAD_FORBIDDEN')

@@ -608,3 +608,47 @@ for (const legacyFlag of [undefined, false, true]) {
     assert.equal(Object.hasOwn(f.manager, 'enabled'), false)
   })
 }
+
+const uninstall = (target, revision = '2') => command(target, {
+  ...policy(target, revision, false).data, action: 'UNINSTALL', commandId: `uninstall_${revision}`,
+  skillChangeId: `change_uninstall_${revision}`
+})
+test('UNINSTALL removes current discovery, preserves exact retained package and permits new INSTALL identity', async t => {
+  const f = setup(t), { pkg } = await installed(f), c = uninstall(pkg.target)
+  const result = await f.manager.handle(c)
+  assert.equal(outcome(result), 'APPLIED'); assert.equal(result.resultEnvelope.data.evidence.actual, null)
+  assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
+  assert.equal(f.manager.listInstalledSkills().length, 0)
+  const retained = f.manager.listInstalledSkills({ includeRetained: true })
+  assert.equal(retained.length, 1); assert.equal(retained[0].active, false)
+  assert.ok(existsSync(resolve(retained[0].packageRoot, 'SKILL.md')))
+  const m = restart(f); assert.equal(m.listInstalledSkills().length, 0)
+  assert.equal(outcome(await m.handle(c)), 'APPLIED'); assert.equal(f.downloads(), 1)
+  const next = f.add(packageFixture({ installationId: 'si_reinstalled' }))
+  const prep = command({ ...next.target, skillInstallationId: 'si_reinstalled' }, { commandId: 'reinstall_prepare', skillChangeId: 'reinstall', skillRevision: '3', fencingToken: '3' })
+  f.add({ ...next, target: prep.data.target })
+  assert.equal(outcome(await m.handle(prep)), 'PREPARED')
+  assert.equal(outcome(await m.handle(activate(prep))), 'APPLIED')
+  assert.equal(m.listInstalledSkills().length, 1)
+  assert.equal(m.listInstalledSkills({ includeRetained: true }).length, 2)
+})
+test('UNINSTALL of disabled installation needs no provider; intent crash is recovered by READ, not mutation replay', async t => {
+  const f = setup(t), { pkg } = await installed(f)
+  assert.equal(outcome(await f.manager.handle(policy(pkg.target, '2', false))), 'APPLIED')
+  f.manager.verifyCandidate = async () => { throw new Error('must not probe provider on uninstall') }
+  f.manager.checkpoint = crashed('policy-intent-persisted')
+  const c = uninstall(pkg.target, '3')
+  await assert.rejects(f.manager.handle(c), /crash/)
+  const m = restart(f), read = await m.handle(reconcile(c))
+  assert.equal(outcome(read), 'APPLIED'); assert.equal(read.resultEnvelope.data.evidence.actual, null)
+  assert.equal(m.listInstalledSkills().length, 0)
+  assert.equal(m.listInstalledSkills({ includeRetained: true }).length, 1)
+})
+test('UNINSTALL still rejects wrong source and permission expansion; malformed enabled removal never ACKs', async t => {
+  const f = setup(t), { pkg } = await installed(f)
+  const c = uninstall(pkg.target)
+  await assert.rejects(f.manager.handle(command(pkg.target, { ...c.data, desiredEnabled: true })))
+  const wrong = command(pkg.target, { ...c.data, source: { ...pkg.target, skillInstallationId: 'si_other' } })
+  assert.notEqual(outcome(await f.manager.handle(wrong)), 'APPLIED')
+  assert.equal(f.manager.listInstalledSkills().length, 1)
+})

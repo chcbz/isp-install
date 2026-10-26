@@ -845,7 +845,7 @@ export class SkillInstallManager {
             || ['agentId', 'runtimeInstallationId', 'fencingToken', 'deliveryEpoch', 'skillRevision'].some(key => record.result.data[key] !== record.envelope.data[key])
             || record.result.data.evidence.observedCommandId !== (record.envelope.data.observedCommandId || record.envelope.data.commandId)
             || record.envelope.data.phase !== 'READ' && record.result.data.evidence.phase !== record.envelope.data.phase
-            || record.result.data.evidence.outcome === 'APPLIED' && (!this._same(record.result.data.evidence.actual, record.envelope.data.target)
+            || record.result.data.evidence.outcome === 'APPLIED' && (!this._same(record.result.data.evidence.actual, record.envelope.data.action === 'UNINSTALL' ? null : record.envelope.data.target)
               || record.result.data.evidence.appliedRevision !== record.envelope.data.skillRevision)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'result integrity conflict')
         if (record.receipt) {
           parseManagementMessage(record.receipt)
@@ -886,7 +886,7 @@ export class SkillInstallManager {
   _same(left, right) { return managementCanonicalJson(left) === managementCanonicalJson(right) }
   _assertSource(state, command) {
     const current = this._skill(state, command.skillKey)
-    if (!this._same(current?.target || null, command.source)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'precise source changed')
+    if (!this._same((current?.removed ? null : current?.target) || null, command.source)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'precise source changed')
     if (current && command.action === 'UPGRADE' && command.desiredEnabled !== current.enabled) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'upgrade cannot change enabled policy')
   }
   _fence(state, command) {
@@ -899,7 +899,7 @@ export class SkillInstallManager {
   }
   _baseEvidence(state, record, outcome, reasonCode = null) {
     const c = record.envelope.data, current = this._skill(state, c.skillKey)
-    return { observedCommandId: c.commandId, phase: c.phase, outcome, actual: current?.target || null,
+    return { observedCommandId: c.commandId, phase: c.phase, outcome, actual: current?.removed ? null : current?.target || null,
       appliedRevision: current?.revision || '0', preparedSha256: null,
       readiness: (['PREPARED', 'APPLIED'].includes(outcome) ? c.target.kind : current?.target.kind) === 'INSTRUCTION' ? 'NOT_EXECUTABLE' : 'UNKNOWN', reasonCode, observedAt: this.now() }
   }
@@ -979,7 +979,7 @@ export class SkillInstallManager {
             || observed && (!this._same(observed.envelope.data.target, c.target) || !this._same(observed.envelope.data.source, c.source))) throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'READ binding mismatch')
         // Absence alone proves nothing; READ never downloads, changes policy, or publishes a view.
         const evidence = observed ? this._observe(state, observed) : {
-          ...this._baseEvidence(state, { ...record, envelope: { ...envelope, data: { ...c, phase: c.action === 'ENABLE' || c.action === 'DISABLE' ? 'POLICY' : 'ACTIVATE' } } }, 'UNKNOWN', 'INTEGRITY_UNPROVEN'), observedCommandId: c.observedCommandId }
+          ...this._baseEvidence(state, { ...record, envelope: { ...envelope, data: { ...c, phase: ['ENABLE', 'DISABLE', 'UNINSTALL'].includes(c.action) ? 'POLICY' : 'ACTIVATE' } } }, 'UNKNOWN', 'INTEGRITY_UNPROVEN'), observedCommandId: c.observedCommandId }
         if (observed && evidence.outcome === 'APPLIED') this._applyObserved(state, observed)
         return this._finish(state, record, evidence, observed?.executionRuntimeInstanceId || record.executionRuntimeInstanceId)
       }
@@ -995,7 +995,7 @@ export class SkillInstallManager {
         this._assertIdentity(c, session)
         this._policyView(state, record)
         this._applyObserved(state, record)
-        return this._finish(state, record, { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision })
+        return this._finish(state, record, { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.action === 'UNINSTALL' ? null : c.target, appliedRevision: c.skillRevision })
       } catch (error) {
         // Once publication may have happened, never turn uncertainty into a refundable failure.
         if (error?.simulatedCrash) throw error
@@ -1077,7 +1077,7 @@ export class SkillInstallManager {
     if (!c.desiredEnabled) {
       if (existsSync(resolve(verifyControlledCodexHome(this.profile.codexHome), c.skillKey))) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'disabled source must not be discoverable')
       this._applyObserved(state, record)
-      return this._finish(state, record, { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 })
+      return this._finish(state, record, { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.action === 'UNINSTALL' ? null : c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 })
     }
     const root = verifyControlledCodexHome(this.profile.codexHome), view = resolve(root, c.skillKey)
     const stageRoot = this._viewStagingRoot(), stage = resolve(stageRoot, this._key(c.commandId))
@@ -1100,7 +1100,7 @@ export class SkillInstallManager {
     this.checkpoint('view-switched', record)
     if (this._observe(state, record).outcome !== 'APPLIED') throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'switched view evidence differs')
     this._applyObserved(state, record)
-    const evidence = { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 }
+    const evidence = { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.action === 'UNINSTALL' ? null : c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 }
     return this._finish(state, record, evidence)
   }
   _viewStagingRoot() {
@@ -1127,6 +1127,12 @@ export class SkillInstallManager {
     if (c.desiredEnabled === current.enabled) {
       if (c.desiredEnabled) this._assertViewSource(state, c, view)
       else if (existsSync(view)) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'disabled view unexpectedly published')
+      if (c.action === 'UNINSTALL') {
+        // Already disabled: persist the exact absence intent so READ can recover
+        // without deleting the immutable package required by admitted tasks.
+        record.intent = { view, uninstalledWithoutView: true }
+        this._save(state); this.checkpoint('policy-intent-persisted', record)
+      }
       return
     }
     if (!c.desiredEnabled) {
@@ -1155,18 +1161,28 @@ export class SkillInstallManager {
   _applyObserved(state, record) {
     const c = record.envelope.data, current = this._skill(state, c.skillKey)
     if (current && BigInt(current.revision) > BigInt(c.skillRevision)) return
-    state.skills[this._key(c.skillKey)] = { target: c.target, enabled: c.desiredEnabled, revision: c.skillRevision, commandId: c.commandId }
+    state.skills[this._key(c.skillKey)] = { target: c.target, enabled: c.desiredEnabled, removed: c.action === 'UNINSTALL', revision: c.skillRevision, commandId: c.commandId }
     const installation = this._installation(state, c.target.skillInstallationId)
     if (installation) installation.activated = true
   }
   _observe(state, record) {
     const c = record.envelope.data
     if (record.result && record.result.data.evidence.outcome !== 'UNKNOWN') return record.result.data.evidence
+    if (c.action === 'UNINSTALL' && c.phase === 'POLICY' && record.intent?.uninstalledWithoutView) {
+      try {
+        this._verifiedInstallation(state, c.target.skillInstallationId)
+        const current = this._skill(state, c.skillKey)
+        if (record.intent.view === resolve(verifyControlledCodexHome(this.profile.codexHome, { create: false }), c.skillKey)
+            && !existsSync(record.intent.view) && current && !current.enabled && this._same(current.target, c.source)
+            && BigInt(current.revision) <= BigInt(c.skillRevision))
+          return { ...this._baseEvidence(state, record, 'APPLIED'), actual: null, appliedRevision: c.skillRevision }
+      } catch { /* Missing or changed retained source does not prove uninstall. */ }
+    }
     if (c.phase === 'POLICY' && record.intent?.disabled) {
       try {
         if (!existsSync(record.intent.view) && this._viewMatches(state, c.target.skillInstallationId, record.intent.stage)
             && samePathIdentity(pathIdentity(record.intent.stage), { ...record.intent.sourceIdentity, path: realpathSync(record.intent.stage) })) {
-          return { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision }
+          return { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.action === 'UNINSTALL' ? null : c.target, appliedRevision: c.skillRevision }
         }
       } catch {}
     }
@@ -1175,7 +1191,7 @@ export class SkillInstallManager {
         const row = this._verifiedInstallation(state, c.target.skillInstallationId), view = record.intent.view
         if (view !== resolve(verifyControlledCodexHome(this.profile.codexHome, { create: false }), c.skillKey) || lstatSync(view).isSymbolicLink()
             || !this._viewMatches(state, c.target.skillInstallationId, view, c.commandId) || skillPackageTreeDigest(view) !== row.packageTreeDigest) throw new Error('marker')
-        return { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 || null }
+        return { ...this._baseEvidence(state, record, 'APPLIED'), actual: c.action === 'UNINSTALL' ? null : c.target, appliedRevision: c.skillRevision, preparedSha256: c.preparedSha256 || null }
       } catch { /* Unknown is not a reason to switch or roll back. */ }
     }
     if (c.phase === 'PREPARE' && record.preparedSha256) {
@@ -1189,14 +1205,14 @@ export class SkillInstallManager {
   listInstalledSkills({ includeRetained = false, skillInstallationId = null } = {}) {
     // Atomic journal read + immutable package verification must not block old tasks during PREPARE.
     const state = this._load(), ids = includeRetained ? Object.values(state.installations).filter(row => row.activated).map(row => row.command.target.skillInstallationId)
-      : Object.values(state.skills).map(row => row.target.skillInstallationId)
+      : Object.values(state.skills).filter(row => !row.removed).map(row => row.target.skillInstallationId)
     return ids.filter(id => skillInstallationId === null || id === skillInstallationId).map(id => {
       const row = this._verifiedInstallation(state, id), current = this._skill(state, row.skillKey)
       if (!includeRetained) {
         const view = resolve(verifyControlledCodexHome(this.profile.codexHome, { create: false }), row.skillKey)
         if (current.enabled ? !this._viewMatches(state, id, view) : existsSync(view)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'current discovery view differs')
       }
-      return { ...row, active: current?.target.skillInstallationId === id }
+      return { ...row, active: !current?.removed && current?.target.skillInstallationId === id }
     })
   }
 
