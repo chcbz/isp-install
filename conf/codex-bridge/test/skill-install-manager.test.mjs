@@ -687,9 +687,12 @@ test('K2 image package stays installed and discovery reports unavailable without
   await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
 })
 
-test('native-image standalone files install as ordinary INSTRUCTION without a runner manifest or credentials', async t => {
+for (const skillKey of ['native-image', 'image-generate', 'image-edit']) test(`${skillKey} standalone files install as ordinary INSTRUCTION without a runner manifest or credentials`, async t => {
   const root = new URL('../../skills/native-image/', import.meta.url)
-  const entries = [{ name: 'SKILL.md', data: readFileSync(new URL('SKILL.md', root)) }]
+  const document = skillKey === 'native-image' ? 'SKILL.md' : `variants/${skillKey}.md`
+  const skillVersion = skillKey === 'native-image' ? '1.0.0' : '1.3.0'
+  const entries = [{ name: 'SKILL.md', data: readFileSync(new URL(document, root)) }]
+  assert.match(entries[0].data.toString(), new RegExp(`/skill-config/${skillKey}\\.json`))
   const collect = relative => {
     for (const entry of readdirSync(new URL(`${relative}/`, root), { withFileTypes: true })) {
       const name = `${relative}/${entry.name}`
@@ -699,15 +702,15 @@ test('native-image standalone files install as ordinary INSTRUCTION without a ru
   }
   collect('scripts'); collect('vendor')
   assert.equal(entries.some(entry => entry.name === 'manifest.json' || entry.name.startsWith('skill-config/')), false)
-  const bytes = zip(entries), target = { skillInstallationId: 'si_native_image', productVersionId: 'spv_native_image', skillVersion: '1.0.0',
+  const bytes = zip(entries), target = { skillInstallationId: 'si_native_image', productVersionId: 'spv_native_image', skillVersion,
     packageSha256: hash(bytes), manifestSha256: null, byteLength: String(bytes.length), kind: 'INSTRUCTION' }
-  const f = setup(t); f.add({ target, bytes }); const c = command(target, { skillKey: 'native-image' })
+  const f = setup(t); f.add({ target, bytes }); const c = command(target, { skillKey })
   assert.equal(outcome(await f.manager.handle(c)), 'PREPARED')
   const result = await f.manager.handle(activate(c))
   assert.equal(outcome(result), 'APPLIED'); assert.equal(result.resultEnvelope.data.evidence.readiness, 'NOT_EXECUTABLE')
   const installed = f.manager.listInstalledSkills()[0]
-  assert.equal(installed.skillKey, 'native-image'); assert.equal(installed.manifest, null)
-  assert.equal(hash(readFileSync(resolve(f.home, 'skills/native-image/vendor/magick.wasm'))), hash(entries.find(entry => entry.name === 'vendor/magick.wasm').data))
+  assert.equal(installed.skillKey, skillKey); assert.equal(installed.manifest, null)
+  assert.equal(hash(readFileSync(resolve(f.home, `skills/${skillKey}/vendor/magick.wasm`))), hash(entries.find(entry => entry.name === 'vendor/magick.wasm').data))
   assert.equal(f.downloads(), 1)
-  console.log(`native-image fixture ZIP bytes=${bytes.length}, sha256=${hash(bytes)}; temporary installer only; publication/production install: NOT_RUN`)
+  console.log(`${skillKey} fixture ZIP bytes=${bytes.length}, sha256=${hash(bytes)}; temporary installer only; publication/production install: NOT_RUN`)
 })
