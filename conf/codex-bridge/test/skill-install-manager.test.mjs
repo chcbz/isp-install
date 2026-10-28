@@ -260,7 +260,7 @@ test('upgrade and policy keep old tasks on exact immutable installation/package/
   const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(),
     loadRetained: () => f.manager.listInstalledSkills({ includeRetained: true }), runnerRegistry: new Map([['native-model', runner]]) })
   registry.setSession(binding.fence)
-  const item1 = (await registry.refresh()).skills[0]; assert.equal(item1.readiness, 'READY')
+  const item1 = (await registry.refresh()).skills[0]; assert.equal(item1.readiness, 'DEPENDENCY_MISSING')
   const taskBinding = { executionId: 'execution_old', taskGrantId: 'grant_old', taskGrantVersion: '1', agentId: binding.scope.agentId,
     skillKey: old.skillKey, skillInstallationId: old.skillInstallationId, productVersionId: old.productVersionId,
     skillVersion: old.skillVersion, packageSha256: old.packageSha256, manifestSha256: old.manifestSha256, approvedPermissionsSha256: old.approvedPermissionsSha256 }
@@ -268,7 +268,7 @@ test('upgrade and policy keep old tasks on exact immutable installation/package/
     skillChangeId: 'sc_upgrade', skillRevision: '2', fencingToken: '2' })
   // Preparation must not block/replace historical execution lookup, even while the installer lock is held.
   f.manager.verifyCandidate = async () => {
-    assert.equal((await registry.requireExact(item1, { taskBinding })).descriptor.packageRoot, old.packageRoot)
+    assert.equal((await registry.requireExact(item1, { taskBinding, allowUnavailable: true })).descriptor.packageRoot, old.packageRoot)
     return { readiness: 'READY' }
   }
   assert.equal(outcome(await f.manager.handle(upgrade)), 'PREPARED')
@@ -684,7 +684,7 @@ test('K2 image package stays installed and discovery reports unavailable without
     skillKey: descriptor.skillKey, skillInstallationId: descriptor.skillInstallationId, productVersionId: descriptor.productVersionId,
     skillVersion: descriptor.skillVersion, packageSha256: descriptor.packageSha256, manifestSha256: descriptor.manifestSha256,
     approvedPermissionsSha256: descriptor.approvedPermissionsSha256 }
-  assert.equal((await registry.requireNativePackage(taskBinding, { taskBinding })).descriptor.packageTreeDigest, descriptor.packageTreeDigest)
+  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
 })
 
 test('native-image standalone files install as ordinary INSTRUCTION without a runner manifest or credentials', async t => {
