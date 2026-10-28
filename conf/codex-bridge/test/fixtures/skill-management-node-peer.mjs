@@ -118,8 +118,11 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
           while (manager.replayResults(emitEnvelope, { replayToken }) === manager.maxReplayBatch) {}
           await publishCatalog(); break
         }
+        case 'resolveNativeTask':
         case 'resolveTask': {
-          const b = input.taskSkillBinding, entry = await registry.requireExact(b, { taskBinding: b, allowUnavailable: true })
+          const b = input.taskSkillBinding, entry = input.op === 'resolveNativeTask'
+            ? await registry.requireNativePackage(b, { taskBinding: b })
+            : await registry.requireExact(b, { taskBinding: b, allowUnavailable: true })
           const row = entry.descriptor
           output({ kind: 'taskPackage', value: Object.fromEntries(['skillInstallationId', 'productVersionId', 'skillKey', 'skillVersion',
             'packageSha256', 'manifestSha256', 'approvedPermissionsSha256'].map(key => [key, row[key]])) }); break

@@ -36,15 +36,15 @@ const resultFor = (rows, command) => envelopes(rows).find(row => row.messageType
 const catalog = rows => { const row = rows.find(row => row.kind === 'catalog'); assert.ok(row, JSON.stringify(rows)); return row.value }
 
 test('stdin/stdout peer runs real Node install/upgrade/policy, retains old task package and replays original boot bytes without any network/model', async t => {
-  const p = await peer(t), first = packageFixture({ executable: true }), second = packageFixture({ version: '2.0.0', executable: true })
+  const p = await peer(t), first = packageFixture(), second = packageFixture({ version: '2.0.0' })
   const init = await p.send({ op: 'init', root: p.root, apiOrigin: 'https://api.example.test', profileId: 'java-node-bridge', ...binding,
-    testExecutableReadiness: true, packages: [first, second].map(pkg => ({ skillInstallationId: pkg.target.skillInstallationId, base64: pkg.bytes.toString('base64') })) })
-  assert.equal(init[0].kind, 'ready'); assert.equal(init[0].dependencyBoundary, 'TEST_PROBES_NO_EXECUTION'); assert.equal(catalog(init).skillExecution.skills.length, 0)
+    testExecutableReadiness: false, packages: [first, second].map(pkg => ({ skillInstallationId: pkg.target.skillInstallationId, base64: pkg.bytes.toString('base64') })) })
+  assert.equal(init[0].kind, 'ready'); assert.equal(init[0].dependencyBoundary, 'NO_EXECUTABLE_RUNNERS'); assert.equal(catalog(init).skillExecution.skills.length, 0)
   const prepare = command(first.target), prepared = await p.receive(prepare)
   assert.equal(envelopes(prepared)[0].messageType, 'command.ack'); assert.equal(resultFor(prepared, prepare).data.evidence.outcome, 'PREPARED')
   const activation = activate(prepare), applied = await p.receive(activation), fact = resultFor(applied, activation)
   assert.equal(fact.data.evidence.outcome, 'APPLIED'); validateManagement('CapabilityAdapterInput', catalog(applied))
-  assert.equal(catalog(applied).skillExecution.skills[0].readiness, 'READY')
+  assert.equal(catalog(applied).skillExecution.skills[0].readiness, 'NOT_EXECUTABLE')
   const upgrade = command(second.target, { action: 'UPGRADE', source: first.target, skillChangeId: 'sc_upgrade', skillRevision: '2', fencingToken: '2' })
   assert.equal(resultFor(await p.receive(upgrade), upgrade).data.evidence.outcome, 'PREPARED')
   assert.equal(catalog(await p.receive(activate(upgrade))).skillExecution.skills[0].skillInstallationId, second.target.skillInstallationId)
@@ -52,7 +52,7 @@ test('stdin/stdout peer runs real Node install/upgrade/policy, retains old task 
   const taskSkillBinding = { executionId: 'old_execution', taskGrantId: 'old_grant', taskGrantVersion: '1', agentId: binding.scope.agentId,
     skillKey: prepare.data.skillKey, ...Object.fromEntries(['skillInstallationId', 'productVersionId', 'skillVersion', 'packageSha256', 'manifestSha256'].map(key => [key, first.target[key]])),
     approvedPermissionsSha256: prepare.data.approvedPermissionsSha256 }
-  const old = await p.send({ op: 'resolveTask', taskSkillBinding }); assert.equal(old[0].value.skillInstallationId, first.target.skillInstallationId)
+  const old = await p.send({ op: 'resolveNativeTask', taskSkillBinding }); assert.equal(old[0].value.skillInstallationId, first.target.skillInstallationId)
   assert.equal(old[0].value.approvedPermissionsSha256, prepare.data.approvedPermissionsSha256)
   await p.send({ op: 'restart', fence: { ...binding.fence, runtimeInstanceId: 'boot_after_java_restart', sessionGeneration: '2' } })
   const replay = await p.send({ op: 'replay' }), originalBytes = applied.find(row => row.kind === 'result' && fromAgentWire(Buffer.from(row.wireBase64, 'base64').toString()).messageId === fact.messageId).wireBase64
