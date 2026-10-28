@@ -693,6 +693,10 @@ for (const skillKey of ['native-image', 'image-generate', 'image-edit']) test(`$
   const skillVersion = skillKey === 'native-image' ? '1.0.0' : '1.3.0'
   const entries = [{ name: 'SKILL.md', data: readFileSync(new URL(document, root)) }]
   assert.match(entries[0].data.toString(), new RegExp(`/skill-config/${skillKey}\\.json`))
+  if (skillKey !== 'native-image') {
+    assert.ok(entries[0].data.toString().includes(`--config /skill-config/${skillKey}.json`))
+    assert.equal(entries[0].data.toString().includes('CYF_SKILL_CONFIG_DIR/'), false)
+  }
   const collect = relative => {
     for (const entry of readdirSync(new URL(`${relative}/`, root), { withFileTypes: true })) {
       const name = `${relative}/${entry.name}`

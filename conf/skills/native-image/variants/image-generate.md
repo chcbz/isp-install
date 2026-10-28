@@ -8,7 +8,7 @@ metadata:
 
 仅在任务授权且本技能的配置与网络可用时运行包内 `scripts/image.mjs`。图片理解优先用原生图像载体。需 Node.js >=24.14 和包内 `vendor/` 的 `@imagemagick/magick-wasm` 0.0.45 运行文件；不在任务中下载依赖。
 
-执行环境应提供只读私有配置 `/skill-config/image-generate.json`，字段为 `endpoint`（HTTPS 服务根地址）、`model`、`apiKey`。可用 `--config` 指定配置文件，否则使用 `CYF_SKILL_CONFIG_DIR/image-generate.json`；仅在未设置配置路径时支持环境变量 `IMAGE_API_ENDPOINT`、`IMAGE_API_MODEL`、`IMAGE_API_KEY` 备用。不要把密钥写入参数、聊天、技能包或日志。脚本显式启用 `HTTPS_PROXY`/`HTTP_PROXY`，无视 `NO_PROXY` 防止绕过代理；不关闭 TLS 验证，CA 须由运行环境在 Node 启动前通过 `NODE_EXTRA_CA_CERTS` 等提供。实际配置、依赖和网络授权由执行环境负责。服务需支持 `/v1/images/generations` 和 `/v1/images/edits` JSON 协议。
+执行环境应提供只读私有配置 `/skill-config/image-generate.json`，字段为 `endpoint`（HTTPS 服务根地址）、`model`、`apiKey`。必须显式传入 `--config /skill-config/image-generate.json`，不要省略或使用其他技能的配置。不要把密钥写入参数、聊天、技能包或日志。脚本显式启用 `HTTPS_PROXY`/`HTTP_PROXY`，无视 `NO_PROXY` 防止绕过代理；不关闭 TLS 验证，CA 须由运行环境在 Node 启动前通过 `NODE_EXTRA_CA_CERTS` 等提供。实际配置、依赖和网络授权由执行环境负责。服务需支持 `/v1/images/generations` 和 `/v1/images/edits` JSON 协议。
 
 ```sh
 node <本技能目录>/scripts/image.mjs generate --config /skill-config/image-generate.json --prompt '描述' --output /outputs/image.png [--size 800x600]
