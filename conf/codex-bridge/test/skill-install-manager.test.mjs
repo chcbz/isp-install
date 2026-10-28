@@ -144,7 +144,6 @@ test('real ZIP traversal, symlink/special files, duplicate/prefix and Unicode al
 test('bounded frontmatter identities and archive expansion/entry limits remain enforced', async t => {
   for (const [name, data, options] of [
     ['wrong-name', skillDocument('other'), {}], ['wrong-version', skillDocument('repo-test', '2.0.0'), {}],
-    ['missing-version', '---\nname: repo-test\ndescription: x\n---\n', {}],
     ['duplicate-name', skillDocument().replace('name: repo-test', 'name: repo-test\nname: repo-test'), {}],
     ['conflicting-version', skillDocument().replace('metadata:', 'version: "2.0.0"\nmetadata:'), {}],
     ['yaml-alias', skillDocument().replace('"1.0.0"', '*untrusted'), {}],
@@ -290,7 +289,7 @@ test('upgrade and policy keep old tasks on exact immutable installation/package/
     claimOrResume: async () => ({}), loadResult: async () => persisted, materializeAuthorizedInputs: async () => [],
     validateAndPersistResult: async (_command, _descriptor, result) => (persisted = { schemaVersion: 1, executionId: task.executionId, snapshotDigest: task.snapshotDigest, result }),
     commitResult: async () => ({ state: 'RESULT_COMMITTED' }), persistReceipt: async () => {} }
-  await executeSkill(task, ctx); await executeSkill(task, ctx); assert.equal(calls, 1)
+  await assert.rejects(executeSkill(task, ctx), /SKILL_COMMAND_INVALID/); assert.equal(calls, 0)
   await assert.rejects(registry.requireExact(item1, { taskBinding: { ...taskBinding, approvedPermissionsSha256: 'e'.repeat(64) } }), /SKILL_EXECUTION_BINDING_CHANGED/)
   assert.equal(outcome(await f.manager.handle(policy(pkg2.target, 4, true))), 'APPLIED')
   const lateDisable = policy(pkg2.target, 3, false)
@@ -419,7 +418,7 @@ test('frozen six W08 metadata.version packages retain exact ZIP, SKILL.md and sc
 
 test('executable malformed manifest, manifest identity and package-local script entrypoint cannot be fabricated', async t => {
   const parsed = packageFixture({ executable: true }), raw = JSON.parse(readFileSync(new URL('./fixtures/skill-manifest-contract-v1.json', import.meta.url))).cases.find(c => c.id === 'image-edit')
-  for (const kind of ['malformed', 'wrong-identity', 'missing-entrypoint', 'dependency-unavailable']) await t.test(kind, async t => {
+  for (const kind of ['malformed', 'wrong-identity', 'missing-entrypoint']) await t.test(kind, async t => {
     const doc = JSON.parse(raw.json); doc.skillKey = 'repo-test'; doc.skillVersion = '1.0.0'
     if (kind === 'wrong-identity') doc.skillVersion = '9.0.0'
     if (kind === 'missing-entrypoint') { doc.runner = 'local-script'; doc.entrypoint = 'scripts/missing.py'; doc.requirements = {} }
@@ -427,51 +426,37 @@ test('executable malformed manifest, manifest identity and package-local script 
     const bytes = zip([{ name: 'SKILL.md', data: skillDocument() }, { name: 'manifest.json', data: text }])
     const target = { ...parsed.target, byteLength: String(bytes.length), packageSha256: hash(bytes), manifestSha256: hash(text) }
     const f = setup(t); f.add({ target, bytes });
-    if (kind === 'dependency-unavailable') f.manager.verifyCandidate = async () => ({ readiness: 'PROVIDER_UNBOUND', reasonCode: 'PROVIDER_UNBOUND' })
     const result = await f.manager.handle(command(target)); assert.equal(outcome(result), 'FAILED')
     assert.equal(f.manager.listInstalledSkills().length, 0)
   })
 })
 
-test('prepared real SE2 archives require measured native/provider readiness; no readiness probe calls a provider', async t => {
-  const { createNativeModelRunner } = await import('../skill-runners/native-model.mjs')
-  const { createImageProviderRunner } = await import('../skill-runners/image-provider.mjs')
+test('real SE2 packages install without granting or probing legacy runner capabilities', async t => {
   const inputs = JSON.parse(readFileSync(new URL('../toolchain/skill-packages-se2/release-inputs.json', import.meta.url)))
   for (const item of inputs.packages) await t.test(item.skillKey, async t => {
     const bytes = readFileSync(new URL(`../toolchain/skill-packages-se2/${item.packageFile}`, import.meta.url))
     assert.equal(bytes.length, item.packageByteLength); assert.equal(hash(bytes), item.packageSha256)
     const f = setup(t), target = { skillInstallationId: `si_${item.skillKey}`, productVersionId: `spv_${item.skillKey}`, skillVersion: item.skillVersion,
       packageSha256: item.packageSha256, manifestSha256: item.manifestSha256, byteLength: String(bytes.length), kind: 'EXECUTABLE' }
-    f.add({ target, bytes })
-    const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(), runnerRegistry: new Map() }); registry.setSession(binding.fence)
-    f.manager.verifyCandidate = async row => (await registry.measureInstallation(row)).item
-    assert.equal(outcome(await f.manager.handle(command(target, { skillKey: item.skillKey }))), 'FAILED'); assert.equal(f.manager.listInstalledSkills().length, 0)
-    const noCall = () => assert.fail('install/readiness must not invoke provider/model')
-    if (item.runner === 'provider-operation') {
-      const bindings = { resolve: async () => ({ ready: true, scope: binding.scope, bindingId: 'test-provider', revision: '1', digest: 'a'.repeat(64) }) }
-      registry.runners.set(item.runner, createImageProviderRunner({ bindings, scope: binding.scope, fetchFn: noCall }))
-      registry.resolveBinding = () => bindings.resolve()
-    } else registry.runners.set(item.runner, createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png'] }), runModel: noCall }))
-    const c = command(target, { skillKey: item.skillKey, skillRevision: '2', fencingToken: '2', attempt: 2 })
+    f.add({ target, bytes }); f.manager.verifyCandidate = () => assert.fail('installation must not probe a runner')
+    const c = command(target, { skillKey: item.skillKey })
     assert.equal(outcome(await f.manager.handle(c)), 'PREPARED'); assert.equal(outcome(await f.manager.handle(activate(c))), 'APPLIED')
     const descriptor = f.manager.listInstalledSkills()[0]; assert.equal(descriptor.manifest.entrypoint, item.entrypoint)
-    assert.equal((await registry.refresh()).skills[0].readiness, 'READY')
+    const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(), runnerRegistry: new Map() })
+    registry.setSession(binding.fence)
+    assert.equal((await registry.refresh()).skills[0].readiness, 'DEPENDENCY_MISSING')
   })
 })
 
-test('failed upgrade preparation preserves old exact view; explicit new attempt can prepare without replaying failure', async t => {
+test('upgrade preserves exact installed packages without probing legacy runner readiness', async t => {
   const f = setup(t), { pkg: original } = await installed(f), pkg = f.add(packageFixture({ version: '2.0.0', executable: true }))
-  const oldBytes = readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md'))
-  f.manager.verifyCandidate = async () => ({ readiness: 'DEPENDENCY_MISSING', reasonCode: 'DEPENDENCY_MISSING' })
-  const first = command(pkg.target, { action: 'UPGRADE', source: original.target, skillChangeId: 'sc_retry', skillRevision: '2', fencingToken: '2' })
-  const failure = await f.manager.handle(first); assert.equal(outcome(failure), 'FAILED'); assert.equal(failure.resultEnvelope.data.evidence.reasonCode, 'DEPENDENCY_MISSING')
-  assert.deepEqual(readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md')), oldBytes)
+  f.manager.verifyCandidate = () => assert.fail('installation must not probe a runner')
+  const next = command(pkg.target, { action: 'UPGRADE', source: original.target, skillChangeId: 'sc_upgrade', skillRevision: '2', fencingToken: '2' })
+  assert.equal(outcome(await f.manager.handle(next)), 'PREPARED')
   assert.equal(f.manager.listInstalledSkills()[0].skillVersion, '1.0.0')
-  await f.manager.handle(first); assert.equal(f.downloads(), 2)
-  f.manager.verifyCandidate = async () => ({ readiness: 'READY' })
-  const next = command(pkg.target, { ...first.data, commandId: 'cmd_retry_next', attempt: 2, skillRevision: '3', fencingToken: '3' })
-  assert.equal(outcome(await f.manager.handle(next)), 'PREPARED'); assert.equal(outcome(await f.manager.handle(activate(next))), 'APPLIED')
-  assert.equal(f.manager.listInstalledSkills()[0].skillVersion, '2.0.0'); assert.equal(f.downloads(), 3)
+  assert.equal(outcome(await f.manager.handle(activate(next))), 'APPLIED')
+  assert.equal(f.manager.listInstalledSkills()[0].skillVersion, '2.0.0')
+  assert.equal(f.manager.listInstalledSkills({ includeRetained: true }).length, 2)
 })
 
 test('upgrading a disabled skill preserves disabled discovery/policy until explicit higher ENABLE', async t => {
@@ -651,4 +636,78 @@ test('UNINSTALL still rejects wrong source and permission expansion; malformed e
   const wrong = command(pkg.target, { ...c.data, source: { ...pkg.target, skillInstallationId: 'si_other' } })
   assert.notEqual(outcome(await f.manager.handle(wrong)), 'APPLIED')
   assert.equal(f.manager.listInstalledSkills().length, 1)
+})
+
+
+test('ordinary SKILL.md without metadata.version installs with approved external version and no runner probe', async t => {
+  const bytes = zip([{ name: 'SKILL.md', data: '---\nname: repo-test\ndescription: Plain instructions.\n---\n\n# Plain\n' }])
+  const base = packageFixture().target
+  const target = { ...base, packageSha256: hash(bytes), byteLength: String(bytes.length) }
+  const f = setup(t); f.add({ target, bytes }); f.manager.verifyCandidate = () => assert.fail('ordinary skill must not probe a runner')
+  const prepare = command(target)
+  assert.equal(outcome(await f.manager.handle(prepare)), 'PREPARED')
+  assert.equal(outcome(await f.manager.handle(activate(prepare))), 'APPLIED')
+  const descriptor = f.manager.listInstalledSkills()[0]
+  assert.equal(descriptor.skillVersion, target.skillVersion); assert.equal(descriptor.manifest, null)
+  assert.equal(readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md'), 'utf8').includes('Plain instructions.'), true)
+  const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(),
+    loadRetained: id => f.manager.listInstalledSkills({ includeRetained: true, skillInstallationId: id }), runnerRegistry: new Map() })
+  registry.setSession(binding.fence)
+  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: binding.scope.agentId,
+    skillKey: descriptor.skillKey, skillInstallationId: descriptor.skillInstallationId, productVersionId: descriptor.productVersionId,
+    skillVersion: descriptor.skillVersion, packageSha256: descriptor.packageSha256, manifestSha256: null,
+    approvedPermissionsSha256: descriptor.approvedPermissionsSha256 }
+  const fixed = await registry.requireNativePackage(taskBinding, { taskBinding })
+  assert.equal(fixed.descriptor.packageTreeDigest, descriptor.packageTreeDigest)
+  assert.equal(fixed.descriptor.packageRoot, descriptor.packageRoot)
+  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding: { ...taskBinding, approvedPermissionsSha256: 'f'.repeat(64) } }), /SKILL_EXECUTION_BINDING_CHANGED/)
+})
+
+test('K2 image package stays installed and discovery reports unavailable without a legacy runner', async t => {
+  const inputs = JSON.parse(readFileSync(new URL('../toolchain/skill-packages-se2/release-inputs.json', import.meta.url)))
+  const item = inputs.packages.find(row => row.skillKey === 'image-edit')
+  assert.ok(item)
+  const bytes = readFileSync(new URL(`../toolchain/skill-packages-se2/${item.packageFile}`, import.meta.url))
+  assert.equal(hash(bytes), item.packageSha256)
+  const target = { skillInstallationId: 'si_image_edit', productVersionId: 'spv_image_edit', skillVersion: item.skillVersion,
+    packageSha256: item.packageSha256, manifestSha256: item.manifestSha256, byteLength: String(bytes.length), kind: 'EXECUTABLE' }
+  const f = setup(t); f.add({ target, bytes }); f.manager.verifyCandidate = () => assert.fail('runner probe is not installation authorization')
+  const prepare = command(target, { skillKey: item.skillKey })
+  assert.equal(outcome(await f.manager.handle(prepare)), 'PREPARED')
+  assert.equal(outcome(await f.manager.handle(activate(prepare))), 'APPLIED')
+  const descriptor = f.manager.listInstalledSkills()[0]
+  const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(),
+    loadRetained: id => f.manager.listInstalledSkills({ includeRetained: true, skillInstallationId: id }), runnerRegistry: new Map() })
+  registry.setSession(binding.fence)
+  assert.equal((await registry.refresh()).skills[0].readiness, 'DEPENDENCY_MISSING')
+  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: binding.scope.agentId,
+    skillKey: descriptor.skillKey, skillInstallationId: descriptor.skillInstallationId, productVersionId: descriptor.productVersionId,
+    skillVersion: descriptor.skillVersion, packageSha256: descriptor.packageSha256, manifestSha256: descriptor.manifestSha256,
+    approvedPermissionsSha256: descriptor.approvedPermissionsSha256 }
+  assert.equal((await registry.requireNativePackage(taskBinding, { taskBinding })).descriptor.packageTreeDigest, descriptor.packageTreeDigest)
+})
+
+test('native-image standalone files install as ordinary INSTRUCTION without a runner manifest or credentials', async t => {
+  const root = new URL('../../skills/native-image/', import.meta.url)
+  const entries = [{ name: 'SKILL.md', data: readFileSync(new URL('SKILL.md', root)) }]
+  const collect = relative => {
+    for (const entry of readdirSync(new URL(`${relative}/`, root), { withFileTypes: true })) {
+      const name = `${relative}/${entry.name}`
+      if (entry.isDirectory()) collect(name)
+      else { assert.equal(entry.isFile(), true); entries.push({ name, data: readFileSync(new URL(name, root)) }) }
+    }
+  }
+  collect('scripts'); collect('vendor')
+  assert.equal(entries.some(entry => entry.name === 'manifest.json' || entry.name.startsWith('skill-config/')), false)
+  const bytes = zip(entries), target = { skillInstallationId: 'si_native_image', productVersionId: 'spv_native_image', skillVersion: '1.0.0',
+    packageSha256: hash(bytes), manifestSha256: null, byteLength: String(bytes.length), kind: 'INSTRUCTION' }
+  const f = setup(t); f.add({ target, bytes }); const c = command(target, { skillKey: 'native-image' })
+  assert.equal(outcome(await f.manager.handle(c)), 'PREPARED')
+  const result = await f.manager.handle(activate(c))
+  assert.equal(outcome(result), 'APPLIED'); assert.equal(result.resultEnvelope.data.evidence.readiness, 'NOT_EXECUTABLE')
+  const installed = f.manager.listInstalledSkills()[0]
+  assert.equal(installed.skillKey, 'native-image'); assert.equal(installed.manifest, null)
+  assert.equal(hash(readFileSync(resolve(f.home, 'skills/native-image/vendor/magick.wasm'))), hash(entries.find(entry => entry.name === 'vendor/magick.wasm').data))
+  assert.equal(f.downloads(), 1)
+  console.log(`native-image fixture ZIP bytes=${bytes.length}, sha256=${hash(bytes)}; temporary installer only; publication/production install: NOT_RUN`)
 })

@@ -16,7 +16,7 @@ const installed = (overrides = {}) => {
     manifestSha256: manifest.manifestSha256, manifest }
 }
 const runner = { run() { assert.fail('readiness must not execute a runner') }, probe: () => ({ ready: true, digest: hash }) }
-const create = ({ rows = [installed({ runner: 'native-model' })], ...options } = {}) => {
+const create = ({ rows = [installed({ runner: 'local-script', entrypoint: 'scripts/run.py' })], ...options } = {}) => {
   const registry = new SkillRegistry({ scope, loadInstalled: () => rows,
     runnerRegistry: new Map([['native-model', runner], ['local-script', runner], ['provider-operation', runner]]), ...options })
   registry.setSession(fence); return registry
@@ -40,21 +40,15 @@ test('local scripts require actual measured tools, not tool names or booleans', 
   const registry = create({ rows, toolProbes: new Map([['python3', () => ({ ready: true, digest: hash })]]) })
   assert.equal((await registry.refresh()).skills[0].readiness, 'READY')
 })
-test('provider runner requires an explicit current-subject binding and revision', async () => {
-  const rows = [installed({ requirements: { providerAlias: 'image' } })]
-  for (const resolveBinding of [null, () => binding({ ready: false }), () => binding({ revision: null }),
-    () => binding({ scope: { ...scope, ownerJiacn: 'foreign' } })]) {
-    assert.equal((await create({ rows, resolveBinding }).refresh()).skills[0].readiness, 'PROVIDER_UNBOUND')
+test('retired executable runners are unavailable without calling runner or provider probes', async () => {
+  for (const name of ['native-model', 'provider-operation']) {
+    const rows = [installed({ runner: name })]
+    const registry = create({ rows, runnerRegistry: new Map([[name, {
+      run: () => assert.fail('run'), probe: () => assert.fail('retired probe') }]]),
+      resolveBinding: () => assert.fail('retired provider probe') })
+    const item = (await registry.refresh()).skills[0]
+    assert.equal(item.kind, 'EXECUTABLE'); assert.equal(item.readiness, 'DEPENDENCY_MISSING')
   }
-  const registry = create({ rows, resolveBinding: ({ scope: supplied, fence: suppliedFence, alias }) => {
-    assert.deepEqual(supplied, scope); assert.deepEqual(suppliedFence, fence); assert.equal(alias, 'image')
-    return binding({ endpoint: 'secret-endpoint', token: 'DO_NOT_EXPOSE' })
-  } })
-  const declaration = await registry.refresh(); assert.equal(declaration.skills[0].readiness, 'READY')
-  assert.equal(declaration.skills[0].bindingRevision, '4')
-  assert.equal(JSON.stringify(declaration).includes('DO_NOT_EXPOSE'), false)
-  assert.equal(JSON.stringify(declaration).includes('secret-endpoint'), false)
-  assert.equal((await create({ rows: [installed({ requirements: {} })], resolveBinding: () => binding() }).refresh()).skills[0].readiness, 'PROVIDER_UNBOUND')
 })
 test('ordinary SKILL.md stays visible as NOT_EXECUTABLE, never fabricated executable capability', async () => {
   const ordinary = { installationId: 'ordinary', skillInstallationId: 'ordinary', productVersionId: 'spv_instruction',
@@ -96,22 +90,19 @@ test('concurrent refresh only commits the latest installation measurement', asyn
   resolvers[0]([installed({ skillKey: 'old', runner: 'native-model' })]); assert.equal(await first, null)
   assert.equal(registry.declaration().skills[0].skillKey, 'current')
 })
-test('execution lookup rechecks immutable hashes, tool measurement and binding revision', async () => {
-  let revision = '4', toolDigest = hash
-  const row = installed({ requirements: { providerAlias: 'image' } })
-  const registry = create({ rows: [row], runnerRegistry: new Map([['provider-operation', {
-    run: runner.run, probe: () => ({ ready: true, digest: toolDigest }) }]]), resolveBinding: () => binding({ revision }) })
+test('local execution lookup rechecks immutable hashes and tool measurement', async () => {
+  let toolDigest = hash
+  const row = installed({ runner: 'local-script', entrypoint: 'scripts/run.py', requirements: { tools: ['python3'] } })
+  const registry = create({ rows: [row], toolProbes: new Map([['python3', () => ({ ready: true, digest: toolDigest })]]) })
   const item = (await registry.refresh()).skills[0]
-  const guards = { toolchainDigest: item.toolchainDigest, bindingRevision: item.bindingRevision }
-  const entry = await registry.requireExact(item, guards); assert.equal(typeof entry.cacheKey, 'string')
-  revision = '5'; await assert.rejects(registry.requireExact(item, guards), /SKILL_EXECUTION_BINDING_CHANGED/)
-  revision = '4'; toolDigest = 'c'.repeat(64)
+  const guards = { toolchainDigest: item.toolchainDigest }
+  assert.equal(typeof (await registry.requireExact(item, guards)).cacheKey, 'string')
+  toolDigest = 'c'.repeat(64)
   await assert.rejects(registry.requireExact(item, guards), /SKILL_EXECUTION_BINDING_CHANGED/)
-  toolDigest = hash
-  await assert.rejects(registry.requireExact({ ...item, packageSha256: 'd'.repeat(64) }, guards), /SKILL_EXECUTION_BINDING_CHANGED/)
+  await assert.rejects(registry.requireExact({ ...item, packageSha256: 'd'.repeat(64) }), /SKILL_EXECUTION_BINDING_CHANGED/)
 })
 test('fee-only deployment information does not change readiness or cache identity', async () => {
-  let fee = 'UNKNOWN'; const row = installed({ runner: 'native-model' })
+  let fee = 'UNKNOWN'; const row = installed({ runner: 'local-script', entrypoint: 'scripts/run.py' })
   const registry = create({ loadInstalled: () => [{ ...row, informationRevision: fee }] })
   const before = await registry.refresh(), beforeEntry = await registry.requireExact(before.skills[0], { toolchainDigest: before.skills[0].toolchainDigest })
   fee = '999'; const after = await registry.refresh()
@@ -134,7 +125,7 @@ test('invalid digest or corrupt source clears the last successful directory with
   assert.equal(await registry.refresh(), null); assert.equal(JSON.stringify(registry.declaration()).includes('secret'), false)
 })
 test('public directory and descriptor snapshots cannot be mutated after refresh', async () => {
-  const row = installed({ runner: 'native-model' }), registry = create({ rows: [row] })
+  const row = installed({ runner: 'local-script', entrypoint: 'scripts/run.py' }), registry = create({ rows: [row] })
   const result = await registry.refresh(), entry = await registry.requireExact(result.skills[0], { toolchainDigest: result.skills[0].toolchainDigest })
   row.packageRoot = '/changed'
   assert.equal(entry.descriptor.packageRoot, '/fixture/immutable/package')
@@ -143,7 +134,7 @@ test('public directory and descriptor snapshots cannot be mutated after refresh'
 })
 
 test('probe hashes and reason codes reject newline suffixes', async () => {
-  const registry = create({ runnerRegistry: new Map([['native-model', {
+  const registry = create({ rows: [installed({ runner: 'local-script', entrypoint: 'scripts/run.py' })], runnerRegistry: new Map([['local-script', {
     run: runner.run, probe: () => ({ ready: true, digest: hash + '\n', reasonCode: 'FAKE\n' }) }]]) })
   const item = (await registry.refresh()).skills[0]
   assert.equal(item.readiness, 'DEPENDENCY_MISSING'); assert.equal(item.reasonCode, 'DEPENDENCY_MISSING')
@@ -153,4 +144,80 @@ test('session generation rejects old numeric, noncanonical and overflowing fence
   const registry = new SkillRegistry({ scope, loadInstalled: () => [] })
   for (const sessionGeneration of [1, 0, '0', '01', '-1', '+1', '1.0', '1\n', '9223372036854775808'])
     assert.throws(() => registry.setSession({ ...fence, sessionGeneration }), /SKILL_SESSION_INVALID/)
+})
+
+test('native package lookup binds retained identity without probing runners or granting tool capability', async () => {
+  const row = { ...installed(), kind: 'INSTRUCTION', manifest: null, manifestSha256: null, packageTreeDigest: 'd'.repeat(64), approvedPermissionsSha256: 'e'.repeat(64) }
+  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: scope.agentId,
+    skillKey: row.skillKey, skillInstallationId: row.skillInstallationId, productVersionId: row.productVersionId,
+    skillVersion: row.skillVersion, packageSha256: row.packageSha256, manifestSha256: row.manifestSha256,
+    approvedPermissionsSha256: row.approvedPermissionsSha256 }
+  const registry = create({ loadRetained: async id => { assert.equal(id, row.skillInstallationId); return [row] },
+    runnerRegistry: new Map([['provider-operation', { run: () => assert.fail('run'), probe: () => assert.fail('probe') }]]),
+    resolveBinding: () => assert.fail('package lookup must not resolve provider') })
+  const skill = Object.fromEntries(['skillKey', 'skillVersion', 'packageSha256', 'manifestSha256'].map(key => [key, row[key]]))
+  const entry = await registry.requireNativePackage(skill, { taskBinding })
+  assert.equal(entry.descriptor.packageTreeDigest, row.packageTreeDigest)
+  assert.equal(Object.hasOwn(entry, 'item'), false)
+  for (const [key, value] of [['agentId', 'another'], ['approvedPermissionsSha256', 'f'.repeat(64)], ['productVersionId', 'other'], ['skillVersion', '2.0.0']]) {
+    await assert.rejects(registry.requireNativePackage(skill, { taskBinding: { ...taskBinding, [key]: value } }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  }
+  registry.loadRetained = async () => [{ ...row, skillKey: 'wrong' }]
+  await assert.rejects(registry.requireNativePackage(skill, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  registry.loadRetained = async () => [row, row]
+  await assert.rejects(registry.requireNativePackage(skill, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+})
+
+test('native package lookup rejects a late retained response after session change', async () => {
+  const row = { ...installed(), kind: 'INSTRUCTION', manifest: null, manifestSha256: null, packageTreeDigest: 'd'.repeat(64), approvedPermissionsSha256: 'e'.repeat(64) }
+  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: scope.agentId,
+    skillKey: row.skillKey, skillInstallationId: row.skillInstallationId, productVersionId: row.productVersionId,
+    skillVersion: row.skillVersion, packageSha256: row.packageSha256, manifestSha256: row.manifestSha256,
+    approvedPermissionsSha256: row.approvedPermissionsSha256 }
+  let resolve
+  const registry = create({ loadRetained: () => new Promise(done => { resolve = done }) })
+  const pending = registry.requireNativePackage(taskBinding, { taskBinding })
+  registry.setSession(null); resolve([row])
+  await assert.rejects(pending, /SKILL_EXECUTION_BINDING_CHANGED/)
+})
+
+
+test('ordinary instructions remain discoverable if another package runner probe fails', async () => {
+  const ordinary = { skillInstallationId: 'si_instruction', productVersionId: 'spv_instruction', skillKey: 'instruction', skillVersion: '1.0.0',
+    packageSha256: hash, manifestSha256: null, kind: 'INSTRUCTION', enabled: true, policyRevision: '1', manifest: null }
+  const registry = create({ rows: [ordinary, installed()], runnerRegistry: new Map([['provider-operation', {
+    run: runner.run, probe: () => { throw new Error('sensitive runner error') } }]]) })
+  const declaration = await registry.refresh()
+  assert.equal(declaration.skills.find(item => item.kind === 'INSTRUCTION').readiness, 'NOT_EXECUTABLE')
+  assert.equal(declaration.skills.find(item => item.kind === 'EXECUTABLE').readiness, 'DEPENDENCY_MISSING')
+  assert.equal(JSON.stringify(declaration).includes('sensitive'), false)
+})
+
+test('native binding resolves null-manifest instruction and forbids executable downgrade', async () => {
+  const instruction = { skillInstallationId: 'si_instruction', productVersionId: 'spv_instruction', skillKey: 'instruction', skillVersion: '1.0.0',
+    packageSha256: hash, packageTreeDigest: 'd'.repeat(64), approvedPermissionsSha256: 'e'.repeat(64), packageRoot: '/fixture/instruction',
+    manifestSha256: null, kind: 'INSTRUCTION', enabled: true, policyRevision: '1', manifest: null }
+  let rows = [instruction]
+  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: scope.agentId,
+    skillKey: instruction.skillKey, skillInstallationId: instruction.skillInstallationId, productVersionId: instruction.productVersionId,
+    skillVersion: instruction.skillVersion, packageSha256: instruction.packageSha256, manifestSha256: null,
+    approvedPermissionsSha256: instruction.approvedPermissionsSha256 }
+  const registry = create({ loadRetained: () => rows, runnerRegistry: new Map(), resolveBinding: () => assert.fail('no provider binding') })
+  const entry = await registry.requireNativePackage(taskBinding, { taskBinding })
+  assert.equal(entry.descriptor.kind, 'INSTRUCTION'); assert.equal(entry.descriptor.manifestSha256, null)
+  assert.equal(entry.descriptor.packageTreeDigest, instruction.packageTreeDigest)
+  rows = [{ ...instruction, kind: 'EXECUTABLE', manifest: { skillKey: instruction.skillKey, skillVersion: instruction.skillVersion, manifestSha256: null } }]
+  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  rows = [{ ...instruction, kind: 'EXECUTABLE', manifestSha256: 'f'.repeat(64), manifest: { skillKey: instruction.skillKey, skillVersion: instruction.skillVersion, manifestSha256: 'f'.repeat(64) } }]
+  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  rows = [{ ...instruction, manifest: { skillKey: instruction.skillKey } }]
+  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+})
+
+ test('disabled ordinary package is advertised as disabled and cannot pass legacy lookup', async () => {
+  const row = { skillInstallationId: 'si_instruction', productVersionId: 'spv_instruction', skillKey: 'instruction', skillVersion: '1.0.0', packageSha256: hash, manifestSha256: null, kind: 'INSTRUCTION', enabled: false, policyRevision: '1', manifest: null }
+  const registry = create({ rows: [row] })
+  const item = (await registry.refresh()).skills[0]
+  assert.equal(item.enabled, false); assert.equal(item.readiness, 'NOT_EXECUTABLE')
+  await assert.rejects(registry.requireExact(item), /SKILL_EXECUTION_BINDING_CHANGED/)
 })

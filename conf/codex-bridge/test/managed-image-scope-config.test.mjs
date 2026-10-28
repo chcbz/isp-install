@@ -7,7 +7,6 @@ import test from 'node:test'
 
 import {
   buildAgentRegistrationPayload,
-  createControlledImageV3SourceRuntime,
   inheritManagedRuntimeCapabilities,
   resolveManagedRuntimeProfile
 } from '../agent-client.mjs'
@@ -145,37 +144,6 @@ test('operator file must be canonical private owned data and malformed config di
   assert.throws(() => parseManagedImageScopeAuthorizations(document(scope({ controlledImageHttpBindingEpoch: 7 }))), /binding epoch/)
 })
 
-test('exact managed authorization reaches real registration and poll runtime composition without Provider access', async () => {
-  const ledgerOptions = []
-  const executorOptions = []
-  const pollOptions = []
-  let polls = 0
-  const managed = resolveManagedRuntimeProfile(profile(), source(), parseManagedImageScopeAuthorizations(document(scope())))
-  const runtime = createControlledImageV3SourceRuntime({
-    profile: managed,
-    getRuntimeHeaders: () => ({ Authorization: `AgentRuntime rts1_${'a'.repeat(64)}`,
-      'X-Agent-Id': managed.agentId, 'X-Agent-Runtime-Id': 'managed-runtime-fixture',
-      'X-Agent-Installation-Id': 'synthetic-installation', 'X-Agent-Host-Id': 'synthetic-host', 'X-Agent-Session-Generation': '7' }),
-    controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' },
-    providerFetchFn: async () => assert.fail('Provider fetch must not run during registration or idle poll wiring'),
-    nativeFetchFn: async () => assert.fail('native fetch is owned by the fake poll protocol in this fixture'),
-    createLedger: options => { ledgerOptions.push(options); return { fixture: true } },
-    createExecutor: options => { executorOptions.push(options); return { execute: async () => assert.fail('executor must stay idle') } },
-    createPollProtocol: options => { pollOptions.push(options); return { poll: async () => { polls++; return { processed: 0 } } } },
-    runtimeInstanceId: 'managed-runtime-fixture'
-  })
-  assert.equal(runtime.controlledImageV3Ready, true)
-  const registration = buildAgentRegistrationPayload(managed, null, true, null, null, runtime)
-  assert.equal(registration.controlledImageBountyExecutionV3, undefined)
-  assert.equal(registration.nativeProviderCredentialBinding, undefined)
-  assert.deepEqual(ledgerOptions, [{ rootDir: '/private/managed-image/tenant-a/owner-a/generation-1',
-    profileId: PROFILE, agentId: AGENT }])
-  assert.equal(executorOptions[0].credential, 'fixture-secret')
-  assert.equal(pollOptions[0].agentId, AGENT)
-  assert.equal(await runtime.pollProtocol.poll().then(result => result.processed), 0)
-  assert.equal(polls, 1)
-})
-
 test('schema v2 exact managed scope selects the frozen GPT CLI adapter without inheriting shared runtime material', async t => {
   const root = mkdtempSync(resolve(tmpdir(), 'managed-image-cli-scope-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -211,26 +179,7 @@ test('schema v2 exact managed scope selects the frozen GPT CLI adapter without i
   }), authorizations)
   assert.equal(managed.controlledImageExecutorKind, 'GPT_IMAGE_CLI_V1')
   assert.equal(managed.controlledImageCliPython, python)
-  const ledgerOptions = []; const cliOptions = []; let httpConstructed = false
-  const runtime = createControlledImageV3SourceRuntime({
-    profile: managed,
-    controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' },
-    providerFetchFn: async () => assert.fail('Provider fetch must stay idle'),
-    nativeFetchFn: async () => assert.fail('native fetch is owned by the fake poll protocol'),
-    createLedger: options => { ledgerOptions.push(options); return { createClaim: () => {} } },
-    createHttpExecutor: () => { httpConstructed = true; return { execute () {} } },
-    createCliExecutor: options => { cliOptions.push(options); return { execute: async () => ({}) } },
-    createPollProtocol: () => ({ poll: async () => ({ processed: 0 }) }),
-    runtimeInstanceId: 'managed-cli-runtime'
-  })
-  assert.equal(runtime.controlledImageV3Ready, true)
-  assert.equal(runtime.adapterKind, 'GPT_IMAGE_CLI_V1')
-  assert.equal(httpConstructed, false)
-  assert.equal(cliOptions.length, 1)
-  assert.equal(cliOptions[0].providerConfig.modelId, 'gpt-image-2.5')
-  assert.equal(cliOptions[0].cliConfig.runnerSha256, digest(runner))
-  assert.deepEqual(ledgerOptions, [{ rootDir: resolve(root, 'ledger'), profileId: PROFILE, agentId: AGENT }])
-  assert.equal(buildAgentRegistrationPayload(managed, null, true, null, null, runtime).nativeProviderCredentialBinding, undefined)
+  assert.equal(buildAgentRegistrationPayload(managed, null, true).nativeProviderCredentialBinding, undefined)
   const wrongGeneration = resolveManagedRuntimeProfile(profile({
     managedGeneration: 'hri_00000000-0000-0000-0000-000000000002'
   }), source(), authorizations)
@@ -239,7 +188,7 @@ test('schema v2 exact managed scope selects the frozen GPT CLI adapter without i
 })
 
 
-test('explicit 130-character scoped profile composes loader ledger executors and registration for CLI and HTTP', async t => {
+test('explicit 130-character scoped profile remains readable without exposing old executors', async t => {
   const root = mkdtempSync(resolve(tmpdir(), 'managed-image-long-profile-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const ownerJiacn = 'o'.repeat(28)
@@ -273,24 +222,6 @@ test('explicit 130-character scoped profile composes loader ledger executors and
   const cliScopes = parseManagedImageScopeAuthorizations(JSON.stringify({ schemaVersion: 2,
     authorizations: [longScope()] }))
   const cliProfile = resolveManagedRuntimeProfile(generatedProfile, source(), cliScopes)
-  const cliRuntime = createControlledImageV3SourceRuntime({ profile: cliProfile,
-    controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' }, providerFetchFn: async () => assert.fail('must stay idle'),
-    createPollProtocol: () => ({ poll: async () => ({ processed: 0 }) }), runtimeInstanceId: 'managed-cli-long' })
-  assert.equal(cliRuntime.controlledImageV3Ready, true)
-  assert.equal(cliRuntime.adapterKind, 'GPT_IMAGE_CLI_V1')
-  assert.equal(buildAgentRegistrationPayload(cliProfile, null, true, null, null, cliRuntime)
-    .nativeProviderCredentialBinding, undefined)
-
-  const httpAuthorization = scope({ ownerJiacn, profileId: generated.profileId,
-    controlledImageHttpLedgerRoot: resolve(root, 'http-ledger') })
-  const httpProfile = resolveManagedRuntimeProfile(generatedProfile, source(),
-    parseManagedImageScopeAuthorizations(document(httpAuthorization)))
-  const httpRuntime = createControlledImageV3SourceRuntime({ profile: httpProfile,
-    controlledEnv: { MANAGED_IMAGE_KEY: 'fixture-secret' }, providerFetchFn: async () => assert.fail('must stay idle'),
-    createPollProtocol: () => ({ poll: async () => ({ processed: 0 }) }), runtimeInstanceId: 'managed-http-long' })
-  assert.equal(httpRuntime.controlledImageV3Ready, true)
-  assert.equal(httpRuntime.adapterKind, 'CONTROLLED_IMAGE_HTTP_V1')
-  const registration = buildAgentRegistrationPayload(httpProfile, null, true, null, null, httpRuntime)
-  assert.equal(registration.controlledImageBountyExecutionV3, undefined)
-  assert.equal(registration.nativeProviderCredentialBinding, undefined)
+  assert.equal(cliProfile.controlledImageExecutorKind, 'GPT_IMAGE_CLI_V1')
+  assert.equal(buildAgentRegistrationPayload(cliProfile, null, true).controlledImageBountyExecutionV3, undefined)
 })

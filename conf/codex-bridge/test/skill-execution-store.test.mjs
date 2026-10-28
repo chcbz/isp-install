@@ -101,3 +101,30 @@ test('result data is schema-validated JSON, including scalar/array/null without 
     assert.deepEqual(store.persistResult(spec, { data, artifacts: [], inputReceipts: [] }).result.data, data)
   }
 })
+
+test('native inputs stream into immutable files, including empty bytes, and verified cache avoids downloading again', async t => {
+  const { options } = setup(t)
+  const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: 'native_inputs', executionProtocolVersion: 5, inputRefs: ['input1', 'empty'] } })
+  let downloads = 0
+  const input = { inputRef: 'input1', sha256: skillHash('original'), byteLength: '8', contentMimeType: 'text/plain' }
+  const open = async function * () { downloads++; yield Buffer.from('ori'); yield Buffer.from('ginal') }
+  const actual = await store.materializeInput(input, open, () => {})
+  assert.equal(readFileSync(actual.path, 'utf8'), 'original'); assert.equal(Object.hasOwn(actual, 'bytes'), false)
+  assert.deepEqual(await store.materializeInput(input, open, () => {}), actual); assert.equal(downloads, 1)
+  const empty = await store.materializeInput({ ...input, inputRef: 'empty', sha256: skillHash(''), byteLength: '0' }, async function * () {}, () => {})
+  assert.equal(readFileSync(empty.path).length, 0)
+  chmodSync(actual.path, 0o600); writeFileSync(actual.path, 'modified')
+  await assert.rejects(store.materializeInput(input, open, () => {}), /BYTES_CHANGED/)
+  assert.equal(downloads, 1)
+})
+test('interrupted, oversized or corrupt native input downloads never publish partial files', async t => {
+  const { options } = setup(t)
+  const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: 'native_inputs', executionProtocolVersion: 5, inputRefs: ['input1'] } })
+  const input = { inputRef: 'input1', sha256: skillHash('ok'), byteLength: '2' }
+  for (const source of [async function * () { yield Buffer.from('o'); throw new Error('connection lost') }, async function * () { yield Buffer.from('oversize') }, async function * () { yield Buffer.from('xx') }]) {
+    await assert.rejects(store.materializeInput(input, source, () => {}))
+    assert.throws(() => readFileSync(resolve(store.directory, 'inputs/input1')), { code: 'ENOENT' })
+  }
+  const actual = await store.materializeInput(input, async function * () { yield Buffer.from('ok') }, () => {})
+  assert.equal(readFileSync(actual.path, 'utf8'), 'ok')
+})

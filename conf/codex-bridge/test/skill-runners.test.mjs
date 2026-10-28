@@ -1,8 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SkillBindings, parseSkillBindings } from '../skill-bindings.mjs'
-import { createImageProviderRunner } from '../skill-runners/image-provider.mjs'
-import { createNativeModelRunner } from '../skill-runners/native-model.mjs'
 import { buildMaterialsInputs } from '../materials-input.mjs'
 import { SkillEffects, SkillExecutionStore } from '../skill-execution-store.mjs'
 import { ImageMagick, MagickFormat, MagickColors } from '@imagemagick/magick-wasm'
@@ -31,73 +29,6 @@ test('fee metadata changes do not alter binding digest/revision; no approval or 
   const first = await bindings.resolve({ scope, alias: 'image' }); config.costInfoOverrides['image-edit@1.0.0'] = { amount: '9999' }
   const next = await bindings.resolve({ scope, alias: 'image' }); assert.equal(first.digest, next.digest); assert.equal(first.revision, next.revision)
 })
-test('generic image broker reuses exact codec and controlled endpoint without consent', async t => {
-  const bindings = bindingFixture(), current = await bindings.resolve({ scope, alias: 'image' }); let calls = 0
-  let bytes = Buffer.from([137,80,78,71,13,10,26,10,0])
-  const runner = createImageProviderRunner({ bindings, scope, fetchFn: async (url, opts) => {
-    calls++; assert.equal(url.href, 'https://images.example.test/v1/images/generations'); assert.equal(opts.redirect, 'error')
-    assert.equal(JSON.parse(opts.body).prompt, 'real request'); assert.equal(JSON.parse(opts.body).n, 1)
-    return { status: 200, url: url.href, redirected: false, headers: new Headers({ 'content-type': 'application/json', 'x-request-id': 'provider1' }), json: async () => ({ data: [{ b64_json: bytes.toString('base64') }] }) }
-  } })
-  const result = await runner.run({ descriptor: descriptor('image-http.generate'), binding: current, inputs: [], instruction: 'real request', parameters: {}, effects: effect })
-  assert.deepEqual(result.artifacts[0].bytes, bytes); assert.equal(calls, 1)
-  assert.equal((await runner.probe({ entrypoint: 'unknown-runner' })).ready, false)
-  // Same production effect store across runner reconstruction: exact output without a second charge.
-  const root = mkdtempSync(resolve(tmpdir(), 'image-sized-effect-')); t.after(() => rmSync(root, { recursive: true, force: true }))
-  bytes = ImageMagick.read(MagickColors.Red, 40, 40, image => image.write(MagickFormat.Png, data => Buffer.from(data)))
-  const options = { rootDirectory: root, scope, command: { executionId: 'sized_image', snapshotDigest: 'a'.repeat(64) } }
-  const durable = () => new SkillEffects({ store: new SkillExecutionStore(options), checkLease() {},
-    start: async () => ({ schemaVersion: 1, disposition: 'NEW', status: 'START_RECORDED', providerRequestId: null, resultDigest: null }),
-    report: async (_id, body) => ({ schemaVersion: 1, disposition: 'RECORDED', ...body }) })
-  const request = { descriptor: descriptor('image-http.generate'), binding: current, inputs: [], instruction: 'real request', parameters: { size: '800x600' } }
-  const sized = await runner.run({ ...request, effects: durable() })
-  ImageMagick.read(sized.artifacts[0].bytes, image => {
-    assert.equal(image.width, 800); assert.equal(image.height, 600)
-    image.getPixels(pixels => {
-      assert.equal(pixels.getColor(0, 300).a, 0)
-      assert.ok(pixels.getColor(400, 300).a > 0)
-    })
-  })
-  const recovered = await runner.run({ ...request, effects: durable() })
-  assert.deepEqual(recovered.artifacts[0].bytes, sized.artifacts[0].bytes); assert.equal(calls, 2)
-  await assert.rejects(runner.run({ ...request, parameters: { size: '0x600' }, effects: durable() }), error => error.code === 'SKILL_IMAGE_SIZE_INVALID')
-  assert.equal(calls, 2)
-
-})
-test('image edits actually transmit verified reference bytes; real errors/redirects are not faked', async () => {
-  const bindings = bindingFixture(), current = await bindings.resolve({ scope, alias: 'image' }); const fixture = JSON.parse(readFileSync(new URL('./fixtures/mixed-material-api-wire-v3.json', import.meta.url))); const input = material(Buffer.from(fixture.materials.find(item => item.bytesBase64.startsWith('iVBOR')).bytesBase64, 'base64'), 'image/png')
-  let calls = 0; const cause = Object.assign(new Error('reset'), { code: 'ECONNRESET' })
-  const runner = createImageProviderRunner({ bindings, scope, fetchFn: async (url, opts) => { calls++; assert.equal(url.pathname, '/v1/images/edits'); assert.match(JSON.parse(opts.body).images[0].image_url, /^data:image\/png;base64,/); throw cause } })
-  await assert.rejects(runner.run({ descriptor: descriptor('image-http.edit'), binding: current, inputs: [input], instruction: 'edit', parameters: {}, effects: effect }), error => error === cause)
-  assert.equal(calls, 1)
-  await assert.rejects(runner.run({ descriptor: descriptor('image-http.edit'), binding: { ...current, revision: '2' }, inputs: [input], instruction: 'edit', parameters: {}, effects: effect }), /BINDING_CHANGED/)
-})
-test('native text file contains actual model result and can use authorized input material', async () => {
-  const input = material('实际资料：甲乙丙')
-  const runner = createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64) }), runModel: async request => {
-    const prepared = buildMaterialsInputs({ inputs: request.inputs, authorizationId: 'pwe_1', snapshotDigest: 'b'.repeat(64) })
-    assert.match(prepared.nativeInputs[0].text, /实际资料/); assert.match(prepared.nativeInputs[0].text, /UNTRUSTED/)
-    return { data: { text: '由实际资料整理的模型正文' }, inputReceipts: prepared.inputReceipts }
-  } })
-  assert.equal((await runner.probe({ entrypoint: 'native-model.text-file' })).ready, true)
-  const result = await runner.run({ descriptor: descriptor('native-model.text-file'), inputs: [input], instruction: '整理', parameters: {}, effects: effect })
-  assert.equal(result.artifacts[0].bytes.toString(), '由实际资料整理的模型正文'); assert.equal(result.inputReceipts[0].delivery, 'DELIVERED')
-})
-test('missing native carrier is unavailable, never imaginary image understanding', () => {
-  assert.throws(() => buildMaterialsInputs({ inputs: [material('not an image', 'image/png')] }), /CARRIER_UNAVAILABLE/)
-  const bad = material('text'); bad.sha256 = '0'.repeat(64); assert.throws(() => buildMaterialsInputs({ inputs: [bad] }), /BYTES_INVALID/)
-})
-
-test('native skill admitting media is unavailable until that exact MIME has a measured real carrier', async () => {
-  const runner = createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64) }), runModel: async () => assert.fail('probe must never run a model') })
-  assert.equal((await runner.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['text/plain'] })).ready, true)
-  assert.deepEqual(await runner.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['text/plain', 'image/png'] }), { ready: false, reasonCode: 'MATERIALS_CARRIER_UNAVAILABLE' })
-  const measured = createNativeModelRunner({ probeModel: async () => ({ ready: true, digest: 'a'.repeat(64), supportedMimeTypes: ['image/png'] }), runModel() {} })
-  assert.equal((await measured.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['image/png'] })).ready, true)
-  assert.equal((await measured.probe({ entrypoint: 'native-model.text-file', inputMimeTypes: ['audio/wav'] })).ready, false)
-})
-
-
 test('shared costInfoOverrides accepts revisioned skill/version/binding metadata without changing readiness or binding digest', async () => {
   const config = configuration(), bindings = new SkillBindings({ load: () => config, credentialEnvironment: { IMAGE_TOKEN: 'fixture' } })
   const first = await bindings.resolve({ scope, alias: 'image' })

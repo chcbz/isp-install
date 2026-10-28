@@ -1,9 +1,9 @@
 /** Execution-scoped, fsynced checkpoints. No auth proof/token/URL enters this store.
  * This is not a work queue: even local START requires server-authorized resume. */
 import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
-  openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+  openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { parseSkillJson, validateSkillData } from './skill-manifest.mjs'
 import { skillCanonicalJson, skillDigest, skillHash, skillId, skillSha } from './skill-executor.mjs'
 import { validateNativeConversationOutput } from './conversation-native.mjs'
@@ -31,6 +31,21 @@ const writePrivate = (path, bytes) => {
   try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
 }
 
+const verifyPrivateBlob = (path, expected) => {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = fstatSync(fd, { bigint: true })
+    if (!before.isFile() || before.nlink !== 1n || before.uid !== BigInt(process.geteuid()) || (before.mode & 0o077n)) fail('SKILL_STORE_UNSAFE')
+    const hash = createHash('sha256'); const buffer = Buffer.allocUnsafe(1024 * 1024); let length = 0n; let count
+    while ((count = readSync(fd, buffer, 0, buffer.length, null))) { hash.update(buffer.subarray(0, count)); length += BigInt(count) }
+    const after = fstatSync(fd, { bigint: true })
+    if (length !== before.size || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) fail('SKILL_STORE_CHANGED')
+    const sha256 = hash.digest('hex'); const byteLength = String(length)
+    if (expected && (sha256 !== expected.sha256 || byteLength !== String(expected.byteLength))) fail('SKILL_RESULT_BYTES_CHANGED')
+    return { path, sha256, byteLength }
+  } finally { closeSync(fd) }
+}
+
 export const SKILL_INPUT_CARRIERS = Object.freeze(['native-text', 'native-image', 'native-audio', 'parsed-text', 'provider-image', 'local-file'])
 export function validateSkillInputReceipts(receipts, inputRefs, frozenInputs = null, runner = null) {
   if (!Array.isArray(receipts) || receipts.length !== inputRefs.length) fail('SKILL_RESULT_INPUT_RECEIPT_INVALID')
@@ -38,7 +53,7 @@ export function validateSkillInputReceipts(receipts, inputRefs, frozenInputs = n
   for (const receipt of receipts) {
     if (!receipt || Object.keys(receipt).sort().join(',') !== 'carrier,delivery,inputRef,sha256' || !inputRefs.includes(receipt.inputRef)
         || seen.has(receipt.inputRef) || !skillSha(receipt.sha256) || !SKILL_INPUT_CARRIERS.includes(receipt.carrier) || receipt.delivery !== 'DELIVERED'
-        || (receipt.carrier === 'local-file' && runner !== 'local-script')
+        || (receipt.carrier === 'local-file' && !['local-script', 'native-execution'].includes(runner))
         || (frozenInputs && frozenInputs.find(input => input.inputRef === receipt.inputRef)?.sha256 !== receipt.sha256)) fail('SKILL_RESULT_INPUT_RECEIPT_INVALID')
     seen.add(receipt.inputRef)
   }
@@ -51,7 +66,7 @@ export class SkillExecutionStore {
     this.command = command; this.directory = resolve(rootDirectory, this.scopeDigest, command.executionId)
     mkdirSync(this.directory, { recursive: true, mode: 0o700 })
     for (const path of [resolve(rootDirectory), resolve(rootDirectory, this.scopeDigest), this.directory]) privateDirectory(path)
-    for (const name of ['inputs', 'outputs', 'scratch']) {
+    for (const name of ['inputs', 'outputs', 'scratch', ...(command.executionProtocolVersion === 5 ? ['drafts'] : [])]) {
       mkdirSync(resolve(this.directory, name), { recursive: true, mode: 0o700 }); privateDirectory(resolve(this.directory, name))
     }
     const previous = this.read('identity')
@@ -77,6 +92,38 @@ export class SkillExecutionStore {
     if (expected && (skillHash(bytes) !== expected.sha256 || String(bytes.length) !== String(expected.byteLength))) fail('SKILL_RESULT_BYTES_CHANGED')
     return bytes
   }
+  verifyBlob(name, expected) {
+    if (!skillId(name)) fail('SKILL_STORE_KEY_INVALID')
+    const directory = resolve(this.directory, 'outputs'); privateDirectory(directory)
+    return verifyPrivateBlob(resolve(directory, name), expected)
+  }
+  async materializeInput(input, openStream, checkActive) {
+    if (!skillId(input?.inputRef) || !this.command.inputRefs.includes(input.inputRef)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
+    const directory = resolve(this.directory, 'inputs'); privateDirectory(directory)
+    const target = resolve(directory, input.inputRef)
+    checkActive()
+    if (existsSync(target)) { verifyPrivateBlob(target, input); return { ...input, path: target } }
+    // Partial downloads stay outside the mounted input view and never become
+    // input facts. No whole-file Buffer or file-size admission limit is needed.
+    const temporary = resolve(this.directory, `input-${randomUUID()}`)
+    const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o400)
+    try {
+      const hash = createHash('sha256'); let length = 0n
+      for await (const chunk of await openStream()) {
+        checkActive(); length += BigInt(chunk.byteLength)
+        if (length > BigInt(input.byteLength)) fail('SKILL_INPUT_BYTES_INVALID')
+        hash.update(chunk); writeFileSync(fd, chunk)
+      }
+      checkActive()
+      if (String(length) !== String(input.byteLength) || hash.digest('hex') !== input.sha256) fail('SKILL_INPUT_BYTES_INVALID')
+      fsyncSync(fd)
+      renameSync(temporary, target); syncDirectory(directory)
+      return { ...input, path: target }
+    } finally {
+      closeSync(fd)
+      if (existsSync(temporary)) unlinkSync(temporary)
+    }
+  }
   writeBlob(name, bytes) {
     if (!skillId(name) || !Buffer.isBuffer(bytes)) fail('SKILL_STORE_KEY_INVALID')
     privateDirectory(resolve(this.directory, 'outputs'))
@@ -89,8 +136,30 @@ export class SkillExecutionStore {
     if (!result) return null
     if (result.schemaVersion !== 1 || result.executionId !== this.command.executionId || result.snapshotDigest !== this.command.snapshotDigest
         || !result.result || !Array.isArray(result.result.artifacts) || !Array.isArray(result.result.inputReceipts)) fail('SKILL_RESULT_BINDING_INVALID')
-    for (const artifact of result.result.artifacts) this.readBlob(artifact.outputId, artifact)
+    for (const artifact of result.result.artifacts) {
+      if (this.command.executionProtocolVersion === 5) this.verifyBlob(artifact.outputId, artifact)
+      else this.readBlob(artifact.outputId, artifact)
+    }
     return result
+  }
+  persistNativeResult(result) {
+    if (this.command.executionProtocolVersion !== 5 || !result || !Array.isArray(result.artifacts)) fail('SKILL_RESULT_INVALID')
+    const outputs = this.command.outputs
+    if (outputs.artifactsRequired && !result.artifacts.length || !outputs.multiple && result.artifacts.length > 1) fail('SKILL_RESULT_ARTIFACTS_INVALID')
+    if (!outputs.dataSchema && result.data !== null) fail('SKILL_RESULT_DATA_INVALID')
+    if (outputs.dataSchema) validateSkillData(outputs.dataSchema, result.data)
+    const ids = new Set()
+    for (const artifact of result.artifacts) {
+      if (!skillId(artifact.outputId) || ids.has(artifact.outputId) || !outputs.mimeTypes.includes(artifact.contentMimeType)) fail('SKILL_RESULT_ARTIFACTS_INVALID')
+      ids.add(artifact.outputId); this.verifyBlob(artifact.outputId, artifact)
+    }
+    validateSkillInputReceipts(result.inputReceipts, this.command.inputRefs, this.read('inputs-snapshot')?.inputs || null, 'native-execution')
+    if (!Array.isArray(result.effectDependencies) || result.effectDependencies.length !== 0) fail('SKILL_RESULT_EFFECTS_INVALID')
+    const manifest = { schemaVersion: 1, executionId: this.command.executionId, snapshotDigest: this.command.snapshotDigest, result }
+    const previous = this.loadResult()
+    if (previous && skillDigest(previous) !== skillDigest(manifest)) fail('SKILL_RESULT_CONFLICT')
+    if (!previous) this.write('result', manifest)
+    return manifest
   }
   persistResult(descriptor, result) {
     if (!result || !Array.isArray(result.artifacts) || !Array.isArray(result.inputReceipts)) fail('SKILL_RESULT_INVALID')

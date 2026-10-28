@@ -80,15 +80,22 @@ print(a[0],a[1].split(b'\r\n',1)[0].decode('ascii','replace'),b[0],c[0])
 sys.exit(0 if a[0]=='connected' and b' 403 ' in a[1].split(b'\r\n',1)[0] and b[0]=='blocked' and c[0]=='blocked' else 7)
 `
 
-export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs } = {}) => {
+export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs, additionalOrigins = [] } = {}) => {
   let url
   try { url = new URL(baseUrl) } catch { fail('TYPED_INSPECTION_PROVIDER_ORIGIN_REQUIRED') }
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) fail('TYPED_INSPECTION_PROVIDER_ORIGIN_REQUIRED')
   if (!positiveInteger(connectTimeoutMs)) fail('TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_REQUIRED')
+  if (!Array.isArray(additionalOrigins)) fail('TYPED_INSPECTION_EGRESS_ORIGINS_INVALID')
+  const origins = [...new Set(additionalOrigins.map(origin => {
+    let extra; try { extra = new URL(origin) } catch { fail('TYPED_INSPECTION_EGRESS_ORIGINS_INVALID') }
+    if (typeof origin !== 'string' || extra.protocol !== 'https:' || extra.origin !== origin || extra.username || extra.password) fail('TYPED_INSPECTION_EGRESS_ORIGINS_INVALID')
+    return origin
+  }))].sort()
   return Object.freeze({
     schemaVersion: 1,
     providerOrigin: url.origin,
     providerAuthority: exactAuthority(url),
+    ...(origins.length ? { additionalOrigins: Object.freeze(origins) } : {}),
     transport: 'fixed-connect-proxy-v1',
     connectTimeoutMs: String(connectTimeoutMs),
     namespace: 'private-slirp4netns-v1',
@@ -171,8 +178,8 @@ export const isolatedSlirpCommand = (slirpBin, pid) => ({
 })
 
 export class RestrictedProviderEgress {
-  constructor({ providerBaseUrl, networkConnectTimeoutMs, slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector() } = {}) {
-    this.policy = restrictedProviderNetworkPolicy(providerBaseUrl, { connectTimeoutMs: networkConnectTimeoutMs })
+  constructor({ providerBaseUrl, networkConnectTimeoutMs, additionalOrigins = [], slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector() } = {}) {
+    this.policy = restrictedProviderNetworkPolicy(providerBaseUrl, { connectTimeoutMs: networkConnectTimeoutMs, additionalOrigins })
     this.networkConnectTimeoutMs = networkConnectTimeoutMs
     this.slirpBin = slirpBin; this.nftBin = nftBin; this.nsenterBin = nsenterBin; this.pythonBin = pythonBin
     this.spawnFn = spawnFn; this.processInspector = processInspector; this.server = null; this.canaryServer = null; this.slirp = null; this.port = 0; this.canaryPort = 0; this.attestation = null; this.owner = null; this.hostCanary = null
@@ -235,8 +242,10 @@ export class RestrictedProviderEgress {
     if (this.server) return this
     const server = createHttpServer((_request, response) => { response.writeHead(405, { Connection: 'close' }); response.end() })
     server.on('connect', (request, client, head) => {
-      if (String(request.url || '').toLowerCase() !== this.policy.providerAuthority) { client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
-      const provider = new URL(this.policy.providerOrigin); const upstream = connect(Number(provider.port || 443), provider.hostname)
+      const authority = String(request.url || '').toLowerCase()
+      const destination = [this.policy.providerOrigin, ...(this.policy.additionalOrigins || [])].find(origin => exactAuthority(new URL(origin)) === authority)
+      if (!destination) { client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
+      const provider = new URL(destination); const upstream = connect(Number(provider.port || 443), provider.hostname)
       const abort = () => { try { client.destroy() } catch {}; try { upstream.destroy() } catch {} }
       upstream.setTimeout(this.networkConnectTimeoutMs, abort); upstream.once('error', abort); client.once('error', abort)
       upstream.once('connect', () => {

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { normalizeInboundMessage, runFastChat, recoverMaterialsChat, buildAgentRegistrationPayload, buildAgentPresencePayload, MESSAGE_TYPES } from '../agent-client.mjs'
+import { normalizeInboundMessage, runFastChat, recoverMaterialsChat, buildAgentRegistrationPayload, buildAgentPresencePayload, publishTypedInspectionReadiness, MESSAGE_TYPES } from '../agent-client.mjs'
 import { canonicalSha256, validateChatDispatch, PersistentChatInbox } from '../chat-runtime.mjs'
 import { resolveChatMaterials } from '../materials-chat.mjs'
 import { TypedInspectionMaterializer } from '../typed-inspection-runtime.mjs'
@@ -160,4 +160,33 @@ test('public materials transport allows only exact GET content route, no aliases
   for (const suffix of ['?x=1','/extra']) assert.equal(materialsChatHttpScope(new URL(`https://platform.example${path}${suffix}`)), false)
   assert.equal(materialsChatHttpScope(new URL(`https://platform.example${path.replace('/ref/', '/%72ef/')}`)), false)
   for (const options of [{ method: 'POST' }, { body: '{}' }]) assert.equal(materialsChatHttpScope(new URL(`https://platform.example${path}`), options), false)
+})
+
+test('native local-file capability is a separate online declaration and requires the execution transport', () => {
+  const adapter = { closed: false, readback: { schema: { ...schema, measured: true, schemaContractId: schema.contractId } } }
+  const declaration = { schemaVersion: 1, executionProtocolVersion: 5, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json'] }
+  const runtime = { declaration: () => ({ supportedInputs: formats }), nativeExecutionDeclaration: () => declaration }
+  const readyProfile = { ...profile, workspaceFileApiOrigin: 'https://platform.example', workspaceFileRootDir: '/synthetic/private-root' }
+  const registered = buildAgentRegistrationPayload(readyProfile, null, true, adapter, runtime)
+  assert.deepEqual(registered.typedDeliberation.nativeExecution, declaration)
+  assert.deepEqual(buildAgentPresencePayload(readyProfile, 'busy', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation.nativeExecution, declaration)
+  assert.equal(buildAgentRegistrationPayload(readyProfile, null, false, adapter, runtime).typedDeliberation.nativeExecution, undefined)
+  assert.equal(buildAgentPresencePayload(readyProfile, 'offline', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation.nativeExecution, undefined)
+  assert.equal(buildAgentRegistrationPayload(profile, null, true, adapter, runtime).typedDeliberation.nativeExecution, undefined)
+  assert.equal(buildAgentRegistrationPayload(readyProfile, null, true, adapter, { declaration: runtime.declaration }).typedDeliberation.nativeExecution, undefined)
+  assert.equal(buildAgentRegistrationPayload(readyProfile, null, true, adapter, { ...runtime, nativeExecutionDeclaration: () => null }).typedDeliberation.nativeExecution, undefined)
+})
+
+
+test('native-only measured readiness refreshes registration without claiming read-only carriers', () => {
+  let refreshed = 0, statuses = 0
+  const state = { disposed: false, typedInspectionProfileRuntime: { declaration: () => null,
+    nativeExecutionDeclaration: () => ({ executionProtocolVersion: 5 }) },
+    runtimeTransport: { refreshCapabilities: () => { refreshed++; return true } } }
+  const p = { ...profile, runtimeIdentity: {} }
+  assert.equal(publishTypedInspectionReadiness(p, state, { sendStatusFn: () => { statuses++; return true }, busyFn: () => false }), true)
+  assert.equal(refreshed, 1); assert.equal(statuses, 1)
+  state.typedInspectionProfileRuntime.nativeExecutionDeclaration = () => null
+  assert.equal(publishTypedInspectionReadiness(p, state), false)
+  assert.equal(refreshed, 1)
 })

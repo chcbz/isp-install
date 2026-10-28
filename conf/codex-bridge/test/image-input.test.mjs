@@ -61,23 +61,6 @@ test('native CHAT passes a normalized JPEG path but binds the original receipt',
   assert.equal(result.inspectionInputReceiptDraft.sources[0].sha256,hash(bytes))
 })
 
-test('image edit posts a PNG derivative with original and derivative audit hashes', async () => {
-  const {createImageProviderRunner}=await import('../skill-runners/image-provider.mjs')
-  const bytes=make(MagickFormat.Bmp),normalized=normalizeImageInput(bytes,'image/bmp')
-  const binding={ready:true,bindingId:'binding',revision:'1',digest:'a'.repeat(64),model:'test',endpoint:'https://images.example.test',credential:'fixture'}
-  let called=false, audited=false
-  const sentinel=new Error('stop after verifying request')
-  const runner=createImageProviderRunner({bindings:{resolve:async()=>binding},scope:{},fetchFn:async (_url,options)=>{
-    called=true;const body=JSON.parse(options.body)
-    assert.equal(body.images[0].image_url,`data:image/png;base64,${normalized.bytes.toString('base64')}`)
-    assert.deepEqual(Object.keys(body.images[0]),['image_url']);throw sentinel
-  }})
-  await assert.rejects(runner.run({descriptor:{manifest:{entrypoint:'image-http.edit',requirements:{providerAlias:'image'}}},binding,
-    inputs:[{inputRef:'input_1',contentMimeType:'image/bmp',bytes,sha256:hash(bytes),byteLength:String(bytes.length)}],instruction:'test',parameters:{},
-    effects:{invoke:async (_id,request,fn)=>{audited=true;assert.equal(request.inputs[0].sha256,hash(bytes));assert.deepEqual(request.derivedInputs[0],normalized.provenance);return fn()}}}),error=>error===sentinel)
-  assert.ok(called && audited)
-})
-
 for (const mime of ['image/heic','image/heif']) test(`${mime}: pinned real HEVC image decodes without relabelling original bytes`,()=>{
   const bytes=readFileSync(new URL('./fixtures/image-input/gray-hevc.heif',import.meta.url))
   assert.equal(hash(bytes),'d386c35ece16c8bdcf31fb5de150ecc596a94b23d5dd9057a71d0ddfe1261d71')

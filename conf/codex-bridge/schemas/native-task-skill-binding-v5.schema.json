@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:cyf:skill-execution:native-task-skill-binding-v5",
+  "title": "NativeTaskSkillBinding for execution protocol v5",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "executionId",
+    "taskGrantId",
+    "taskGrantVersion",
+    "agentId",
+    "skillKey",
+    "skillInstallationId",
+    "productVersionId",
+    "skillVersion",
+    "packageSha256",
+    "manifestSha256",
+    "approvedPermissionsSha256"
+  ],
+  "properties": {
+    "executionId": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/Id"
+    },
+    "taskGrantId": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/Id"
+    },
+    "taskGrantVersion": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/PositiveRevision"
+    },
+    "agentId": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/Id"
+    },
+    "skillKey": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/SkillKey"
+    },
+    "skillInstallationId": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/Id"
+    },
+    "productVersionId": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/Id"
+    },
+    "skillVersion": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/SkillVersion"
+    },
+    "packageSha256": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/Sha256"
+    },
+    "manifestSha256": {
+      "anyOf": [
+        {
+          "$ref": "urn:cyf:skill-management:sm-c1#/definitions/Sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "approvedPermissionsSha256": {
+      "$ref": "urn:cyf:skill-management:sm-c1#/definitions/Sha256"
+    }
+  }
+}

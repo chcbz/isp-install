@@ -1,43 +1,41 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { executeSkill, parseSkillCommand } from '../skill-executor.mjs'
-const schema = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false }
-const command = () => ({ executionProtocolVersion: 4, executionId: 'pwe_1', taskId: 't1', runId: 'r1', conversationId: 'c1', conversationGeneration: '1',
-  taskSkillBinding: { executionId: 'pwe_1', taskGrantId: 'grant_1', taskGrantVersion: '1', agentId: 'agent', skillKey: 'text-file', skillInstallationId: 'si_a', productVersionId: 'spv_a', skillVersion: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64), approvedPermissionsSha256: 'd'.repeat(64) },
-  skill: { key: 'text-file', version: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64) },
-  commandId: 'cmd1', messageId: 'msg1', snapshotDigest: 'c'.repeat(64), parameters: { title: '内容' }, instruction: '生成文本', inputRefs: [], outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } })
+import { parseSkillCommand, executeSkill } from '../skill-executor.mjs'
+const command = () => ({ executionProtocolVersion: 5, executionId: 'execution1', taskId: 'task1', runId: 'run1', conversationId: 'conversation1', conversationGeneration: '1', commandId: 'command1', messageId: 'message1', skills: [], snapshotDigest: 'a'.repeat(64), parameters: {}, instruction: 'read and write', inputRefs: [], outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false }, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1' })
 const fixture = () => {
-  const events = []; const c = command()
-  const manifest = { schemaVersion: 1, executionId: c.executionId, snapshotDigest: c.snapshotDigest, result: { data: '真实结果', artifacts: [], inputReceipts: [] } }
-  const descriptor = { manifest: { parametersSchema: schema, runner: 'native-model', inputs: { minItems: 0, maxItems: 32, acceptedMimeTypes: ['text/plain'] }, outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } } }
-  const ctx = { registry: { requireExact: async skill => { assert.equal(skill.skillKey, 'text-file'); return { descriptor, binding: null } } },
-    runners: new Map([['native-model', { run: async () => { events.push('run'); return manifest.result } }]]),
+  const c = command(); const events = []
+  const manifest = { schemaVersion: 1, executionId: c.executionId, snapshotDigest: c.snapshotDigest, result: { data: null, artifacts: [], inputReceipts: [], effectDependencies: [] } }
+  const ctx = { registry: { requireNativePackage: () => assert.fail('empty skills must not require a synthetic installation') },
     claimOrResume: async () => { events.push('claim'); return {} }, loadResult: async () => null,
-    materializeAuthorizedInputs: async () => [], validateAndPersistResult: async () => { events.push('persist'); return manifest },
+    materializeAuthorizedInputs: async () => [], runNative: async () => { events.push('native'); return manifest },
     stageOutputs: async () => { events.push('stage') }, commitResult: async () => { events.push('commit'); return { state: 'RESULT_COMMITTED' } },
     persistReceipt: async () => { events.push('receipt') } }
   return { c, ctx, events, manifest }
 }
-test('strict protocol4 command rejects URLs, old protocols, malformed selectors/outputs and duplicate keys', () => {
+test('native command accepts empty skills and harmless metadata but not legacy execution or unknown authority', () => {
   assert.deepEqual(parseSkillCommand(command()), command())
-  for (const patch of [{ executionProtocolVersion: 3 }, { endpoint: 'https://evil.test' }, { inputRefs: ['a', 'a'] }, { outputs: [{ outputId: '../x', contentMimeType: 'text/plain' }] }])
-    assert.throws(() => parseSkillCommand({ ...command(), ...patch }), /SKILL_COMMAND_INVALID/)
-  assert.throws(() => parseSkillCommand('{"executionProtocolVersion":4,"executionProtocolVersion":4}'), /SKILL_INVALID_JSON/)
+  assert.deepEqual(parseSkillCommand({ ...command(), displayHint: 'optional' }), command())
+  for (const patch of [{ executionProtocolVersion: 4 }, { toolPolicyRef: 'ALL_TOOLS' }, { skills: null }, { skill: null }, { inputRefs: ['a', 'a'] }]) assert.throws(() => parseSkillCommand({ ...command(), ...patch }), /SKILL_COMMAND_INVALID/)
+  assert.throws(() => parseSkillCommand('{"executionProtocolVersion":5,"executionProtocolVersion":5}'), /SKILL_INVALID_JSON/)
 })
-test('one executor persists result before stage/commit; data-only still has real commit', async () => {
-  const { c, ctx, events } = fixture(); assert.equal((await executeSkill(c, ctx)).state, 'RESULT_COMMITTED')
-  assert.deepEqual(events, ['claim', 'run', 'persist', 'commit', 'receipt'])
+test('native executor claims, performs real native work, commits and persists receipt without a skill runner', async () => {
+  const { c, ctx, events } = fixture(); await executeSkill(c, ctx)
+  assert.deepEqual(events, ['claim', 'native', 'commit', 'receipt'])
 })
-test('recovered persistent result never runs a model/provider again', async () => {
+test('local or server committed recovery never starts a model again', async () => {
   const { c, ctx, manifest, events } = fixture(); ctx.loadResult = async () => manifest
   await executeSkill(c, ctx); assert.deepEqual(events, ['claim', 'commit', 'receipt'])
+  events.length = 0; ctx.claimOrResume = async () => ({ resultManifest: manifest }); ctx.recoverCommittedResult = async () => ({ state: 'RESULT_COMMITTED' })
+  await executeSkill(c, ctx); assert.deepEqual(events, ['receipt'])
 })
-test('invalid parameters, missing runner, wrong result identity and required empty output fail closed', async () => {
-  const { c, ctx, manifest } = fixture(); c.parameters.title = 1; await assert.rejects(executeSkill(c, ctx), /SKILL_PARAMETERS_INVALID/)
-  c.parameters.title = 'x'; ctx.runners.clear(); await assert.rejects(executeSkill(c, ctx), /SKILL_RUNNER_MISSING/)
-  ctx.runners.set('native-model', { run() {} }); ctx.loadResult = async () => ({ ...manifest, executionId: 'foreign' }); await assert.rejects(executeSkill(c, ctx), /SKILL_RESULT_BINDING_INVALID/)
+test('missing native adapter and wrong result binding never commit', async () => {
+  const { c, ctx, manifest } = fixture(); delete ctx.runNative
+  await assert.rejects(executeSkill(c, ctx), /SKILL_NATIVE_ADAPTER_MISSING/)
+  ctx.runNative = async () => ({ ...manifest, executionId: 'foreign' }); await assert.rejects(executeSkill(c, ctx), /SKILL_RESULT_BINDING_INVALID/)
 })
-
+test('legacy commands are rejected before registry or execution admission', async () => {
+  await assert.rejects(executeSkill({ ...command(), executionProtocolVersion: 4 }, { registry: { requireNativePackage: () => assert.fail('legacy authority') } }), /SKILL_COMMAND_INVALID/)
+})
 import { readFileSync } from 'node:fs'
 import { skillCanonicalJson, skillDigest, skillHash } from '../skill-executor.mjs'
 import { canonicalSha256 } from '../chat-runtime.mjs'
@@ -56,19 +54,49 @@ test('canonical object keys are UTF16 lexical, never JS integer-property enumera
   for (const value of [NaN, Infinity, undefined, 1n]) assert.throws(() => skillCanonicalJson(value), /SKILL_CANONICAL_JSON_INVALID/)
 })
 
-test('protocol4 requires the exact shared task binding and rejects substituted execution/package references before claim', async () => {
-  const original = command()
-  for (const key of ['executionId', 'skillKey', 'skillVersion', 'packageSha256', 'manifestSha256']) {
-    const changed = structuredClone(original)
-    changed.taskSkillBinding[key] = key.endsWith('Sha256') ? 'e'.repeat(64) : 'substituted'
-    assert.throws(() => parseSkillCommand(changed), /SKILL_COMMAND_INVALID/)
+
+test('API optional dataSchema omission normalizes to null without inventing output data', () => {
+  const wire = command(); delete wire.outputs.dataSchema
+  assert.deepEqual(parseSkillCommand(wire), command())
+})
+
+const addInstruction = f => {
+  const skill = { key: 'guide', version: '1.0.0', packageSha256: 'b'.repeat(64), manifestSha256: null }
+  const taskSkillBinding = { executionId: f.c.executionId, taskGrantId: 'grant1', taskGrantVersion: '1', agentId: 'agent1', skillKey: skill.key,
+    skillInstallationId: 'installation1', productVersionId: 'product1', skillVersion: skill.version, packageSha256: skill.packageSha256,
+    manifestSha256: null, approvedPermissionsSha256: 'c'.repeat(64) }
+  f.c.skills = [{ skill, taskSkillBinding }]
+  return taskSkillBinding
+}
+test('native execution binds an ordinary instruction package without old runner readiness', async () => {
+  const f = fixture(); const binding = addInstruction(f)
+  f.ctx.registry.requireNativePackage = async (skill, options) => {
+    assert.equal(skill.manifestSha256, null); assert.deepEqual(options.taskBinding, binding)
+    f.events.push('package'); return { descriptor: { kind: 'INSTRUCTION', manifest: null } }
   }
-  for (const taskSkillBinding of [null, { ...original.taskSkillBinding, taskGrantVersion: '01' },
-    { ...original.taskSkillBinding, approvedPermissionsSha256: null }, { ...original.taskSkillBinding, extra: true }]) {
-    await assert.rejects(executeSkill({ ...original, taskSkillBinding }, {
-      registry: { requireExact() { assert.fail('invalid binding must not reach registry/claim') } }
-    }))
+  f.ctx.runNative = async ({ entries }) => {
+    assert.equal(entries[0].descriptor.kind, 'INSTRUCTION'); f.events.push('native'); return f.manifest
   }
-  const { taskSkillBinding, ...missing } = original
-  assert.throws(() => parseSkillCommand(missing), /SKILL_COMMAND_INVALID/)
+  await executeSkill(f.c, f.ctx)
+  assert.deepEqual(f.events, ['claim', 'package', 'native', 'commit', 'receipt'])
+  const broken = structuredClone(f.c); broken.skills[0].skill.manifestSha256 = ''
+  assert.throws(() => parseSkillCommand(broken), /SKILL_COMMAND_INVALID/)
+})
+test('native result recovery does not depend on a still-installed package or live old runner', async () => {
+  const f = fixture(); addInstruction(f)
+  f.ctx.loadResult = async () => f.manifest
+  await executeSkill(f.c, f.ctx)
+  assert.deepEqual(f.events, ['claim', 'commit', 'receipt'])
+  f.events.length = 0
+  f.ctx.claimOrResume = async () => ({ resultManifest: f.manifest })
+  f.ctx.recoverCommittedResult = async () => ({ state: 'RESULT_COMMITTED' })
+  await executeSkill(f.c, f.ctx)
+  assert.deepEqual(f.events, ['receipt'])
+})
+
+test('script policy requires a real bound skill and preserves the policy in the command', () => {
+  const f = fixture(); f.c.toolPolicyRef = 'NATIVE_SKILL_SCRIPT_V1'
+  assert.throws(() => parseSkillCommand(f.c), /SKILL_COMMAND_INVALID/)
+  addInstruction(f)
+  assert.equal(parseSkillCommand(f.c).toolPolicyRef, 'NATIVE_SKILL_SCRIPT_V1')
 })

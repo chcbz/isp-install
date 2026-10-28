@@ -8,8 +8,6 @@ import {
   buildControlledImageBountyExecutionV3Declaration,
   controlledImageBountyExecutionV3Enabled
 } from '../controlled-image-bounty-v3-capability.mjs'
-import { parseControlledImageV3ConversationCommand } from '../conversation-controlled-image-v3.mjs'
-import { parseControlledImageConversationCommand } from '../conversation-controlled-image.mjs'
 import { controlledImageV3InputDigest, parseControlledImageV3Inputs } from '../conversation-reference-inputs-v3.mjs'
 
 const fixturePath = resolve(import.meta.dirname, 'fixtures/controlled-image-v3-source-wire-v1.json')
@@ -59,26 +57,12 @@ test('v3 readiness requires exact live profile, runtime, Provider policy, execut
 
 test('all valid fixture commands, source snapshots, canonical bytes, and digests parse exactly', () => {
   for (const item of fixture.validCases) {
-    const command = parseControlledImageV3ConversationCommand(item.command)
+    const command = item.command
     const snapshot = parseControlledImageV3Inputs(item.inputSnapshot, command, item.startReceipt.leaseVersion)
     assert.equal(snapshot.canonicalUtf8, item.inputDigestCanonicalUtf8, item.caseId)
     assert.equal(createHash('sha256').update(snapshot.canonicalUtf8).digest('hex'), item.inputDigestSha256, item.caseId)
     assert.equal(snapshot.inputSnapshotDigest, item.command.inputSnapshotDigest, item.caseId)
   }
-})
-
-test('v2 and v3 command parsers remain disjoint and exact-field strict', () => {
-  const v3 = fixture.validCases[0].command
-  const oldFixture = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures/controlled-image-bridge-v1.json')))
-  assert.throws(() => parseControlledImageConversationCommand(v3), /CONTROLLED_IMAGE_COMMAND_INVALID/)
-  assert.throws(() => parseControlledImageV3ConversationCommand(oldFixture.wire.command), /CONTROLLED_IMAGE_V3_COMMAND_INVALID/)
-  for (const mutation of [
-    { ...v3, extra: true },
-    Object.fromEntries(Object.entries(v3).filter(([key]) => key !== 'operation')),
-    { ...v3, operation: 'UPSCALE_IMAGE' },
-    { ...v3, inputSnapshotDigest: 'A'.repeat(64) },
-    { ...v3, executionId: '' }
-  ]) assert.throws(() => parseControlledImageV3ConversationCommand(mutation), /CONTROLLED_IMAGE_V3_COMMAND_INVALID/)
 })
 
 test('source union, decimal longs, operation cardinality, and duplicate sources fail closed', () => {
@@ -104,7 +88,7 @@ test('source union, decimal longs, operation cardinality, and duplicate sources 
     const changed = clone(workspace.inputSnapshot); changed.inputs.push(clone(changed.inputs[0])); changed.inputs[1].inputRef = 'input_2'; mutations.push([workspace.command, changed])
   }
   for (const [rawCommand, snapshot] of mutations) {
-    const command = parseControlledImageV3ConversationCommand(rawCommand)
+    const command = rawCommand
     assert.throws(() => parseControlledImageV3Inputs(snapshot, command, 1), /CONTROLLED_IMAGE_V3_INPUTS_UNAVAILABLE/)
   }
 })
@@ -127,7 +111,7 @@ test('workspace, conversation, and asset source revisions are bound into the inp
     }).sha256
     assert.notEqual(digest, item.command.inputSnapshotDigest, field)
     changedDigests.push(digest)
-    const command = parseControlledImageV3ConversationCommand(item.command)
+    const command = item.command
     assert.throws(() => parseControlledImageV3Inputs(changed, command, item.startReceipt.leaseVersion),
       /CONTROLLED_IMAGE_V3_INPUTS_UNAVAILABLE/)
   }

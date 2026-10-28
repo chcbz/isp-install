@@ -625,8 +625,8 @@ const parseSkillIdentity = text => {
       }
     }
   }
-  if (!closed || !fields.has('name') || !fields.has('description') || !metadata.has('version')) return null
-  return { name: fields.get('name'), description: fields.get('description'), version: metadata.get('version') }
+  if (!closed || !fields.has('name') || !fields.has('description')) return null
+  return { name: fields.get('name'), description: fields.get('description'), version: metadata.get('version') ?? null }
 }
 
 const validateNoFilePrefixConflict = entries => {
@@ -734,7 +734,7 @@ const extractArchive = async (buffer, stagingPath, command, limits) => {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.ARCHIVE_INVALID, 'archive must contain a root SKILL.md')
   }
   const identity = parseSkillIdentity(skillManifestBytes.toString('utf8'))
-  if (!identity || identity.name !== command.skillKey || identity.version !== command.skillVersion) {
+  if (!identity || identity.name !== command.skillKey || (identity.version !== null && identity.version !== command.skillVersion)) {
     throw new SkillInstallError(SKILL_INSTALL_FAILURE.IDENTITY_MISMATCH, 'SKILL.md name/version does not match the command identity')
   }
   let manifest = null
@@ -1005,7 +1005,6 @@ export class SkillInstallManager {
         if (c.phase === 'ACTIVATE') return await this._activate(state, record, session)
         const installed = this._verifiedInstallation(state, c.target.skillInstallationId)
         if (installed.approvedPermissionsSha256 !== c.approvedPermissionsSha256) throw new SkillInstallError('SKILL_PERMISSIONS_MISMATCH', 'policy cannot expand installation permissions')
-        if (c.action === 'ENABLE') await this._probe(installed)
         this._assertIdentity(c, session)
         this._policyView(state, record)
         this._applyObserved(state, record)
@@ -1024,13 +1023,6 @@ export class SkillInstallManager {
     })
     this.replayResults()
     return { status: result.data.evidence.outcome === 'FAILED' ? 'failed' : 'completed', exitCode: 0, resultEnvelope: result }
-  }
-  async _probe(row) {
-    if (!row.manifest) return { readiness: 'NOT_EXECUTABLE' }
-    if (typeof this.verifyCandidate !== 'function') throw new SkillInstallError('SKILL_DEPENDENCY_UNAVAILABLE', 'authenticated runner probe unavailable')
-    const probe = await this.verifyCandidate(row)
-    if (probe?.readiness !== 'READY') throw new SkillInstallError(probe?.reasonCode || 'SKILL_DEPENDENCY_UNAVAILABLE', 'candidate dependency unavailable')
-    return probe
   }
   _descriptor(installation, current = null) {
     const c = installation.command, target = c.target
@@ -1067,10 +1059,6 @@ export class SkillInstallManager {
     const manifest = await extractArchive(bytes, stage, command, this)
     if ((manifest?.manifestSha256 ?? null) !== target.manifestSha256 || (manifest === null) !== (target.kind === 'INSTRUCTION')) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IDENTITY_MISMATCH, 'approved manifest/kind mismatch')
     const packageTreeDigest = skillPackageTreeDigest(stage)
-    await this._probe({ installationId: target.skillInstallationId, skillInstallationId: target.skillInstallationId,
-      productVersionId: target.productVersionId, skillKey: c.skillKey, skillVersion: target.skillVersion, kind: target.kind,
-      packageRoot: stage, packageSha256: target.packageSha256, manifestSha256: target.manifestSha256,
-      packageTreeDigest, manifest, enabled: c.desiredEnabled, policyRevision: c.skillRevision })
     this._assertIdentity(c, session)
     const marker = { schemaVersion: 2, commandId: c.commandId, preparedSha256: preparedDigest(c),
       target, approvedPermissionsSha256: c.approvedPermissionsSha256, scopeDigest: this.scope.digest, packageTreeDigest }
@@ -1087,7 +1075,7 @@ export class SkillInstallManager {
     if (!prepared || prepared.state !== 'PREPARED' || prepared.preparedSha256 !== c.preparedSha256
         || c.preparedSha256 !== preparedDigest(c) || !['skillChangeId', 'attempt', 'skillRevision', 'skillKey', 'desiredEnabled', 'approvedPermissionsSha256'].every(k => c[k] === prepared.envelope.data[k])) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'activation lacks matching prepared authorization')
     const row = this._verifiedInstallation(state, c.target.skillInstallationId)
-    await this._probe(row); this._assertIdentity(c, session)
+    this._assertIdentity(c, session)
     if (!c.desiredEnabled) {
       if (existsSync(resolve(verifyControlledCodexHome(this.profile.codexHome), c.skillKey))) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'disabled source must not be discoverable')
       this._applyObserved(state, record)

@@ -414,19 +414,26 @@ export class AppServerAdapter extends EventEmitter {
     verifyCodexAppServerBinaryIdentity(profile, schemaMeasurement)
     return AppServerAdapter.#spawnVerified(profile, { spawnFn, cwd, requestTimeoutMs, schemaMeasurement, spawnedExecutableVerifier })
   }
-  static #spawnVerified(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000, schemaMeasurement, spawnedExecutableVerifier = verifySpawnedAppServerExecutable }) {
+  static #spawnVerified(profile, { spawnFn = spawn, cwd, requestTimeoutMs = 15000, schemaMeasurement, spawnedExecutableVerifier = verifySpawnedAppServerExecutable, nativeExecution = null }) {
     const child = spawnFn(schemaMeasurement.snapshotPath, ['app-server'], {
       cwd, shell: false, stdio: ['pipe', 'pipe', 'pipe'],
       env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', CODEX_HOME: profile.codexHome, NO_PROXY: '*', no_proxy: '*' }
     })
-    return new AppServerAdapter({ child, requestTimeoutMs, schemaMeasurement, spawnedExecutableVerifier })
+    return new AppServerAdapter({ child, requestTimeoutMs, schemaMeasurement, spawnedExecutableVerifier, nativeExecution })
   }
   async verifySpawnedExecutable(options = {}) {
     const probe = await this.spawnedExecutableVerifier(this.child, this.readback.schema, options)
     this.readback.processExecutable = probe; return probe
   }
-  constructor({ child, send = null, now = Date.now, requestTimeoutMs = 15000, maxStderrBytes = 1024 * 1024, schemaMeasurement = null, spawnedExecutableVerifier = verifySpawnedAppServerExecutable } = {}) {
+  constructor({ child, send = null, now = Date.now, requestTimeoutMs = 15000, maxStderrBytes = 1024 * 1024, schemaMeasurement = null, spawnedExecutableVerifier = verifySpawnedAppServerExecutable, nativeExecution = null } = {}) {
     super(); if (!child) throw new Error('APP_SERVER_CHILD_REQUIRED')
+    // Only the trusted execution owner can opt in. A turn/model policy cannot
+    // upgrade the CHAT adapter. Outer mount/egress isolation remains mandatory.
+    if (nativeExecution && (!id(nativeExecution.executionId) || typeof nativeExecution.checkActive !== 'function'
+        || typeof nativeExecution.callTool !== 'function' || !Array.isArray(nativeExecution.tools)
+        || nativeExecution.tools.some(tool => tool.type !== 'function' || !id(tool.name))
+        || new Set(nativeExecution.tools.map(tool => tool.name)).size !== nativeExecution.tools.length)) throw new Error('NATIVE_EXECUTION_BINDING_INVALID')
+    this.nativeExecution = nativeExecution ? Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools) }) : null
     this.child = child; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.maxStderrBytes = maxStderrBytes; this.spawnedExecutableVerifier = spawnedExecutableVerifier
     this.nextId = 1; this.pending = new Map(); this.buffer = ''; this.stderrBytes = 0; this.closed = false
     this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [], schema: schemaMeasurement || { measured: false } }
@@ -449,7 +456,7 @@ export class AppServerAdapter extends EventEmitter {
   notify(method, params = {}) { if (!this.closed) this.send({ method, params }) }
   async initialize() {
     if (this.readback.schema?.measured === true && !this.readback.processExecutable) await this.verifySpawnedExecutable()
-    this.readback.initialize = await this.request('initialize', { clientInfo: { name: 'cyf-juyiting-runtime', version: '2' } })
+    this.readback.initialize = await this.request('initialize', { clientInfo: { name: 'cyf-juyiting-runtime', version: '2' }, ...(this.nativeExecution ? { capabilities: { experimentalApi: true } } : {}) })
     this.notify('initialized', {})
     this.readback.account = await this.request('account/read', { refreshToken: false })
     this.readback.models = await this.request('model/list', {})
@@ -459,23 +466,39 @@ export class AppServerAdapter extends EventEmitter {
   }
   async startOrResumeThread(binding, policy) {
     const params = { cwd: policy.cwd, model: policy.model || undefined, approvalPolicy: 'never', sandbox: 'read-only', config: { ...(policy.config || {}), network: false }, developerInstructions: policy.developerInstructions || policy.instructions || '', ...(policy.baseInstructions ? { baseInstructions: policy.baseInstructions } : {}) }
+    if (this.nativeExecution) {
+      this.nativeExecution.checkActive()
+      if (policy.cwd !== '/execution') throw new Error('NATIVE_EXECUTION_CWD_INVALID')
+      params.sandbox = 'workspace-write'
+      params.config.sandbox_workspace_write = { writable_roots: ['/workspace', '/outputs'], network_access: false, exclude_slash_tmp: true, exclude_tmpdir_env_var: true }
+      // Dynamic tools are persisted with the thread by the engine. Resume does
+      // not accept a replacement catalog; local dispatch still checks our set.
+      if (!binding?.threadId) params.dynamicTools = this.nativeExecution.tools
+    }
     const result = binding?.threadId ? await this.request('thread/resume', { threadId: binding.threadId, ...params }) : await this.request('thread/start', params)
     const threadId = result?.thread?.id || result?.threadId
     if (!id(threadId)) throw new Error('APP_SERVER_THREAD_ID_MISSING')
     return { ...(binding || {}), threadId, state: 'HOT', updatedAt: this.now() }
   }
-  async runTurn({ threadId, clientUserMessageId, input, policy = {}, onAccepted = () => {}, onDelta = () => {}, onClarification = () => {} }) {
+  async runTurn({ threadId, clientUserMessageId, input, policy = {}, onAccepted = () => {}, onDelta = () => {}, onClarification = () => {}, onToolEvent = () => {} }) {
     if (!id(threadId) || !id(clientUserMessageId)) throw new Error('TURN_BINDING_REQUIRED')
+    if (this.nativeExecution) {
+      this.nativeExecution.checkActive()
+      if (policy.cwd !== '/execution') throw new Error('NATIVE_EXECUTION_CWD_INVALID')
+      if ([...this.turns.values()].some(turn => turn.threadId === threadId)) throw new Error('TURN_ALREADY_ACTIVE')
+    }
     const provisional = `${threadId}:${clientUserMessageId}`
     if (this.turns.has(provisional)) throw new Error('TURN_ALREADY_ACTIVE')
     const turn = { threadId, clientUserMessageId, state: 'STARTING', startedAt: this.now(), turnId: null }
     this.turns.set(provisional, turn)
 
-    let finalContent = ''; let settled = false; const buffered = []
+    let finalContent = ''; let settled = false; let terminalSeen = false; const buffered = []; const toolCalls = new Map()
     let resolveTerminal; let rejectTerminal
     const terminalPromise = new Promise((resolve, reject) => { resolveTerminal = resolve; rejectTerminal = reject })
+    void terminalPromise.catch(() => {})
     const cleanup = () => {
       this.off('delta', delta); this.off('final', final); this.off('terminal', terminal)
+      this.off('native_tool_call', toolCall); this.off('tool', toolEvent)
       this.off('clarification', clarification); this.off('policy_violation', violation); this.off('exit', exited)
       this.turns.delete(provisional)
       if (turn.turnId) this.turns.delete(`${threadId}:${turn.turnId}`)
@@ -493,12 +516,53 @@ export class AppServerAdapter extends EventEmitter {
       if (kind === 'delta') onDelta(event)
       else if (kind === 'final') finalContent = event.content
       else if (kind === 'clarification') onClarification(event)
+      else if (kind === 'tool') { try { onToolEvent(event) } catch (error) { settle(error); void this.interrupt(threadId, turn.turnId).catch(() => {}) } }
+      else if (kind === 'toolCall') dispatchTool(event)
       else if (kind === 'violation') settle(Object.assign(new Error(event.code), { code: event.code }))
       else if (kind === 'terminal') {
-        if (event.status === 'completed') settle(null, { turnId: turn.turnId, threadId, content: finalContent, finishReason: 'completed' })
+        terminalSeen = true
+        if (event.status === 'completed') {
+          // Completion cannot overtake a still-running trusted tool callback.
+          void Promise.all([...toolCalls.values()].map(call => call.promise)).then(() => {
+            this.nativeExecution?.checkActive()
+            settle(null, { turnId: turn.turnId, threadId, content: finalContent, finishReason: 'completed' })
+          }).catch(error => settle(error))
+        }
         else settle(Object.assign(new Error(`TURN_${event.status.toUpperCase()}`), { code: `TURN_${event.status.toUpperCase()}` }))
       }
     }
+    const dispatchTool = event => {
+      const { frame, callId, tool, arguments: args } = event
+      if (!id(callId) || !this.nativeExecution?.tools.some(spec => spec.name === tool) || event.namespace) {
+        this._denyServerRequest(frame); return
+      }
+      const signature = JSON.stringify([tool, args]); let call = toolCalls.get(callId)
+      if (call && call.signature !== signature) { this._denyServerRequest(frame); return }
+      if (!call && terminalSeen) { this._denyServerRequest(frame); return }
+      if (!call) {
+        const promise = Promise.resolve().then(async () => {
+          if (settled || this.closed) throw new Error('NATIVE_EXECUTION_INACTIVE')
+          this.nativeExecution.checkActive()
+          try {
+            const result = await this.nativeExecution.callTool({ executionId: this.nativeExecution.executionId, threadId, turnId: turn.turnId, callId, tool, arguments: args })
+            return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] }
+          } catch (error) {
+            if (error.recoverableToolError === true && typeof error.code === 'string') return { success: false, contentItems: [{ type: 'inputText', text: error.code }] }
+            throw error
+          }
+        })
+        call = { signature, promise }; toolCalls.set(callId, call)
+      }
+      void call.promise.then(result => {
+        if (!this.closed) this.send({ id: frame.id, result })
+      }).catch(error => {
+        // Do not forward exception messages, filesystem paths or credentials.
+        if (!this.closed) this.send({ id: frame.id, result: { success: false, contentItems: [{ type: 'inputText', text: error.code || 'NATIVE_TOOL_FAILED' }] } })
+        settle(error)
+      })
+    }
+    const toolCall = event => consume('toolCall', event)
+    const toolEvent = event => consume('tool', event)
     const delta = event => consume('delta', event)
     const final = event => consume('final', event)
     const terminal = event => consume('terminal', event)
@@ -506,12 +570,13 @@ export class AppServerAdapter extends EventEmitter {
     const violation = event => consume('violation', event)
     const exited = () => { if (turn.turnId) settle(Object.assign(new Error('APP_SERVER_EXITED_DURING_TURN'), { code: 'TURN_ACCEPTANCE_UNKNOWN', turn: { ...turn } })) }
     this.on('delta', delta); this.on('final', final); this.on('terminal', terminal)
+    this.on('native_tool_call', toolCall); this.on('tool', toolEvent)
     this.on('clarification', clarification); this.on('policy_violation', violation); this.on('exit', exited)
 
     let response
     try {
       const userInput = Array.isArray(input) ? input : [{ type: 'text', text: String(input) }]
-      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false }, ...(policy.outputSchema ? { outputSchema: policy.outputSchema } : {}) })
+      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', sandboxPolicy: this.nativeExecution ? { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: this.nativeExecution.networkAccess === true, excludeSlashTmp: true, excludeTmpdirEnvVar: true } : { type: 'readOnly', networkAccess: false }, ...(policy.outputSchema ? { outputSchema: policy.outputSchema } : {}) })
     } catch (cause) {
       cleanup(); turn.state = 'ACCEPTANCE_UNKNOWN'; turn.error = cause.message
       const reconciliation = await this.reconcileTurn(turn).catch(() => ({ status: 'RECOVERY_REQUIRED' }))
@@ -525,7 +590,8 @@ export class AppServerAdapter extends EventEmitter {
       this.emit('recovery_required', { ...turn, reason: 'TURN_START_RESPONSE_MISSING_ID', reconciliation })
       throw Object.assign(new Error('TURN_START_RESPONSE_MISSING_ID'), { code: 'TURN_ACCEPTANCE_UNKNOWN', turn: { ...turn }, reconciliation })
     }
-    turn.turnId = turnId; turn.state = 'RUNNING'; this.turns.set(`${threadId}:${turnId}`, turn); onAccepted({ threadId, turnId })
+    turn.turnId = turnId; turn.state = 'RUNNING'; this.turns.set(`${threadId}:${turnId}`, turn)
+    try { onAccepted({ threadId, turnId }) } catch (error) { settle(error); void this.interrupt(threadId, turnId).catch(() => {}); return terminalPromise }
     for (const [kind, event] of buffered.splice(0)) consume(kind, event)
     return terminalPromise
   }
@@ -577,7 +643,23 @@ export class AppServerAdapter extends EventEmitter {
     if (frame.id != null && (frame.result !== undefined || frame.error !== undefined)) { const pending = this.pending.get(frame.id); if (!pending) return; this.pending.delete(frame.id); clearTimeout(pending.timer); if (frame.error) pending.reject(Object.assign(new Error(frame.error.message || 'APP_SERVER_RPC_ERROR'), { code: frame.error.code })); else pending.resolve(frame.result); return }
     if (!frame.method) return
     if (!this.readback.eventMethods.includes(frame.method)) this.readback.eventMethods.push(frame.method)
-    if (frame.id != null || deniedMethods.test(frame.method)) { this._denyServerRequest(frame); return }
+    if (this.nativeExecution && frame.method === 'item/tool/call' && frame.id != null) {
+      const params = frame.params || {}
+      if (![...this.turns.values()].some(turn => turn.threadId === params.threadId && (!turn.turnId || turn.turnId === params.turnId))) { this._denyServerRequest(frame); return }
+      this.emit('native_tool_call', { ...params, frame }); return
+    }
+    const toolNotification = this.nativeExecution && frame.id == null && [
+      'item/started', 'item/completed', 'item/commandExecution/outputDelta',
+      'item/commandExecution/terminalInteraction', 'item/fileChange/outputDelta', 'item/mcpToolCall/progress'
+    ].includes(frame.method)
+    if (toolNotification) {
+      const p = frame.params || {}; const item = p.item || {}
+      if (['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall'].includes(item.type) || frame.method !== 'item/started' && frame.method !== 'item/completed') {
+        // Progress is not an execution receipt. Do not expose raw command output.
+        this.emit('tool', { threadId: p.threadId, turnId: p.turnId, itemId: item.id || p.itemId, method: frame.method, type: item.type, status: item.status })
+      }
+    }
+    if (frame.id != null || deniedMethods.test(frame.method) && !toolNotification) { this._denyServerRequest(frame); return }
     const params = frame.params || {}; const threadId = params.threadId || params.thread_id; const turnId = params.turnId || params.turn_id || params.turn?.id
     if (frame.method === 'item/agentMessage/delta') { const content = params.delta || params.text || params.content; if (typeof content === 'string' && content) this.emit('delta', { threadId, turnId, content }); return }
     if (frame.method === 'item/agentMessage') { const content = params.text || params.content || params.item?.text; if (typeof content === 'string') this.emit('final', { threadId, turnId, content }); return }
@@ -597,8 +679,8 @@ export class AppServerAdapter extends EventEmitter {
     const params = frame.params || {}; const threadId = params.threadId || params.thread_id; const turnId = params.turnId || params.turn_id
     const clarification = /user.?input/i.test(frame.method)
     if (clarification) this.emit('clarification', { threadId, turnId, request: frame.method })
-    else this.emit('policy_violation', { threadId, turnId, request: frame.method, code: 'FAST_CHAT_TOOL_POLICY_VIOLATION' })
-    if (frame.id != null) this.send({ id: frame.id, error: { code: -32001, message: clarification ? 'Clarification only; it cannot authorize execution' : 'Denied by read-only-constrained CHAT policy' } })
+    else this.emit('policy_violation', { threadId, turnId, request: frame.method, code: this.nativeExecution ? 'NATIVE_EXECUTION_TOOL_POLICY_VIOLATION' : 'FAST_CHAT_TOOL_POLICY_VIOLATION' })
+    if (frame.id != null) this.send({ id: frame.id, error: { code: -32001, message: clarification ? 'Clarification only; it cannot authorize execution' : this.nativeExecution ? 'Tool or permission request is outside the bound execution policy' : 'Denied by read-only-constrained CHAT policy' } })
     if (!clarification && id(threadId) && id(turnId)) void this.interrupt(threadId, turnId).catch(() => {})
   }
 }

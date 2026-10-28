@@ -1,5 +1,5 @@
 import { skillDigest } from './skill-executor.mjs'
-import { validateManagement } from './skill-management-wire.mjs'
+import { validateManagement, validateNativeTaskSkillBinding } from './skill-management-wire.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const hash = value => typeof value === 'string' && /^[0-9a-f]{64}(?![\s\S])/.test(value)
 const exact = value => typeof value === 'string' && value.length > 0 && value === value.trim() && !/[\x00-\x1f\x7f]/u.test(value)
@@ -12,12 +12,12 @@ const code = value => value === 'PROVIDER_UNBOUND' ? value : 'DEPENDENCY_MISSING
 /** Current authenticated discovery view + exact retained execution lookup, not a
  * second installer/ACL. Only a server-authorized TaskSkillBinding selects history. */
 export class SkillRegistry {
-  constructor({ scope, loadInstalled, loadRetained = loadInstalled, runnerRegistry = new Map(), toolProbes = new Map(), resolveBinding = null, now = Date.now }) {
+  constructor({ scope, loadInstalled, loadRetained = loadInstalled, runnerRegistry = new Map(), toolProbes = new Map(), now = Date.now }) {
     const fields = ['tenantId', 'clientId', 'ownerJiacn', 'agentId']
     if (!object(scope) || fields.some(field => !exact(scope[field]))) fail('SKILL_SCOPE_INVALID')
     if (typeof loadInstalled !== 'function' || typeof loadRetained !== 'function') fail('SKILL_INSTALL_SOURCE_REQUIRED')
     this.scope = Object.freeze(Object.fromEntries(fields.map(field => [field, scope[field]])))
-    Object.assign(this, { loadInstalled, loadRetained, resolveBinding, now })
+    Object.assign(this, { loadInstalled, loadRetained, now })
     this.runners = new Map(runnerRegistry); this.tools = new Map(toolProbes)
     this.fence = null; this.epoch = 0; this.ticket = 0; this.revision = 0n
     this.cached = null; this.entries = new Map(); this.fingerprint = null; this.lastErrorCode = null
@@ -33,7 +33,7 @@ export class SkillRegistry {
   invalidate() { this.epoch++; this.cached = null; this.entries = new Map(); this.lastErrorCode = null }
   declaration() { return this.cached }
 
-  async measureInstallation(input, fence = this.fence, { tools = new Map(), bindings = new Map() } = {}) {
+  async measureInstallation(input, fence = this.fence, { tools = new Map() } = {}) {
     if (!fence) fail('SKILL_SESSION_INVALID')
     const row = freeze(structuredClone(input)), manifest = row.manifest
     if (!exact(row.skillInstallationId) || !exact(row.productVersionId) || !exact(row.skillKey) || !exact(row.skillVersion)
@@ -47,32 +47,24 @@ export class SkillRegistry {
       const context = Object.freeze({ scope: this.scope, fence, skillKey: row.skillKey, skillVersion: row.skillVersion,
         entrypoint: manifest.entrypoint, inputMimeTypes: manifest.inputs.acceptedMimeTypes,
         packageRoot: row.packageRoot, packageTreeDigest: row.packageTreeDigest })
-      const runner = this.runners.get(manifest.runner)
+      // Only the archive reconciler's local-script path remains supported.
+      // Unknown/retired EXECUTABLE semantics are not ordinary native skills.
+      const runner = manifest.runner === 'local-script' ? this.runners.get('local-script') : null
       if (typeof runner?.run !== 'function' || typeof runner?.probe !== 'function') reasonCode = 'DEPENDENCY_MISSING'
       if (!reasonCode) {
-        const probe = await runner.probe(context)
+        const probe = await Promise.resolve().then(() => runner.probe(context)).catch(() => null)
         if (probe?.ready !== true || !hash(probe.digest)) reasonCode = code(probe?.reasonCode)
         else measured.push({ runner: manifest.runner, digest: probe.digest })
       }
       for (const name of manifest.requirements.tools || []) {
         if (reasonCode) break
         if (!tools.has(name)) tools.set(name, Promise.resolve().then(() => this.tools.get(name)?.({ scope: this.scope, fence })))
-        const probe = await tools.get(name)
+        const probe = await tools.get(name).catch(() => null)
         if (probe?.ready !== true || !hash(probe.digest)) reasonCode = 'DEPENDENCY_MISSING'
         else measured.push({ tool: name, digest: probe.digest })
       }
-      const alias = manifest.requirements.providerAlias
-      if (!reasonCode && (alias || manifest.runner === 'provider-operation')) {
-        if (!alias || typeof this.resolveBinding !== 'function') reasonCode = 'PROVIDER_UNBOUND'
-        else {
-          if (!bindings.has(alias)) bindings.set(alias, Promise.resolve().then(() => this.resolveBinding({ scope: this.scope, fence, alias })))
-          const probe = await bindings.get(alias)
-          if (probe?.ready !== true || Object.entries(this.scope).some(([key, value]) => probe.scope?.[key] !== value)
-              || !exact(probe.bindingId) || typeof probe.revision !== 'string' || !/^(0|[1-9][0-9]*)(?![\s\S])/.test(probe.revision)
-              || BigInt(probe.revision) > 9223372036854775807n || !hash(probe.digest)) reasonCode = 'PROVIDER_UNBOUND'
-          else { bindingRevision = probe.revision; binding = Object.freeze({ bindingId: probe.bindingId, revision: probe.revision, digest: probe.digest }) }
-        }
-      }
+      // Provider bindings belong to the retired runner protocol, not native discovery.
+      if (!reasonCode && manifest.requirements.providerAlias) reasonCode = 'DEPENDENCY_MISSING'
       if (!reasonCode) toolchainDigest = skillDigest(measured)
     }
     const item = freeze({ skillKey: row.skillKey, skillInstallationId: row.skillInstallationId, productVersionId: row.productVersionId,
@@ -92,7 +84,7 @@ export class SkillRegistry {
     try {
       const installed = await this.loadInstalled()
       if (!Array.isArray(installed)) fail('SKILL_INSTALL_SOURCE_INVALID')
-      const entries = new Map(), publicItems = [], shared = { tools: new Map(), bindings: new Map() }
+      const entries = new Map(), publicItems = [], shared = { tools: new Map() }
       for (const row of installed.sort((a, b) => Buffer.compare(Buffer.from(a.skillKey), Buffer.from(b.skillKey)))) {
         const entry = await this.measureInstallation(row, fence, shared), key = identity(entry.item)
         if (entries.has(key)) fail('SKILL_INSTALLATION_AMBIGUOUS')
@@ -111,6 +103,26 @@ export class SkillRegistry {
       if (current()) { this.cached = null; this.entries = new Map(); this.lastErrorCode = 'SKILL_CATALOG_UNAVAILABLE' }
       return null
     }
+  }
+  // Resolve only the API-authorized immutable package. Installation storage
+  // verifies its tree/marker; readiness and tool authorization are separate.
+  // Do not use this method to grant tool, network or Provider permissions.
+  async requireNativePackage(skill, { taskBinding } = {}) {
+    const fence = this.fence, epoch = this.epoch
+    if (!fence || !taskBinding || !object(skill)) fail('SKILL_EXECUTION_BINDING_CHANGED')
+    validateNativeTaskSkillBinding(taskBinding)
+    const fields = ['skillKey', 'skillVersion', 'packageSha256', 'manifestSha256']
+    if (taskBinding.agentId !== this.scope.agentId || fields.some(key => taskBinding[key] !== skill[key])) fail('SKILL_EXECUTION_BINDING_CHANGED')
+    const rows = await this.loadRetained(taskBinding.skillInstallationId)
+    if (!Array.isArray(rows)) fail('SKILL_EXECUTION_BINDING_CHANGED')
+    const matches = rows.filter(row => row.skillInstallationId === taskBinding.skillInstallationId)
+    if (matches.length !== 1) fail('SKILL_EXECUTION_BINDING_CHANGED')
+    const row = matches[0]
+    if ([...fields, 'productVersionId', 'approvedPermissionsSha256'].some(key => row[key] !== taskBinding[key])
+        || !exact(row.packageRoot) || !hash(row.packageTreeDigest)
+        || row.kind !== 'INSTRUCTION' || row.manifest !== null || row.manifestSha256 !== null
+        || this.fence !== fence || this.epoch !== epoch) fail('SKILL_EXECUTION_BINDING_CHANGED')
+    return freeze({ descriptor: structuredClone(row) })
   }
   async requireExact(skill, { toolchainDigest, bindingRevision, allowUnavailable = false, taskBinding = null } = {}) {
     const fence = this.fence, epoch = this.epoch

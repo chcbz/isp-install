@@ -6,6 +6,7 @@ import { parseStrictJson } from './api-envelope.mjs'
 import { validateMessage } from './message-envelope.mjs'
 
 const schema = JSON.parse(readFileSync(new URL('./schemas/management-contract-v1.schema.json', import.meta.url)))
+const nativeTaskSkillBindingSchema = JSON.parse(readFileSync(new URL('./schemas/native-task-skill-binding-v5.schema.json', import.meta.url)))
 // The Runtime installer/validator imports the transport for offline collation
 // before node_modules exists. Load the already-declared validator only when an
 // actual management DTO is consumed, not during stdlib-only payload preparation.
@@ -33,15 +34,28 @@ export function managementCanonicalJson(value) {
   return JSON.stringify(value)
 }
 export const managementDigest = (domain, value) => createHash('sha256').update(domain).update('\0').update(managementCanonicalJson(value)).digest('hex')
-export function validateManagement(definition, value) {
-  managementCanonicalJson(value)
+const managementAjv = () => {
   if (!ajv) {
     const module = require('ajv'), Ajv = module.default || module
     ajv = new Ajv({ strict: false, allErrors: false, coerceTypes: false, useDefaults: false, removeAdditional: false })
     ajv.addSchema(schema)
   }
+  return ajv
+}
+export function validateManagement(definition, value) {
+  managementCanonicalJson(value)
+  managementAjv()
   if (!validators.has(definition)) validators.set(definition, ajv.compile({ $ref: `${schema.$id}#/definitions/${definition}` }))
   if (!validators.get(definition)(value)) fail()
+  return value
+}
+// V5 only: syntax permits null; the authorized installed descriptor determines
+// whether null is appropriate. This is not a tool authorization check.
+export function validateNativeTaskSkillBinding(value) {
+  managementCanonicalJson(value)
+  const engine = managementAjv(), key = nativeTaskSkillBindingSchema.$id
+  if (!validators.has(key)) validators.set(key, engine.compile(nativeTaskSkillBindingSchema))
+  if (!validators.get(key)(value)) fail()
   return value
 }
 export const isManagementMessage = message => message?.protocolVersion === 1 && (

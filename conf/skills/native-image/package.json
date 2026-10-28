@@ -1,0 +1,12 @@
+{
+  "name": "cyf-native-image-skill",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "dependencies": {
+    "@imagemagick/magick-wasm": "0.0.45"
+  }
+}

@@ -6,7 +6,6 @@ import {
   buildAgentPresencePayload,
   buildCodexArgs,
   buildAgentRegistrationPayload,
-  createNativeBountyExecutionRuntime,
   inheritManagedRuntimeCapabilities,
   normalizeProfile
 } from '../agent-client.mjs'
@@ -30,80 +29,14 @@ const configuredProfile = overrides => normalizeProfile({
   ...overrides
 })
 
-const runtimeFor = (profile, hooks = {}) => createNativeBountyExecutionRuntime({
-  profile,
-  workspaceFileBridge: hooks.workspaceFileBridge === undefined ? {} : hooks.workspaceFileBridge,
-  toolchainReady: hooks.toolchainReady === undefined ? true : hooks.toolchainReady,
-  getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'a'.repeat(64)}`, profile.agentId),
-  executeImage: hooks.executeImage || (async () => { throw new Error('declaration must not execute Provider work') }),
-  createPollProtocol: hooks.createPollProtocol || (options => ({ poll: async () => ({ processed: 0 }), options }))
-})
-
-const expectedEnabledDeclaration = {
-  schemaVersion: 1,
-  enabled: true,
-  transport: 'PERSONAL_WORKSPACE_CONVERSATION_HTTP_V1',
-  commandSchemaVersions: [1],
-  leaseProtocolVersions: [1],
-  providerStartFenceVersions: [1],
-  resultCommitProtocolVersions: [1],
-  operations: [{
-    operation: 'GENERATE_IMAGE',
-    inputManifest: {
-      schemaVersion: 1,
-      minItems: 0,
-      maxItems: 32,
-      mimeTypes: ['image/jpeg', 'image/png']
-    },
-    resultManifest: {
-      schemaVersion: 1,
-      minItems: 1,
-      maxItems: 1,
-      outputId: 'output_1',
-      mimeTypes: ['image/png']
-    }
-  }]
-}
-
 test('new registration never trusts image capability prose or legacy profile toggles; only measured skills advertise execution', () => {
-  const profile = configuredProfile(), runtime = runtimeFor(profile)
+  const profile = configuredProfile(), runtime = null
   for (const current of [profile, { ...profile, skills: ['imagegen'], abilities: ['GENERATE_IMAGE'] }, { ...profile, status: 'offline' }]) {
     const payload = buildAgentRegistrationPayload(current, runtime, true)
     assert.equal(payload.nativeBountyExecution, undefined)
     assert.equal(payload.nativeTextFileExecution, undefined)
     assert.equal(payload.skillExecution, undefined)
     assert.deepEqual(payload.runtimeCapabilities.profiles.EXECUTE, { supported: false, enabled: false })
-  }
-})
-
-test('runtime readiness requires an actual executor, usable local config, and poll implementation without probing them', () => {
-  const profile = configuredProfile()
-  let executorCalls = 0
-  let pollCalls = 0
-  const runtime = runtimeFor(profile, {
-    executeImage: async () => { executorCalls++; return null },
-    createPollProtocol: options => ({
-      options,
-      poll: async () => { pollCalls++; return { processed: 0 } }
-    })
-  })
-
-  assert.equal(runtime.configReady, true)
-  assert.equal(runtime.httpPollEnabled, true)
-  assert.equal(typeof runtime.executor, 'function')
-  assert.equal(typeof runtime.pollProtocol.poll, 'function')
-  assert.equal(executorCalls, 0)
-  assert.equal(pollCalls, 0)
-
-  for (const unavailable of [
-    runtimeFor(profile, { toolchainReady: false }),
-    runtimeFor(profile, { workspaceFileBridge: null }),
-    runtimeFor(profile, { createPollProtocol: () => ({}) }),
-    runtimeFor(configuredProfile({ nativeConversationHttpPollEnabled: false }))
-  ]) {
-    assert.equal(unavailable.configReady, false)
-    assert.equal(unavailable.executor, null)
-    assert.equal(unavailable.pollProtocol, null)
   }
 })
 
@@ -118,8 +51,8 @@ test('server and managed-local profiles use the same frozen declaration protocol
     status: ''
   }, server)
 
-  const serverDeclaration = buildAgentRegistrationPayload(server, runtimeFor(server), true).nativeBountyExecution
-  const localDeclaration = buildAgentRegistrationPayload(local, runtimeFor(local), true).nativeBountyExecution
+  const serverDeclaration = buildAgentRegistrationPayload(server, null, true).nativeBountyExecution
+  const localDeclaration = buildAgentRegistrationPayload(local, null, true).nativeBountyExecution
   assert.deepEqual(localDeclaration, serverDeclaration)
   assert.equal(localDeclaration, undefined)
 })
@@ -145,33 +78,11 @@ test('native executor flags are strict config and never mutate fast-v1 presence 
 })
 
 
-test('text-file native lane is selected only by explicit flag and stays separate from image readiness', async () => {
-  const profile = configuredProfile({ nativeConversationImageGenerationEnabled: false, nativeConversationTextFileEnabled: true })
-  let created; let executions = 0
-  const runtime = createNativeBountyExecutionRuntime({ profile, getRuntimeHeaders: () => sessionProof(`AgentRuntime rts1_${'a'.repeat(64)}`, profile.agentId),
-    executeTextFile: async args => { executions++; return args },
-    createPollProtocol: options => { created = options; return { poll() {} } } })
-  assert.equal(runtime.adapterKind, 'CODEX_TEXT_FILE_NATIVE_V1')
-  assert.equal(runtime.nativeTextFileV1Ready, true)
-  assert.equal(runtime.nativeBountyV1Ready, false)
-  assert.equal(runtime.credentialReady, false)
-  assert.equal(runtime.executor, created.execute)
-  assert.deepEqual(await runtime.executor({ command: { outputContentMimeType: 'text/plain' } }), { command: { outputContentMimeType: 'text/plain' } })
-  assert.throws(() => runtime.executor({ command: { outputContentMimeType: 'image/png' } }),
-    error => error.code === 'CONVERSATION_TEXT_FILE_COMMAND_INVALID')
-  assert.equal(executions, 1)
-  const registration = buildAgentRegistrationPayload(profile, runtime, true)
-  assert.equal(registration.nativeTextFileExecution, undefined)
-  assert.equal(buildAgentRegistrationPayload(profile, runtime, false).nativeTextFileExecution, undefined)
-  assert.equal(buildAgentPresencePayload(profile, 'offline', { nativeRuntime: runtime }).nativeTextFileExecution, undefined)
-})
-
 test('ordinary profile flag is inherited, while mixed image runtime does not advertise text execution', () => {
   const inherited = inheritManagedRuntimeCapabilities({}, { nativeConversationTextFileEnabled: true })
   assert.equal(inherited.nativeConversationTextFileEnabled, true)
   const profile = configuredProfile({ nativeConversationTextFileEnabled: true, nativeConversationImageGenerationEnabled: true })
-  const runtime = runtimeFor(profile)
-  assert.notEqual(runtime.nativeTextFileV1Ready, true)
+  const runtime = null
   assert.equal(buildAgentRegistrationPayload(profile, runtime, true).nativeTextFileExecution, undefined)
 })
 

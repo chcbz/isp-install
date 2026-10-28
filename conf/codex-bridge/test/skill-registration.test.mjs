@@ -38,6 +38,7 @@ test('ACK bootstraps the catalog once; repeated refresh ACK never starts a regis
   let loads = 0; const current = state(() => { loads++; return [] })
   assert.equal(bindMeasuredSkillSession(current, skillSessionBinding(receipt(), session)), true)
   await tick(); assert.equal(loads, 1); assert.equal(current.publications(), 1)
+  assert.deepEqual([...current.skillRunners.keys()], ['local-script'])
   assert.equal(typeof current.skillRunners.get('local-script').run, 'function')
   assert.equal(typeof current.skillRunners.get('local-script').probe, 'function')
   assert.equal(typeof current.skillRegistry.tools.get('node'), 'function')

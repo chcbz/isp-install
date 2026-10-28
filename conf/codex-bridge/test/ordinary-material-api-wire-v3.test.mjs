@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, lstatSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { parseControlledImageV3ConversationCommand } from '../conversation-controlled-image-v3.mjs'
 import { parseControlledImageV3Inputs, materializeControlledImageV3Inputs } from '../conversation-reference-inputs-v3.mjs'
 
 const bytes = readFileSync(resolve(import.meta.dirname, 'fixtures/ordinary-material-api-wire-v3.json'))
@@ -27,7 +26,7 @@ test('fixture is the exact API-emitted wire with source provenance, not a client
 
 for (const item of cases) {
   test(`API wire ${item.caseId}: parse independent digest and materialize original sources/bytes privately`, async t => {
-    const command = parseControlledImageV3ConversationCommand(item.command)
+    const command = item.command
     const snapshot = parseControlledImageV3Inputs(item.inputSnapshot, command, 1)
     assert.equal(sha(snapshot.canonicalUtf8), item.command.inputSnapshotDigest)
     const runDirectory = privateRun(t)
@@ -48,7 +47,7 @@ for (const item of cases) {
 }
 
 test('API wire role, revision, foreign conversation or digest mutation is rejected before materialization', () => {
-  const item = cases[0], command = parseControlledImageV3ConversationCommand(item.command)
+  const item = cases[0], command = item.command
   for (const mutate of [
     snapshot => { snapshot.inputs[0].source.purpose = 'REFERENCE' },
     snapshot => { snapshot.inputs[0].source.version = '3' },
@@ -63,7 +62,7 @@ test('API wire role, revision, foreign conversation or digest mutation is reject
 })
 
 test('API wire byte corruption leaves no materialized input file', async t => {
-  const item = cases[1], command = parseControlledImageV3ConversationCommand(item.command)
+  const item = cases[1], command = item.command
   const snapshot = parseControlledImageV3Inputs(item.inputSnapshot, command, 1)
   const runDirectory = privateRun(t)
   const corrupt = Buffer.from(item.inputBytesBase64, 'base64'); corrupt[corrupt.length - 1] ^= 1

@@ -230,3 +230,39 @@ test('native read answer accepts AVIF while PNG-only skill execution remains rej
   assert.match(ACTION_OUTCOME_INSTRUCTIONS, /inputMimeTypes list restricts that skill execution, not native reading/);
   assert.match(ACTION_OUTCOME_INSTRUCTIONS, /if a carrier is absent or genuinely unreadable/);
 });
+
+const nativeFacts = () => ({ schemaVersion: 6, availableSources: [], inspectedSourceRefIds: [], availableActions: [{
+  actionId: 'act_native', kind: 'EXECUTE', operation: 'EXECUTE_NATIVE', skill: null,
+  parametersSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: {}, additionalProperties: false },
+  inputMimeTypes: [], minSources: 0, maxSources: 0, outputMimeTypes: ['text/plain']
+}] })
+test('facts v6 advertises native execution with empty skill while preserving outcome v5', () => {
+  const f = nativeFacts(); const a = action()
+  a.action = { actionId: 'act_native', instruction: 'create a text file', sourceRefIds: [], parameters: {} }
+  assert.equal(validateActionFacts(f).schemaVersion, 6)
+  assert.deepEqual(validateActionOutcome(a, f), a)
+  assert.equal(validateActionOutcome(a, f).schemaVersion, 5)
+  const message = { durable: true, route: 'CHAT', taskId: 'task', conversationId: 'c', conversationGeneration: '1', targetAgentId: 'agent',
+    contextSnapshot: { facts: { typedDeliberation: f, conversation: { id: 'c', generation: '1', scopeType: 'bounty' }, task: { id: 'task' }, targetAgentId: 'agent' } } }
+  assert.deepEqual(resolveActionChatRequest({ agentId: 'agent', typedDeliberationEnabled: true }, message), f)
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /EXECUTE_NATIVE/)
+  assert.doesNotMatch(ACTION_OUTCOME_INSTRUCTIONS, /All advertised actions are EXECUTE_SKILL/)
+})
+test('native action cannot downgrade to facts v5 or inject malformed skill, policy or Provider parameter', () => {
+  for (const mutate of [
+    f => { f.schemaVersion = 5 },
+    f => { f.availableActions[0].operation = 'EXECUTE_SKILL' },
+    f => { f.availableActions[0].skill = { skillKey: 'unbound' } },
+    f => { f.availableActions[0].toolPolicyRef = 'ALL_TOOLS' }
+  ]) { const f = nativeFacts(); mutate(f); assert.throws(() => validateActionFacts(f), /ACTION_CAPABILITIES_INVALID/) }
+  const a = action(); a.action = { actionId: 'act_native', instruction: 'write', sourceRefIds: [], parameters: { endpoint: 'https://unauthorized.invalid' } }
+  assert.throws(() => validateActionOutcome(a, nativeFacts()))
+})
+
+ test('facts v6 permits an advertised ordinary native skill with nullable manifest', () => {
+  const f = nativeFacts()
+  f.availableActions[0].skill = { skillKey: 'guide', skillVersion: '1.0.0', packageSha256: 'a'.repeat(64), manifestSha256: null }
+  assert.deepEqual(validateActionFacts(f), f)
+  f.schemaVersion = 5
+  assert.throws(() => validateActionFacts(f), /ACTION_CAPABILITIES_INVALID/)
+})

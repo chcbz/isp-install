@@ -196,3 +196,28 @@ test('negative probe records socket failure phase and accumulates a fragmented H
   const parsed = spawnSync('/usr/bin/python3', ['-c', 'import ast,sys; ast.parse(sys.stdin.read())'], { input: probe, encoding: 'utf8' })
   assert.equal(parsed.status, 0, parsed.stderr)
 })
+
+test('skill egress extends only an explicitly configured exact origin set, preserving model-only defaults', () => {
+  const local = restrictedProviderNetworkPolicy('https://model.invalid/v1', { connectTimeoutMs: 1000 })
+  assert.equal(Object.hasOwn(local, 'additionalOrigins'), false)
+  const skill = restrictedProviderNetworkPolicy('https://model.invalid/v1', { connectTimeoutMs: 1000, additionalOrigins: ['https://images.invalid', 'https://images.invalid'] })
+  assert.deepEqual(skill.additionalOrigins, ['https://images.invalid'])
+  for (const origin of ['http://images.invalid', 'https://images.invalid/secret', 'https://key:secret@images.invalid', '*'])
+    assert.throws(() => restrictedProviderNetworkPolicy('https://model.invalid', { connectTimeoutMs: 1000, additionalOrigins: [origin] }), /ORIGINS_INVALID/)
+})
+test('CONNECT proxy accepts configured skill destination and refuses an unconfigured destination', async () => {
+  const { createServer, connect } = await import('node:net')
+  const upstream = createServer(socket => socket.end('authorized-synthetic-endpoint'))
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  const origin = `https://127.0.0.1:${upstream.address().port}`
+  const egress = new RestrictedProviderEgress({ providerBaseUrl: 'https://model.invalid/v1', networkConnectTimeoutMs: 1000, additionalOrigins: [origin] })
+  const request = authority => new Promise((resolve, reject) => {
+    const socket = connect(egress.port, '127.0.0.1', () => socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`))
+    let result = ''; socket.on('data', chunk => { result += chunk.toString() }); socket.on('end', () => { socket.end(); resolve(result) }); socket.on('error', reject)
+  })
+  try {
+    await egress.start()
+    assert.match(await request(`127.0.0.1:${upstream.address().port}`), /200 Connection Established[\s\S]*authorized-synthetic-endpoint/)
+    assert.match(await request('unconfigured.invalid:443'), /403 Forbidden/)
+  } finally { await egress.dispose(); await new Promise(resolve => upstream.close(resolve)) }
+})

@@ -2,15 +2,19 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync,
-  openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync
+  openSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync
 } from 'node:fs'
 import { dirname, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createServer } from 'node:net'
+import { skillPackageTreeDigest } from './skill-manifest.mjs'
 import {
   AppServerAdapter, measureCodexAppServerBinaryAsync, verifySpawnedAppServerExecutableTree
 } from './app-server-adapter.mjs'
 import { canonicalSha256 } from './chat-runtime.mjs'
 import { RestrictedProviderEgress, restrictedProviderNetworkPolicy } from './typed-inspection-network.mjs'
+
+import { NATIVE_NEUTRAL_MOUNT_TARGETS, buildNativeExecutionCodexConfig, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -106,12 +110,13 @@ export const buildTypedInspectionCodexConfig = profile => {
   const systemProxy = profile?.typedInspectionProviderNetwork === 'restricted-proxy' ? '[features]\nrespect_system_proxy = true\n' : ''
   return `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile)}${systemProxy}`
 }
-const stageCodexHome = (profile, stateRoot) => {
+const stageCodexHome = (profile, stateRoot, { nativeExecution = false, nativeNetworkAccess = false } = {}) => {
   const codexHome = ensurePrivateDirectory(resolve(stateRoot, 'codex-home')); ensurePrivateDirectory(resolve(stateRoot, 'home'))
   const sourceAuth = resolve(profile.codexHome || '', 'auth.json')
   if (!profile.codexHome || !existsSync(sourceAuth)) fail('TYPED_INSPECTION_AUTH_SOURCE_REQUIRED')
   const authDigest = copyCredentialFile(sourceAuth, resolve(codexHome, 'auth.json'))
-  const config = buildTypedInspectionCodexConfig(profile)
+  const readOnlyConfig = buildTypedInspectionCodexConfig(profile)
+  const config = nativeExecution ? buildNativeExecutionCodexConfig(readOnlyConfig, { networkAccess: nativeNetworkAccess }) : readOnlyConfig
   const configPath = resolve(codexHome, 'config.toml'); const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(temporary, config, { mode: 0o600, flag: 'wx' }); chmodSync(temporary, 0o600)
   const configFd = openSync(temporary, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(configFd) } finally { closeSync(configFd) }
@@ -124,8 +129,8 @@ const engineStateBinding = value => {
   return Object.freeze({ schemaVersion: 1, requestKey: value.requestKey, authorizationId: value.authorizationId, manifestDigest: value.manifestDigest,
     requestId: value.requestId, turnId: value.turnId, inputPolicyDigest: value.inputPolicyDigest })
 }
-const stateMarker = (directory, binding) => {
-  const path = resolve(directory, 'binding.json'); const serialized = `${JSON.stringify(binding)}\n`
+const stateMarker = (directory, binding, filename = 'binding.json') => {
+  const path = resolve(directory, filename); const serialized = `${JSON.stringify(binding)}\n`
   if (!existsSync(path)) {
     writeFileSync(path, serialized, { mode: 0o400, flag: 'wx' }); chmodSync(path, 0o400)
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) }; fsyncDirectory(directory)
@@ -155,19 +160,20 @@ const verifyBwrapIdentity = identity => {
   if (!lexical.isFile() || lexical.isSymbolicLink() || String(lexical.dev) !== identity.dev || String(lexical.ino) !== identity.ino || String(lexical.size) !== identity.size || `sha256:${sha256(readFileSync(identity.path))}` !== identity.sha256) fail('TYPED_INSPECTION_BWRAP_IDENTITY_DRIFT')
 }
 const snapshotDirectory = measurement => dirname(dirname(measurement.snapshotPath))
-const sandboxArgs = ({ snapshot, stateRoot, inputDirectory, networkMode, proxyUrl = '', caTrust = null }) => {
+const sandboxArgs = ({ snapshot, stateRoot, inputDirectory, networkMode, proxyUrl = '', caTrust = null, nativeView = null }) => {
   const args = ['--unshare-all']
   args.push('--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
-    '--dir', '/runtime', '--ro-bind', snapshot, '/runtime', '--dir', '/state', '--bind', stateRoot, '/state',
-    '--dir', '/inputs', '--ro-bind', inputDirectory, '/inputs')
+    '--dir', '/runtime', '--ro-bind', snapshot, '/runtime', '--dir', '/inputs', '--ro-bind', inputDirectory, '/inputs')
+  if (!nativeView) args.push('--dir', '/state', '--bind', stateRoot, '/state')
   if (networkMode === 'provider-restricted') {
     if (!caTrust) fail('TYPED_INSPECTION_CA_SOURCE_REQUIRED')
     verifyStagedCaTrust(caTrust); args.push('--dir', '/trust', '--ro-bind', caTrust.directory, '/trust')
   }
-  args.push('--setenv', 'HOME', '/state/home', '--setenv', 'CODEX_HOME', '/state/codex-home', '--setenv', 'PATH', '/runtime/bin')
-  if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', '', '--setenv', 'no_proxy', '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH)
+  if (nativeView) args.push(...nativeExecutionMountArgs(nativeView))
+  args.push('--setenv', 'HOME', '/state/home', '--setenv', 'CODEX_HOME', '/state/codex-home', '--setenv', 'PATH', nativeView ? '/runtime/bin:/usr/bin:/bin' : '/runtime/bin')
+  if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', '', '--setenv', 'no_proxy', '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH, '--setenv', 'NODE_EXTRA_CA_CERTS', PROVIDER_CA_SANDBOX_PATH)
   else args.push('--unsetenv', 'HTTP_PROXY', '--unsetenv', 'HTTPS_PROXY', '--unsetenv', 'ALL_PROXY', '--unsetenv', 'http_proxy', '--unsetenv', 'https_proxy', '--unsetenv', 'all_proxy')
-  args.push('--chdir', '/inputs', '/runtime/bin/codex')
+  args.push('--chdir', nativeView ? '/execution' : '/inputs', '/runtime/bin/codex')
   return args
 }
 const emptyMcpCatalog = tools => Array.isArray(tools?.data) && tools.data.length === 0 && (tools.nextCursor === null || tools.nextCursor === undefined)
@@ -247,14 +253,85 @@ export const loadTypedInspectionCarrierEvidence = ({ path, expectedDigest, bindi
       mediaKind: item.mediaKind, mimeType: item.mimeType, carrier: item.carrier, carrierContractDigest: item.carrierContractDigest }))) })
 }
 
+// A synthetic package and config exercise exactly the request-scoped script
+// view. The host canary is an explicitly allowed additional origin, not a paid
+// endpoint; the script never receives a real user credential.
+const measureNativeSkillScript = async runtime => {
+  runtime.nativeScriptMeasurementFailure = null
+  if (!runtime.nativeToolchain?.files?.some(file => file.sandboxPath === '/usr/bin/node')) { runtime.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_NODE_REQUIRED' }; return false }
+  const id = `native-script-measurement-${randomUUID()}`
+  const binding = { schemaVersion: 1, requestKey: id, authorizationId: id, manifestDigest: id, requestId: id, turnId: id, inputPolicyDigest: id }
+  let directory, server, ready = false, stage = 'fixture'
+  try {
+    directory = ensurePrivateDirectory(mkdtempSync(resolve(runtime.materializerRoot, '.native-script-measurement-')))
+    const inputs = ensurePrivateDirectory(resolve(directory, 'inputs'))
+    const scratchDirectory = ensurePrivateDirectory(resolve(directory, 'scratch'))
+    const draftsDirectory = ensurePrivateDirectory(resolve(directory, 'drafts'))
+    const packageRoot = ensurePrivateDirectory(resolve(directory, 'package'))
+    writeFileSync(resolve(inputs, 'probe.txt'), 'script-input', { mode: 0o600 })
+    writeFileSync(resolve(packageRoot, 'SKILL.md'), '---\nname: probe-skill\ndescription: Synthetic isolated script probe.\n---\nProbe only.\n', { mode: 0o600 })
+    const script = `import { readFileSync, writeFileSync } from 'node:fs'
+import { connect } from 'node:net'
+const configPath = process.env.CYF_SKILL_CONFIG_DIR + '/probe-skill.json'
+const config = JSON.parse(readFileSync(configPath, 'utf8'))
+if (config.marker !== 'synthetic-config' || readFileSync('/inputs/probe.txt', 'utf8') !== 'script-input') throw Error('view')
+for (const path of [configPath, '/state/codex-home/skills/probe-skill/SKILL.md']) {
+  let denied = false; try { writeFileSync(path, 'bad') } catch (e) { denied = ['EROFS', 'EACCES', 'EPERM'].includes(e.code) }
+  if (!denied) throw Error('writable')
+}
+const proxy = new URL(process.env.HTTPS_PROXY)
+async function tunnel(authority, expected, marker) {
+  await new Promise((resolve, reject) => {
+    const socket = connect(Number(proxy.port), proxy.hostname); let data = ''
+    socket.setTimeout(config.timeoutMs, () => socket.destroy(Error('timeout')))
+    socket.on('connect', () => socket.write('CONNECT ' + authority + ' HTTP/1.1\\r\\nHost: ' + authority + '\\r\\n\\r\\n'))
+    socket.on('data', chunk => { data += chunk.toString(); if (data.includes('\\r\\n\\r\\n') && (!marker || data.includes(marker))) { socket.destroy(); if (!data.startsWith('HTTP/1.1 ' + expected + ' ')) reject(Error('status')); else resolve() } })
+    socket.on('error', reject); socket.on('end', () => reject(Error('early-close')))
+  })
+}
+await tunnel(config.authority, '200', 'cyf-script-canary')
+await tunnel('forbidden.invalid:443', '403', '')
+writeFileSync('/outputs/script-probe.txt', 'script-ok')
+console.log('script-ok')
+`
+    writeFileSync(resolve(packageRoot, 'probe.mjs'), script, { mode: 0o600 })
+    server = createServer(socket => socket.end('cyf-script-canary'))
+    await new Promise((resolveListen, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolveListen() }) })
+    const authority = `127.0.0.1:${server.address().port}`
+    const skills = [{ skillKey: 'probe-skill', packageRoot, packageTreeDigest: skillPackageTreeDigest(packageRoot) }]
+    const skillConfiguration = [{ skillKey: 'probe-skill', configuration: { marker: 'synthetic-config', authority, timeoutMs: runtime.profile.typedInspectionNetworkConnectTimeoutMs }, networkOrigins: [`https://${authority}`] }]
+    const nativeExecution = { executionId: id, tools: [], networkAccess: true,
+      checkActive: () => { if (runtime.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED') }, callTool: async () => { fail('NATIVE_EXECUTION_TOOL_UNAVAILABLE') } }
+    stage = 'engine-open'
+    const adapter = await runtime.openNativeExecutionAdapter(inputs, id, binding, { scratchDirectory, draftsDirectory, skills, skillConfiguration, nativeExecution })
+    const network = adapter.nativeExecutionIsolation?.network
+    if (network?.measured !== true || network.nftDefaultDropReadback !== true || network.directInternetBlocked !== true) fail('NATIVE_SCRIPT_NETWORK_UNVERIFIED')
+    stage = 'script-exec'
+    const result = await adapter.request('command/exec', { command: ['/usr/bin/node', '/state/codex-home/skills/probe-skill/probe.mjs'], cwd: '/execution',
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: true, excludeSlashTmp: true, excludeTmpdirEnvVar: true } })
+    if (result?.exitCode !== 0 || result.stdout?.trim() !== 'script-ok' || readFileSync(resolve(draftsDirectory, 'script-probe.txt'), 'utf8') !== 'script-ok'
+        || readFileSync(resolve(inputs, 'probe.txt'), 'utf8') !== 'script-input') fail('NATIVE_SCRIPT_PROBE_FAILED')
+    validateNativeExecutionToolchain(runtime.nativeToolchain)
+    ready = !runtime.disposed
+  } catch (error) { runtime.nativeScriptMeasurementFailure = { stage, code: error.code || 'NATIVE_SCRIPT_MEASUREMENT_FAILED' } }
+  finally {
+    try { await runtime.releaseAdapter(id, { requestBinding: binding }) } catch { ready = false; runtime.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_CLEANUP_FAILED' } }
+    try { if (server?.listening) await new Promise((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose())) } catch { ready = false; runtime.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_CLEANUP_FAILED' } }
+    try { if (directory) rmSync(directory, { recursive: true, force: true }) } catch { ready = false; runtime.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_CLEANUP_FAILED' } }
+  }
+  if (ready) runtime.nativeScriptMeasurementFailure = null
+  return ready && !runtime.disposed
+}
+
 export class TypedInspectionProfileRuntime {
-  constructor({ profile, materializerRoot, stateRoot, bwrapBin = '/usr/bin/bwrap', spawnFn = spawn, measureBinary = measureCodexAppServerBinaryAsync, forbidden = [], egressFactory = options => new RestrictedProviderEgress(options) } = {}) {
+  constructor({ profile, materializerRoot, stateRoot, bwrapBin = '/usr/bin/bwrap', spawnFn = spawn, measureBinary = measureCodexAppServerBinaryAsync, forbidden = [], egressFactory = options => new RestrictedProviderEgress(options), nativeToolchain = null } = {}) {
     if (!object(profile) || !nonblank(profile.agentId) || !nonblank(profile.profileId) || !nonblank(profile.codexBin) || !nonblank(profile.codexHome)) fail('TYPED_INSPECTION_PROFILE_CONFIG_INVALID')
     this.profile = profile; this.materializerRoot = ensurePrivateDirectory(materializerRoot); this.stateRoot = ensurePrivateDirectory(stateRoot)
     if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!Number.isSafeInteger(profile.typedInspectionNetworkConnectTimeoutMs) || profile.typedInspectionNetworkConnectTimeoutMs <= 0)) fail('TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_REQUIRED')
     if (overlaps(this.materializerRoot, this.stateRoot)) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
     for (const candidate of forbidden.filter(value => value && existsSync(resolve(value)))) if (overlaps(this.stateRoot, realpathSync(resolve(candidate)))) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
     this.providerCaTrust = profile.typedInspectionProviderNetwork === 'restricted-proxy' ? stageProviderCaTrust(profile, this.stateRoot) : null
+    this.nativeToolchain = nativeToolchain; this.nativeExecutionReadback = null; this.nativeExecutionMeasurementPending = null; this.pendingNativeAdapters = new Map(); this.pendingInspectionKeys = new Set(); this.closingAdapters = new Map()
     this.bwrap = bwrapIdentity(bwrapBin); this.spawnFn = spawnFn; this.measureBinary = measureBinary; this.egressFactory = egressFactory; this.measurement = null; this.contractReadback = null; this.nativeReadback = null; this.activeAdapters = new Map(); this.disposed = false
   }
   _prepareEphemeralState(label) {
@@ -262,23 +339,37 @@ export class TypedInspectionProfileRuntime {
     const directory = ensurePrivateDirectory(mkdtempSync(resolve(root, `.${label}-`)))
     return { directory, markerPath: null, created: true, bindingDigest: null, ...stageCodexHome(this.profile, directory) }
   }
-  _prepareRequestState(rawBinding, { requireExistingState = false } = {}) {
+  _prepareRequestState(rawBinding, { requireExistingState = false, nativeExecution = false, nativeBinding = null, nativeNetworkAccess = false } = {}) {
     const binding = engineStateBinding(rawBinding); const rootPath = resolve(this.stateRoot, 'requests')
     const bindingDigest = canonicalSha256(binding); const directory = resolve(rootPath, bindingDigest.slice('sha256:'.length))
     if (requireExistingState && (!existsSync(directory) || !existsSync(resolve(directory, 'binding.json'))))
       fail('TYPED_INSPECTION_RECOVERY_STATE_MISSING')
     const root = ensurePrivateDirectory(rootPath); const created = !existsSync(directory)
     if (created) { mkdirSync(directory, { mode: 0o700 }); chmodSync(directory, 0o700); fsyncDirectory(root) }
-    ensurePrivateDirectory(directory); const markerPath = stateMarker(directory, binding)
-    return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory) }
+    ensurePrivateDirectory(directory)
+    if (!nativeExecution && existsSync(resolve(directory, 'native-binding.json'))) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+    const markerPath = stateMarker(directory, binding)
+    if (nativeExecution) {
+      if (!created && !existsSync(resolve(directory, 'native-binding.json'))) fail('NATIVE_EXECUTION_RECOVERY_MAPPING_MISSING')
+      stateMarker(directory, nativeBinding, 'native-binding.json')
+    }
+    return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory, { nativeExecution, nativeNetworkAccess }) }
   }
-  async _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '' }) {
-    const input = realpathSync(inputDirectory); if (!within(this.materializerRoot, input)) fail('TYPED_INSPECTION_INPUT_DIRECTORY_OUTSIDE_ROOT')
+  async _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '', nativeView = null, nativeExecution = null }) {
+    if (Boolean(nativeView) !== Boolean(nativeExecution)) fail('NATIVE_EXECUTION_BINDING_INVALID')
+    const input = realpathSync(inputDirectory); if (!nativeView && !within(this.materializerRoot, input)) fail('TYPED_INSPECTION_INPUT_DIRECTORY_OUTSIDE_ROOT')
     const lexical = lstatSync(input, { bigint: true }); if (lexical.isSymbolicLink() || !lexical.isDirectory() || Number(lexical.mode & 0o777n) !== 0o700) fail('TYPED_INSPECTION_INPUT_DIRECTORY_UNSAFE')
     if (!engineState?.directory || !within(this.stateRoot, engineState.directory) || realpathSync(engineState.directory) !== engineState.directory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
-    const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: engineState.directory, inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust })
-    const spawnWrapped = (_binary, commandArgs, options) => { verifyBwrapIdentity(this.bwrap); return this.spawnFn(this.bwrap.path, [...args, ...commandArgs], { ...options, cwd: '/', env: { LANG: 'C.UTF-8' } }) }
-    const adapter = await AppServerAdapter.spawnAsync(this.profile, { cwd: '/inputs', schemaMeasurement, spawnFn: spawnWrapped, shouldSpawn: () => !this.disposed, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
+    const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: engineState.directory, inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust, nativeView })
+    const spawnWrapped = (_binary, commandArgs, options) => {
+      verifyBwrapIdentity(this.bwrap)
+      if (nativeView) {
+        nativeExecution.checkActive()
+        const current = prepareNativeExecutionLayout({ ...nativeView.layout, nativeExecution, toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
+        if (current.digest !== nativeView.layout.digest) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
+      }
+      return this.spawnFn(this.bwrap.path, [...args, ...commandArgs], { ...options, cwd: '/', env: { LANG: 'C.UTF-8' } }) }
+    const adapter = await AppServerAdapter.spawnAsync(this.profile, { cwd: nativeView ? '/execution' : '/inputs', nativeExecution, schemaMeasurement, spawnFn: spawnWrapped, shouldSpawn: () => !this.disposed, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
     adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
   }
   async _initializeAndSeal(adapter) {
@@ -343,14 +434,23 @@ export class TypedInspectionProfileRuntime {
       rmSync(isolatedState.directory, { recursive: true, force: true }); rmSync(probeDirectory, { recursive: true, force: true }); try { rmSync(outsideCanary, { force: true }) } catch {}
     }
   }
-  async openAdapter(inputDirectory, requestKey = '', requestBinding = null, { requireExistingState = false } = {}) {
+  async openAdapter(inputDirectory, requestKey = '', requestBinding = null, options = {}) {
+    this.pendingInspectionKeys ||= new Set()
+    if (this.closingAdapters?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_CLOSING')
+    if (this.pendingInspectionKeys.has(requestKey) || this.pendingNativeAdapters?.has(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+    this.pendingInspectionKeys.add(requestKey)
+    try { return await this._openInspectionAdapter(inputDirectory, requestKey, requestBinding, options) }
+    finally { this.pendingInspectionKeys.delete(requestKey) }
+  }
+  async _openInspectionAdapter(inputDirectory, requestKey = '', requestBinding = null, { requireExistingState = false } = {}) {
     const measurement = await this.measure(); if (!measurement.contractReady) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_REQUIRED')
     if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
     if (!nonblank(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
+    if (this.pendingNativeAdapters?.has(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     const binding = engineStateBinding(requestBinding); const bindingDigest = canonicalSha256(binding)
     if (requestKey && this.activeAdapters.has(requestKey)) {
       const active = this.activeAdapters.get(requestKey)
-      if (!active.adapter.closed && active.inputDirectory === realpathSync(inputDirectory) && active.engineState.bindingDigest === bindingDigest) return active.adapter
+      if (!active.nativeLayout && !active.adapter.closed && active.inputDirectory === realpathSync(inputDirectory) && active.engineState.bindingDigest === bindingDigest) return active.adapter
       fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     }
     const engineState = this._prepareRequestState(binding, { requireExistingState })
@@ -365,19 +465,242 @@ export class TypedInspectionProfileRuntime {
       return adapter
     } catch (error) { await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose().catch(() => {}); if (engineState.created) rmSync(engineState.directory, { recursive: true, force: true }); throw error }
   }
-  async releaseAdapter(requestKey) {
-    const active = this.activeAdapters.get(requestKey); if (!active) return false
-    this.activeAdapters.delete(requestKey); await active.adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await active.egress?.dispose().catch(() => {}); rmSync(active.engineState.directory, { recursive: true, force: true }); return true
+  // Native execution is NOT authorized by the read-only carrier evidence.
+  // The caller supplies an API-authorized execution/tool binding and pinned
+  // package/toolchain bytes; this path measures its own actual engine view.
+  openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, requireExistingState = false } = {}) {
+    if (nativeExecution) nativeExecution = Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools) })
+    if (this.disposed) return Promise.reject(Object.assign(new Error('TYPED_INSPECTION_PROFILE_DISPOSED'), { code: 'TYPED_INSPECTION_PROFILE_DISPOSED' }))
+    const binding = engineStateBinding(requestBinding)
+    if (!nonblank(requestKey) || binding.requestKey !== requestKey) fail('NATIVE_EXECUTION_BINDING_INVALID')
+    const layout = prepareNativeExecutionLayout({ inputDirectory, scratchDirectory, draftsDirectory, skills, skillConfiguration, nativeExecution,
+      toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
+    const bindingDigest = canonicalSha256(binding)
+    const matches = active => active.nativeLayout?.digest === layout.digest && active.engineState.bindingDigest === bindingDigest
+      && active.nativeExecution.checkActive === nativeExecution.checkActive && active.nativeExecution.callTool === nativeExecution.callTool
+    if (this.closingAdapters?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_CLOSING')
+    if (this.pendingInspectionKeys?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
+    const pending = this.pendingNativeAdapters.get(requestKey)
+    if (pending) { if (matches(pending)) return pending.promise; fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT') }
+    const active = this.activeAdapters.get(requestKey)
+    if (active) {
+      if (!active.adapter.closed && matches(active)) return Promise.resolve(active.adapter)
+      fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
+    }
+    const slot = { nativeLayout: layout, engineState: { bindingDigest }, nativeExecution, cancelled: false }
+    this.pendingNativeAdapters.set(requestKey, slot)
+    slot.promise = this._openNativeExecutionAdapter(binding, layout, nativeExecution, requireExistingState, slot)
+      .finally(() => { if (this.pendingNativeAdapters.get(requestKey) === slot) this.pendingNativeAdapters.delete(requestKey) })
+    return slot.promise
+  }
+  async _openNativeExecutionAdapter(binding, layout, nativeExecution, requireExistingState, slot) {
+    let engineState, adapter, egress
+    const checkActive = () => { if (this.disposed || slot.cancelled) fail('NATIVE_EXECUTION_START_CANCELLED'); nativeExecution.checkActive() }
+    try {
+      checkActive()
+      if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
+      const schema = await this.measureBinary(this.profile); checkActive()
+      engineState = this._prepareRequestState(binding, { requireExistingState, nativeExecution: true, nativeBinding: layout.binding, nativeNetworkAccess: layout.binding.networkAccess })
+      slot.engineState = engineState
+      const skillConfigurationDirectory = ensurePrivateDirectory(resolve(engineState.directory, 'skill-config'))
+      for (const item of layout.skillConfiguration) stateMarker(skillConfigurationDirectory, item.configuration, `${item.skillKey}.json`)
+      const neutralDirectory = ensurePrivateDirectory(resolve(engineState.directory, 'neutral'))
+      const skillsDirectory = ensurePrivateDirectory(resolve(engineState.directory, 'skill-view'))
+      if (readdirSync(neutralDirectory).some(name => !NATIVE_NEUTRAL_MOUNT_TARGETS.includes(name)) || readdirSync(skillsDirectory).some(key => key !== '.system' && !layout.skills.some(skill => skill.skillKey === key))) fail('NATIVE_EXECUTION_DISCOVERY_ROOT_UNSAFE')
+      for (const name of NATIVE_NEUTRAL_MOUNT_TARGETS) {
+        const target = ensurePrivateDirectory(resolve(neutralDirectory, name))
+        if (readdirSync(target).length) fail('NATIVE_EXECUTION_DISCOVERY_ROOT_UNSAFE')
+      }
+      const systemMask = ensurePrivateDirectory(resolve(skillsDirectory, '.system'))
+      if (readdirSync(systemMask).length) fail('NATIVE_EXECUTION_DISCOVERY_ROOT_UNSAFE')
+      for (const skill of layout.skills) {
+        const mountpoint = ensurePrivateDirectory(resolve(skillsDirectory, skill.skillKey))
+        if (readdirSync(mountpoint).length) fail('NATIVE_EXECUTION_DISCOVERY_ROOT_UNSAFE')
+      }
+      egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins })
+      await egress.start(); checkActive()
+      // Recheck bytes/identities after asynchronous setup, immediately before bind.
+      const current = prepareNativeExecutionLayout({ ...layout, nativeExecution, toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
+      if (current.digest !== layout.digest) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
+      adapter = await this._spawnAdapter({ inputDirectory: layout.inputDirectory, engineState, schemaMeasurement: schema,
+        networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl,
+        nativeView: { layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory }, nativeExecution: { ...nativeExecution, checkActive } })
+      checkActive(); await egress.bindOwner(adapter.child, this.bwrap, schema.snapshotIdentity)
+      const network = await egress.attach(); checkActive()
+      const readback = await this._initializeAndSeal(adapter); checkActive(); verifyNativeExecutionConfig(readback, { networkAccess: layout.binding.networkAccess })
+      if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
+      adapter.verifyNativeExecutionSkills = async () => {
+        checkActive()
+        const discovery = verifyNativeExecutionSkillCatalog(await adapter.request('skills/list', { cwds: ['/execution'], forceReload: true }), layout)
+        checkActive(); return discovery
+      }
+      const discovery = await adapter.verifyNativeExecutionSkills()
+      // Recheck actual engine discovery at both new/resumed thread and turn
+      // boundaries; a cached startup inventory is not refresh/resume evidence.
+      for (const method of ['startOrResumeThread', 'runTurn']) {
+        const call = adapter[method].bind(adapter)
+        adapter[method] = async (...args) => { await adapter.verifyNativeExecutionSkills(); return call(...args) }
+      }
+      checkActive()
+      adapter.nativeExecutionIsolation = Object.freeze({ schemaVersion: 1, layoutDigest: layout.digest, cwd: '/execution',
+        writableRoots: Object.freeze(['/workspace', '/outputs']), skills: discovery, network, modelTurnMeasured: false })
+      this.suspendedNativeStates?.delete(binding.requestKey)
+      this.activeAdapters.set(binding.requestKey, { adapter, egress, engineState, inputDirectory: layout.inputDirectory, nativeLayout: layout, nativeExecution, slot })
+      adapter.once('exit', () => {
+        // Keep the closed entry until per-execution suspend/release joins
+        // egress cleanup; never race a new lease against a dying process.
+        this.suspendedNativeStates ||= new Map(); this.suspendedNativeStates.set(binding.requestKey, engineState.directory)
+        rmSync(resolve(engineState.directory, 'skill-config'), { recursive: true, force: true })
+        void egress.dispose().catch(() => {})
+      })
+      return adapter
+    } catch (error) {
+      await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress?.dispose().catch(() => {})
+      if (engineState?.authPath) rmSync(engineState.authPath, { force: true })
+      if (engineState?.directory) rmSync(resolve(engineState.directory, 'skill-config'), { recursive: true, force: true })
+      if (engineState?.created && !slot.preserveState) rmSync(engineState.directory, { recursive: true, force: true })
+      if (engineState && slot.preserveState) { this.suspendedNativeStates ||= new Map(); this.suspendedNativeStates.set(binding.requestKey, engineState.directory) }
+      throw error
+    }
+  }
+  suspendAdapter(requestKey) { return this.releaseAdapter(requestKey, { preserveState: true }) }
+  async releaseAdapter(requestKey, { preserveState = false, requestBinding = null } = {}) {
+    let retainedDirectory = null, expectedDirectory = null, expectedBindingDigest = null
+    if (requestBinding !== null) {
+      const binding = engineStateBinding(requestBinding)
+      if (requestKey !== binding.requestKey) fail('NATIVE_EXECUTION_BINDING_INVALID')
+      expectedBindingDigest = canonicalSha256(binding)
+      const requests = resolve(this.stateRoot, 'requests')
+      const directory = resolve(requests, expectedBindingDigest.slice('sha256:'.length)); expectedDirectory = directory
+      if (existsSync(directory)) {
+        ensurePrivateDirectory(requests); ensurePrivateDirectory(directory)
+        // Read-only exact lookup after restart: never scan directories, create
+        // a marker, restage auth, or invoke the engine to retire a committed Home.
+        for (const name of ['binding.json', 'native-binding.json']) {
+          const path = resolve(directory, name)
+          if (!existsSync(path)) fail('NATIVE_EXECUTION_RECOVERY_MAPPING_MISSING')
+          const stat = lstatSync(path)
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.geteuid() || (stat.mode & 0o777) !== 0o400) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+        }
+        if (readFileSync(resolve(directory, 'binding.json'), 'utf8') !== `${JSON.stringify(binding)}\n`) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+        let mapping; try { mapping = JSON.parse(readFileSync(resolve(directory, 'native-binding.json'), 'utf8')) } catch { fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT') }
+        if (mapping?.schemaVersion !== 1 || !nonblank(mapping.executionId)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+        retainedDirectory = directory
+      }
+    }
+    this.closingAdapters ||= new Map()
+    const closing = this.closingAdapters.get(requestKey)
+    if (closing) {
+      await closing
+      // A commit-time release following a concurrent suspension still removes
+      // the retained Home, without racing a replacement adapter's startup.
+      if (!preserveState) return this.releaseAdapter(requestKey, { requestBinding })
+      return true
+    }
+    const pending = this.pendingNativeAdapters?.get(requestKey)
+    const active = this.activeAdapters.get(requestKey)
+    if (expectedBindingDigest && ((pending && pending.engineState.bindingDigest !== expectedBindingDigest)
+        || (active && active.engineState.bindingDigest !== expectedBindingDigest))) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+    if (!pending && !active) {
+      const suspended = this.suspendedNativeStates?.get(requestKey) || retainedDirectory
+      if (expectedDirectory && suspended && suspended !== expectedDirectory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+      if (suspended && !preserveState) { rmSync(suspended, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey); return true }
+      return Boolean(suspended)
+    }
+    const close = (async () => {
+      if (pending) {
+        pending.preserveState = preserveState; pending.cancelled = true; await pending.promise.catch(() => {})
+        const directory = pending.engineState.directory || this.suspendedNativeStates?.get(requestKey)
+        if (!preserveState && directory) { rmSync(directory, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey) }
+        return true
+      }
+      if (active.slot) active.slot.cancelled = true
+      try { await active.adapter.shutdown({ timeoutMs: 1000 }) } finally { await active.egress?.dispose() }
+      if (this.activeAdapters.get(requestKey) === active) this.activeAdapters.delete(requestKey)
+      if (active.nativeLayout) rmSync(resolve(active.engineState.directory, 'skill-config'), { recursive: true, force: true })
+      if (!preserveState) { rmSync(active.engineState.directory, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey) }
+      else {
+        this.suspendedNativeStates ||= new Map()
+        this.suspendedNativeStates.set(requestKey, active.engineState.directory)
+      }
+      return true
+    })()
+    this.closingAdapters.set(requestKey, close)
+    try { return await close } finally { if (this.closingAdapters.get(requestKey) === close) this.closingAdapters.delete(requestKey) }
   }
   async dispose() {
     this.disposed = true
+    await Promise.all([...(this.closingAdapters?.values() || [])].map(promise => promise.catch(() => {})))
+    await Promise.all([...(this.pendingNativeAdapters?.values() || [])].map(slot => slot.promise.catch(() => {})))
     const active = [...this.activeAdapters.values()]; this.activeAdapters.clear()
-    await Promise.all(active.map(async item => { await item.adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await item.egress?.dispose().catch(() => {}) }))
+    await Promise.all(active.map(async item => { await item.adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await item.egress?.dispose().catch(() => {}); if (item.nativeLayout) rmSync(resolve(item.engineState.directory, 'skill-config'), { recursive: true, force: true }) }))
     if (this.providerCaTrust?.directory) rmSync(this.providerCaTrust.directory, { recursive: true, force: true })
   }
   mapInputPath(hostPath, inputDirectory) {
     const root = realpathSync(inputDirectory); const path = realpathSync(hostPath); if (!within(root, path)) fail('TYPED_INSPECTION_INPUT_PATH_OUTSIDE_REQUEST')
     return resolve('/inputs', path.slice(root.length + 1))
+  }
+  // Capability measurement, not an execution authorization. Each call uses an
+  // isolated disposable request and never starts a model turn.
+  nativeExecutionDeclaration() { return this.disposed ? null : this.nativeExecutionReadback || null }
+  measureNativeExecution() {
+    if (this.disposed) return Promise.resolve(null)
+    if (this.nativeExecutionMeasurementPending) return this.nativeExecutionMeasurementPending
+    this.nativeExecutionReadback = null
+    this.nativeExecutionMeasurementFailure = null
+    const pending = this._measureNativeExecution().then(result => {
+      this.nativeExecutionReadback = this.disposed ? null : result
+      return this.nativeExecutionReadback
+    }, () => { this.nativeExecutionReadback = null; return null }).finally(() => {
+      if (this.nativeExecutionMeasurementPending === pending) this.nativeExecutionMeasurementPending = null
+    })
+    this.nativeExecutionMeasurementPending = pending
+    return pending
+  }
+  async _measureNativeExecution() {
+    if (this.disposed || !this.nativeToolchain || this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') return null
+    const id = `native-declaration-${randomUUID()}`
+    const binding = { schemaVersion: 1, requestKey: id, authorizationId: id, manifestDigest: id,
+      requestId: id, turnId: id, inputPolicyDigest: id }
+    let directory, ready = false, scriptReady = false, stage = 'toolchain'
+    try {
+      validateNativeExecutionToolchain(this.nativeToolchain)
+      directory = ensurePrivateDirectory(mkdtempSync(resolve(this.materializerRoot, '.native-declaration-')))
+      const inputs = ensurePrivateDirectory(resolve(directory, 'inputs'))
+      const scratchDirectory = ensurePrivateDirectory(resolve(directory, 'scratch'))
+      const draftsDirectory = ensurePrivateDirectory(resolve(directory, 'drafts'))
+      writeFileSync(resolve(inputs, 'probe.txt'), 'native-declaration-probe', { mode: 0o600 })
+      const nativeExecution = { executionId: id, tools: [], checkActive: () => { if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED') },
+        callTool: async () => { fail('NATIVE_EXECUTION_TOOL_UNAVAILABLE') } }
+      stage = 'engine-open'
+      const adapter = await this.openNativeExecutionAdapter(inputs, id, binding, { scratchDirectory, draftsDirectory, skills: [], nativeExecution })
+      const network = adapter.nativeExecutionIsolation?.network
+      if (network?.measured !== true || network.nftDefaultDropReadback !== true || network.directInternetBlocked !== true) fail('NATIVE_EXECUTION_NETWORK_UNVERIFIED')
+      const egress = this.activeAdapters.get(id)?.egress
+      stage = 'provider-tls'
+      const tls = await egress.measureAllowedTls(adapter.readback.providerCaTrust)
+      if (tls?.measured !== true || tls.tlsVerified !== true) fail('NATIVE_EXECUTION_PROVIDER_TLS_UNVERIFIED')
+      stage = 'shell'
+      const result = await adapter.request('command/exec', { command: [this.nativeToolchain.shell, '-c',
+        'set -e; cat /inputs/probe.txt > /workspace/probe.txt; cat /workspace/probe.txt > /outputs/probe.txt; ! (echo bad > /inputs/probe.txt) 2>/dev/null; ! (echo bad > /state/codex-home/probe.txt) 2>/dev/null; cat /outputs/probe.txt'],
+        cwd: '/execution', sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } })
+      if (result?.exitCode !== 0 || result.stdout !== 'native-declaration-probe'
+          || readFileSync(resolve(draftsDirectory, 'probe.txt'), 'utf8') !== 'native-declaration-probe'
+          || readFileSync(resolve(inputs, 'probe.txt'), 'utf8') !== 'native-declaration-probe') fail('NATIVE_EXECUTION_SHELL_UNVERIFIED')
+      validateNativeExecutionToolchain(this.nativeToolchain)
+      ready = !this.disposed
+      if (ready) { try { scriptReady = await this._measureNativeSkillScript() } catch { this.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_MEASUREMENT_FAILED' } } }
+    } catch (error) { ready = false; this.nativeExecutionMeasurementFailure = { stage, code: error.code || 'NATIVE_EXECUTION_MEASUREMENT_FAILED' } }
+    finally {
+      try { await this.releaseAdapter(id, { requestBinding: binding }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
+      try { if (directory) rmSync(directory, { recursive: true, force: true }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
+    }
+    return ready && !this.disposed ? Object.freeze({ schemaVersion: 1, executionProtocolVersion: 5,
+      toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: Object.freeze(['text/plain', 'text/markdown', 'text/html', 'application/json', ...(scriptReady ? ['image/png'] : [])]),
+      ...(scriptReady ? { supportedToolPolicyRefs: Object.freeze(['NATIVE_SKILL_SCRIPT_V1']) } : {}) }) : null
+  }
+  async _measureNativeSkillScript() {
+    return measureNativeSkillScript(this)
   }
   declaration() {
     if (!this.contractReadback) return null
