@@ -74,3 +74,18 @@ test('shared compact registration preserves all consumed declarations and native
   assert.equal(fixture.data.skillExecution.skills.length, 4)
   assert.equal(Object.hasOwn(fixture.data, 'inputCarriers'), false)
 })
+
+
+test('registration does not read or publish user profile metadata or workspace abilities', () => {
+  const profile = { agentId: 'fixture-agent',
+    get agentName() { assert.fail('registration must not read name') },
+    get personaName() { assert.fail('registration must not read persona') },
+    get codexWorkdir() { assert.fail('registration must not scan workdir for user abilities') } }
+  const registration = buildAgentRegistrationPayload(profile)
+  for (const key of ['name', 'avatar', 'personaCode', 'personaName', 'abilities']) {
+    assert.equal(Object.hasOwn(registration, key), false)
+  }
+  assert.ok(registration.runtimeCapabilities)
+  assert.deepEqual(buildAgentPresencePayload(profile, 'busy', { taskId: 'task-1', title: '工作中' }),
+    { status: 'busy', currentTaskId: 'task-1', currentTaskTitle: '工作中', errorMessage: '' })
+})

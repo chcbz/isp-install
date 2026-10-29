@@ -4145,10 +4145,7 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
   const nativeExecution = online && profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
     ? typedInspectionProfileRuntime?.nativeExecutionDeclaration?.() : null
   return {
-    name: profile.agentName,
-    personaName: profile.personaName,
     endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
-    abilities: resolveProfileAbilities(profile),
     runtimeCapabilities: buildRuntimeCapabilities(profile),
     ...(typedDeliberation ? { typedDeliberation: { ...typedDeliberation,
       ...(online && typedInspection ? { materialsInput: { schemaVersion: 1, supportedInputs: typedInspection.supportedInputs } } : {}),

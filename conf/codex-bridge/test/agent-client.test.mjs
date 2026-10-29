@@ -1004,8 +1004,8 @@ test('runtime abilities only contain allowlisted Chinese business abilities', ()
   }
   assert.deepEqual(discoverCodexSkills(configured), ['imagegen'])
   assert.deepEqual(resolveProfileAbilities(configured), ['天气查询'])
-  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, ['天气查询'])
-  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, ['天气查询'])
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(configured), 'abilities'), false)
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(configured), 'abilities'), false)
 })
 
 test('discovered Codex tools do not become scheduling abilities', () => {
@@ -1197,19 +1197,19 @@ test('managed profiles publish ONLINE only after exact authenticated registratio
   assert.equal(canPublishProfileOnline(profile, {}), true)
 })
 
-test('register and presence refresh business abilities after directory changes', () => {
+test('registration never publishes user abilities after directory changes', () => {
   const root = temporaryDirectory()
   writeFileSync(resolve(root, 'settings.gradle'), 'rootProject.name = "jia"')
   const configured = { ...profile, codexHome: resolve(root, '.codex'), codexWorkdir: root, abilities: [], skills: [] }
-  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, [])
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(configured), 'abilities'), false)
   mkdirSync(resolve(root, 'jia-oauth-core'))
   writeFileSync(resolve(root, 'jia-oauth-core', 'build.gradle'), 'module')
-  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, ['身份认证'])
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(configured), 'abilities'), false)
   rmSync(resolve(root, 'jia-oauth-core'), { recursive: true })
   writeFileSync(resolve(root, 'weather.py'), 'print("sunny")')
-  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, ['天气查询'])
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(configured), 'abilities'), false)
   rmSync(resolve(root, 'weather.py'))
-  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, [])
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(configured), 'abilities'), false)
 })
 
 test('oversized or malformed manifests cannot inject business labels', () => {
@@ -1234,10 +1234,10 @@ test('installing Codex skills does not change scheduling abilities', () => {
   const root = temporaryDirectory()
   const codexHome = resolve(root, '.codex-agent-a')
   const configured = { ...profile, codexHome, codexWorkdir: root, abilities: [], skills: [] }
-  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, [])
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(configured), 'abilities'), false)
   mkdirSync(resolve(codexHome, 'skills', 'new-client-skill'), { recursive: true })
   writeFileSync(resolve(codexHome, 'skills', 'new-client-skill', 'SKILL.md'), '---\nname: new-client-skill\n---\n')
-  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, [])
+  assert.equal(Object.hasOwn(buildAgentRegistrationPayload(configured), 'abilities'), false)
 })
 
 test('real ws upgrade uses memory session proof, no API key or URL credential', async () => {

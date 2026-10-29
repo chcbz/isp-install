@@ -393,3 +393,8 @@ Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺
 ### 解释器逐次异步摘要（1.3.18源码候选）
 
 local-script解释器从整文件同步读取改为1MiB缓冲异步SHA，每次仍重新测量全文件，不新增信任缓存，也不修改既有工具链摘要字段。异步窗口用同FD和路径身份/元数据前后对照，保留属主/父目录权限校验；父目录内容变化不等于路径身份变化。变化仅拒绝当前测量，不启动脚本、不重放历史效果。小合成文件验证摘要等价、事件循环推进、同长替换/修改/别名切换拒绝；真实runner及恢复回归继续走Flow。1MiB不是包大小门槛，源码存在不等于线上提速。本轮接口基线为CYF `api/docs/interface-standard.md` v1.4，详细约束见`specs/juyiting-skill-execution/management-contract.md`的2026-10-26性能节。
+
+
+### CYF 本领维护与最小注册（2026-10-29 候选，发布见 CYF handoff）
+
+遵循 `/home/isp/wsps/cyf/api/docs/interface-standard.md` v1.4 和 RB-1。请上梁山/API 初始化资料和本领，随后本人在详情维护；Runtime 注册不读工作目录推测本领、不上报姓名/头像/角色资料/本领，presence 只报动态状态与会话 fence。保留 API 真实消费的 runtimeCapabilities、typedDeliberation（材料输入、nativeExecution）、skillExecution，不能用本领介绍代替就绪/授权。无旧客户端双轨；Runtime 1.3.24/bridge 1.1.15 候选需与对应 API/Web 协调部署，版本号修改不表示已启用。
