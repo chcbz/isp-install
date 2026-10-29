@@ -1253,8 +1253,12 @@ export class SkillInstallManager {
   }
   replayAcks(sendFn = this.sendResultFn) {
     if (!this.session || typeof sendFn !== 'function') return 0
+    const state = this._load()
     let sent = 0
-    for (const { ack } of Object.values(this._load().messages)) {
+    for (const { ack } of Object.values(state.messages)) {
+      // An authenticated durable result receipt already proves server acceptance.
+      // Keep history and direct duplicate delivery handling, but retire proactive ACK replay.
+      if (this._command(state, ack.data.commandId)?.receipt) continue
       if (sendFn(ack) !== true) break
       sent++
     }

@@ -189,7 +189,16 @@ test('cross-boot deliveryEpoch fencing preserves original ACK/result bytes; only
     assert.throws(() => m.acknowledgeResultReceipt(bad), /uncorrelated/)
   const replayed = []; m.replayResults(msg => { replayed.push(JSON.stringify(msg)); return true }); assert.deepEqual(replayed, [bytes])
   m.acknowledgeResultReceipt(receipt); m.acknowledgeResultReceipt(receipt)
-  assert.equal(restart(f, { runtimeInstanceId: 'boot_third' }).pendingResults().length, 0)
+  const confirmed = restart(f, { runtimeInstanceId: 'boot_third' })
+  assert.equal(confirmed.pendingResults().length, 0)
+  const journalBeforeReplay = readFileSync(confirmed.statePath)
+  assert.equal(confirmed.replayAcks(() => { assert.fail('receipted ACK must not replay') }), 0)
+  assert.deepEqual(readFileSync(confirmed.statePath), journalBeforeReplay)
+  // A genuine server redelivery still receives its exact persisted ACK/result.
+  const duplicateReplies = []; confirmed.sendResultFn = message => { duplicateReplies.push(message); return true }
+  await confirmed.handle(redelivery)
+  assert.ok(duplicateReplies.some(message => message.messageType === 'command.ack'))
+  assert.equal(f.downloads(), 1)
   // Corrupting acknowledged evidence, even with a recomputed container hash, cannot invent a receipt correlation.
   const state = JSON.parse(readFileSync(m.statePath)); const record = Object.values(state.commands)[0]
   record.receipt.correlationId = 'forged'; delete state.journalSha256; state.journalSha256 = managementDigest('cyf.skill.journal.v2', state)
@@ -717,4 +726,22 @@ for (const skillKey of ['native-image', 'image-generate', 'image-edit']) test(`$
   assert.equal(hash(readFileSync(resolve(f.home, `skills/${skillKey}/vendor/magick.wasm`))), hash(entries.find(entry => entry.name === 'vendor/magick.wasm').data))
   assert.equal(f.downloads(), 1)
   console.log(`${skillKey} fixture ZIP bytes=${bytes.length}, sha256=${hash(bytes)}; temporary installer only; publication/production install: NOT_RUN`)
+})
+
+
+test('ACK replay retires only receipted commands, preserving unconfirmed ACK bytes and disconnect stop', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), prepared = command(pkg.target)
+  const prepareResult = (await f.manager.handle(prepared)).resultEnvelope
+  const activation = activate(prepared)
+  await f.manager.handle(activation)
+  f.manager.acknowledgeResultReceipt(receiptFor(prepareResult))
+  const remainingAck = f.emitted.find(message => message.messageType === 'command.ack' && message.data.commandId === activation.data.commandId)
+  const manager = restart(f), sent = []
+  assert.equal(manager.replayAcks(message => { sent.push(JSON.stringify(message)); return true }), 1)
+  assert.deepEqual(sent, [JSON.stringify(remainingAck)])
+  let attempts = 0
+  assert.equal(manager.replayAcks(() => { attempts++; return false }), 0)
+  assert.equal(attempts, 1)
+  manager.bindSession(null)
+  assert.equal(manager.replayAcks(() => { assert.fail('unbound ACK replay') }), 0)
 })

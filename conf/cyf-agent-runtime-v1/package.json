@@ -1,6 +1,6 @@
 {
   "name": "@cyf/agent-runtime-v1",
-  "version": "1.3.21",
+  "version": "1.3.22",
   "private": true,
   "description": "Unified multi-Agent Runtime reusing codex-bridge",
   "type": "module",
