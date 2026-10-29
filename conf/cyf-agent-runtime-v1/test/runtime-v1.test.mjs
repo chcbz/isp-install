@@ -50,6 +50,20 @@ test('manifest exact explicit identity and SHA remain validated', () => {
   assert.throws(() => validateManifest({ ...manifest(), runtimeProtocolVersion: 'v0' }), /must be v1/);
 });
 
+
+test('tenant one manifest, enrollment, session and callback identity remain exact', async t => {
+  const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: 'rti_11111111111111111111111111111111',
+    tenantId: '1', clientId: 'cyf-local', canonicalAgentId: 'agt_11111111111111111111111111111111' };
+  const tenantOne = { ...unsigned, manifestSha256: digestManifest(unsigned) };
+  assert.equal(validateManifest(tenantOne).tenantId, '1');
+  const proof = { runtimeInstallationId: tenantOne.installationId, tenantId: '1', clientId: 'cyf-local', canonicalAgentId: tenantOne.canonicalAgentId,
+    hostId: 'gray-host', runtimeInstanceId: 'gray-boot', sessionGeneration: '1', scheme: 'AgentRuntime', sessionToken: token,
+    websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' };
+  const { validateRuntimeSession } = await import('../lib/runtime-client.mjs');
+  assert.equal(validateRuntimeSession(proof, { manifest: tenantOne, hostId: 'gray-host', runtimeInstanceId: 'gray-boot' }).tenantId, '1');
+  assert.throws(() => validateRuntimeSession({ ...proof, tenantId: '0' }, { manifest: tenantOne, hostId: 'gray-host', runtimeInstanceId: 'gray-boot' }), /IDENTITY_MISMATCH/);
+});
+
 test('protected secret and authorization reads reject permissions, file/ancestor symlinks', async t => {
   const { directory, client } = await setup(t, async () => response({}));
   const file = join(directory, 'secret'); await writeFile(file, 'synthetic-enroll\n', { mode: 0o600 });
