@@ -667,17 +667,16 @@ test('production chat runner takes disabled and legacy messages directly to seri
   assert.equal(result.status, 'completed')
 })
 
-test('registration and presence truthfully advertise capability contract v1 with Fast CHAT disabled by default', () => {
+test('only registration advertises capability contract v1; status does not repeat capabilities', () => {
   const registration = buildAgentRegistrationPayload(profile).runtimeCapabilities
   const presencePayload = buildAgentPresencePayload(profile, 'online')
   const registrationPayload = buildAgentRegistrationPayload(profile)
-  const presence = presencePayload.runtimeCapabilities
-  assert.deepEqual(presence, registration)
+  assert.equal(presencePayload.runtimeCapabilities, undefined)
   assert.equal(Object.hasOwn(registrationPayload, 'typedDeliberation'), false)
   assert.equal(Object.hasOwn(presencePayload, 'typedDeliberation'), false)
   assert.deepEqual(
     registration,
-    JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'u0-runtime-capabilities-v1.json'), 'utf8'))
+    Object.fromEntries(Object.entries(JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'u0-runtime-capabilities-v1.json'), 'utf8'))).filter(([key]) => ['capabilityContractVersion', 'runtimeVersion', 'profiles', 'fastChatEnabled', 'appServerEnabled', 'trueDeltaEnabled'].includes(key)))
   )
 })
 
@@ -695,7 +694,7 @@ test('completed typed inspection measurement republishes exact readiness only on
   assert.equal(publishTypedInspectionReadiness(profile, state, { sendStatusFn: () => assert.fail('must not publish unready declaration'), busyFn: () => false }), false)
 })
 
-test('public input carriers declaration is absent without measured contract readback and exact when ready', () => {
+test('only consumed materialsInput is published; duplicate inputCarriers and local policy diagnostics stay private', () => {
   const declaration = {
     schemaVersion: 1, contract: 'juyiting-typed-inspection-v1', enabled: true, profileId: 'inspection-profile',
     engineContractId: 'engine-contract-v1', enginePolicyDigest: 'sha256:' + '1'.repeat(64), toolPolicyDigest: 'sha256:' + '2'.repeat(64),
@@ -705,8 +704,11 @@ test('public input carriers declaration is absent without measured contract read
   const unavailable = { declaration: () => null }; const ready = { declaration: () => declaration }
   assert.equal(Object.hasOwn(buildAgentRegistrationPayload(profile, null, false, null, unavailable), 'typedInspection'), false)
   assert.equal(Object.hasOwn(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: unavailable }), 'typedInspection'), false)
-  assert.deepEqual(buildAgentRegistrationPayload(profile, null, true, null, ready).inputCarriers, { ...declaration, contract: 'juyiting-materials-v1' })
-  assert.deepEqual(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: ready }).inputCarriers, { ...declaration, contract: 'juyiting-materials-v1' })
+  const payload = buildAgentRegistrationPayload({ ...profile, typedDeliberationEnabled: true }, null, true, null, ready)
+  assert.deepEqual(payload.typedDeliberation.materialsInput, { schemaVersion: 1, supportedInputs: declaration.supportedInputs })
+  assert.equal(Object.hasOwn(payload, 'inputCarriers'), false)
+  assert.equal(JSON.stringify(payload).includes('enginePolicyDigest'), false)
+  assert.equal(Object.hasOwn(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: ready }), 'inputCarriers'), false)
 })
 
 test('typed inspection CA bundle path survives exact profile and fallback normalization', () => {
@@ -743,10 +745,10 @@ test('typed readiness uses live handshake and integrity, not selected CLI versio
     strictNoToolsVerified: false, toolPolicy: 'read-only-constrained'
   }
   assert.deepEqual(buildAgentRegistrationPayload(configured, null, true, liveNative).typedDeliberation, declaration)
-  assert.deepEqual(buildAgentPresencePayload(configured, 'online', { appServerAdapter: liveNative }).typedDeliberation, declaration)
-  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: adapter(legacy) }).typedDeliberation.state, 'READY')
-  assert.equal(buildAgentPresencePayload({ ...configured, appServerSchemaContractId: legacy.contractId }, 'online', { appServerAdapter: liveNative }).typedDeliberation.state, 'READY')
-  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...liveNative, closed: true } }).typedDeliberation.state, 'UNAVAILABLE')
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: liveNative }).typedDeliberation, undefined)
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: adapter(legacy) }).typedDeliberation, undefined)
+  assert.equal(buildAgentPresencePayload({ ...configured, appServerSchemaContractId: legacy.contractId }, 'online', { appServerAdapter: liveNative }).typedDeliberation, undefined)
+  assert.equal(buildAgentPresencePayload(configured, 'online', { appServerAdapter: { ...liveNative, closed: true } }).typedDeliberation, undefined)
   const incompleteMeasured = { closed: false, readback: { initialize: {}, schema: { measured: false } } }
   for (const inherited of [...Object.getOwnPropertyNames(Object.prototype), ' __proto__ ']) {
     assert.equal(
@@ -768,7 +770,7 @@ test('capability contract advertises CHAT only after its read-only-constrained p
     workspaceFileRootDir: '/private/runs'
   }
   const capabilities = buildAgentRegistrationPayload(configured).runtimeCapabilities
-  assert.deepEqual(capabilities.interactionModes, ['CHAT'])
+  assert.equal(capabilities.interactionModes, undefined)
   assert.deepEqual(capabilities.profiles.CHAT, {
     supported: true,
     enabled: true,
@@ -777,12 +779,9 @@ test('capability contract advertises CHAT only after its read-only-constrained p
   })
   assert.equal(capabilities.profiles.INSPECT.enabled, false)
   assert.equal(capabilities.profiles.EXECUTE.enabled, false)
-  assert.deepEqual(capabilities.legacyCompatibility, {
-    PRIVATE: true,
-    TASK: true,
-    nativeStart: true,
-    dispatchAckTypes: ['chat.dispatch.ack']
-  })
+  assert.equal(capabilities.legacyCompatibility, undefined)
+  for (const field of ['protocolVersions', 'chatProtocolVersions', 'contextSnapshotVersions',
+    'contextEnvelopeVersions', 'deltaVersions', 'dispatchAckTypes', 'deliverySemantics']) assert.equal(capabilities[field], undefined)
 })
 
 test('capability contract refuses to advertise CHAT policy for a non-constrained Fast configuration', () => {
@@ -796,7 +795,7 @@ test('capability contract refuses to advertise CHAT policy for a non-constrained
   }).runtimeCapabilities
   assert.equal(capabilities.profiles.CHAT.enabled, false)
   assert.equal('toolPolicy' in capabilities.profiles.CHAT, false)
-  assert.deepEqual(capabilities.interactionModes, [])
+  assert.equal(capabilities.interactionModes, undefined)
 })
 
 test('legacy chat run emits final only and never fabricates delta', async () => {
@@ -1006,7 +1005,7 @@ test('runtime abilities only contain allowlisted Chinese business abilities', ()
   assert.deepEqual(discoverCodexSkills(configured), ['imagegen'])
   assert.deepEqual(resolveProfileAbilities(configured), ['天气查询'])
   assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, ['天气查询'])
-  assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, ['天气查询'])
+  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, ['天气查询'])
 })
 
 test('discovered Codex tools do not become scheduling abilities', () => {
@@ -1205,12 +1204,12 @@ test('register and presence refresh business abilities after directory changes',
   assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, [])
   mkdirSync(resolve(root, 'jia-oauth-core'))
   writeFileSync(resolve(root, 'jia-oauth-core', 'build.gradle'), 'module')
-  assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, ['身份认证'])
+  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, ['身份认证'])
   rmSync(resolve(root, 'jia-oauth-core'), { recursive: true })
   writeFileSync(resolve(root, 'weather.py'), 'print("sunny")')
-  assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, ['天气查询'])
+  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, ['天气查询'])
   rmSync(resolve(root, 'weather.py'))
-  assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, [])
+  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, [])
 })
 
 test('oversized or malformed manifests cannot inject business labels', () => {
@@ -1238,7 +1237,7 @@ test('installing Codex skills does not change scheduling abilities', () => {
   assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, [])
   mkdirSync(resolve(codexHome, 'skills', 'new-client-skill'), { recursive: true })
   writeFileSync(resolve(codexHome, 'skills', 'new-client-skill', 'SKILL.md'), '---\nname: new-client-skill\n---\n')
-  assert.deepEqual(buildAgentPresencePayload(configured, 'online').abilities, [])
+  assert.deepEqual(buildAgentRegistrationPayload(configured).abilities, [])
 })
 
 test('real ws upgrade uses memory session proof, no API key or URL credential', async () => {

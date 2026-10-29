@@ -74,7 +74,8 @@ test('native executor flags are strict config and never mutate fast-v1 presence 
 
   const presence = buildAgentPresencePayload(enabled, 'online')
   assert.equal('nativeBountyExecution' in presence, false)
-  assert.deepEqual(presence.runtimeCapabilities.profiles.EXECUTE, { supported: false, enabled: false })
+  assert.equal(presence.runtimeCapabilities, undefined)
+  assert.deepEqual(buildAgentRegistrationPayload(enabled).runtimeCapabilities.profiles.EXECUTE, { supported: false, enabled: false })
 })
 
 

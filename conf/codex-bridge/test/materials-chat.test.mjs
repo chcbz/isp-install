@@ -146,13 +146,13 @@ test('materials final requires exact existing server save ACK before inbox compl
   assert.equal(inbox.confirmFinalSaved(ack).status, 'duplicate')
   await assert.rejects(runFastChat(profile, { ...c.message, route: 'INSPECT' }, c.options), error => error.code === 'FAST_CHAT_ROUTE_INVALID')
 })
-test('v4 registration and presence expose exact nested materials declaration only after measurement', () => {
+test('registration alone exposes exact measured materials; status does not duplicate declarations', () => {
   const adapter = { closed: false, readback: { schema: { ...schema, measured: true, schemaContractId: schema.contractId } } }
   const runtime = { declaration: () => ({ supportedInputs: formats }) }
   const registered = buildAgentRegistrationPayload(profile, null, true, adapter, runtime)
   assert.deepEqual(registered.typedDeliberation.materialsInput, { schemaVersion: 1, supportedInputs: formats })
   assert.equal(buildAgentRegistrationPayload(profile, null, false, adapter, runtime).typedDeliberation.materialsInput, undefined)
-  assert.deepEqual(buildAgentPresencePayload(profile, 'online', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation.materialsInput, registered.typedDeliberation.materialsInput)
+  assert.equal(buildAgentPresencePayload(profile, 'online', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation, undefined)
 })
 test('public materials transport allows only exact GET content route, no aliases/query/body/wider internal namespace', () => {
   const path = '/internal/agent/chat/requests/request/turns/turn/materials/inputs/ref/content'
@@ -169,9 +169,9 @@ test('native local-file capability is a separate online declaration and requires
   const readyProfile = { ...profile, workspaceFileApiOrigin: 'https://platform.example', workspaceFileRootDir: '/synthetic/private-root' }
   const registered = buildAgentRegistrationPayload(readyProfile, null, true, adapter, runtime)
   assert.deepEqual(registered.typedDeliberation.nativeExecution, declaration)
-  assert.deepEqual(buildAgentPresencePayload(readyProfile, 'busy', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation.nativeExecution, declaration)
+  assert.equal(buildAgentPresencePayload(readyProfile, 'busy', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation, undefined)
   assert.equal(buildAgentRegistrationPayload(readyProfile, null, false, adapter, runtime).typedDeliberation.nativeExecution, undefined)
-  assert.equal(buildAgentPresencePayload(readyProfile, 'offline', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation.nativeExecution, undefined)
+  assert.equal(buildAgentPresencePayload(readyProfile, 'offline', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation, undefined)
   assert.equal(buildAgentRegistrationPayload(profile, null, true, adapter, runtime).typedDeliberation.nativeExecution, undefined)
   assert.equal(buildAgentRegistrationPayload(readyProfile, null, true, adapter, { declaration: runtime.declaration }).typedDeliberation.nativeExecution, undefined)
   assert.equal(buildAgentRegistrationPayload(readyProfile, null, true, adapter, { ...runtime, nativeExecutionDeclaration: () => null }).typedDeliberation.nativeExecution, undefined)

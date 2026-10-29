@@ -305,6 +305,7 @@ test('upgrade and policy keep old tasks on exact immutable installation/package/
   assert.equal(outcome(await f.manager.handle(lateDisable)), 'FAILED')
   assert.equal(f.manager.listInstalledSkills()[0].enabled, true)
   assert.equal(f.manager.listInstalledSkills({ includeRetained: true }).length, 2); assert.equal(f.downloads(), 2)
+  assert.equal(f.manager.listInstalledSkills().length, 1, 'historical installed versions must not grow the registration catalog')
 })
 
 test('retained manifest/marker/hardlink/symlink tampering cannot override trusted package identity', async t => {

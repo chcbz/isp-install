@@ -4098,7 +4098,6 @@ export const hasReadOnlyConstrainedChatProfile = profile => Boolean(
  */
 export const buildRuntimeCapabilities = profile => {
   const chatEnabled = hasReadOnlyConstrainedChatProfile(profile)
-  const nativeStartEnabled = Boolean(profile?.workspaceFileApiOrigin && profile?.workspaceFileRootDir)
   const chat = {
     supported: true,
     enabled: chatEnabled,
@@ -4109,15 +4108,6 @@ export const buildRuntimeCapabilities = profile => {
   return Object.freeze({
     capabilityContractVersion: 1,
     runtimeVersion: 'juyiting-fast-context-runtime-v2',
-    protocolVersions: [1],
-    chatProtocolVersions: [1],
-    contextSnapshotVersions: [1],
-    contextEnvelopeVersions: [2],
-    deltaVersions: [1],
-    dispatchAckTypes: ['chat.dispatch.ack'],
-    deliverySemantics: ['AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED'],
-    // Retained for v1 readers. It is derived from profiles and never lists disabled modes.
-    interactionModes: chatEnabled ? ['CHAT'] : [],
     profiles: Object.freeze({
       CHAT: Object.freeze(chat),
       // The runtime has no independently verified fixed-manifest Provider execution yet.
@@ -4125,37 +4115,19 @@ export const buildRuntimeCapabilities = profile => {
       // Existing command paths are legacy compatibility, not new execution-orchestration admission.
       EXECUTE: Object.freeze({ supported: false, enabled: false })
     }),
-    legacyCompatibility: Object.freeze({
-      PRIVATE: true,
-      TASK: true,
-      nativeStart: nativeStartEnabled,
-      dispatchAckTypes: ['chat.dispatch.ack']
-    }),
     fastChatEnabled: Boolean(profile?.fastChatEnabled),
     appServerEnabled: Boolean(profile?.appServerEnabled),
     trueDeltaEnabled: Boolean(profile?.trueDeltaEnabled)
   })
 }
 
-export const buildAgentPresencePayload = (profile, status, extra = {}) => {
-  const typedDeliberation = buildTypedDeliberationDeclaration(profile, extra.appServerAdapter || null)
-  const typedInspection = extra.typedInspectionProfileRuntime?.declaration?.() || null
-  const online = ['online', 'busy'].includes(status)
-  const nativeExecution = online && profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
-    ? extra.typedInspectionProfileRuntime?.nativeExecutionDeclaration?.() : null
-  return {
-    status,
-    currentTaskId: extra.taskId || '',
-    currentTaskTitle: extra.title || '',
-    errorMessage: extra.errorMessage || '',
-    abilities: resolveProfileAbilities(profile),
-    runtimeCapabilities: buildRuntimeCapabilities(profile),
-    ...(typedDeliberation ? { typedDeliberation: { ...typedDeliberation,
-      ...(online && typedInspection ? { materialsInput: { schemaVersion: 1, supportedInputs: typedInspection.supportedInputs } } : {}),
-      ...(nativeExecution ? { nativeExecution } : {}) } } : {}),
-    ...(online && typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {}),
-  }
-}
+// Capability changes are published by acknowledged registration, not status updates.
+export const buildAgentPresencePayload = (_profile, status, extra = {}) => ({
+  status,
+  currentTaskId: extra.taskId || '',
+  currentTaskTitle: extra.title || '',
+  errorMessage: extra.errorMessage || ''
+})
 
 // Task readiness uses the D06 task command contract only. Taskless SM-C1
 // management is declared by skillExecution and handled by its durable manager.
@@ -4181,19 +4153,12 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
     ...(typedDeliberation ? { typedDeliberation: { ...typedDeliberation,
       ...(online && typedInspection ? { materialsInput: { schemaVersion: 1, supportedInputs: typedInspection.supportedInputs } } : {}),
       ...(nativeExecution ? { nativeExecution } : {}) } } : {}),
-    ...(online && typedInspection ? { inputCarriers: { ...typedInspection, contract: 'juyiting-materials-v1' } } : {}),
     ...(online && skillRegistry?.declaration?.() ? { skillExecution: skillRegistry.declaration() } : {})
   }
 }
 
 const sendStatus = (profile, status, extra = {}) => {
-  const state = getProfileState(profile)
-  return sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, {
-    ...extra,
-    appServerAdapter: state?.appServerAdapter || null,
-    typedInspectionProfileRuntime: state?.typedInspectionProfileRuntime || null,
-    skillRegistry: state?.skillRegistry || null
-  }), profile)
+  return sendProtocol(MESSAGE_TYPES.AGENT_PRESENCE, buildAgentPresencePayload(profile, status, extra), profile)
 }
 
 // The server activates capability declarations only from an acknowledged registration.
