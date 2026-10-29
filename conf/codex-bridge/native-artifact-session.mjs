@@ -20,7 +20,17 @@ export class NativeArtifactSession {
     this.store = store; this.command = store.command; this.checkActive = checkActive; this.validateSnapshot = validateSnapshot
     if (this.command.executionProtocolVersion !== 5 || typeof checkActive !== 'function' || typeof validateSnapshot !== 'function') fail('NATIVE_ARTIFACT_SESSION_INVALID')
   }
-  policy() { return { executionId: this.command.executionId, tools: nativeArtifactTools, checkActive: this.checkActive, callTool: ctx => this.callTool(ctx) } }
+  policy() {
+    // Advertise the execution's actual data contract, not an unconstrained value
+    // that the same tool subsequently rejects (e.g. {} for file-only results).
+    // Keep structured schemas at their existing root in outputs.dataSchema so
+    // local $refs retain their original meaning; runtime validation is unchanged.
+    const data = this.command.outputs.dataSchema ? {} : { type: 'null', description: 'This execution has no structured data output. Pass null; deliver files via artifactRefs.' }
+    const tools = nativeArtifactTools.map(tool => tool.name === 'result_propose'
+      ? { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, data } } }
+      : tool)
+    return { executionId: this.command.executionId, tools, checkActive: this.checkActive, callTool: ctx => this.callTool(ctx) }
+  }
   bindTurn({ threadId, turnId }) {
     this.checkActive()
     if (typeof threadId !== 'string' || !threadId || typeof turnId !== 'string' || !turnId) fail('NATIVE_TURN_BINDING_INVALID')

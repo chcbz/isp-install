@@ -62,3 +62,22 @@ test('local-file delivery is valid for native execution without masquerading as 
   const result = f.session.finalize(f.terminal, [{ inputRef: 'input1', sha256: 'b'.repeat(64), carrier: 'local-file', delivery: 'DELIVERED' }])
   assert.equal(result.result.inputReceipts[0].carrier, 'local-file')
 })
+
+test('proposal tool advertises the same file-only data contract it enforces', t => {
+  const f = fixture(t)
+  const tool = f.session.policy().tools.find(tool => tool.name === 'result_propose')
+  assert.equal(tool.inputSchema.properties.data.type, 'null')
+  f.write('real file'); const a = f.stage()
+  assert.throws(() => f.call('result_propose', { summary: 'done', artifactRefs: [a.artifactRef], data: {} }, 'invalid-data'), /PROPOSAL_INVALID/)
+  f.propose([a.artifactRef]); assert.equal(f.session.finalize(f.terminal, []).result.artifacts.length, 1)
+})
+test('structured data schemas are execution-local and do not leak to file-only sessions', t => {
+  const typed = fixture(t); const plain = fixture(t)
+  const schema = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false }
+  typed.store.command.outputs.dataSchema = schema
+  assert.deepEqual(typed.session.policy().tools.find(tool => tool.name === 'result_propose').inputSchema.properties.data, {})
+  assert.equal(plain.session.policy().tools.find(tool => tool.name === 'result_propose').inputSchema.properties.data.type, 'null')
+  typed.write('typed'); const a = typed.stage()
+  typed.call('result_propose', { summary: 'done', artifactRefs: [a.artifactRef], data: { count: 1 } }, 'typed-data')
+  assert.equal(typed.session.finalize(typed.terminal, []).result.data.count, 1)
+})
