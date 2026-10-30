@@ -700,7 +700,7 @@ test('K2 image package stays installed and discovery reports unavailable without
 for (const skillKey of ['native-image', 'image-generate', 'image-edit']) test(`${skillKey} standalone files install as ordinary INSTRUCTION without a runner manifest or credentials`, async t => {
   const root = new URL('../../skills/native-image/', import.meta.url)
   const document = skillKey === 'native-image' ? 'SKILL.md' : `variants/${skillKey}.md`
-  const skillVersion = skillKey === 'native-image' ? '1.0.0' : '1.3.0'
+  const skillVersion = skillKey === 'native-image' ? '1.0.0' : '1.3.1'
   const entries = [{ name: 'SKILL.md', data: readFileSync(new URL(document, root)) }]
   assert.match(entries[0].data.toString(), new RegExp(`/skill-config/${skillKey}\\.json`))
   if (skillKey !== 'native-image') {
