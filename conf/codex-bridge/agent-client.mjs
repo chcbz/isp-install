@@ -39,7 +39,7 @@ import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallState
 import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
 import { nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
-import { measureMinimalNativeExecutionToolchain } from './native-execution-profile.mjs'
+import { initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { loadNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
 import { buildActionChatFinal, publishActionChatFinal } from './action-chat-final.mjs'
@@ -4210,12 +4210,12 @@ export const bindMeasuredSkillSession = (state, binding) => {
       state.conversationNativeLane = new SkillConversationLane({ apiOrigin: state.profile.workspaceFileApiOrigin,
         rootDir: state.profile.workspaceFileRootDir, agentId: state.profile.agentId, runtimeInstanceId: state.profile.runtimeInstanceId,
         scope: binding.scope, registry: state.skillRegistry, runners: state.skillRunners,
-        runNative: request => {
+        runNative: async request => {
           const profileRuntime = state.typedInspectionProfileRuntime
           if (!profileRuntime) throw new AgentProtocolError('NATIVE_EXECUTION_PROFILE_UNAVAILABLE', 'Isolated execution profile is unavailable')
           // Pin the baseline shell/file tools and the actual runtime Node, not all host programs.
           // The profile rechecks this manifest before mounting each execution.
-          profileRuntime.nativeToolchain ||= measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath })
+          await initializeNativeToolchain(profileRuntime)
           const skillConfiguration = loadNativeSkillConfiguration({ file: state.profile.skillExecutionConfigFile,
             scope: binding.scope, command: request.command, entries: request.entries })
           return runNativeExecution({ ...request, profileRuntime, skillConfiguration,
@@ -5894,7 +5894,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       if (!state.disposed && profile.workspaceFileApiOrigin && profile.workspaceFileRootDir && !state.nativeExecutionProfilePromise) {
         state.nativeExecutionProfilePromise = Promise.resolve().then(async () => {
           if (state.disposed) return
-          state.typedInspectionProfileRuntime.nativeToolchain ||= measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath })
+          await initializeNativeToolchain(state.typedInspectionProfileRuntime)
           const nativeReady = await state.typedInspectionProfileRuntime.measureNativeExecution()
           if (!nativeReady) {
             const failure = state.typedInspectionProfileRuntime.nativeExecutionMeasurementFailure

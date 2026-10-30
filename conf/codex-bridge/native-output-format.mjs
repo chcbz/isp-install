@@ -1,3 +1,4 @@
+import { isNativeOfficeMime, validateNativeOfficeSnapshot } from './native-office-format.mjs'
 /** File-format boundary for the native collector; no task orchestration. */
 import { constants, openSync, closeSync, readSync, readFileSync } from 'node:fs'
 import { validateNativeConversationOutput } from './conversation-native.mjs'
@@ -5,6 +6,7 @@ const textTypes = new Set(['text/plain', 'text/markdown', 'text/html', 'text/csv
 const signatures = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm'])
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 export function validateNativeOutputSnapshot(path, mediaTypeHint) {
+  if (isNativeOfficeMime(mediaTypeHint)) return validateNativeOfficeSnapshot(path, mediaTypeHint)
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     if (textTypes.has(mediaTypeHint)) {

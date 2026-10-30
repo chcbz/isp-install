@@ -39,7 +39,7 @@ export class NativeArtifactSession {
     if (old && skillDigest(old) !== skillDigest(binding)) fail('NATIVE_TURN_BINDING_CONFLICT')
     if (!old) this.store.write('native-turn', binding)
   }
-  callTool(ctx) {
+  async callTool(ctx) {
     this.checkActive()
     const binding = this.store.read('native-turn')
     if (!binding || ['executionId', 'threadId', 'turnId'].some(k => ctx[k] !== binding[k]) || typeof ctx.callId !== 'string' || !ctx.callId) fail('NATIVE_TOOL_BINDING_INVALID')
@@ -67,7 +67,9 @@ export class NativeArtifactSession {
     let snapshot
     try {
       snapshot = snapshotNativeArtifact({ draftsDirectory: resolve(this.store.directory, 'drafts'), snapshotDirectory: resolve(this.store.directory, 'outputs'), path: args.path })
-      const contentMimeType = this.validateSnapshot(snapshot.path, args.mediaTypeHint)
+      const contentMimeType = await this.validateSnapshot(snapshot.path, args.mediaTypeHint)
+      this.checkActive()
+      if (this.store.read('result') || this.store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
       if (!this.command.outputs.mimeTypes.includes(contentMimeType)) fail('NATIVE_OUTPUT_FORMAT_INVALID')
       const outputId = `output_${key.slice('native-call-'.length)}`
       const artifact = { outputId, displayName: args.displayName, contentMimeType, sha256: snapshot.sha256, byteLength: snapshot.byteLength }

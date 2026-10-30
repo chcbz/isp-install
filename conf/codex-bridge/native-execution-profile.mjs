@@ -160,6 +160,9 @@ export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory
     for (const path of parents) if (!directories.has(path)) { args.push('--dir', path); directories.add(path) }
     args.push('--ro-bind', file.sourcePath, file.sandboxPath)
   }
+  if (layout.toolchain.files.some(file => file.sandboxPath === '/usr/bin/python3')) {
+    args.push('--setenv', 'LD_LIBRARY_PATH', '/usr/lib:/usr/lib64:/lib:/lib64', '--setenv', 'PYTHONDONTWRITEBYTECODE', '1', '--setenv', 'TMPDIR', '/workspace')
+  }
   args.push('--setenv', 'PATH', '/runtime/bin:/usr/bin:/bin', '--setenv', 'SHELL', layout.toolchain.shell, '--remount-ro', '/')
   return args
 }

@@ -1,3 +1,4 @@
+import { DOCUMENT_MIMES, DOCUMENT_PROBE } from './native-document-toolchain.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -662,7 +663,7 @@ export class TypedInspectionProfileRuntime {
     const id = `native-declaration-${randomUUID()}`
     const binding = { schemaVersion: 1, requestKey: id, authorizationId: id, manifestDigest: id,
       requestId: id, turnId: id, inputPolicyDigest: id }
-    let directory, ready = false, scriptReady = false, stage = 'toolchain'
+    let directory, ready = false, scriptReady = false, documentReady = false, stage = 'toolchain'
     try {
       validateNativeExecutionToolchain(this.nativeToolchain)
       directory = ensurePrivateDirectory(mkdtempSync(resolve(this.materializerRoot, '.native-declaration-')))
@@ -688,6 +689,15 @@ export class TypedInspectionProfileRuntime {
           || readFileSync(resolve(draftsDirectory, 'probe.txt'), 'utf8') !== 'native-declaration-probe'
           || readFileSync(resolve(inputs, 'probe.txt'), 'utf8') !== 'native-declaration-probe') fail('NATIVE_EXECUTION_SHELL_UNVERIFIED')
       validateNativeExecutionToolchain(this.nativeToolchain)
+      if (this.nativeToolchain.files.some(file => file.sandboxPath === DOCUMENT_PROBE)) {
+        this.nativeDocumentMeasurementFailure = null
+        try {
+          const probe = await adapter.request('command/exec', { command: ['/usr/bin/python3', '-I', '-B', DOCUMENT_PROBE],
+            cwd: '/execution', sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } })
+          documentReady = probe?.exitCode === 0 && probe.stdout.trim() === 'native-documents-ready'
+          if (!documentReady) this.nativeDocumentMeasurementFailure = { stage: 'document-probe', code: 'NATIVE_DOCUMENT_PROBE_FAILED' }
+        } catch { this.nativeDocumentMeasurementFailure = { stage: 'document-probe', code: 'NATIVE_DOCUMENT_PROBE_FAILED' } }
+      }
       ready = !this.disposed
       if (ready) { try { scriptReady = await this._measureNativeSkillScript() } catch { this.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_MEASUREMENT_FAILED' } } }
     } catch (error) { ready = false; this.nativeExecutionMeasurementFailure = { stage, code: error.code || 'NATIVE_EXECUTION_MEASUREMENT_FAILED' } }
@@ -696,7 +706,7 @@ export class TypedInspectionProfileRuntime {
       try { if (directory) rmSync(directory, { recursive: true, force: true }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
     }
     return ready && !this.disposed ? Object.freeze({ schemaVersion: 1, executionProtocolVersion: 5,
-      toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: Object.freeze(['text/plain', 'text/markdown', 'text/html', 'application/json', ...(scriptReady ? ['image/png'] : [])]),
+      toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: Object.freeze(['text/plain', 'text/markdown', 'text/html', 'application/json', ...(scriptReady ? ['image/png'] : []), ...(documentReady ? DOCUMENT_MIMES : [])]),
       ...(scriptReady ? { supportedToolPolicyRefs: Object.freeze(['NATIVE_SKILL_SCRIPT_V1']) } : {}) }) : null
   }
   async _measureNativeSkillScript() {

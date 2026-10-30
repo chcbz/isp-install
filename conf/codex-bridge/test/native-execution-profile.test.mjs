@@ -502,3 +502,37 @@ test('real SCRIPT declaration uses Node package, read-only config and additional
     console.log('real SCRIPT declaration passed; model turn, real credential and paid API: NOT_RUN')
   } finally { await runtime.dispose(); f.cleanup() }
 })
+
+test('Office declaration requires actual document reopens; document failure retains existing text/image capability', async () => {
+  const { DOCUMENT_PROBE, DOCUMENT_MIMES } = await import('../native-document-toolchain.mjs')
+  const f = fixture()
+  try {
+    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    Object.assign(runtime, { materializerRoot: mkdir(resolve(f.root, 'document-measurements')), profile: { typedInspectionProviderNetwork: 'restricted-proxy' },
+      nativeToolchain: { ...f.options.toolchain, files: [...f.options.toolchain.files, tool('/usr/bin/bash', DOCUMENT_PROBE)] }, activeAdapters: new Map() })
+    let success = true
+    runtime._measureNativeSkillScript = async () => true
+    runtime.openNativeExecutionAdapter = async (inputs, id, binding, options) => {
+      runtime.activeAdapters.set(id, { egress: { measureAllowedTls: async () => ({ measured: true, tlsVerified: true }) } })
+      return { nativeExecutionIsolation: { network: { measured: true, nftDefaultDropReadback: true, directInternetBlocked: true } }, readback: { providerCaTrust: {} },
+        request: async (_method, args) => {
+          if (args.command[0] === '/usr/bin/python3') {
+            assert.deepEqual(args.command, ['/usr/bin/python3', '-I', '-B', DOCUMENT_PROBE])
+            assert.equal(args.sandboxPolicy.networkAccess, false)
+            return { exitCode: success ? 0 : 1, stdout: success ? 'native-documents-ready\n' : '' }
+          }
+          writeFileSync(resolve(options.draftsDirectory, 'probe.txt'), readFileSync(resolve(inputs, 'probe.txt')))
+          return { exitCode: 0, stdout: 'native-declaration-probe' }
+        } }
+    }
+    runtime.releaseAdapter = async id => { runtime.activeAdapters.delete(id) }
+    const ready = await runtime.measureNativeExecution()
+    assert.deepEqual(ready.outputMimeTypes.slice(-2), DOCUMENT_MIMES)
+    assert.ok(ready.outputMimeTypes.includes('image/png'))
+    success = false
+    const failed = await runtime.measureNativeExecution()
+    assert.deepEqual(failed.outputMimeTypes, ['text/plain', 'text/markdown', 'text/html', 'application/json', 'image/png'])
+    assert.equal(runtime.nativeDocumentMeasurementFailure.code, 'NATIVE_DOCUMENT_PROBE_FAILED')
+    assert.equal(runtime.activeAdapters.size, 0)
+  } finally { f.cleanup() }
+})
