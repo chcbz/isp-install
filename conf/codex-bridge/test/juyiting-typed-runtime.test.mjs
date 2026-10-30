@@ -228,6 +228,8 @@ test('v5 runs through native CHAT schema, streams only text and emits action sid
   assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed')
   assert.equal(calls[0].config.network, false)
   assert.match(calls[0].developerInstructions, /ACTION_REQUEST is planning only/)
+  assert.match(calls[0].developerInstructions, /self-contained handoff to a separate execution turn/)
+  assert.match(calls[0].developerInstructions, /exact requested values, operations, acceptance criteria/)
   assert.equal(frames.at(-1).payload.outcomeContractVersion, 5)
   assert.deepEqual(frames.at(-1).payload.interactionOutcome, v3.outcomes[2])
   assert.equal(frames.filter(f => f.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA).map(f => f.payload.content).join(''), v3.outcomes[2].text)

@@ -40,7 +40,7 @@ const stubRuntime = f => {
     measureBinary: async () => ({ snapshotIdentity: {} }),
     egressFactory: () => ({ proxyUrl: 'http://10.0.2.2:1', start: async () => {}, bindOwner: async () => {}, attach: async () => ({ measured: true }), dispose: async () => { disposals++ } }),
     _spawnAdapter: async args => { spawns++; const adapter = new EventEmitter(); adapter.child = {}; adapter.closed = false; adapter.readback = { tools: { data: [] } }; adapter.request = async () => discovery(args.nativeView.layout); adapter.shutdown = async () => { shutdowns++; adapter.closed = true }; adapter.spawnArgs = args; adapter.startOrResumeThread = async () => 'thread-started'; adapter.runTurn = async () => 'turn-started'; return adapter },
-    _initializeAndSeal: async adapter => { rmSync(adapter.spawnArgs.engineState.authPath, { force: true }); return { config: { config: { default_permissions: 'native-execution', approval_policy: 'never', permissions: { 'native-execution': { filesystem: nativeFilesystemPermissions, network: { enabled: false } } } } } } }
+    _initializeAndSeal: async adapter => { rmSync(adapter.spawnArgs.engineState.authPath, { force: true }); return { config: { config: { default_permissions: 'native-execution', approval_policy: 'never', permissions: { 'native-execution': { filesystem: nativeFilesystemPermissions, network: { enabled: true } } } } } } }
   })
   return { runtime, counts: () => ({ spawns, disposals, shutdowns }) }
 }
@@ -54,7 +54,7 @@ test('native config and mounts keep inspection read-only; only scratch/drafts an
     assert.match(readOnly, /sandbox_mode = "read-only"/)
     assert.doesNotMatch(readOnly, /workspace-write/)
     assert.match(buildNativeExecutionCodexConfig(readOnly), /default_permissions = "native-execution"/)
-    assert.match(buildNativeExecutionCodexConfig(readOnly), /enabled = false/)
+    assert.match(buildNativeExecutionCodexConfig(readOnly), /enabled = true/)
     const args = nativeExecutionMountArgs({ layout, engineState: { codexHome: resolve(f.options.stateRoot, 'engine-home') }, neutralDirectory: '/private/neutral', skillsDirectory: '/private/skills' })
     assert.deepEqual(args.slice(0, 6), ['--uid', '65534', '--gid', '65534', '--cap-drop', 'ALL'])
     // Temporary files remain writable even without the optional Python library.
@@ -579,15 +579,15 @@ test('browser readiness requires a successful process probe and retains text/Off
   } finally { f.cleanup() }
 })
 
-test('named native permissions retain filesystem boundaries and authorization-derived network', () => {
-  for (const networkAccess of [false, true]) {
-    const config = { approval_policy: 'never', default_permissions: 'native-execution', permissions: { 'native-execution': { filesystem: { ...nativeFilesystemPermissions }, network: { enabled: networkAccess } } } }
-    verifyNativeExecutionConfig({ config: { config } }, { networkAccess })
-    assert.throws(() => verifyNativeExecutionConfig({ config: { config } }, { networkAccess: !networkAccess }), /CONFIG_READBACK_MISMATCH/)
-    config.permissions['native-execution'].filesystem['/state/codex-home'] = 'write'
-    assert.throws(() => verifyNativeExecutionConfig({ config: { config } }, { networkAccess }), /CONFIG_READBACK_MISMATCH/)
-    delete config.permissions['native-execution'].filesystem['/state/codex-home']
-    config.permissions['native-execution'].filesystem['/'] = 'write'
-    assert.throws(() => verifyNativeExecutionConfig({ config: { config } }, { networkAccess }), /CONFIG_READBACK_MISMATCH/)
-  }
+test('native inner permissions allow socket IPC while retaining filesystem boundaries', () => {
+  const config = { approval_policy: 'never', default_permissions: 'native-execution', permissions: { 'native-execution': { filesystem: { ...nativeFilesystemPermissions }, network: { enabled: true } } } }
+  verifyNativeExecutionConfig({ config: { config } })
+  config.permissions['native-execution'].network.enabled = false
+  assert.throws(() => verifyNativeExecutionConfig({ config: { config } }), /CONFIG_READBACK_MISMATCH/)
+  config.permissions['native-execution'].network.enabled = true
+  config.permissions['native-execution'].filesystem['/state/codex-home'] = 'write'
+  assert.throws(() => verifyNativeExecutionConfig({ config: { config } }), /CONFIG_READBACK_MISMATCH/)
+  delete config.permissions['native-execution'].filesystem['/state/codex-home']
+  config.permissions['native-execution'].filesystem['/'] = 'write'
+  assert.throws(() => verifyNativeExecutionConfig({ config: { config } }), /CONFIG_READBACK_MISMATCH/)
 })

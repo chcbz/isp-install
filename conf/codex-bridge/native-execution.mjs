@@ -65,9 +65,13 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
   } catch (cause) {
     // Engine uncertainty belongs to this execution, not to the whole inbox.
     // Keep the original checkpoint; normalization never starts another turn.
+    // A confirmed completed turn without its required proposal failed the
+    // execution contract. Use the existing failure receipt, not endless resume;
+    // preserve the original cause (this is not an upstream engine crash).
     const code = signal?.aborted ? 'SKILL_LEASE_UNCERTAIN'
       : cause?.code === 'TURN_ACCEPTANCE_UNKNOWN' ? 'SKILL_RESULT_UNKNOWN'
-        : ['TURN_FAILED', 'TURN_INTERRUPTED'].includes(cause?.code) ? `NATIVE_EXECUTION_${cause.code}`
+        : cause?.code === 'NATIVE_PROPOSAL_REQUIRED' ? 'NATIVE_EXECUTION_TURN_FAILED'
+          : ['TURN_FAILED', 'TURN_INTERRUPTED'].includes(cause?.code) ? `NATIVE_EXECUTION_${cause.code}`
           : cause?.code === 'APP_SERVER_RPC_TIMEOUT' ? 'NATIVE_EXECUTION_ENGINE_UNAVAILABLE' : null
     if (code) throw Object.assign(new Error(code), { code, cause })
     throw cause

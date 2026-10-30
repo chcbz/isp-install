@@ -140,6 +140,39 @@ console.log('native-browser-network-ready');`
   console.log('real app-server + browser + exact-origin CONNECT + TLS + blocked subresources/redirect: PASS; no model or production business execution')
   // Exercise the ordinary shell process tree, not a browser-specific cancellation
   // handler. Only processes carrying this fixture's unique argv are inspected.
+  // Production incident task560: no installed-skill origin grant. The browser
+  // must still use local AF_UNIX IPC; neither proxy nor direct egress is granted.
+  const offlineRoot = mkdir(resolve(root, 'offline'))
+  const offlineInputs = mkdir(resolve(offlineRoot, 'inputs'))
+  writeFileSync(resolve(offlineInputs, 'probe.txt'), 'empty-origin-browser-input', { mode: 0o600 })
+  const offlineBinding = { ...binding, requestKey: 'browser-offline-probe', requestId: 'offline-req' }
+  const offline = await runtime.openNativeExecutionAdapter(offlineInputs, offlineBinding.requestKey, offlineBinding, {
+    inputDirectory: offlineInputs, scratchDirectory: mkdir(resolve(offlineRoot, 'scratch')), draftsDirectory: mkdir(resolve(offlineRoot, 'drafts')),
+    skills: [], skillConfiguration: [], nativeExecution: { executionId: 'exec-browser-offline', tools: [], checkActive() {}, callTool() { assert.fail('no model tool expected') } }
+  })
+  assert.equal(offline.nativeExecutionIsolation.network.directInternetBlocked, true)
+  assert.equal(offline.nativeExecutionIsolation.network.nftDefaultDropReadback, true)
+  const callsBefore = JSON.stringify(calls)
+  const offlineCode = `import assert from 'node:assert/strict';
+import {request} from 'node:https';
+import '/usr/lib/cyf-browser/browser-probe.mjs';
+import {withBrowser} from '/usr/lib/cyf-browser/browser-session.mjs';
+await withBrowser(async ({page}) => {
+  await assert.rejects(page.goto(${JSON.stringify(origin)}, {timeout:5000}));
+});
+await new Promise((resolve,reject) => {
+ const req=request(${JSON.stringify(origin)}, {rejectUnauthorized:false, timeout:3000}, () => reject(new Error('direct egress escaped')));
+ req.on('error',resolve); req.on('timeout',()=>req.destroy(new Error('expected blocked direct egress'))); req.end();
+});
+console.log('empty-origin-browser-ready; proxy and direct egress denied');`
+  const offlineProbe = await offline.request('command/exec', { command: ['/usr/bin/node', '--input-type=module', '-e', offlineCode],
+    cwd: '/execution', permissionProfile: 'native-execution', timeoutMs: 120000 }, 150000)
+  assert.equal(offlineProbe.exitCode, 0, offlineProbe.stderr)
+  assert.match(offlineProbe.stdout, /empty-origin-browser-ready/)
+  assert.equal(JSON.stringify(calls), callsBefore, 'no additional origin or direct server request')
+  await runtime.releaseAdapter(offlineBinding.requestKey, { requestBinding: offlineBinding })
+  console.log('real app-server empty-origin browser local form/download/font probe: PASS; no external network grant')
+
   const marker = `cyf-browser-cancel-${process.pid}-${Date.now()}`
   writeFileSync(resolve(scratch, 'cancel-probe.mjs'), `
 import { writeFileSync } from 'node:fs';

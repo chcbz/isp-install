@@ -112,13 +112,13 @@ export const buildTypedInspectionCodexConfig = profile => {
   const systemProxy = profile?.typedInspectionProviderNetwork === 'restricted-proxy' ? '[features]\nrespect_system_proxy = true\n' : ''
   return `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile)}${systemProxy}`
 }
-const stageCodexHome = (profile, stateRoot, { nativeExecution = false, nativeNetworkAccess = false } = {}) => {
+const stageCodexHome = (profile, stateRoot, { nativeExecution = false } = {}) => {
   const codexHome = ensurePrivateDirectory(resolve(stateRoot, 'codex-home')); ensurePrivateDirectory(resolve(stateRoot, 'home'))
   const sourceAuth = resolve(profile.codexHome || '', 'auth.json')
   if (!profile.codexHome || !existsSync(sourceAuth)) fail('TYPED_INSPECTION_AUTH_SOURCE_REQUIRED')
   const authDigest = copyCredentialFile(sourceAuth, resolve(codexHome, 'auth.json'))
   const readOnlyConfig = buildTypedInspectionCodexConfig(profile)
-  const config = nativeExecution ? buildNativeExecutionCodexConfig(readOnlyConfig, { networkAccess: nativeNetworkAccess }) : readOnlyConfig
+  const config = nativeExecution ? buildNativeExecutionCodexConfig(readOnlyConfig) : readOnlyConfig
   const configPath = resolve(codexHome, 'config.toml'); const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(temporary, config, { mode: 0o600, flag: 'wx' }); chmodSync(temporary, 0o600)
   const configFd = openSync(temporary, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(configFd) } finally { closeSync(configFd) }
@@ -341,7 +341,7 @@ export class TypedInspectionProfileRuntime {
     const directory = ensurePrivateDirectory(mkdtempSync(resolve(root, `.${label}-`)))
     return { directory, markerPath: null, created: true, bindingDigest: null, ...stageCodexHome(this.profile, directory) }
   }
-  _prepareRequestState(rawBinding, { requireExistingState = false, nativeExecution = false, nativeBinding = null, nativeNetworkAccess = false } = {}) {
+  _prepareRequestState(rawBinding, { requireExistingState = false, nativeExecution = false, nativeBinding = null } = {}) {
     const binding = engineStateBinding(rawBinding); const rootPath = resolve(this.stateRoot, 'requests')
     const bindingDigest = canonicalSha256(binding); const directory = resolve(rootPath, bindingDigest.slice('sha256:'.length))
     if (requireExistingState && (!existsSync(directory) || !existsSync(resolve(directory, 'binding.json'))))
@@ -355,7 +355,7 @@ export class TypedInspectionProfileRuntime {
       if (!created && !existsSync(resolve(directory, 'native-binding.json'))) fail('NATIVE_EXECUTION_RECOVERY_MAPPING_MISSING')
       stateMarker(directory, nativeBinding, 'native-binding.json')
     }
-    return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory, { nativeExecution, nativeNetworkAccess }) }
+    return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory, { nativeExecution }) }
   }
   async _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '', nativeView = null, nativeExecution = null }) {
     if (Boolean(nativeView) !== Boolean(nativeExecution)) fail('NATIVE_EXECUTION_BINDING_INVALID')
@@ -502,7 +502,7 @@ export class TypedInspectionProfileRuntime {
       checkActive()
       if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
       const schema = await this.measureBinary(this.profile); checkActive()
-      engineState = this._prepareRequestState(binding, { requireExistingState, nativeExecution: true, nativeBinding: layout.binding, nativeNetworkAccess: layout.binding.networkAccess })
+      engineState = this._prepareRequestState(binding, { requireExistingState, nativeExecution: true, nativeBinding: layout.binding })
       slot.engineState = engineState
       const skillConfigurationDirectory = ensurePrivateDirectory(resolve(engineState.directory, 'skill-config'))
       for (const item of layout.skillConfiguration) stateMarker(skillConfigurationDirectory, item.configuration, `${item.skillKey}.json`)
@@ -529,7 +529,7 @@ export class TypedInspectionProfileRuntime {
         nativeView: { layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory }, nativeExecution: { ...nativeExecution, checkActive } })
       checkActive(); await egress.bindOwner(adapter.child, this.bwrap, schema.snapshotIdentity)
       const network = await egress.attach(); checkActive()
-      const readback = await this._initializeAndSeal(adapter); checkActive(); verifyNativeExecutionConfig(readback, { networkAccess: layout.binding.networkAccess })
+      const readback = await this._initializeAndSeal(adapter); checkActive(); verifyNativeExecutionConfig(readback)
       if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
       adapter.verifyNativeExecutionSkills = async () => {
         checkActive()

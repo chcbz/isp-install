@@ -17,6 +17,7 @@ function fixture(t) {
       runs++; events.push('turn'); assert.equal(options.policy.cwd, '/execution')
       if (mode === 'acceptance-unknown') throw Object.assign(new Error('reply lost'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
       options.onAccepted({ threadId: 'thread1', turnId: 'turn1' })
+      if (mode === 'no-proposal') return { threadId: 'thread1', turnId: 'turn1', finishReason: 'completed', content: 'browser launch failed' }
       // Simulate bytes written by the engine in its mounted draft directory.
       writeFileSync(resolve(store.directory, 'drafts/result.txt'), 'actual draft')
       const ctx = { executionId: command.executionId, threadId: 'thread1', turnId: 'turn1' }
@@ -140,4 +141,18 @@ test('browser availability does not add a bridge tool or a browser workflow', as
   }
   const result = await runNativeExecution(f.request)
   assert.equal(result.result.artifacts.length, 1)
+})
+
+// task560: model honestly reports browser failure instead of fabricating files.
+test('completed turn missing required proposal reports execution failure and reconciliation never replays', async t => {
+  const f = fixture(t); f.setMode('no-proposal')
+  await assert.rejects(runNativeExecution(f.request), error => error.code === 'NATIVE_EXECUTION_TURN_FAILED' && error.cause.code === 'NATIVE_PROPOSAL_REQUIRED')
+  assert.equal(f.store.read('native-final-message').content, 'browser launch failed')
+  assert.equal(f.store.loadResult(), null)
+  f.request.profileRuntime.openNativeExecutionAdapter = async () => ({
+    reconcileTurn: async () => ({ status: 'TERMINAL', terminalStatus: 'completed', turnId: 'turn1' })
+  })
+  await assert.rejects(runNativeExecution(f.request), error => error.code === 'NATIVE_EXECUTION_TURN_FAILED' && error.cause.code === 'NATIVE_PROPOSAL_REQUIRED')
+  assert.equal(f.runs(), 1)
+  assert.equal(f.store.loadResult(), null)
 })

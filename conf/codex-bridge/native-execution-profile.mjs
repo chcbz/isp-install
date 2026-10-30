@@ -194,9 +194,13 @@ export const nativeFilesystemPermissions = Object.freeze({
   // Codex 0.164's implicit placeholder mounts here; real Home stays read-only.
   '/proc/.git': 'write', '/proc/.agents': 'write', '/proc/.codex': 'write', '/proc/.aws': 'write'
 })
-export const buildNativeExecutionCodexConfig = (readOnlyConfig, { networkAccess = false } = {}) =>
+// Native processes already run behind the measured namespace/nft + exact-origin
+// proxy boundary. Keep local socket syscalls available: Codex's network=false
+// seccomp also rejects shutdown(AF_UNIX), preventing Chromium's own sandbox.
+// This setting grants no destinations; layout.networkOrigins remains authoritative.
+export const buildNativeExecutionCodexConfig = readOnlyConfig =>
   readOnlyConfig.replace('sandbox_mode = "read-only"', `default_permissions = "${NATIVE_PERMISSION_PROFILE}"`)
-  + `\n[permissions.${NATIVE_PERMISSION_PROFILE}]\nfilesystem = { ${Object.entries(nativeFilesystemPermissions).map(([path, mode]) => `${JSON.stringify(path)} = ${JSON.stringify(mode)}`).join(', ')} }\n[permissions.${NATIVE_PERMISSION_PROFILE}.network]\nenabled = ${networkAccess === true}\n`
+  + `\n[permissions.${NATIVE_PERMISSION_PROFILE}]\nfilesystem = { ${Object.entries(nativeFilesystemPermissions).map(([path, mode]) => `${JSON.stringify(path)} = ${JSON.stringify(mode)}`).join(', ')} }\n[permissions.${NATIVE_PERMISSION_PROFILE}.network]\nenabled = true\n`
 
 // Shared immutable dependency mounts; no execution state or credentials.
 export const nativeToolchainMountArgs = toolchain => {
@@ -237,12 +241,12 @@ export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory
   return args
 }
 
-export const verifyNativeExecutionConfig = (readback, { networkAccess = false } = {}) => {
+export const verifyNativeExecutionConfig = readback => {
   const config = readback?.config?.config
   const permissions = config?.permissions?.[NATIVE_PERMISSION_PROFILE]
   const filesystem = permissions?.filesystem
   if (config?.default_permissions !== NATIVE_PERMISSION_PROFILE || config?.approval_policy !== 'never'
-      || permissions?.network?.enabled !== (networkAccess === true)
+      || permissions?.network?.enabled !== true
       || !filesystem || Object.entries(nativeFilesystemPermissions).some(([path, mode]) => filesystem[path] !== mode)
       || Object.keys(filesystem).some(path => path !== 'glob_scan_max_depth' && !Object.hasOwn(nativeFilesystemPermissions, path))) fail('NATIVE_EXECUTION_CONFIG_READBACK_MISMATCH')
 }
