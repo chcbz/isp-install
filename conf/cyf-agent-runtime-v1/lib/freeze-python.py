@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -27,6 +28,19 @@ def copy_standard_library(source, target):
             shutil.copytree(str(entry), str(destination), ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
         else:
             shutil.copy2(str(entry), str(destination))
+
+
+def protect_staged_permissions(prefix):
+    """Remove upstream group/world writes before attesting the private stage.
+
+    Standalone Python ships 0664/0775 files. Preserve read/execute bits and
+    internal links; never chmod through a link or modify the build-host base.
+    """
+    for directory, directories, files in os.walk(str(prefix), followlinks=False):
+        for path in [Path(directory)] + [Path(directory) / name for name in files]:
+            info = path.lstat()
+            if not stat.S_ISLNK(info.st_mode):
+                path.chmod(stat.S_IMODE(info.st_mode) & ~0o6022)
 
 
 def freeze(prefix):
@@ -50,6 +64,7 @@ def freeze(prefix):
     # With its stdlib adjacent to bin/, CPython discovers a regular prefix.
     # Keeping pyvenv.cfg would continue importing the build-host base instead.
     config.unlink()
+    protect_staged_permissions(prefix)
     result = subprocess.check_output([str(prefix / 'bin/python'), '-I', '-B', '-c',
         'import json,sys,sysconfig; print(json.dumps([sys.prefix,sys.base_prefix,sysconfig.get_path("stdlib")]))'],
         env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, universal_newlines=True)

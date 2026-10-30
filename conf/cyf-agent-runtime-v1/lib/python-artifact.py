@@ -97,7 +97,8 @@ def extract(archive, manifest, target):
                 raise ValueError('PYTHON_ARTIFACT_UNSAFE_TYPE')
         target.mkdir(mode=0o700)
         # Parents first, regular contents next, symlinks last: never write via a link.
-        for member in sorted(members, key=lambda item: (0 if item.isdir() else 2 if item.issym() else 1, len(PurePosixPath(item.name).parts), item.name)):
+        # Keep regular members in archive order to avoid repeatedly rewinding gzip.
+        for member in sorted(members, key=lambda item: (0 if item.isdir() else 2 if item.issym() else 1, len(PurePosixPath(item.name).parts) if item.isdir() else 0)):
             path = target / member.name
             if member.isdir():
                 path.mkdir(mode=0o700)

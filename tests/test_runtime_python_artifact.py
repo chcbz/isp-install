@@ -60,6 +60,11 @@ class PythonArtifactTest(unittest.TestCase):
             module.extract(self.archive, self.manifest, self.target)
         self.assertFalse(self.target.exists())
 
+    def test_writable_and_privileged_file_modes_remain_rejected(self):
+        for mode in (0o664, 0o775, 0o4755, 0o2755):
+            self.malicious([{'path': 'unsafe', 'type': 'file', 'mode': mode,
+                            'sha256': hashlib.sha256(b'x').hexdigest()}])
+
     def test_traversal_rejected_before_writing(self):
         self.malicious([{'path': '../escape', 'type': 'file', 'mode': 0o644, 'sha256': hashlib.sha256(b'x').hexdigest()}])
 

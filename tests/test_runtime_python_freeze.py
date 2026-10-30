@@ -35,6 +35,36 @@ class FreezeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'DESTINATION_EXISTS'):
             module.copy_standard_library(source, target)
 
+    def test_upstream_writable_modes_are_normalized_without_following_links(self):
+        stage = self.root / 'stage'
+        (stage / 'lib').mkdir(parents=True)
+        executable = stage / 'python'
+        executable.write_bytes(b'fixture')
+        executable.chmod(0o775)
+        library = stage / 'lib/module.py'
+        library.write_bytes(b'fixture')
+        library.chmod(0o664)
+        (stage / 'lib').chmod(0o775)
+        outside = self.root / 'outside'
+        outside.write_bytes(b'unchanged')
+        outside.chmod(0o664)
+        (stage / 'external').symlink_to(outside)
+        (stage / 'lib64').symlink_to('lib')
+        module.protect_staged_permissions(stage)
+        self.assertEqual(executable.stat().st_mode & 0o7777, 0o755)
+        self.assertEqual(library.stat().st_mode & 0o7777, 0o644)
+        self.assertEqual((stage / 'lib').stat().st_mode & 0o7777, 0o755)
+        self.assertEqual(outside.stat().st_mode & 0o7777, 0o664)
+        self.assertTrue((stage / 'lib64').is_symlink())
+        (stage / 'external').unlink()
+        artifact_spec = importlib.util.spec_from_file_location('artifact', SCRIPT.with_name('python-artifact.py'))
+        artifact = importlib.util.module_from_spec(artifact_spec)
+        artifact_spec.loader.exec_module(artifact)
+        archive, manifest = self.root / 'python.tgz', self.root / 'python.json'
+        artifact.pack(stage, archive, manifest)
+        artifact.extract(archive, manifest, self.root / 'extracted')
+        self.assertEqual(artifact.inventory(stage), artifact.inventory(self.root / 'extracted'))
+
     def test_refuses_modifying_non_active_or_base_interpreter(self):
         with self.assertRaisesRegex(ValueError, 'REQUIRES_ACTIVE_STAGED_VENV'):
             module.freeze(str(self.root))
