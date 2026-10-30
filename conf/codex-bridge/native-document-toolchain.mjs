@@ -3,10 +3,10 @@
 import { spawnSync } from 'node:child_process'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { createHash } from 'node:crypto'
-import { readFileSync, readdirSync, realpathSync, lstatSync } from 'node:fs'
+import { readFileSync, readdirSync, realpathSync, lstatSync, existsSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { measureMinimalNativeExecutionToolchain, validateNativeExecutionToolchain } from './native-execution-profile.mjs'
+import { measureMinimalNativeExecutionToolchain, validateNativeExecutionToolchain, validateNativeExecutionToolchainAsync } from './native-execution-profile.mjs'
 
 export const DOCUMENT_MIMES = Object.freeze(['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'])
 export const DOCUMENT_PROBE = '/usr/lib/cyf-documents/document_probe.py'
@@ -22,15 +22,30 @@ export function measureNativeDocumentToolchain({ base, pythonBin = resolve(root,
   // The installed venv can still reference an external base interpreter. Check
   // that protected base location before Python imports any of its stdlib.
   const config = resolve(dirname(pythonBin), '../pyvenv.cfg')
-  validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(config, '/usr/lib/cyf-documents/pyvenv.cfg')] })
-  const home = /^home\s*=\s*(.+)$/m.exec(readFileSync(config, 'utf8'))?.[1]?.trim()
-  if (!home || resolve(home) !== home || realpathSync(home) !== home) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
-  for (let cursor = home; ; cursor = dirname(cursor)) {
-    const stat = lstatSync(cursor)
-    if (!stat.isDirectory() || ![0, process.geteuid()].includes(stat.uid) || stat.mode & 0o022) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
-    if (cursor === '/' || (stat.uid === process.geteuid() && (stat.mode & 0o077) === 0)) break
+  validateNativeExecutionToolchain({ shell: base.shell, files })
+  if (existsSync(config)) {
+    validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(config, '/usr/lib/cyf-documents/pyvenv.cfg')] })
+    const home = /^home\s*=\s*(.+)$/m.exec(readFileSync(config, 'utf8'))?.[1]?.trim()
+    if (!home || resolve(home) !== home || realpathSync(home) !== home) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
+    for (let cursor = home; ; cursor = dirname(cursor)) {
+      const stat = lstatSync(cursor)
+      if (!stat.isDirectory() || ![0, process.geteuid()].includes(stat.uid) || stat.mode & 0o022) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
+      if (cursor === '/' || (stat.uid === process.geteuid() && (stat.mode & 0o077) === 0)) break
+    }
+    validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(resolve(home, 'python3'), '/usr/lib/cyf-documents/base-python')] })
+  } else {
+    // Frozen artifacts have no venv redirect. Verify their local stdlib paths
+    // before starting Python, rather than trusting an external build prefix.
+    const prefix = resolve(dirname(pythonBin), '..')
+    const libraries = ['lib', 'lib64'].flatMap(name => {
+      const directory = resolve(prefix, name)
+      return existsSync(directory) ? readdirSync(directory).filter(name => /^python3\.\d+$/.test(name)).map(name => resolve(directory, name)) : []
+    })
+    if (!libraries.length) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
+    for (const library of libraries) {
+      validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(resolve(library, 'os.py'), '/usr/lib/cyf-documents/os.py'), pin(resolve(library, 'encodings/__init__.py'), '/usr/lib/cyf-documents/encodings.py')] })
+    }
   }
-  validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(resolve(home, 'python3'), '/usr/lib/cyf-documents/base-python')] })
   const measured = spawnSync(pythonBin, ['-I', '-B', '-c', `import json, os, sys, sysconfig, pkg_resources
 wanted = {'python-docx', 'openpyxl'}
 requirements = []
@@ -43,10 +58,11 @@ packages = set()
 for dist in pkg_resources.require(requirements):
  for name in dist.get_metadata('top_level.txt').splitlines():
   if name.strip(): packages.add(name.strip())
-print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig.get_path('stdlib'), 'platlib': sysconfig.get_path('platlib'), 'packages': sorted(packages), 'platlibdir': os.path.basename(os.path.dirname(sysconfig.get_path('stdlib')))}))`, requirementsPath], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' } })
+print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig.get_path('stdlib'), 'platlib': sysconfig.get_path('platlib'), 'packages': sorted(packages), 'prefix': sys.prefix, 'basePrefix': sys.base_prefix, 'platlibdir': os.path.basename(os.path.dirname(sysconfig.get_path('stdlib')))}))`, requirementsPath], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' } })
   if (measured.status !== 0) fail('NATIVE_DOCUMENT_TOOLCHAIN_UNAVAILABLE')
   const info = JSON.parse(measured.stdout)
   if (!/^3\.\d+$/.test(info.version) || !['lib', 'lib64'].includes(info.platlibdir)) fail('NATIVE_DOCUMENT_TOOLCHAIN_INVALID')
+  if (!existsSync(config) && (info.prefix !== resolve(dirname(pythonBin), '..') || info.basePrefix !== info.prefix || !info.stdlib.startsWith(info.prefix + '/'))) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
   // Use the interpreter's actual library directory convention. -I can then find
   // its standard library without trusting PYTHONPATH or a user site directory.
   const library = `/usr/${info.platlibdir}/python${info.version}`
@@ -106,15 +122,18 @@ export async function initializeNativeToolchain(runtime) {
     let result
     worker.once('message', value => { result = value })
     worker.once('error', error => { result = { code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' } })
-    worker.once('exit', () => {
+    worker.once('exit', async () => {
       if (!result?.toolchain) { reject(Object.assign(new Error(result?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED'), { code: result?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' })); return }
       if (result.documentFailure) {
         runtime.nativeDocumentMeasurementFailure = { stage: 'toolchain', code: result.documentFailure }
         console.warn(`native documents unavailable | code=${runtime.nativeDocumentMeasurementFailure.code}`)
       }
       // Missing optional libraries must not remove existing text/image tools.
-      if (!runtime.disposed) runtime.nativeToolchain = result.toolchain
-      resolve(runtime.nativeToolchain || null)
+      try {
+        const verified = await validateNativeExecutionToolchainAsync(result.toolchain)
+        if (!runtime.disposed) runtime.nativeToolchain = verified
+        resolve(runtime.nativeToolchain || null)
+      } catch (error) { reject(error) }
     })
   })
   runtime.nativeToolchainPending = pending

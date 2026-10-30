@@ -144,3 +144,12 @@ test('fixed app target refuses an existing artifact before executing toolchain o
   assert.equal(readFileSync(resolve(app, 'keep'), 'utf8'), 'unchanged');
   assert.equal(existsSync(f.calls), false);
 });
+
+test('new artifact freezes its Python base after launcher relocation and before validation/publication', () => {
+  const installer = text('conf/cyf-agent-runtime-v1/install.sh')
+  const freeze = '"$STAGE/codex-bridge/.toolchain/bin/python" -I -B "$STAGE/runtime/lib/freeze-python.py" "$STAGE/codex-bridge/.toolchain"'
+  assert.ok(installer.includes('lib/freeze-python.py lib/hosting-config.mjs'))
+  assert.ok(installer.indexOf(freeze) > installer.lastIndexOf('\nPY_RUNTIME_RELOCATE\n'))
+  assert.ok(installer.indexOf(freeze) < installer.indexOf('"$STAGE/runtime/validate.sh" --root "$STAGE"'))
+  assert.ok(installer.indexOf(freeze) < installer.indexOf('mv -T -n "$STAGE" "$TARGET"'))
+})

@@ -18,9 +18,11 @@ test('missing document interpreter is not a supported Office toolchain', () => {
 // supply its fixed toolchain; a skipped probe is not a production acceptance.
 test('pinned Python actually reads/edits/reopens DOCX/XLSX inside native mounts; no host or input writes', { skip: !process.env.CYF_NATIVE_DOCUMENT_PROBE_PYTHON }, async t => {
   const root = mkdtempSync(resolve(tmpdir(), 'native-document-probe-')); chmodSync(root, 0o700); t.after(() => rmSync(root, { recursive: true, force: true }))
-  const probePath = resolve(root, 'document_probe.py'); copyFileSync(fileURLToPath(new URL('../toolchain/document_probe.py', import.meta.url)), probePath); chmodSync(probePath, 0o600)
+  const probePath = resolve(mkdir(resolve(root, 'probe-tools')), 'document_probe.py'); copyFileSync(fileURLToPath(new URL('../toolchain/document_probe.py', import.meta.url)), probePath); chmodSync(probePath, 0o600)
   const base = measureMinimalNativeExecutionToolchain()
+  const measurementStart = performance.now()
   const toolchain = measureNativeDocumentToolchain({ base, pythonBin: process.env.CYF_NATIVE_DOCUMENT_PROBE_PYTHON, probePath })
+  t.diagnostic(`document discovery/hash/ldd: ${(performance.now() - measurementStart).toFixed(1)} ms; files: ${toolchain.files.length}`)
   assert.ok(toolchain.files.some(file => file.sandboxPath === '/usr/bin/python3'))
   assert.ok(toolchain.files.some(file => file.sandboxPath.endsWith('/openpyxl/__init__.py')))
   assert.ok(toolchain.files.every(file => !file.sandboxPath.startsWith('/home/') && !file.sandboxPath.includes('/pip/')))
@@ -32,7 +34,9 @@ test('pinned Python actually reads/edits/reopens DOCX/XLSX inside native mounts;
   const engineState = { codexHome: mkdir(resolve(options.stateRoot, 'engine-home')) }
   writeFileSync(resolve(engineState.codexHome, 'config.toml'), '')
   const neutralDirectory = mkdir(resolve(root, 'neutral')), skillsDirectory = mkdir(resolve(root, 'skills'))
+  const layoutStart = performance.now()
   const layout = prepareNativeExecutionLayout(options)
+  t.diagnostic(`request layout with exact-metadata reuse: ${(performance.now() - layoutStart).toFixed(1)} ms`)
   const args = ['--unshare-all', '--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--dir', '/inputs', '--ro-bind', options.inputDirectory, '/inputs',
     ...nativeExecutionMountArgs({ layout, engineState, neutralDirectory, skillsDirectory }), '--setenv', 'HOME', '/state/home', '--chdir', '/execution']
   const run = command => spawnSync('/usr/bin/bwrap', [...args, ...command], { encoding: 'utf8', env: { LANG: 'C.UTF-8' } })
@@ -100,4 +104,15 @@ test('replaceable venv base is rejected before importing external Python code', 
   writeFileSync(resolve(venv, 'pyvenv.cfg'), `home = ${home}\n`, { mode: 0o600 })
   chmodSync(home, 0o770)
   assert.throws(() => measureNativeDocumentToolchain({ base: measureMinimalNativeExecutionToolchain(), pythonBin: resolve(bin, 'python') }), { code: 'NATIVE_DOCUMENT_BASE_UNSAFE' })
+})
+
+test('frozen local stdlib must be protected before interpreter execution', t => {
+  const root = mkdtempSync(resolve(tmpdir(), 'native-frozen-unsafe-')); chmodSync(root, 0o700); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const bin = mkdir(resolve(root, 'bin')), lib = mkdir(resolve(root, 'lib'))
+  const stdlib = mkdir(resolve(lib, 'python3.11')), encodings = mkdir(resolve(stdlib, 'encodings'))
+  writeFileSync(resolve(bin, 'python'), '#!/bin/sh\nexit 99\n', { mode: 0o700 })
+  writeFileSync(resolve(stdlib, 'os.py'), '# fixture', { mode: 0o600 })
+  writeFileSync(resolve(encodings, '__init__.py'), '# fixture', { mode: 0o600 })
+  chmodSync(stdlib, 0o770)
+  assert.throws(() => measureNativeDocumentToolchain({ base: measureMinimalNativeExecutionToolchain(), pythonBin: resolve(bin, 'python') }), { code: 'NATIVE_EXECUTION_TOOLCHAIN_UNSAFE' })
 })

@@ -18,8 +18,15 @@ evidence/gates, not a current declaration that all deployed hosts are unaccepted
 `install.sh --target ABSOLUTE_NEW_DIRECTORY` prepares a new artifact containing
 `runtime/`, `codex-bridge/` and supplied `node/bin/node`, npm lock graph
 and release-local Python delivery tools. It neither enables services nor adopts,
-rewrites, enrolls or deletes existing Agent state. Python still needs a compatible
-target ABI/stdlib; mocked installer tests do not prove clean-target installation.
+rewrites, enrolls or deletes existing Agent state. The installer now copies the
+base standard library and libpython into the staged Python prefix, removes its
+external venv redirect, and verifies local prefix resolution. It does not copy
+the base site-packages or host glibc/loader. Python still needs a compatible
+target ABI; mocked installer tests do not prove clean-target installation.
+This source change does not update the live installation or the existing Flow
+recipe that reuses an installed venv; the release must ship and verify the
+new self-contained toolchain before declaring Office support. Standard-library
+files are shared read-only across Agents/requests, never copied into request Homes.
 
 The current clean-target acceptance candidate targets **Python 3.11.13**.
 `Pillow==10.4.0` and `reportlab==3.6.13` have published cp311/Linux x86_64

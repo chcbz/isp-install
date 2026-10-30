@@ -2,6 +2,7 @@
 // Toolchain files are explicitly pinned by the caller; never bind host /usr,
 // /etc, a main HOME, or the trusted execution store into the engine namespace.
 import { spawnSync } from 'node:child_process'
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { createHash } from 'node:crypto'
 import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, resolve, sep } from 'node:path'
@@ -29,8 +30,34 @@ const fileDigest = path => {
     return createHash('sha256').update(bytes).digest('hex')
   } finally { closeSync(fd) }
 }
+// Same integrity rule as the app-server executable: only a process-local,
+// frozen, SHA-verified manifest can reuse hashes. Recheck files AND ancestors
+// synchronously before every use; ctime prevents restored-mtime substitutions.
+const verifiedToolchains = new WeakMap()
+const toolchainState = toolchain => {
+  const paths = new Set()
+  for (const file of toolchain.files) {
+    paths.add(file.sourcePath)
+    for (let cursor = dirname(file.sourcePath); ; cursor = dirname(cursor)) {
+      if (paths.has(cursor)) break
+      paths.add(cursor)
+      const stat = lstatSync(cursor)
+      if (cursor === '/' || (stat.uid === process.geteuid() && (stat.mode & 0o077) === 0)) break
+    }
+  }
+  return [...paths].sort().map(path => {
+    const stat = lstatSync(path, { bigint: true })
+    return [path, ...['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'mode', 'uid', 'gid'].map(key => String(stat[key]))]
+  })
+}
+const sameState = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+const freezeToolchain = value => Object.freeze({ shell: value.shell, files: Object.freeze(value.files.map(file => Object.freeze({ ...file }))) })
+
 export const validateNativeExecutionToolchain = toolchain => {
   if (!object(toolchain) || !Array.isArray(toolchain.files) || !toolchain.files.length || !['/bin/bash', '/bin/sh'].includes(toolchain.shell)) fail('NATIVE_EXECUTION_TOOLCHAIN_REQUIRED')
+  let before
+  try { before = toolchainState(toolchain) } catch { /* Original validation below supplies the precise failure. */ }
+  if (before && verifiedToolchains.has(toolchain) && sameState(verifiedToolchains.get(toolchain), before)) return toolchain
   const targets = new Set()
   const files = toolchain.files.map(file => {
     if (!object(file) || typeof file.sourcePath !== 'string' || resolve(file.sourcePath) !== file.sourcePath || realpathSync(file.sourcePath) !== file.sourcePath || !hash(file.sha256)
@@ -53,7 +80,35 @@ export const validateNativeExecutionToolchain = toolchain => {
   }).sort((a, b) => a.sandboxPath.localeCompare(b.sandboxPath))
   if (![toolchain.shell, '/bin/sh'].every(path => targets.has(path))) fail('NATIVE_EXECUTION_TOOLCHAIN_SHELL_REQUIRED')
   for (const path of [toolchain.shell, '/bin/sh']) if (!(lstatSync(files.find(file => file.sandboxPath === path).sourcePath).mode & 0o111)) fail('NATIVE_EXECUTION_TOOLCHAIN_SHELL_REQUIRED')
-  return Object.freeze({ shell: toolchain.shell, files: Object.freeze(files) })
+  const result = Object.freeze({ shell: toolchain.shell, files: Object.freeze(files) })
+  const after = toolchainState(result)
+  if (!before || !sameState(before, after)) fail('NATIVE_EXECUTION_TOOLCHAIN_DRIFT')
+  verifiedToolchains.set(result, after)
+  return result
+}
+
+// One initial verification off the WS thread. The synchronous final metadata
+// guard has no await gap before granting process-local reuse.
+export const validateNativeExecutionToolchainAsync = toolchain => new Promise((resolveJob, reject) => {
+  const worker = new Worker(new URL(import.meta.url), { execArgv: [], workerData: { kind: 'native-toolchain-verify', toolchain } })
+  let reply
+  worker.once('message', value => { reply = value })
+  worker.once('error', reject)
+  worker.once('exit', () => {
+    try {
+      if (!reply?.toolchain) fail(reply?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED')
+      const result = freezeToolchain(reply.toolchain)
+      if (!sameState(reply.verification, toolchainState(result))) fail('NATIVE_EXECUTION_TOOLCHAIN_DRIFT')
+      verifiedToolchains.set(result, reply.verification)
+      resolveJob(result)
+    } catch (error) { reject(error) }
+  })
+})
+if (!isMainThread && workerData?.kind === 'native-toolchain-verify') {
+  try {
+    const toolchain = validateNativeExecutionToolchain(workerData.toolchain)
+    parentPort.postMessage({ toolchain, verification: verifiedToolchains.get(toolchain) })
+  } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' }) }
 }
 
 // Explicit opt-in host measurement for the minimal Linux shell toolchain.

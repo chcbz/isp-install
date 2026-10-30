@@ -49,7 +49,7 @@ for file in agent-runtime.mjs install.sh validate.sh; do
 done
 for file in README.md package.json runtime.env.example manifest.example.json lib/manifest.mjs lib/runtime-client.mjs lib/api-envelope.mjs lib/message-envelope.mjs \
     lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs \
-    lib/hosting-config.mjs lib/hosting-wire.mjs lib/hosting-control.mjs lib/hosting-server.mjs \
+    lib/freeze-python.py lib/hosting-config.mjs lib/hosting-wire.mjs lib/hosting-control.mjs lib/hosting-server.mjs \
     hosting-control.example.json HOSTING-CONTROL.md systemd/cyf-agent-runtime-v1-hosting.tmpfiles.conf.example systemd/cyf-agent-runtime-v1@.service; do
     install -m 0644 "$SOURCE_DIR/$file" "$STAGE/runtime/$file"
 done
@@ -177,6 +177,8 @@ for directory, _, files in os.walk(os.path.join(venv, 'lib')):
         with open(record, 'w', newline='') as stream: stream.write(output.getvalue())
 print('Runtime venv launchers prepared for publication: %d' % len(changed))
 PY_RUNTIME_RELOCATE
+# Freeze only the newly built stage; never rewrite an installed toolchain.
+"$STAGE/codex-bridge/.toolchain/bin/python" -I -B "$STAGE/runtime/lib/freeze-python.py" "$STAGE/codex-bridge/.toolchain"
 "$STAGE/runtime/validate.sh" --root "$STAGE"
 # Do not let a competing operator install be overwritten between preflight and publication.
 [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ] || { echo 'Runtime target appeared during staging' >&2; exit 1; }
