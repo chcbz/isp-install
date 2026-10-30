@@ -42,6 +42,7 @@ import { nativeExecutionRequestBinding, runNativeExecution } from './native-exec
 import { measureMinimalNativeExecutionToolchain } from './native-execution-profile.mjs'
 import { loadNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
+import { buildActionChatFinal, publishActionChatFinal } from './action-chat-final.mjs'
 import { resolveChatMaterials, prepareChatMaterials, materialsEngineBinding, buildMaterialsChatFinal, publishMaterialsChatFinal } from './materials-chat.mjs'
 import { skillDigest } from './skill-executor.mjs'
 import { SkillRegistry } from './skill-registry.mjs'
@@ -2926,7 +2927,7 @@ export class AgentMessageProcessor {
     for (const item of this.chatInbox.listRecovery()) {
       if (canResumePreEngineInspection(item.record)) {
         if (!this.preEngineRecoveryAttempts.has(item.key)) this._scheduleChat(item, true)
-      } else if (this.recoverChat && ((item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' || item.record.message?.contextSnapshot?.facts?.materialsInput) && (item.record.preparation || item.record.finalPrepared)) this._scheduleChatRecovery(item)
+      } else if (this.recoverChat && ((item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' || item.record.message?.contextSnapshot?.facts?.materialsInput || item.record.finalPrepared?.contract === 'juyiting-action-chat-final-v1') && (item.record.preparation || item.record.finalPrepared)) this._scheduleChatRecovery(item)
     }
   }
   _retryChatRecovery(item) {
@@ -3022,7 +3023,7 @@ export class AgentMessageProcessor {
           const recovered = this.chatInbox.recoveryRequired(claimed, result.recoveryReason || 'CHAT_RECOVERY_REQUIRED')
           if (recovered.state === 'COMPLETED' && recovered.finalConfirmation?.serverPersistence === 'confirmed') this._clearChatRecoveryRetry(claimed.key)
           else {
-            retryInspectionFinal = Boolean(claimed.record.finalPrepared) && ((claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' || claimed.record.message?.contextSnapshot?.facts?.materialsInput)
+            retryInspectionFinal = Boolean(claimed.record.finalPrepared) && ((claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' || claimed.record.message?.contextSnapshot?.facts?.materialsInput || claimed.record.finalPrepared?.contract === 'juyiting-action-chat-final-v1')
             const recoveryAck = { status: 'recovery_required', errorCode: result.recoveryReason || 'CHAT_RECOVERY_REQUIRED', reason: result.recoveryReason || 'CHAT recovery is required' }
             try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
           }
@@ -4757,10 +4758,11 @@ export const runFastChat = async (profile, message, {
         return publishMaterialsChatFinal({ profile, message, materials, finalPrepared, validateOutcome, controls,
           sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
       }
-      sendChatFinal(profile, message, outcome.text, {
-        status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key,
-        resourceReadback: readbackSummary, outcomeContractVersion: outcome.schemaVersion, interactionOutcome: outcome
-      }, sendProtocolFn)
+      if (typeof controls.markFinalPrepared !== 'function' || typeof controls.markFinalPublication !== 'function') throw new AgentProtocolError('CHAT_FINAL_DURABILITY_REQUIRED', 'Durable action CHAT final storage required')
+      const finalPrepared = buildActionChatFinal({ message, outcome, engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key })
+      await controls.markFinalPrepared(finalPrepared)
+      return recoverActionChat(profile, message, { finalPrepared }, { controls,
+        sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
     } else {
       sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
     }
@@ -4774,6 +4776,13 @@ export const runFastChat = async (profile, message, {
     if (typedStreamError && error.code !== 'TURN_ACCEPTANCE_UNKNOWN') throw typedStreamError
     throw error
   }
+}
+
+export const recoverActionChat = async (profile, message, record, { controls, sendFinal } = {}) => {
+  const facts = resolveActionChatRequest(profile, message)
+  if (!facts || message.contextSnapshot?.facts?.materialsInput) throw new AgentProtocolError('CHAT_FINAL_BINDING_INVALID', 'Exact non-material action CHAT required')
+  const validateOutcome = raw => validateActionOutcome(raw, facts, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
+  return publishActionChatFinal({ profile, message, finalPrepared: record.finalPrepared, validateOutcome, controls, sendFinal })
 }
 
 export const recoverMaterialsChat = async (profile, message, record, { profileRuntime = null, adapter = null, controls = {}, sendFinal } = {}) => {
@@ -5999,6 +6008,8 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       const route = message.route || message.routing?.interactionMode
       if (route === 'CHAT' && message.contextSnapshot?.facts?.materialsInput) return recoverMaterialsChat(profile, message, record, {
         profileRuntime: record.finalPrepared ? null : await state.ensureTypedInspectionProfile(), controls,
+        sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra) })
+      if (route === 'CHAT' && record.finalPrepared?.contract === 'juyiting-action-chat-final-v1') return recoverActionChat(profile, message, record, { controls,
         sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra) })
       if (route !== 'INSPECT') return { status: 'recovery_required', reconciliationStatus: 'UNSUPPORTED_ROUTE' }
       const inspectionProfile = record.finalPrepared ? null : await state.ensureTypedInspectionProfile()

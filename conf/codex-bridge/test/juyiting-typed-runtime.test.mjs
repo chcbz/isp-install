@@ -1,15 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { AppServerAdapter } from '../app-server-adapter.mjs'
 import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from './fixtures/recorded-app-server-schemas.mjs'
 import { typedDeliberationAdapterReady } from '../juyiting-typed-outcome.mjs'
-import { runFastChat, MESSAGE_TYPES } from '../agent-client.mjs'
-import { canonicalSha256, validateChatDispatch } from '../chat-runtime.mjs'
+import { runFastChat as nativeFastChat, recoverActionChat, MESSAGE_TYPES } from '../agent-client.mjs'
+import { canonicalSha256, validateChatDispatch, PersistentChatInbox } from '../chat-runtime.mjs'
 import { buildActionOutcomeContract } from '../juyiting-action-outcome.mjs'
+
+// These protocol fixtures compute finals; only the inbox receipt tests establish persistence.
+const runFastChat = (profile, message, options = {}) => nativeFastChat(profile, message, { ...options, controls: {
+  markRunning: () => {}, isCancelled: () => false, markFinalPrepared: () => {}, markFinalPublication: () => {}, ...options.controls } })
 
 const current = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'unified-action-outcome-v5.json'), 'utf8'))
 // Native output tests use the shipped closed, parameterless skill contract.
@@ -85,7 +90,7 @@ test('real AppServerAdapter callback boundary passes native outputSchema and ato
     adapter, bindingStore: bindingStore(), chatWorkdir: '/runtime-owned-empty-chat',
     sendProtocolFn: (type, payload) => frames.push({ type, payload })
   })
-  assert.equal(result.status, 'completed')
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed')
   const turnStart = rpc.find(frame => frame.method === 'turn/start'); const threadStart = rpc.find(frame => frame.method === 'thread/start')
   assert.deepEqual(turnStart.params.outputSchema, buildActionOutcomeContract(fixture.dispatchFacts).outputSchema)
   assert.equal(Object.hasOwn(threadStart.params, 'outputSchema'), false)
@@ -220,7 +225,7 @@ test('v5 runs through native CHAT schema, streams only text and emits action sid
     }, interrupt: async () => {}
   }
   const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-  assert.equal(result.status, 'completed')
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed')
   assert.equal(calls[0].config.network, false)
   assert.match(calls[0].developerInstructions, /ACTION_REQUEST is planning only/)
   assert.equal(frames.at(-1).payload.outcomeContractVersion, 5)
@@ -253,7 +258,7 @@ test('v5 native CHAT preserves the explicit text delivery marker in its durable 
     }
     const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
       sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-    assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+    assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed'); assert.equal(starts, 1)
     assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
     assert.equal(frames.at(-1).payload.content, outcome.text)
     assert.equal(frames.at(-1).payload.outcomeContractVersion, 5)
@@ -273,7 +278,7 @@ test('native CHAT preserves parent-bound text append and refuses fabricated pare
   const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'append-thread' }),
     runTurn: async options => { options.onAccepted({ threadId: 'append-thread', turnId: 'append-turn' }); return { threadId: 'append-thread', turnId: 'append-turn', content: JSON.stringify(outcome) } }, interrupt: async () => {} }
   const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-  assert.equal(result.status, 'completed'); assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed'); assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
   outcome.deliveryRelation.parentOutcomeId = 'fabricated'
   await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: () => assert.fail('must not publish fabricated final') }), /ACTION_DELIVERY_PARENT_INVALID/)
 })
@@ -292,7 +297,7 @@ test('native CHAT retains the original text parent across API-verified clarifica
     const adapter = { closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'clarified-thread' }),
       runTurn: async options => { options.onAccepted({ threadId: 'clarified-thread', turnId: 'clarified-turn' }); return { threadId: 'clarified-thread', turnId: 'clarified-turn', content: JSON.stringify(outcome) } }, interrupt: async () => {} }
     const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-    assert.equal(result.status, 'completed'); assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+    assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed'); assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
     assert.equal(outcome.deliveryRelation.parentOutcomeId, group.initial.outcome.outcomeId)
     assert.notEqual(outcome.deliveryRelation.parentOutcomeId, admission.parentOutcomeId)
     for (const mutate of [bad => { bad.deliveryRelation.parentOutcomeId = admission.parentOutcomeId }, bad => { bad.deliveryRelation.parentFinalDigest = group.clarifications.at(-1).outcome.finalDigest }]) {
@@ -322,7 +327,7 @@ test('native CHAT proposes the existing image edit using exact API-advertised co
       return { threadId: 'media-context-thread', turnId: 'media-context-turn', content: JSON.stringify(outcome) }
     }, interrupt: async () => {} }
   const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-  assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed'); assert.equal(starts, 1)
   assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
   assert.equal(frames.at(-1).payload.outcomeContractVersion, 5)
   assert.equal(frames.some(frame => frame.type !== MESSAGE_TYPES.CHAT_MESSAGE && frame.type !== MESSAGE_TYPES.CHAT_MESSAGE_DELTA), false)
@@ -348,7 +353,7 @@ test('native CHAT retains the frozen earlier target through clarification and ne
       return { threadId: 'retained-thread', turnId: 'retained-turn', content: JSON.stringify(outcome) }
     }, interrupt: async () => {} }
   const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-  assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed'); assert.equal(starts, 1)
   assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
   assert.equal(outcome.deliveryRelation.targetOutcomeId, group.initial.outcome.outcomeId)
   assert.equal(outcome.deliveryRelation.parentOutcomeId, group.appended.outcome.outcomeId)
@@ -377,7 +382,7 @@ test('native CHAT keeps API batch append/reset metadata on EXECUTE sidecar, not 
         return { threadId: 'batch-thread', turnId: 'batch-turn', content: JSON.stringify(outcome) }
       }, interrupt: async () => {} }
     const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-    assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+    assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed'); assert.equal(starts, 1)
     assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
     assert.equal(frames.some(frame => frame.type !== MESSAGE_TYPES.CHAT_MESSAGE && frame.type !== MESSAGE_TYPES.CHAT_MESSAGE_DELTA), false)
     outcome.deliveryRelation.parentFinalDigest = `sha256:${'0'.repeat(64)}`
@@ -409,7 +414,7 @@ test('native CHAT uses the actual completed media final as causal basis while re
     }, interrupt: async () => {} }
   const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
     sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-  assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed'); assert.equal(starts, 1)
   assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
   assert.equal(outcome.deliveryRelation.parentOutcomeId, basis.outcomeId)
   assert.equal(outcome.deliveryRelation.targetOutcomeId, group.initial.outcome.outcomeId)
@@ -442,7 +447,7 @@ test('native CHAT receives only API retained edited media targets and keeps thei
     }, interrupt: async () => {} }
   const result = await runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
     sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
-  assert.equal(result.status, 'completed'); assert.equal(starts, 1)
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.serverPersistence, 'unconfirmed'); assert.equal(starts, 1)
   assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
   outcome.deliveryRelation.targetOutcomeId = group.initial.outcome.outcomeId; outcome.deliveryRelation.targetFinalDigest = group.initial.outcome.finalDigest
   await assert.rejects(() => runFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
@@ -460,4 +465,51 @@ test('old typed planning contracts cannot start any new durable model turn', asy
     assert.equal(typedDeliberationAdapterReady({ ...profile, appServerSchemaContractId: 'unregistered' }, adapter), true)
     assert.equal(typedDeliberationAdapterReady(profile, { ...adapter, closed: true }), false)
   }
+})
+
+
+test('action CHAT retains computed final across disconnect/restart and completes only on API receipt', async t => {
+  const root = mkdtempSync(resolve(tmpdir(), 'action-chat-final-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const message = typedMessage(), outcome = fixture.outcomes[2]
+  let starts = 0
+  const adapter = { closed: false, readback: measuredReadback(),
+    startOrResumeThread: async () => ({ threadId: 'durable-thread' }),
+    runTurn: async options => { starts++; options.onAccepted({ threadId: 'durable-thread', turnId: 'durable-turn' });
+      return { threadId: 'durable-thread', turnId: 'durable-turn', content: JSON.stringify(outcome) } } }
+  const inbox = new PersistentChatInbox({ rootDir: root, profile })
+  inbox.initialize()
+  const accepted = await inbox.accept(message), item = inbox.claim(accepted.key), frames = []
+  const result = await nativeFastChat(profile, message, { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
+    controls: { isCancelled: () => false, markRunning: (_cancel, engine) => inbox.markRunning(item, engine),
+      markFinalPrepared: value => inbox.markFinalPrepared(item, value), markFinalPublication: value => inbox.markFinalPublication(item, value) },
+    sendProtocolFn: (type, payload) => { if (type === MESSAGE_TYPES.CHAT_MESSAGE) {
+      assert.ok(inbox.findByKey(item.key).record.finalPrepared); frames.push(payload)
+    } return false } })
+  assert.equal(result.status, 'recovery_required'); assert.equal(result.publicationState, 'NOT_SENT')
+  inbox.recoveryRequired(item, result.recoveryReason)
+  const restarted = new PersistentChatInbox({ rootDir: root, profile })
+  restarted.initialize()
+  const pending = restarted.findByKey(item.key)
+  const controls = { markFinalPublication: value => restarted.markFinalPublication(pending, value) }
+  const failedWrite = await recoverActionChat(profile, message, pending.record, { controls,
+    sendFinal: async () => { throw Object.assign(new Error('disconnected'), { code: 'WS_CLOSED' }) } })
+  assert.equal(failedWrite.publicationState, 'NOT_SENT')
+  assert.equal(restarted.findByKey(item.key).record.finalPublication.errorCode, 'WS_CLOSED')
+  const resent = await recoverActionChat(profile, message, pending.record, { controls,
+    sendFinal: async (_p, _m, content, extra) => { frames.push({ content, ...extra }); return true } })
+  assert.equal(resent.status, 'recovery_required'); assert.equal(resent.serverPersistence, 'unconfirmed')
+  assert.equal(starts, 1); assert.equal(frames[0].outboundMessageId, frames[1].outboundMessageId)
+  assert.equal(frames[0].finalSeq, frames[1].finalSeq)
+  assert.deepEqual(frames[0].interactionOutcome, frames[1].interactionOutcome)
+  const changed = structuredClone(pending.record); changed.finalPrepared.extra.interactionOutcome.text += 'tampered'
+  await assert.rejects(recoverActionChat(profile, message, changed, { controls, sendFinal: () => assert.fail('must not send') }))
+  await assert.rejects(recoverActionChat(profile, { ...message, ownerJiacn: 'different-owner' }, pending.record,
+    { controls, sendFinal: () => assert.fail('must not send') }))
+  const ack = { type: 'agent_message_saved', channel: 'agent', turnId: message.turnId, messageId: '123', eventId: 'event-1', duplicate: false }
+  assert.equal(restarted.confirmFinalSaved({ ...ack, turnId: 'unrelated-turn' }).status, 'ignored')
+  assert.equal(restarted.confirmFinalSaved(ack).status, 'confirmed')
+  assert.equal(restarted.findByKey(item.key).record.result.serverPersistence, 'confirmed')
+  assert.equal(restarted.confirmFinalSaved(ack).status, 'duplicate')
+  assert.equal(starts, 1)
 })

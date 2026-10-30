@@ -4974,3 +4974,36 @@ test('runtime phase observations preserve results/errors and never expose operat
   assert.ok(rows.filter(r => r.stage === 'finish').every(r => Number.isFinite(r.durationMs) && r.durationMs >= 0));
   assert.equal(JSON.stringify(rows).includes('private-test-material'), false);
 });
+
+test('action CHAT prepared final is recovered by the existing scheduler after reload, without a new model turn', async () => {
+  const { canonicalSha256 } = await import('../chat-runtime.mjs')
+  const { buildActionChatFinal } = await import('../action-chat-final.mjs')
+  const root = temporaryDirectory(), raw = durableChat(1092)
+  raw.contextSnapshot.facts.typedDeliberation = { schemaVersion: 5, availableActions: [], availableSources: [], inspectedSourceRefIds: [] }
+  raw.contextHash = raw.contextSnapshot.contextHash = canonicalSha256({ sourceVector: raw.sourceVector, facts: raw.contextSnapshot.facts })
+  const message = normalizeInboundMessage(raw)
+  const seeded = new PersistentChatInbox({ rootDir: root, profile }); seeded.initialize()
+  const accepted = await seeded.accept(message), item = seeded.claim(accepted.key)
+  seeded.markFinalPrepared(item, buildActionChatFinal({ message, outcome: { schemaVersion: 5, kind: 'ANSWER', text: 'done' },
+    engineThreadId: 'original-thread', engineTurnId: 'original-turn', threadKey: 'original-key' }))
+  seeded.recoveryRequired(item, 'FINAL_PUBLISH_NOT_SENT')
+  let recoveries = 0, runtime
+  runtime = createChatRuntime(root, {
+    runChat: () => assert.fail('never rerun model for prepared final'),
+    recoverChat: async (_message, record, controls) => {
+      recoveries++; assert.equal(record.finalPrepared.contract, 'juyiting-action-chat-final-v1')
+      // Receipt may arrive before the WebSocket write returns.
+      assert.equal((await runtime.processor.handle(finalSavedAck(message))).status, 'confirmed')
+      controls.markFinalPublication({ schemaVersion: 1, outboundMessageId: record.finalPrepared.outboundMessageId, state: 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED' })
+      return { status: 'recovery_required', recoveryReason: 'FINAL_SERVER_PERSISTENCE_UNCONFIRMED' }
+    }, onReject: error => assert.fail(error.message)
+  })
+  runtime.processor.start()
+  try {
+    for (let i = 0; i < 50 && recoveries === 0; i++) await new Promise(resolve => setTimeout(resolve, 10))
+    await runtime.processor.waitForIdle()
+    assert.equal(recoveries, 1)
+    assert.equal(runtime.chatInbox.findByKey(item.key).record.result.serverPersistence, 'confirmed')
+    assert.equal(runtime.processor.chatRecoveryRetries.size, 0)
+  } finally { runtime.processor.stop() }
+})

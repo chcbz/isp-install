@@ -696,15 +696,16 @@ export class PersistentChatInbox {
       const item = matches[0]
       const route = item.record.message?.route || item.record.message?.routing?.interactionMode
       const materialsChat = route === 'CHAT' && Boolean(item.record.message?.contextSnapshot?.facts?.materialsInput)
-      if (route !== 'INSPECT' && !materialsChat) return { status: 'ignored', reason: 'NON_INSPECT_DURABLE_TURN', key: item.key }
+      const actionChat = route === 'CHAT' && !materialsChat && [5, 6].includes(item.record.message?.contextSnapshot?.facts?.typedDeliberation?.schemaVersion)
+      if (route !== 'INSPECT' && !materialsChat && !actionChat) return { status: 'ignored', reason: 'NON_INSPECT_DURABLE_TURN', key: item.key }
       const ack = finalSavedAck(rawAck)
       const prepared = item.record.finalPrepared
       if (item.record.message?.targetAgentId !== this.profile.agentId) {
         const error = new Error('CHAT_FINAL_ACK_PROFILE_MISMATCH'); error.code = 'CHAT_FINAL_ACK_PROFILE_MISMATCH'; throw error
       }
-      if (!object(prepared) || prepared.contract !== (materialsChat ? 'juyiting-materials-chat-final-v1' : 'juyiting-typed-inspection-final-v1') || prepared.turnId !== ack.turnId ||
+      if (!object(prepared) || prepared.contract !== (materialsChat ? 'juyiting-materials-chat-final-v1' : actionChat ? 'juyiting-action-chat-final-v1' : 'juyiting-typed-inspection-final-v1') || prepared.turnId !== ack.turnId ||
           prepared.requestId !== item.record.message?.requestId || prepared.dispatchId !== item.record.message?.dispatchId ||
-          !(materialsChat ? /^materials_final_[a-f0-9]{64}$/ : /^inspection_final_[a-f0-9]{64}$/).test(prepared.outboundMessageId || '') ||
+          !(materialsChat ? /^materials_final_[a-f0-9]{64}$/ : actionChat ? /^action_final_[a-f0-9]{64}$/ : /^inspection_final_[a-f0-9]{64}$/).test(prepared.outboundMessageId || '') ||
           !/^sha256:[a-f0-9]{64}$/.test(prepared.finalDigest || '')) {
         const error = new Error('CHAT_FINAL_ACK_PREPARED_REQUIRED'); error.code = 'CHAT_FINAL_ACK_PREPARED_REQUIRED'; throw error
       }
