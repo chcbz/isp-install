@@ -55,6 +55,19 @@ class FreezeTest(unittest.TestCase):
         self.assertEqual(base, str(final))
         self.assertTrue(stdlib.startswith(str(final) + '/'))
 
+class FlowBuildEntryTest(unittest.TestCase):
+    def test_worker_entry_reuses_installer_launcher_rules_and_freezes_new_stage(self):
+        root = SCRIPT.parents[3]
+        source = (root / 'conf/cyf-agent-runtime-v1/build-python-toolchain.sh').read_text()
+        self.assertIn('text.count(start) == 1 and text.count(end) == 1', source)
+        self.assertIn('[ ! -e "$STAGE" ] && [ ! -L "$STAGE" ]', source)
+        self.assertLess(source.index('subprocess.run('), source.index('"$VENV/bin/python" -I -B "$SOURCE_DIR/lib/freeze-python.py"'))
+        self.assertNotIn('systemctl', source)
+        pin = json.loads((root / 'conf/cyf-agent-runtime-v1/python-source.json').read_text())
+        self.assertEqual(pin['version'], '3.11.13')
+        self.assertEqual(len(pin['sha256']), 64)
+        self.assertTrue(pin['url'].startswith('https://github.com/astral-sh/python-build-standalone/releases/download/'))
+
 
 if __name__ == '__main__':
     unittest.main()

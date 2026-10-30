@@ -1,0 +1,7 @@
+{
+  "version": "3.11.13",
+  "release": "20250818",
+  "platform": "x86_64-unknown-linux-gnu",
+  "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20250818/cpython-3.11.13%2B20250818-x86_64-unknown-linux-gnu-install_only.tar.gz",
+  "sha256": "b3d07471abdf1b3d2867dd44f095c891fb072bab5667b9322355546f9f9c5dda"
+}
