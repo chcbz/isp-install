@@ -360,6 +360,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "image-input.mjs",
   "image-input-file.mjs",
   "materials-chat.mjs",
+  "action-chat-final.mjs",
   "skill-bindings.mjs",
   "skill-runners/local-script.mjs",
   "skill-runners/local-tool-measurement.mjs",
