@@ -69,7 +69,9 @@ print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig
   const omitted = new Set(['__pycache__', 'test', 'tests', 'idlelib', 'tkinter', 'ensurepip', 'pip', 'setuptools', 'pkg_resources', '_distutils_hack'])
   const walk = (source, target, standard = false) => {
     for (const item of readdirSync(source, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (omitted.has(item.name) || /\.(?:pyc|pyo)$/.test(item.name) || (standard && item.name === 'site-packages')) continue
+      // The desktop tkinter package is omitted above; its native GUI extension
+      // must also stay outside this headless document dependency closure.
+      if ((standard && /^_tkinter(?:\.|$)/.test(item.name)) || omitted.has(item.name) || /\.(?:pyc|pyo)$/.test(item.name) || (standard && item.name === 'site-packages')) continue
       const path = resolve(source, item.name), dest = `${target}/${item.name}`
       if (item.isDirectory()) walk(path, dest, standard)
       else if (item.isFile()) files.push(pin(path, dest))

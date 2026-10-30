@@ -25,6 +25,7 @@ test('pinned Python actually reads/edits/reopens DOCX/XLSX inside native mounts;
   t.diagnostic(`document discovery/hash/ldd: ${(performance.now() - measurementStart).toFixed(1)} ms; files: ${toolchain.files.length}`)
   assert.ok(toolchain.files.some(file => file.sandboxPath === '/usr/bin/python3'))
   assert.ok(toolchain.files.some(file => file.sandboxPath.endsWith('/openpyxl/__init__.py')))
+  assert.ok(toolchain.files.every(file => !/(?:^|\/)(?:_tkinter[./]|tkinter\/)/.test(file.sandboxPath)))
   assert.ok(toolchain.files.every(file => !file.sandboxPath.startsWith('/home/') && !file.sandboxPath.includes('/pip/')))
   const execution = mkdir(resolve(root, 'execution'))
   const options = { inputDirectory: mkdir(resolve(execution, 'inputs')), scratchDirectory: mkdir(resolve(execution, 'scratch')), draftsDirectory: mkdir(resolve(execution, 'drafts')),
