@@ -3,7 +3,7 @@
 # The caller supplies the SHA-verified Python distribution and binds output to its Run.
 set -euo pipefail
 [ "$#" = 3 ] || { echo 'usage: build-python-toolchain.sh STAGE FINAL_APP VERIFIED_PYTHON' >&2; exit 2; }
-STAGE="$1"; FINAL_APP="$2"; PYTHON="$3"
+STAGE="$1"; FINAL_APP="$2"; PYTHON="$(readlink -f -- "$3")"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 for path in "$STAGE" "$FINAL_APP" "$PYTHON"; do
   [[ "$path" = /* ]] && [ "$(readlink -m "$path")" = "$path" ] || { echo 'Absolute canonical paths required' >&2; exit 1; }

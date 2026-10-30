@@ -56,6 +56,23 @@ class FreezeTest(unittest.TestCase):
         self.assertTrue(stdlib.startswith(str(final) + '/'))
 
 class FlowBuildEntryTest(unittest.TestCase):
+    def test_worker_entry_accepts_verified_distribution_python_alias(self):
+        with tempfile.TemporaryDirectory(prefix='cyf-python-entry-test-') as temporary:
+            root = Path(temporary)
+            real = root / 'python3.11'
+            real.write_text('#!/bin/sh\necho VERIFIED_PYTHON_INVOKED >&2\nexit 37\n')
+            real.chmod(0o700)
+            alias = root / 'python3'
+            alias.symlink_to('python3.11')
+            stage = root / 'stage'
+            command = ['bash', str(SCRIPT.parents[1] / 'build-python-toolchain.sh'), str(stage), str(root / 'final'), str(alias)]
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            self.assertEqual(result.returncode, 37, result.stderr)
+            self.assertIn('VERIFIED_PYTHON_INVOKED', result.stderr)
+            second = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            self.assertNotEqual(second.returncode, 0)
+            self.assertNotIn('VERIFIED_PYTHON_INVOKED', second.stderr)
+
     def test_worker_entry_reuses_installer_launcher_rules_and_freezes_new_stage(self):
         root = SCRIPT.parents[3]
         source = (root / 'conf/cyf-agent-runtime-v1/build-python-toolchain.sh').read_text()
