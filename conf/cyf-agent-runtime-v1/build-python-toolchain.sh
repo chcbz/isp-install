@@ -12,9 +12,11 @@ done
 mkdir -m 700 "$STAGE"
 mkdir -m 700 "$STAGE/codex-bridge"
 VENV="$STAGE/codex-bridge/.toolchain"
+# Flow workers use the HTTPS package mirror; pip still checks index link hashes.
+PIP_INDEX="https://mirrors.aliyun.com/pypi/simple/"
 "$PYTHON" -I -B -m venv --copies "$VENV"
-"$VENV/bin/python" -I -B -m pip install --disable-pip-version-check --no-input --no-cache-dir --upgrade 'pip<22'
-"$VENV/bin/python" -I -B -m pip install --disable-pip-version-check --no-input --no-cache-dir -r "$SOURCE_DIR/../codex-bridge/toolchain/requirements.txt"
+"$VENV/bin/python" -I -B -m pip install --disable-pip-version-check --no-input --no-cache-dir --index-url "$PIP_INDEX" --upgrade 'pip<22'
+"$VENV/bin/python" -I -B -m pip install --disable-pip-version-check --no-input --no-cache-dir --index-url "$PIP_INDEX" -r "$SOURCE_DIR/../codex-bridge/toolchain/requirements.txt"
 # Reuse the installer's exact generated-launcher relocation, not a second policy.
 "$VENV/bin/python" -I -B - "$SOURCE_DIR/install.sh" "$STAGE" "$FINAL_APP" <<'PY'
 from pathlib import Path
