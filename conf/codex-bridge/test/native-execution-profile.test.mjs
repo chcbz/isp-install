@@ -9,7 +9,7 @@ import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { buildTypedInspectionCodexConfig, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
-import { buildNativeExecutionCodexConfig, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
+import { buildNativeExecutionCodexConfig, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
 
 const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('hex')
 const mkdir = path => { mkdirSync(path, { mode: 0o700 }); chmodSync(path, 0o700); return path }
@@ -40,7 +40,7 @@ const stubRuntime = f => {
     measureBinary: async () => ({ snapshotIdentity: {} }),
     egressFactory: () => ({ proxyUrl: 'http://10.0.2.2:1', start: async () => {}, bindOwner: async () => {}, attach: async () => ({ measured: true }), dispose: async () => { disposals++ } }),
     _spawnAdapter: async args => { spawns++; const adapter = new EventEmitter(); adapter.child = {}; adapter.closed = false; adapter.readback = { tools: { data: [] } }; adapter.request = async () => discovery(args.nativeView.layout); adapter.shutdown = async () => { shutdowns++; adapter.closed = true }; adapter.spawnArgs = args; adapter.startOrResumeThread = async () => 'thread-started'; adapter.runTurn = async () => 'turn-started'; return adapter },
-    _initializeAndSeal: async adapter => { rmSync(adapter.spawnArgs.engineState.authPath, { force: true }); return { config: { config: { sandbox_mode: 'workspace-write', approval_policy: 'never', sandbox_workspace_write: { writable_roots: ['/workspace', '/outputs'], network_access: false, exclude_slash_tmp: true, exclude_tmpdir_env_var: true } } } } }
+    _initializeAndSeal: async adapter => { rmSync(adapter.spawnArgs.engineState.authPath, { force: true }); return { config: { config: { default_permissions: 'native-execution', approval_policy: 'never', permissions: { 'native-execution': { filesystem: nativeFilesystemPermissions, network: { enabled: false } } } } } } }
   })
   return { runtime, counts: () => ({ spawns, disposals, shutdowns }) }
 }
@@ -53,10 +53,15 @@ test('native config and mounts keep inspection read-only; only scratch/drafts an
     const readOnly = buildTypedInspectionCodexConfig({})
     assert.match(readOnly, /sandbox_mode = "read-only"/)
     assert.doesNotMatch(readOnly, /workspace-write/)
-    assert.match(buildNativeExecutionCodexConfig(readOnly), /sandbox_mode = "workspace-write"/)
-    assert.match(buildNativeExecutionCodexConfig(readOnly), /network_access = false/)
+    assert.match(buildNativeExecutionCodexConfig(readOnly), /default_permissions = "native-execution"/)
+    assert.match(buildNativeExecutionCodexConfig(readOnly), /enabled = false/)
     const args = nativeExecutionMountArgs({ layout, engineState: { codexHome: resolve(f.options.stateRoot, 'engine-home') }, neutralDirectory: '/private/neutral', skillsDirectory: '/private/skills' })
     assert.deepEqual(args.slice(0, 6), ['--uid', '65534', '--gid', '65534', '--cap-drop', 'ALL'])
+    // Temporary files remain writable even without the optional Python library.
+    const temporaryDirectory = args.indexOf('TMPDIR')
+    assert.ok(temporaryDirectory > 0)
+    assert.equal(args[temporaryDirectory - 1], '--setenv')
+    assert.equal(args[temporaryDirectory + 1], '/workspace')
     const binds = args.flatMap((value, i) => value === '--bind' ? [[args[i + 1], args[i + 2]]] : [])
     assert.deepEqual(binds, [[resolve(f.options.stateRoot, 'engine-home'), '/state/codex-home'], [f.options.scratchDirectory, '/workspace'], [f.options.draftsDirectory, '/outputs']])
     assert.equal(args.includes(f.options.sourceHome), false)
@@ -410,7 +415,7 @@ test('selected skill configuration is read-only and binds network and configurat
     const at = args.indexOf('/private/request/skill-config')
     assert.equal(args[at - 1], '--ro-bind'); assert.equal(args[at + 1], '/skill-config')
     assert.ok(args.includes('CYF_SKILL_CONFIG_DIR'))
-    assert.match(buildNativeExecutionCodexConfig(buildTypedInspectionCodexConfig({}), { networkAccess: true }), /network_access = true/)
+    assert.match(buildNativeExecutionCodexConfig(buildTypedInspectionCodexConfig({}), { networkAccess: true }), /enabled = true/)
     assert.throws(() => prepareNativeExecutionLayout({ ...f.options, skillConfiguration }), /NETWORK_BINDING_INVALID/)
     assert.throws(() => prepareNativeExecutionLayout({ ...f.options, nativeExecution, skillConfiguration: [{ ...skillConfiguration[0], skillKey: 'unselected' }] }), /CONFIG_BINDING_INVALID/)
     const changed = prepareNativeExecutionLayout({ ...f.options, nativeExecution, skillConfiguration: [{ ...skillConfiguration[0], configuration: { apiKey: 'rotated' } }] })
@@ -535,4 +540,54 @@ test('Office declaration requires actual document reopens; document failure reta
     assert.equal(runtime.nativeDocumentMeasurementFailure.code, 'NATIVE_DOCUMENT_PROBE_FAILED')
     assert.equal(runtime.activeAdapters.size, 0)
   } finally { f.cleanup() }
+})
+
+test('browser readiness requires a successful process probe and retains text/Office when it fails', async () => {
+  const { BROWSER_PROBE } = await import('../native-browser-toolchain.mjs')
+  const { DOCUMENT_PROBE, DOCUMENT_MIMES } = await import('../native-document-toolchain.mjs')
+  const f = fixture()
+  try {
+    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    Object.assign(runtime, { materializerRoot: mkdir(resolve(f.root, 'browser-measurements')), profile: { typedInspectionProviderNetwork: 'restricted-proxy' },
+      nativeToolchain: { ...f.options.toolchain, files: [...f.options.toolchain.files, tool('/usr/bin/bash', BROWSER_PROBE), tool('/usr/bin/bash', DOCUMENT_PROBE)] }, activeAdapters: new Map() })
+    let success = true
+    runtime._measureNativeSkillScript = async () => false
+    runtime.openNativeExecutionAdapter = async (inputs, id, binding, options) => {
+      runtime.activeAdapters.set(id, { egress: { measureAllowedTls: async () => ({ measured: true, tlsVerified: true }) } })
+      return { nativeExecutionIsolation: { network: { measured: true, nftDefaultDropReadback: true, directInternetBlocked: true } }, readback: { providerCaTrust: {} },
+        request: async (_method, args) => {
+          if (args.command[0] === '/usr/bin/python3') return { exitCode: 0, stdout: 'native-documents-ready' }
+          if (args.command[1] === BROWSER_PROBE) {
+            assert.equal(args.permissionProfile, 'native-execution')
+            return { exitCode: success ? 0 : 1, stdout: success ? 'native-browser-ready' : '' }
+          }
+          writeFileSync(resolve(options.draftsDirectory, 'probe.txt'), readFileSync(resolve(inputs, 'probe.txt')))
+          return { exitCode: 0, stdout: 'native-declaration-probe' }
+        } }
+    }
+    runtime.releaseAdapter = async id => { runtime.activeAdapters.delete(id) }
+    const ready = await runtime.measureNativeExecution()
+    assert.equal(runtime.nativeBrowserReady, true)
+    assert.ok(ready.outputMimeTypes.includes('image/png'))
+    assert.deepEqual(ready.outputMimeTypes.slice(-2), DOCUMENT_MIMES)
+    success = false
+    const failed = await runtime.measureNativeExecution()
+    assert.equal(runtime.nativeBrowserReady, false)
+    assert.deepEqual(failed.outputMimeTypes, ['text/plain', 'text/markdown', 'text/html', 'application/json', ...DOCUMENT_MIMES])
+    assert.equal(runtime.nativeBrowserMeasurementFailure.code, 'NATIVE_BROWSER_PROBE_FAILED')
+    assert.equal(runtime.activeAdapters.size, 0)
+  } finally { f.cleanup() }
+})
+
+test('named native permissions retain filesystem boundaries and authorization-derived network', () => {
+  for (const networkAccess of [false, true]) {
+    const config = { approval_policy: 'never', default_permissions: 'native-execution', permissions: { 'native-execution': { filesystem: { ...nativeFilesystemPermissions }, network: { enabled: networkAccess } } } }
+    verifyNativeExecutionConfig({ config: { config } }, { networkAccess })
+    assert.throws(() => verifyNativeExecutionConfig({ config: { config } }, { networkAccess: !networkAccess }), /CONFIG_READBACK_MISMATCH/)
+    config.permissions['native-execution'].filesystem['/state/codex-home'] = 'write'
+    assert.throws(() => verifyNativeExecutionConfig({ config: { config } }, { networkAccess }), /CONFIG_READBACK_MISMATCH/)
+    delete config.permissions['native-execution'].filesystem['/state/codex-home']
+    config.permissions['native-execution'].filesystem['/'] = 'write'
+    assert.throws(() => verifyNativeExecutionConfig({ config: { config } }, { networkAccess }), /CONFIG_READBACK_MISMATCH/)
+  }
 })

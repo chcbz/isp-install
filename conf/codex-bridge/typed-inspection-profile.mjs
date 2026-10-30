@@ -1,3 +1,4 @@
+import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE } from './native-document-toolchain.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -15,7 +16,7 @@ import {
 import { canonicalSha256 } from './chat-runtime.mjs'
 import { RestrictedProviderEgress, restrictedProviderNetworkPolicy } from './typed-inspection-network.mjs'
 
-import { NATIVE_NEUTRAL_MOUNT_TARGETS, buildNativeExecutionCodexConfig, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
+import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, buildNativeExecutionCodexConfig, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -663,7 +664,8 @@ export class TypedInspectionProfileRuntime {
     const id = `native-declaration-${randomUUID()}`
     const binding = { schemaVersion: 1, requestKey: id, authorizationId: id, manifestDigest: id,
       requestId: id, turnId: id, inputPolicyDigest: id }
-    let directory, ready = false, scriptReady = false, documentReady = false, stage = 'toolchain'
+    this.nativeBrowserReady = false
+    let directory, ready = false, scriptReady = false, documentReady = false, browserReady = false, stage = 'toolchain'
     try {
       validateNativeExecutionToolchain(this.nativeToolchain)
       directory = ensurePrivateDirectory(mkdtempSync(resolve(this.materializerRoot, '.native-declaration-')))
@@ -698,6 +700,15 @@ export class TypedInspectionProfileRuntime {
           if (!documentReady) this.nativeDocumentMeasurementFailure = { stage: 'document-probe', code: 'NATIVE_DOCUMENT_PROBE_FAILED' }
         } catch { this.nativeDocumentMeasurementFailure = { stage: 'document-probe', code: 'NATIVE_DOCUMENT_PROBE_FAILED' } }
       }
+      const browserProbe = this.nativeToolchain.files.find(file => file.sandboxPath === BROWSER_PROBE)
+      if (browserProbe) {
+        this.nativeBrowserMeasurementFailure = null
+        try {
+          const probe = await adapter.request('command/exec', { command: ['/usr/bin/node', BROWSER_PROBE], cwd: '/execution', permissionProfile: NATIVE_PERMISSION_PROFILE })
+          browserReady = probe.exitCode === 0 && probe.stdout.trim() === 'native-browser-ready'
+          if (!browserReady) this.nativeBrowserMeasurementFailure = { stage: 'browser-probe', code: 'NATIVE_BROWSER_PROBE_FAILED' }
+        } catch { this.nativeBrowserMeasurementFailure = { stage: 'browser-probe', code: 'NATIVE_BROWSER_PROBE_FAILED' } }
+      }
       ready = !this.disposed
       if (ready) { try { scriptReady = await this._measureNativeSkillScript() } catch { this.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_MEASUREMENT_FAILED' } } }
     } catch (error) { ready = false; this.nativeExecutionMeasurementFailure = { stage, code: error.code || 'NATIVE_EXECUTION_MEASUREMENT_FAILED' } }
@@ -705,8 +716,9 @@ export class TypedInspectionProfileRuntime {
       try { await this.releaseAdapter(id, { requestBinding: binding }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
       try { if (directory) rmSync(directory, { recursive: true, force: true }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
     }
+    this.nativeBrowserReady = ready && !this.disposed && browserReady
     return ready && !this.disposed ? Object.freeze({ schemaVersion: 1, executionProtocolVersion: 5,
-      toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: Object.freeze(['text/plain', 'text/markdown', 'text/html', 'application/json', ...(scriptReady ? ['image/png'] : []), ...(documentReady ? DOCUMENT_MIMES : [])]),
+      toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: Object.freeze(['text/plain', 'text/markdown', 'text/html', 'application/json', ...(scriptReady || browserReady ? ['image/png'] : []), ...(documentReady ? DOCUMENT_MIMES : [])]),
       ...(scriptReady ? { supportedToolPolicyRefs: Object.freeze(['NATIVE_SKILL_SCRIPT_V1']) } : {}) }) : null
   }
   async _measureNativeSkillScript() {

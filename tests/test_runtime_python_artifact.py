@@ -35,6 +35,23 @@ class PythonArtifactTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'NEW_TARGET'):
             module.extract(self.archive, self.manifest, self.target)
 
+    def test_browser_layout_roundtrip_uses_same_archive_contract(self):
+        browser = self.source / 'chromium'
+        browser.mkdir()
+        executable = browser / 'chrome-headless-shell'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o755)
+        fonts = self.source / 'fonts'
+        fonts.mkdir()
+        (fonts / 'LICENSE.NotoSansCJK').write_text('synthetic license fixture')
+        (self.source / 'node_modules/playwright-core').mkdir(parents=True)
+        (self.source / 'node_modules/playwright-core/package.json').write_text('{"version":"fixture"}')
+        module.pack(self.source, self.archive, self.manifest)
+        module.extract(self.archive, self.manifest, self.target)
+        self.assertEqual(module.inventory(self.source), module.inventory(self.target))
+        self.assertEqual((self.target / 'chromium/chrome-headless-shell').stat().st_mode & 0o777, 0o755)
+        self.assertEqual((self.target / 'fonts/LICENSE.NotoSansCJK').read_text(), 'synthetic license fixture')
+
     def test_corrupt_archive_rejected_without_creating_target(self):
         module.pack(self.source, self.archive, self.manifest)
         with self.archive.open('ab') as stream:

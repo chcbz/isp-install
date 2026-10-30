@@ -117,3 +117,18 @@ test('frozen local stdlib must be protected before interpreter execution', t => 
   chmodSync(stdlib, 0o770)
   assert.throws(() => measureNativeDocumentToolchain({ base: measureMinimalNativeExecutionToolchain(), pythonBin: resolve(bin, 'python') }), { code: 'NATIVE_EXECUTION_TOOLCHAIN_UNSAFE' })
 })
+
+test('worker discovery retains base tools when the optional browser artifact is absent', async t => {
+  const { existsSync } = await import('node:fs')
+  if (existsSync(new URL('../.browser-toolchain/chromium/chrome-headless-shell', import.meta.url))) {
+    t.skip('this regression targets a source checkout without the optional browser artifact'); return
+  }
+  const { initializeNativeToolchain } = await import('../native-document-toolchain.mjs')
+  const runtime = {}
+  const measured = await initializeNativeToolchain(runtime)
+  assert.equal(runtime.nativeToolchain, measured)
+  assert.ok(measured.files.some(file => file.sandboxPath === '/usr/bin/node'))
+  assert.ok(measured.files.some(file => file.sandboxPath === measured.shell))
+  assert.equal(runtime.nativeBrowserMeasurementFailure.stage, 'toolchain')
+  assert.equal(runtime.nativeToolchainPending, null)
+})

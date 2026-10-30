@@ -427,3 +427,29 @@ CYF现用程序统一实体目录`/home/isp/apps/cyf-agent-runtime-v1/app/`，�
 CYF协同任务遵循 `/home/isp/wsps/cyf/AGENTS.md` 与 `api/docs/interface-standard.md` v1.2；单Owner，不修改公共全局规则。
 `codex-bridge` 现行v5 typed union增加 `SUBMISSION_REQUEST`，注册outcomeKinds同步。只有用户明确要求提交、存在冻结deliveryParent及非空deliveryTargets、没有待验收reviewBasis时可返回；SUBMIT引用原成果，deliverable=false、action/revision/clarification=null。操作说明不得成为文字RESULT；不得重新生成媒体，不得代验收。不按MIME决定主流程。
 同步fixture `../codex-bridge/test/fixtures/existing-delivery-submit-v5.json`；API同内容fixture在chat-service tests/contracts。需要Web、API（含CHECK约束迁移）、Runtime同批协调就绪；源码更新/测试通过不等于主机runtime安装更新。发布必须固定runtime制品及实例版本并验注册/业务链，本次尚未激活。
+
+## Native browser toolchain (1.3.28 candidate; deployment tracked separately)
+
+Browser operations use ordinary app-server shell scripts, not a bridge browser
+RPC or workflow. The optional fixed `.browser-toolchain/` contains one shared
+Chromium/Playwright/font set; the namespace mounts its measured files read-only.
+Per-request HOME, inputs, outputs and authorized network policy remain isolated.
+Native execution uses the named `native-execution` permissions profile with
+writable workspace/outputs and isolated procfs (required for Chromium's nested
+sandbox); CHAT remains read-only. All native scripts use `/workspace` as TMPDIR,
+including deployments without Python. Packaged tool instructions are read from
+`/usr/lib/cyf-*/README.md`; those instructions do not grant network authority.
+
+On the Flow worker, `build-browser-toolchain.sh NEW_STAGE` prepares SHA/lock-pinned
+dependencies and retains vendor/font licenses. Archive/manifest creation and
+extraction reuse `lib/python-artifact.py`, whose format is also suitable for this
+file tree. The release binds both files' hashes to the fixed Run. Host installation
+consumes them via `--browser-archive` and `--browser-manifest` (paired options),
+without downloading/building another browser. CYF's fixed-app release adapter
+uses the same extractor in its private candidate before any service stop.
+
+The actual sandbox probe must run on a host that supports the required user
+namespace. Missing optional dependencies disable only the browser capability;
+base/document capabilities are measured separately. A successful synthetic probe
+is not proof of a production model turn or a remote transaction. External effects
+with unknown outcomes must not be automatically resubmitted.

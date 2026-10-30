@@ -37,15 +37,15 @@ test('CHAT cannot be upgraded by turn policy or tool catalog', async () => {
   } finally { f.adapter.close() }
 })
 
-test('native adapter fixes neutral cwd and writable roots and accepts tool progress without stdout leakage', async () => {
+test('native adapter fixes neutral cwd and named execution permissions and accepts tool progress without stdout leakage', async () => {
   const f = fixture(execution()); try {
     await assert.rejects(f.adapter.startOrResumeThread(null, { cwd: '/workspace' }), /NATIVE_EXECUTION_CWD_INVALID/)
     await f.adapter.startOrResumeThread(null, { cwd: '/execution' })
-    assert.equal(f.sent[0].params.sandbox, 'workspace-write'); assert.deepEqual(f.sent[0].params.dynamicTools, [tool])
+    assert.equal(f.sent[0].params.permissions, 'native-execution'); assert.equal(f.sent[0].params.sandbox, undefined); assert.deepEqual(f.sent[0].params.dynamicTools, [tool])
     const events = []; const running = f.adapter.runTurn({ threadId: 'thread1', clientUserMessageId: 'message1', input: 'write', policy: { cwd: '/execution' }, onToolEvent: e => events.push(e) })
     await tick()
-    const policy = f.sent.find(x => x.method === 'turn/start').params.sandboxPolicy
-    assert.deepEqual(policy.writableRoots, ['/workspace', '/outputs']); assert.equal(policy.networkAccess, false)
+    const params = f.sent.find(x => x.method === 'turn/start').params
+    assert.equal(params.permissions, 'native-execution'); assert.equal(params.sandboxPolicy, undefined)
     f.event('item/commandExecution/outputDelta', { threadId: 'thread1', turnId: 'turn1', itemId: 'item1', delta: 'SECRET' })
     f.event('item/completed', { threadId: 'thread1', turnId: 'turn1', item: { id: 'item1', type: 'commandExecution', status: 'completed' } })
     completed(f); assert.equal((await running).finishReason, 'completed')
@@ -122,7 +122,7 @@ test('native turn network follows its trusted execution binding, never model tur
     try {
       const running = f.adapter.runTurn({ threadId: 'thread1', clientUserMessageId: 'message1', input: 'run script', policy: { cwd: '/execution', networkAccess: !allowed } })
       await tick()
-      assert.equal(f.sent.find(frame => frame.method === 'turn/start').params.sandboxPolicy.networkAccess, allowed)
+      assert.equal(f.sent.find(frame => frame.method === 'turn/start').params.permissions, 'native-execution')
       completed(f); await running
     } finally { f.adapter.close() }
   }

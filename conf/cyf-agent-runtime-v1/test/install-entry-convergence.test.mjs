@@ -153,3 +153,15 @@ test('new artifact freezes its Python base after launcher relocation and before 
   assert.ok(installer.indexOf(freeze) < installer.indexOf('"$STAGE/runtime/validate.sh" --root "$STAGE"'))
   assert.ok(installer.indexOf(freeze) < installer.indexOf('mv -T -n "$STAGE" "$TARGET"'))
 })
+
+test('optional browser install consumes a paired archive/manifest before validation without downloading', () => {
+  const installer = text('conf/cyf-agent-runtime-v1/install.sh')
+  const extraction = installer.indexOf('--root "$STAGE/codex-bridge/.browser-toolchain"')
+  assert.ok(extraction > 0 && extraction < installer.indexOf('"$STAGE/runtime/validate.sh" --root "$STAGE"'))
+  for (const flag of ['--browser-archive', '--browser-manifest']) {
+    const result = spawnSync('bash', [resolve(repo, 'conf/cyf-agent-runtime-v1/install.sh'), '--target', '/nonexistent/browser-fixture', flag, '/fixture'], { encoding: 'utf8' })
+    assert.equal(result.status, 2)
+    assert.match(result.stderr, /usage:/)
+  }
+  assert.doesNotMatch(installer, /build-browser-toolchain\.sh|playwright install/)
+})

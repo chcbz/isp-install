@@ -12,7 +12,7 @@ function fixture(t) {
   const store = new SkillExecutionStore({ rootDirectory: root, scope: { agentId: 'agent1' }, command })
   const events = []; let policy; let mode = 'success'; let runs = 0
   const adapter = {
-    startOrResumeThread: async (_binding, value) => { assert.equal(value.cwd, '/execution'); events.push('thread'); return { threadId: 'thread1' } },
+    startOrResumeThread: async (_binding, value) => { assert.equal(value.cwd, '/execution'); assert.match(value.developerInstructions, /\/usr\/lib\/cyf-\*\/README\.md/); events.push('thread'); return { threadId: 'thread1' } },
     runTurn: async options => {
       runs++; events.push('turn'); assert.equal(options.policy.cwd, '/execution')
       if (mode === 'acceptance-unknown') throw Object.assign(new Error('reply lost'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
@@ -128,4 +128,16 @@ test('local files policy cannot receive script credentials or acquire network', 
     return original(...args)
   }
   await runNativeExecution(f.request)
+})
+
+test('browser availability does not add a bridge tool or a browser workflow', async t => {
+  const f = fixture(t)
+  f.request.profileRuntime.nativeBrowserReady = true
+  const original = f.request.profileRuntime.openNativeExecutionAdapter
+  f.request.profileRuntime.openNativeExecutionAdapter = async (...args) => {
+    assert.deepEqual(args[3].nativeExecution.tools.map(tool => tool.name), ['artifact_stage', 'result_propose'])
+    return original(...args)
+  }
+  const result = await runNativeExecution(f.request)
+  assert.equal(result.result.artifacts.length, 1)
 })

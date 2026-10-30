@@ -3,11 +3,13 @@
 # No activation, state adoption, enrollment, service control or legacy .env copy.
 set -euo pipefail
 usage() {
-    echo 'usage: install.sh --target ABSOLUTE_NEW_DIRECTORY [--node NODE] [--npm NPM_CLI] [--python PYTHON3] [--engine-root ENGINE_SOURCE]' >&2
+    echo 'usage: install.sh --target ABSOLUTE_NEW_DIRECTORY [--node NODE] [--npm NPM_CLI] [--python PYTHON3] [--engine-root ENGINE_SOURCE] [--browser-archive ARCHIVE --browser-manifest MANIFEST]' >&2
     exit 2
 }
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TARGET=''
+BROWSER_ARCHIVE=''
+BROWSER_MANIFEST=''
 NODE_BIN="${CYF_RUNTIME_V1_NODE_BIN:-node}"
 NPM_CLI="${CYF_RUNTIME_V1_NPM_CLI:-npm}"
 PYTHON_BIN="${CYF_RUNTIME_V1_PYTHON_BIN:-python3}"
@@ -20,10 +22,15 @@ while [ "$#" -gt 0 ]; do
         --npm) NPM_CLI="$2" ;;
         --python) PYTHON_BIN="$2" ;;
         --engine-root) ENGINE_ROOT="$2" ;;
+        --browser-archive) BROWSER_ARCHIVE="$2" ;;
+        --browser-manifest) BROWSER_MANIFEST="$2" ;;
         *) usage ;;
     esac
     shift 2
 done
+[ -z "$BROWSER_ARCHIVE" ] && [ -z "$BROWSER_MANIFEST" ] || {
+    [ -n "$BROWSER_ARCHIVE" ] && [ -n "$BROWSER_MANIFEST" ] || usage
+}
 case "$TARGET" in /*) ;; *) usage ;; esac
 [ "$(readlink -m "$TARGET")" = "$TARGET" ] || { echo 'Runtime target must be canonical' >&2; exit 1; }
 [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ] || { echo 'Runtime target exists; do not adopt or overwrite it' >&2; exit 1; }
@@ -179,6 +186,13 @@ print('Runtime venv launchers prepared for publication: %d' % len(changed))
 PY_RUNTIME_RELOCATE
 # Freeze only the newly built stage; never rewrite an installed toolchain.
 "$STAGE/codex-bridge/.toolchain/bin/python" -I -B "$STAGE/runtime/lib/freeze-python.py" "$STAGE/codex-bridge/.toolchain"
+# Consume the fixed worker artifact; never download or build browser dependencies
+# on the installation host. The release owner verifies its enclosing Run metadata.
+if [ -n "$BROWSER_ARCHIVE" ]; then
+    "$PYTHON_BIN" -I -B "$STAGE/runtime/lib/python-artifact.py" extract \
+        --root "$STAGE/codex-bridge/.browser-toolchain" \
+        --archive "$BROWSER_ARCHIVE" --manifest "$BROWSER_MANIFEST"
+fi
 "$STAGE/runtime/validate.sh" --root "$STAGE"
 # Do not let a competing operator install be overwritten between preflight and publication.
 [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ] || { echo 'Runtime target appeared during staging' >&2; exit 1; }

@@ -254,6 +254,11 @@ test('unified library catalog closes actual engine imports without retired provi
   for (const path of RETIRED_EXECUTION_PAYLOAD_PATHS) {
     assert.equal(EXECUTION_PAYLOAD_FILES.some(entry => entry === path || entry.startsWith(`${path}/`)), false, path);
   }
+  for (const path of ['native-browser-toolchain.mjs', 'toolchain/browser-session.mjs',
+    'toolchain/browser-probe.mjs', 'toolchain/browser-fonts.conf', 'toolchain/browser/README.md',
+    'toolchain/browser/package.json', 'toolchain/browser/package-lock.json']) {
+    assert.ok(EXECUTION_PAYLOAD_FILES.includes(path), path);
+  }
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('skill-manifest.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('juyiting-review-basis.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('schemas/skill-manifest-v1.schema.json'), true);

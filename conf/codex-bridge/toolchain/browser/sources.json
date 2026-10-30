@@ -1,0 +1,19 @@
+{
+  "chromium": {
+    "version": "156.0.8078.4",
+    "url": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/linux64/chrome-headless-shell-linux64.zip",
+    "mirror": "https://cdn.npmmirror.com/binaries/chrome-for-testing/156.0.8078.4/linux64/chrome-headless-shell-linux64.zip",
+    "sha256": "c3e50596aef52c58f8fda3c6b3411c33d34c88b177b3ed1c2243359fd3b8ba20"
+  },
+  "font": {
+    "name": "NotoSansCJKsc-Regular.otf",
+    "release": "Sans2.004",
+    "url": "https://api.github.com/repos/notofonts/noto-cjk/git/blobs/dc15562470b4f842321894787a0d066879ccff8b",
+    "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+  },
+  "fontLicense": {
+    "name": "LICENSE.NotoSansCJK",
+    "url": "https://api.github.com/repos/notofonts/noto-cjk/git/blobs/d952d62c065f3f35fb83a173496e90b21525aef3",
+    "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+  }
+}

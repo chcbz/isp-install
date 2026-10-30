@@ -1,0 +1,6 @@
+{
+  "name": "cyf-native-browser-toolchain",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": { "playwright-core": "1.64.1" }
+}

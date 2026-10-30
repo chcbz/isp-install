@@ -1,3 +1,4 @@
+import { NATIVE_PERMISSION_PROFILE } from './native-execution-profile.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -469,8 +470,8 @@ export class AppServerAdapter extends EventEmitter {
     if (this.nativeExecution) {
       this.nativeExecution.checkActive()
       if (policy.cwd !== '/execution') throw new Error('NATIVE_EXECUTION_CWD_INVALID')
-      params.sandbox = 'workspace-write'
-      params.config.sandbox_workspace_write = { writable_roots: ['/workspace', '/outputs'], network_access: false, exclude_slash_tmp: true, exclude_tmpdir_env_var: true }
+      delete params.sandbox
+      params.permissions = NATIVE_PERMISSION_PROFILE
       // Dynamic tools are persisted with the thread by the engine. Resume does
       // not accept a replacement catalog; local dispatch still checks our set.
       if (!binding?.threadId) params.dynamicTools = this.nativeExecution.tools
@@ -576,7 +577,7 @@ export class AppServerAdapter extends EventEmitter {
     let response
     try {
       const userInput = Array.isArray(input) ? input : [{ type: 'text', text: String(input) }]
-      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', sandboxPolicy: this.nativeExecution ? { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: this.nativeExecution.networkAccess === true, excludeSlashTmp: true, excludeTmpdirEnvVar: true } : { type: 'readOnly', networkAccess: false }, ...(policy.outputSchema ? { outputSchema: policy.outputSchema } : {}) })
+      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', ...(this.nativeExecution ? { permissions: NATIVE_PERMISSION_PROFILE } : { sandboxPolicy: { type: 'readOnly', networkAccess: false } }), ...(policy.outputSchema ? { outputSchema: policy.outputSchema } : {}) })
     } catch (cause) {
       cleanup(); turn.state = 'ACCEPTANCE_UNKNOWN'; turn.error = cause.message
       const reconciliation = await this.reconcileTurn(turn).catch(() => ({ status: 'RECOVERY_REQUIRED' }))

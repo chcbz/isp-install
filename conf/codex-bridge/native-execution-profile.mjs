@@ -187,8 +187,29 @@ export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory,
     skills: Object.freeze(packages), skillConfiguration: Object.freeze(configurations), toolchain: fixedToolchain, binding, digest: canonicalSha256(binding) })
 }
 
-export const buildNativeExecutionCodexConfig = (readOnlyConfig, { networkAccess = false } = {}) => readOnlyConfig.replace('sandbox_mode = "read-only"', 'sandbox_mode = "workspace-write"')
-  + `\n[sandbox_workspace_write]\nwritable_roots = ["/workspace", "/outputs"]\nnetwork_access = ${networkAccess === true}\nexclude_slash_tmp = true\nexclude_tmpdir_env_var = true\n`
+export const NATIVE_PERMISSION_PROFILE = 'native-execution'
+export const nativeFilesystemPermissions = Object.freeze({
+  '/': 'read', '/workspace': 'write', '/outputs': 'write', '/proc': 'write',
+  // procfs cannot contain ordinary metadata directories. Explicit entries avoid
+  // Codex 0.164's implicit placeholder mounts here; real Home stays read-only.
+  '/proc/.git': 'write', '/proc/.agents': 'write', '/proc/.codex': 'write', '/proc/.aws': 'write'
+})
+export const buildNativeExecutionCodexConfig = (readOnlyConfig, { networkAccess = false } = {}) =>
+  readOnlyConfig.replace('sandbox_mode = "read-only"', `default_permissions = "${NATIVE_PERMISSION_PROFILE}"`)
+  + `\n[permissions.${NATIVE_PERMISSION_PROFILE}]\nfilesystem = { ${Object.entries(nativeFilesystemPermissions).map(([path, mode]) => `${JSON.stringify(path)} = ${JSON.stringify(mode)}`).join(', ')} }\n[permissions.${NATIVE_PERMISSION_PROFILE}.network]\nenabled = ${networkAccess === true}\n`
+
+// Shared immutable dependency mounts; no execution state or credentials.
+export const nativeToolchainMountArgs = toolchain => {
+  const args = []
+  const directories = new Set()
+  for (const file of toolchain.files) {
+    const parents = []; let cursor = dirname(file.sandboxPath)
+    while (cursor !== '/') { parents.unshift(cursor); cursor = dirname(cursor) }
+    for (const path of parents) if (!directories.has(path)) { args.push('--dir', path); directories.add(path) }
+    args.push('--ro-bind', file.sourcePath, file.sandboxPath)
+  }
+  return args
+}
 
 // Append to an unshare-all bwrap view. HOME is neutral/read-only; only the
 // engine's request state is writable, with config and skill roots overmounted ro.
@@ -208,26 +229,22 @@ export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory
     args.push('--dir', '/skill-config', '--ro-bind', skillConfigurationDirectory, '/skill-config', '--setenv', 'CYF_SKILL_CONFIG_DIR', '/skill-config')
   }
   for (const skill of layout.skills) args.push('--ro-bind', skill.packageRoot, `/state/codex-home/skills/${skill.skillKey}`)
-  const directories = new Set()
-  for (const file of layout.toolchain.files) {
-    const parents = []; let cursor = dirname(file.sandboxPath)
-    while (cursor !== '/') { parents.unshift(cursor); cursor = dirname(cursor) }
-    for (const path of parents) if (!directories.has(path)) { args.push('--dir', path); directories.add(path) }
-    args.push('--ro-bind', file.sourcePath, file.sandboxPath)
-  }
+  args.push(...nativeToolchainMountArgs(layout.toolchain))
   if (layout.toolchain.files.some(file => file.sandboxPath === '/usr/bin/python3')) {
-    args.push('--setenv', 'LD_LIBRARY_PATH', '/usr/lib:/usr/lib64:/lib:/lib64', '--setenv', 'PYTHONDONTWRITEBYTECODE', '1', '--setenv', 'TMPDIR', '/workspace')
+    args.push('--setenv', 'LD_LIBRARY_PATH', '/usr/lib:/usr/lib64:/lib:/lib64', '--setenv', 'PYTHONDONTWRITEBYTECODE', '1')
   }
-  args.push('--setenv', 'PATH', '/runtime/bin:/usr/bin:/bin', '--setenv', 'SHELL', layout.toolchain.shell, '--remount-ro', '/')
+  args.push('--setenv', 'TMPDIR', '/workspace', '--setenv', 'PATH', '/runtime/bin:/usr/bin:/bin', '--setenv', 'SHELL', layout.toolchain.shell, '--remount-ro', '/')
   return args
 }
 
 export const verifyNativeExecutionConfig = (readback, { networkAccess = false } = {}) => {
   const config = readback?.config?.config
-  const sandbox = config?.sandbox_workspace_write
-  if (config?.sandbox_mode !== 'workspace-write' || config?.approval_policy !== 'never'
-      || !Array.isArray(sandbox?.writable_roots) || JSON.stringify(sandbox.writable_roots) !== JSON.stringify(['/workspace', '/outputs'])
-      || sandbox.network_access !== (networkAccess === true) || sandbox.exclude_slash_tmp !== true || sandbox.exclude_tmpdir_env_var !== true) fail('NATIVE_EXECUTION_CONFIG_READBACK_MISMATCH')
+  const permissions = config?.permissions?.[NATIVE_PERMISSION_PROFILE]
+  const filesystem = permissions?.filesystem
+  if (config?.default_permissions !== NATIVE_PERMISSION_PROFILE || config?.approval_policy !== 'never'
+      || permissions?.network?.enabled !== (networkAccess === true)
+      || !filesystem || Object.entries(nativeFilesystemPermissions).some(([path, mode]) => filesystem[path] !== mode)
+      || Object.keys(filesystem).some(path => path !== 'glob_scan_max_depth' && !Object.hasOwn(nativeFilesystemPermissions, path))) fail('NATIVE_EXECUTION_CONFIG_READBACK_MISMATCH')
 }
 
 export const verifyNativeExecutionSkillCatalog = (result, layout) => {

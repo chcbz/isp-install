@@ -1,5 +1,6 @@
 /** RB-03/05: fixed document libraries in the existing file-manifest sandbox.
  * No host directory mount, package installation, or document workflow selection. */
+import { measureNativeBrowserToolchain } from './native-browser-toolchain.mjs'
 import { spawnSync } from 'node:child_process'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { createHash } from 'node:crypto'
@@ -111,8 +112,12 @@ print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig
 if (!isMainThread && workerData?.kind === 'native-document-measurement') {
   try {
     const base = measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath })
-    try { parentPort.postMessage({ toolchain: measureNativeDocumentToolchain({ base }) }) }
-    catch (error) { parentPort.postMessage({ toolchain: base, documentFailure: error.code || 'NATIVE_DOCUMENT_TOOLCHAIN_UNAVAILABLE' }) }
+    let toolchain = base, documentFailure, browserFailure
+    try { toolchain = measureNativeDocumentToolchain({ base }) }
+    catch (error) { documentFailure = error.code || 'NATIVE_DOCUMENT_TOOLCHAIN_UNAVAILABLE' }
+    try { toolchain = measureNativeBrowserToolchain({ base: toolchain }) }
+    catch (error) { browserFailure = error.code || 'NATIVE_BROWSER_TOOLCHAIN_UNAVAILABLE' }
+    parentPort.postMessage({ toolchain, documentFailure, browserFailure })
   } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' }) }
 }
 
@@ -130,6 +135,7 @@ export async function initializeNativeToolchain(runtime) {
         runtime.nativeDocumentMeasurementFailure = { stage: 'toolchain', code: result.documentFailure }
         console.warn(`native documents unavailable | code=${runtime.nativeDocumentMeasurementFailure.code}`)
       }
+      if (result.browserFailure) runtime.nativeBrowserMeasurementFailure = { stage: 'toolchain', code: result.browserFailure }
       // Missing optional libraries must not remove existing text/image tools.
       try {
         const verified = await validateNativeExecutionToolchainAsync(result.toolchain)
