@@ -319,7 +319,8 @@ test('native declaration requires a successful isolated engine, TLS and shell pr
       if (mode === 'open-fail') throw new Error('unavailable')
       runtime.activeAdapters.set(id, { egress: { measureAllowedTls: async () => ({ measured: true, tlsVerified: mode !== 'tls-fail' }) } })
       return { nativeExecutionIsolation: { network: { measured: true, nftDefaultDropReadback: true, directInternetBlocked: true } }, readback: { providerCaTrust: {} },
-        request: async (method, args) => {
+        request: async (method, args, rpcTimeout) => {
+          assert.equal(args.disableTimeout, true); assert.equal(rpcTimeout, null)
           assert.equal(method, 'command/exec'); assert.equal(args.cwd, '/execution')
           if (mode === 'shell-fail') return { exitCode: 1, stdout: '' }
           writeFileSync(resolve(options.draftsDirectory, 'probe.txt'), readFileSync(resolve(inputs, 'probe.txt')))
@@ -520,7 +521,8 @@ test('Office declaration requires actual document reopens; document failure reta
     runtime.openNativeExecutionAdapter = async (inputs, id, binding, options) => {
       runtime.activeAdapters.set(id, { egress: { measureAllowedTls: async () => ({ measured: true, tlsVerified: true }) } })
       return { nativeExecutionIsolation: { network: { measured: true, nftDefaultDropReadback: true, directInternetBlocked: true } }, readback: { providerCaTrust: {} },
-        request: async (_method, args) => {
+        request: async (_method, args, rpcTimeout) => {
+          assert.equal(args.disableTimeout, true); assert.equal(Object.hasOwn(args, 'timeoutMs'), false); assert.equal(rpcTimeout, null)
           if (args.command[0] === '/usr/bin/python3') {
             assert.deepEqual(args.command, ['/usr/bin/python3', '-I', '-B', DOCUMENT_PROBE])
             assert.equal(args.sandboxPolicy.networkAccess, false)
@@ -555,7 +557,8 @@ test('browser readiness requires a successful process probe and retains text/Off
     runtime.openNativeExecutionAdapter = async (inputs, id, binding, options) => {
       runtime.activeAdapters.set(id, { egress: { measureAllowedTls: async () => ({ measured: true, tlsVerified: true }) } })
       return { nativeExecutionIsolation: { network: { measured: true, nftDefaultDropReadback: true, directInternetBlocked: true } }, readback: { providerCaTrust: {} },
-        request: async (_method, args) => {
+        request: async (_method, args, rpcTimeout) => {
+          assert.equal(args.disableTimeout, true); assert.equal(Object.hasOwn(args, 'timeoutMs'), false); assert.equal(rpcTimeout, null)
           if (args.command[0] === '/usr/bin/python3') return { exitCode: 0, stdout: 'native-documents-ready' }
           if (args.command[1] === BROWSER_PROBE) {
             assert.equal(args.permissionProfile, 'native-execution')
@@ -605,7 +608,8 @@ test('PDF capability requires its real render/reopen probe; failure retains Offi
     runtime.openNativeExecutionAdapter = async (inputs, id, binding, options) => {
       runtime.activeAdapters.set(id, { egress: { measureAllowedTls: async () => ({ measured: true, tlsVerified: true }) } })
       return { nativeExecutionIsolation: { network: { measured: true, nftDefaultDropReadback: true, directInternetBlocked: true } }, readback: { providerCaTrust: {} },
-        request: async (_method, args) => {
+        request: async (_method, args, rpcTimeout) => {
+          assert.equal(args.disableTimeout, true); assert.equal(Object.hasOwn(args, 'timeoutMs'), false); assert.equal(rpcTimeout, null)
           if (args.command.includes(DOCUMENT_PROBE)) return { exitCode: 0, stdout: 'native-documents-ready' }
           if (args.command.includes(BROWSER_PROBE)) return { exitCode: 0, stdout: 'native-browser-ready' }
           if (args.command.includes(PDF_PROBE)) {

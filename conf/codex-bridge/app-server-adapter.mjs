@@ -450,7 +450,9 @@ export class AppServerAdapter extends EventEmitter {
     if (this.closed) return Promise.reject(new Error('APP_SERVER_CLOSED'))
     const requestId = this.nextId++
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(requestId); const error = new Error(`APP_SERVER_RPC_TIMEOUT:${method}`); error.code = 'APP_SERVER_RPC_TIMEOUT'; reject(error) }, timeoutMs)
+      // Explicit null is for owned local readiness commands: wait for their result
+      // or existing pipe/process/owner shutdown, not an arbitrary RPC deadline.
+      const timer = timeoutMs === null ? null : setTimeout(() => { this.pending.delete(requestId); const error = new Error(`APP_SERVER_RPC_TIMEOUT:${method}`); error.code = 'APP_SERVER_RPC_TIMEOUT'; reject(error) }, timeoutMs)
       this.pending.set(requestId, { resolve, reject, method, timer }); this.send({ id: requestId, method, params })
     })
   }

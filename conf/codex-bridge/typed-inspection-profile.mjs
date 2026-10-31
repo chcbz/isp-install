@@ -309,8 +309,8 @@ console.log('script-ok')
     const network = adapter.nativeExecutionIsolation?.network
     if (network?.measured !== true || network.nftDefaultDropReadback !== true || network.directInternetBlocked !== true) fail('NATIVE_SCRIPT_NETWORK_UNVERIFIED')
     stage = 'script-exec'
-    const result = await adapter.request('command/exec', { command: ['/usr/bin/node', '/state/codex-home/skills/probe-skill/probe.mjs'], cwd: '/execution',
-      sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: true, excludeSlashTmp: true, excludeTmpdirEnvVar: true } })
+    const result = await adapter.request('command/exec', { command: ['/usr/bin/node', '/state/codex-home/skills/probe-skill/probe.mjs'], cwd: '/execution', disableTimeout: true,
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: true, excludeSlashTmp: true, excludeTmpdirEnvVar: true } }, null)
     if (result?.exitCode !== 0 || result.stdout?.trim() !== 'script-ok' || readFileSync(resolve(draftsDirectory, 'script-probe.txt'), 'utf8') !== 'script-ok'
         || readFileSync(resolve(inputs, 'probe.txt'), 'utf8') !== 'script-input') fail('NATIVE_SCRIPT_PROBE_FAILED')
     validateNativeExecutionToolchain(runtime.nativeToolchain)
@@ -686,7 +686,7 @@ export class TypedInspectionProfileRuntime {
       stage = 'shell'
       const result = await adapter.request('command/exec', { command: [this.nativeToolchain.shell, '-c',
         'set -e; cat /inputs/probe.txt > /workspace/probe.txt; cat /workspace/probe.txt > /outputs/probe.txt; ! (echo bad > /inputs/probe.txt) 2>/dev/null; ! (echo bad > /state/codex-home/probe.txt) 2>/dev/null; cat /outputs/probe.txt'],
-        cwd: '/execution', sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } })
+        cwd: '/execution', disableTimeout: true, sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } }, null)
       if (result?.exitCode !== 0 || result.stdout !== 'native-declaration-probe'
           || readFileSync(resolve(draftsDirectory, 'probe.txt'), 'utf8') !== 'native-declaration-probe'
           || readFileSync(resolve(inputs, 'probe.txt'), 'utf8') !== 'native-declaration-probe') fail('NATIVE_EXECUTION_SHELL_UNVERIFIED')
@@ -695,7 +695,7 @@ export class TypedInspectionProfileRuntime {
         this.nativeDocumentMeasurementFailure = null
         try {
           const probe = await adapter.request('command/exec', { command: ['/usr/bin/python3', '-I', '-B', DOCUMENT_PROBE],
-            cwd: '/execution', sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } })
+            cwd: '/execution', disableTimeout: true, sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } }, null)
           documentReady = probe?.exitCode === 0 && probe.stdout.trim() === 'native-documents-ready'
           if (!documentReady) this.nativeDocumentMeasurementFailure = { stage: 'document-probe', code: 'NATIVE_DOCUMENT_PROBE_FAILED' }
         } catch { this.nativeDocumentMeasurementFailure = { stage: 'document-probe', code: 'NATIVE_DOCUMENT_PROBE_FAILED' } }
@@ -704,7 +704,7 @@ export class TypedInspectionProfileRuntime {
       if (browserProbe) {
         this.nativeBrowserMeasurementFailure = null
         try {
-          const probe = await adapter.request('command/exec', { command: ['/usr/bin/node', BROWSER_PROBE], cwd: '/execution', permissionProfile: NATIVE_PERMISSION_PROFILE })
+          const probe = await adapter.request('command/exec', { command: ['/usr/bin/node', BROWSER_PROBE], cwd: '/execution', disableTimeout: true, permissionProfile: NATIVE_PERMISSION_PROFILE }, null)
           browserReady = probe.exitCode === 0 && probe.stdout.trim() === 'native-browser-ready'
           if (!browserReady) this.nativeBrowserMeasurementFailure = { stage: 'browser-probe', code: 'NATIVE_BROWSER_PROBE_FAILED' }
         } catch { this.nativeBrowserMeasurementFailure = { stage: 'browser-probe', code: 'NATIVE_BROWSER_PROBE_FAILED' } }
@@ -712,7 +712,7 @@ export class TypedInspectionProfileRuntime {
       if (documentReady && browserReady && this.nativeToolchain.files.some(file => file.sandboxPath === PDF_PROBE)) {
         this.nativePdfMeasurementFailure = null
         try {
-          const probe = await adapter.request('command/exec', { command: ['/usr/bin/node', PDF_PROBE], cwd: '/execution', permissionProfile: NATIVE_PERMISSION_PROFILE })
+          const probe = await adapter.request('command/exec', { command: ['/usr/bin/node', PDF_PROBE], cwd: '/execution', disableTimeout: true, permissionProfile: NATIVE_PERMISSION_PROFILE }, null)
           pdfReady = probe?.exitCode === 0 && probe.stdout.trim() === 'native-pdf-ready'
           if (!pdfReady) this.nativePdfMeasurementFailure = { stage: 'pdf-probe', code: 'NATIVE_PDF_PROBE_FAILED' }
         } catch { this.nativePdfMeasurementFailure = { stage: 'pdf-probe', code: 'NATIVE_PDF_PROBE_FAILED' } }
