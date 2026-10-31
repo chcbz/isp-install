@@ -591,3 +591,37 @@ test('native inner permissions allow socket IPC while retaining filesystem bound
   config.permissions['native-execution'].filesystem['/'] = 'write'
   assert.throws(() => verifyNativeExecutionConfig({ config: { config } }), /CONFIG_READBACK_MISMATCH/)
 })
+
+test('PDF capability requires its real render/reopen probe; failure retains Office and browser', async () => {
+  const { BROWSER_PROBE } = await import('../native-browser-toolchain.mjs')
+  const { DOCUMENT_PROBE, PDF_PROBE, DOCUMENT_MIMES } = await import('../native-document-toolchain.mjs')
+  const f = fixture()
+  try {
+    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    Object.assign(runtime, { materializerRoot: mkdir(resolve(f.root, 'pdf-measurements')), profile: { typedInspectionProviderNetwork: 'restricted-proxy' },
+      nativeToolchain: { ...f.options.toolchain, files: [...f.options.toolchain.files, ...[BROWSER_PROBE, DOCUMENT_PROBE, PDF_PROBE].map(path => tool('/usr/bin/bash', path))] }, activeAdapters: new Map() })
+    let success = true
+    runtime._measureNativeSkillScript = async () => false
+    runtime.openNativeExecutionAdapter = async (inputs, id, binding, options) => {
+      runtime.activeAdapters.set(id, { egress: { measureAllowedTls: async () => ({ measured: true, tlsVerified: true }) } })
+      return { nativeExecutionIsolation: { network: { measured: true, nftDefaultDropReadback: true, directInternetBlocked: true } }, readback: { providerCaTrust: {} },
+        request: async (_method, args) => {
+          if (args.command.includes(DOCUMENT_PROBE)) return { exitCode: 0, stdout: 'native-documents-ready' }
+          if (args.command.includes(BROWSER_PROBE)) return { exitCode: 0, stdout: 'native-browser-ready' }
+          if (args.command.includes(PDF_PROBE)) {
+            assert.equal(args.permissionProfile, 'native-execution')
+            return { exitCode: success ? 0 : 1, stdout: success ? 'native-pdf-ready' : '' }
+          }
+          writeFileSync(resolve(options.draftsDirectory, 'probe.txt'), readFileSync(resolve(inputs, 'probe.txt')))
+          return { exitCode: 0, stdout: 'native-declaration-probe' }
+        } }
+    }
+    runtime.releaseAdapter = async id => { runtime.activeAdapters.delete(id) }
+    assert.ok((await runtime.measureNativeExecution()).outputMimeTypes.includes('application/pdf'))
+    success = false
+    assert.deepEqual((await runtime.measureNativeExecution()).outputMimeTypes, ['text/plain', 'text/markdown', 'text/html', 'application/json', 'image/png', ...DOCUMENT_MIMES])
+    assert.equal(runtime.nativeBrowserReady, true)
+    assert.equal(runtime.nativePdfMeasurementFailure.code, 'NATIVE_PDF_PROBE_FAILED')
+    assert.equal(runtime.activeAdapters.size, 0)
+  } finally { f.cleanup() }
+})

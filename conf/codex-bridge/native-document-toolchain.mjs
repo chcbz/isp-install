@@ -11,6 +11,7 @@ import { measureMinimalNativeExecutionToolchain, validateNativeExecutionToolchai
 
 export const DOCUMENT_MIMES = Object.freeze(['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'])
 export const DOCUMENT_PROBE = '/usr/lib/cyf-documents/document_probe.py'
+export const PDF_PROBE = '/usr/lib/cyf-documents/pdf-probe.mjs'
 const root = fileURLToPath(new URL('.', import.meta.url))
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const pin = (sourcePath, sandboxPath) => {
@@ -18,7 +19,7 @@ const pin = (sourcePath, sandboxPath) => {
   return { sourcePath: source, sandboxPath, sha256: createHash('sha256').update(readFileSync(source)).digest('hex') }
 }
 
-export function measureNativeDocumentToolchain({ base, pythonBin = resolve(root, '.toolchain/bin/python'), requirementsPath = resolve(root, 'toolchain/requirements.txt'), probePath = resolve(root, 'toolchain/document_probe.py') }) {
+export function measureNativeDocumentToolchain({ base, pythonBin = resolve(root, '.toolchain/bin/python'), requirementsPath = resolve(root, 'toolchain/requirements.txt'), probePath = resolve(root, 'toolchain/document_probe.py'), pdfProbePath = resolve(root, 'toolchain/pdf-probe.mjs'), readmePath = resolve(root, 'toolchain/documents/README.md') }) {
   const files = [...base.files, pin(pythonBin, '/usr/bin/python3')]
   // The installed venv can still reference an external base interpreter. Check
   // that protected base location before Python imports any of its stdlib.
@@ -47,8 +48,8 @@ export function measureNativeDocumentToolchain({ base, pythonBin = resolve(root,
       validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(resolve(library, 'os.py'), '/usr/lib/cyf-documents/os.py'), pin(resolve(library, 'encodings/__init__.py'), '/usr/lib/cyf-documents/encodings.py')] })
     }
   }
-  const measured = spawnSync(pythonBin, ['-I', '-B', '-c', `import json, os, sys, sysconfig, pkg_resources
-wanted = {'python-docx', 'openpyxl'}
+  const measured = spawnSync(pythonBin, ['-I', '-B', '-c', `import json, os, sys, sysconfig, pkg_resources, importlib.metadata
+wanted = {'python-docx', 'openpyxl', 'pypdf'}
 requirements = []
 for line in open(sys.argv[1]):
  line = line.strip()
@@ -57,8 +58,11 @@ for line in open(sys.argv[1]):
 assert len(requirements) == len(wanted), 'DOCUMENT_REQUIREMENTS_MISSING'
 packages = set()
 for dist in pkg_resources.require(requirements):
- for name in dist.get_metadata('top_level.txt').splitlines():
-  if name.strip(): packages.add(name.strip())
+ if dist.has_metadata('top_level.txt'):
+  packages.update(name.strip() for name in dist.get_metadata('top_level.txt').splitlines() if name.strip())
+ else:
+  # Modern wheels need not contain setuptools' optional top_level.txt.
+  packages.update(path.parts[0] for path in importlib.metadata.distribution(dist.project_name).files or [] if len(path.parts) == 2 and path.parts[1] == '__init__.py')
 print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig.get_path('stdlib'), 'platlib': sysconfig.get_path('platlib'), 'packages': sorted(packages), 'prefix': sys.prefix, 'basePrefix': sys.base_prefix, 'platlibdir': os.path.basename(os.path.dirname(sysconfig.get_path('stdlib')))}))`, requirementsPath], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' } })
   if (measured.status !== 0) fail('NATIVE_DOCUMENT_TOOLCHAIN_UNAVAILABLE')
   const info = JSON.parse(measured.stdout)
@@ -86,7 +90,7 @@ print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig
     if (lstatSync(source).isSymbolicLink()) fail('NATIVE_DOCUMENT_TOOLCHAIN_UNSAFE')
     walk(source, `${library}/site-packages/${name}`)
   }
-  files.push(pin(probePath, DOCUMENT_PROBE))
+  files.push(pin(probePath, DOCUMENT_PROBE), pin(pdfProbePath, PDF_PROBE), pin(readmePath, '/usr/lib/cyf-documents/README.md'))
   // Shared objects may reference bundled libraries outside /usr. Only those
   // measured dependencies are copied into the namespace, never their parents.
   validateNativeExecutionToolchain({ shell: base.shell, files })

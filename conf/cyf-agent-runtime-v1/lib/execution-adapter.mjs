@@ -382,6 +382,8 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "schemas/skill-manifest-v1.schema.json",
   "toolchain/delivery_tool.py",
   "toolchain/document_probe.py",
+  "toolchain/pdf-probe.mjs",
+  "toolchain/documents/README.md",
   "toolchain/requirements.txt",
   "toolchain/browser-session.mjs",
   "toolchain/browser-probe.mjs",

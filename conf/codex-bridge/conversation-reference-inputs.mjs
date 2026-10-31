@@ -20,7 +20,7 @@ export const parseNativeConversationInputs = (snapshot, executionId, leaseVersio
   if (!obj(snapshot) || Object.keys(snapshot).sort().join(',') !==
       ['executionId', 'leaseVersion', 'noReferencedMaterials', 'inputs'].sort().join(',') ||
       snapshot.executionId !== executionId || snapshot.leaseVersion !== leaseVersion ||
-      !Array.isArray(snapshot.inputs) || snapshot.inputs.length > 32 ||
+      !Array.isArray(snapshot.inputs) ||
       snapshot.noReferencedMaterials !== (snapshot.inputs.length === 0)) deny()
   return Object.freeze(snapshot.inputs.map((input, index) => {
     if (!obj(input) || Object.keys(input).sort().join(',') !== FIELDS ||

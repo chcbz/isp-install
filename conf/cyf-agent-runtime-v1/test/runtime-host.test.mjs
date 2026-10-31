@@ -1114,7 +1114,7 @@ test('current delivery dependency candidate keeps six exact pins and one fixed p
   const requirements = await readFile(resolve(engineSource, 'toolchain/requirements.txt'), 'utf8');
   assert.deepEqual(requirements.split(/\r?\n/).filter(line => line && !line.startsWith('#')), [
     'python-docx==0.8.11', 'python-pptx==0.6.23', 'openpyxl==3.1.3',
-    'Pillow==10.4.0', 'PyPDF2==1.28.6', 'reportlab==3.6.13'
+    'Pillow==10.4.0', 'PyPDF2==1.28.6', 'reportlab==3.6.13', 'pypdf==6.21.4'
   ]);
   assert.match(requirements, /Python 3\.11\.13.*not yet accepted/);
   // Source/pin assertions only; no install, wheel import, format or ABI PASS.

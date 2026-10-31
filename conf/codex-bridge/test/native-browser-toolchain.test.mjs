@@ -39,7 +39,15 @@ test('real browser reads, clicks, fills, uploads, downloads and isolates context
   for (const name of ['browser-session.mjs', 'browser-probe.mjs', 'browser-fonts.conf']) copyFileSync(new URL(`../toolchain/${name}`, import.meta.url), resolve(scriptsRoot, name))
   mkdir(resolve(scriptsRoot, 'browser'))
   copyFileSync(new URL('../toolchain/browser/README.md', import.meta.url), resolve(scriptsRoot, 'browser/README.md'))
-  const toolchain = measureNativeBrowserToolchain({ base: measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath }),
+  let base = measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath })
+  if (process.env.CYF_NATIVE_DOCUMENT_PROBE_PYTHON) {
+    const { measureNativeDocumentToolchain } = await import('../native-document-toolchain.mjs')
+    for (const name of ['document_probe.py', 'pdf-probe.mjs']) copyFileSync(new URL(`../toolchain/${name}`, import.meta.url), resolve(scriptsRoot, name))
+    copyFileSync(new URL('../toolchain/documents/README.md', import.meta.url), resolve(scriptsRoot, 'documents-README.md'))
+    base = measureNativeDocumentToolchain({ base, pythonBin: process.env.CYF_NATIVE_DOCUMENT_PROBE_PYTHON,
+      probePath: resolve(scriptsRoot, 'document_probe.py'), pdfProbePath: resolve(scriptsRoot, 'pdf-probe.mjs'), readmePath: resolve(scriptsRoot, 'documents-README.md') })
+  }
+  const toolchain = measureNativeBrowserToolchain({ base,
     scriptsRoot, fontsRoot: resolve(toolchainRoot, 'fonts'), browserRoot: resolve(toolchainRoot, 'chromium'), playwrightRoot: resolve(toolchainRoot, 'node_modules/playwright-core') })
   const execution = mkdir(resolve(root, 'execution')), stateRoot = mkdir(resolve(root, 'state'))
   const options = { inputDirectory: mkdir(resolve(execution, 'inputs')), scratchDirectory: mkdir(resolve(execution, 'scratch')), draftsDirectory: mkdir(resolve(execution, 'drafts')),
@@ -58,4 +66,28 @@ test('real browser reads, clicks, fills, uploads, downloads and isolates context
   assert.equal(readFileSync(resolve(options.inputDirectory, 'probe.txt'), 'utf8'), 'native-browser-input')
   assert.equal(readFileSync(resolve(options.draftsDirectory, 'browser-probe.txt'), 'utf8'), 'native-browser-download')
   assert.equal(readFileSync(resolve(options.draftsDirectory, 'browser-probe.png')).subarray(0,8).toString('hex'), '89504e470d0a1a0a')
+  if (process.env.CYF_NATIVE_DOCUMENT_PROBE_PYTHON) {
+    const { PDF_PROBE } = await import('../native-document-toolchain.mjs')
+    const { validateNativeOutputSnapshot } = await import('../native-output-format.mjs')
+    const commandArgs = args.slice(0, -2)
+    const pdf = spawnSync('/usr/bin/bwrap', [...commandArgs, '/usr/bin/node', PDF_PROBE], { encoding: 'utf8', env: { LANG: 'C.UTF-8' } })
+    assert.equal(pdf.status, 0, pdf.stderr); assert.equal(pdf.stdout.trim(), 'native-pdf-ready')
+    const generated = readFileSync(resolve(options.scratchDirectory, 'probe.pdf'))
+    copyFileSync(resolve(options.scratchDirectory, 'probe.pdf'), resolve(options.inputDirectory, 'input.pdf'))
+    const edit = spawnSync('/usr/bin/bwrap', [...commandArgs, '/usr/bin/python3', '-I', '-B', '-c', `from pypdf import PdfReader, PdfWriter
+from unicodedata import normalize
+reader = PdfReader('/inputs/input.pdf', strict=True)
+assert '中文文档核验' in ''.join(normalize('NFKC', reader.pages[0].extract_text()).split())
+writer = PdfWriter()
+writer.append(reader)
+writer.add_metadata({'/Title': '中文PDF重开核验'})
+with open('/outputs/result.pdf', 'wb') as output: writer.write(output)
+result = PdfReader('/outputs/result.pdf', strict=True)
+assert len(result.pages) == 1 and result.metadata.title == '中文PDF重开核验'
+assert '中文文档核验' in ''.join(normalize('NFKC', result.pages[0].extract_text()).split())
+`], { encoding: 'utf8', env: { LANG: 'C.UTF-8' } })
+    assert.equal(edit.status, 0, edit.stderr)
+    assert.deepEqual(readFileSync(resolve(options.inputDirectory, 'input.pdf')), generated)
+    assert.equal(validateNativeOutputSnapshot(resolve(options.draftsDirectory, 'result.pdf'), 'application/pdf'), 'application/pdf')
+  }
 })

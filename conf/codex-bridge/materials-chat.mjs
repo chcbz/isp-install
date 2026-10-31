@@ -22,7 +22,7 @@ export function resolveChatMaterials(profile, message) {
   if (!exact(value, ['schemaVersion', 'authorizationId', 'manifestDigest', 'manifest']) || value.schemaVersion !== 1 || !digest(value.manifestDigest)
       || !exact(manifest, ['schemaVersion', 'profile', 'sources']) || manifest.schemaVersion !== 1
       || !exact(manifest.profile, ['schemaVersion', 'supportedInputs']) || manifest.profile.schemaVersion !== 1
-      || !Array.isArray(manifest.profile.supportedInputs) || !Array.isArray(manifest.sources) || !manifest.sources.length || manifest.sources.length > 32) fail('MATERIALS_MANIFEST_INVALID')
+      || !Array.isArray(manifest.profile.supportedInputs) || !Array.isArray(manifest.sources) || !manifest.sources.length) fail('MATERIALS_MANIFEST_INVALID')
   const formats = new Map()
   for (const format of manifest.profile.supportedInputs) {
     if (!exact(format, ['mediaKind', 'mimeType', 'carrier', 'carrierContractDigest'])

@@ -32,3 +32,15 @@ test('invalid archive paths, duplicate entries and symlink snapshots are rejecte
   const link = resolve(f.root, 'linked'); symlinkSync(f.path, link)
   await assert.rejects(() => validateNativeOutputSnapshot(link, docx), { code: 'ELOOP' })
 })
+
+test('PDF collector checks the byte envelope only, matching the existing API contract', async t => {
+  const { pdfFixture } = await import('./fixtures/pdf-document.mjs')
+  const f = fixture(t)
+  for (const bytes of [pdfFixture(), Buffer.concat([pdfFixture(), Buffer.alloc(9000, 32)]), pdfFixture({ encrypted: true })]) {
+    f.put(bytes); assert.equal(validateNativeOutputSnapshot(f.path, 'application/pdf'), 'application/pdf')
+  }
+  // Encrypted PDFs can be carried; this check does not claim they can be read.
+  for (const bytes of [Buffer.from('not PDF'), pdfFixture().subarray(0, -8), Buffer.concat([pdfFixture(), Buffer.from('garbage')]), Buffer.from('%%EOF')]) {
+    f.put(bytes); assert.throws(() => validateNativeOutputSnapshot(f.path, 'application/pdf'), /FORMAT_INVALID/)
+  }
+})
