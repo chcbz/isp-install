@@ -11,7 +11,7 @@ import { measureMinimalNativeExecutionToolchain, validateNativeExecutionToolchai
 
 export const DOCUMENT_MIMES = Object.freeze(['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'])
 export const DOCUMENT_PROBE = '/usr/lib/cyf-documents/document_probe.py'
-export const PDF_PROBE = '/usr/lib/cyf-documents/pdf-probe.mjs'
+export const PDF_PROBE = '/usr/lib/cyf-browser/pdf-probe.mjs'
 const root = fileURLToPath(new URL('.', import.meta.url))
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const pin = (sourcePath, sandboxPath) => {

@@ -1,5 +1,5 @@
 /** Disposable PDF readiness probe, not a business document template. */
-import { withBrowser } from '/usr/lib/cyf-browser/browser-session.mjs'
+import { withBrowser } from './browser-session.mjs'
 import { execFileSync } from 'node:child_process'
 await withBrowser(async ({ page }) => {
   await page.setContent('<meta charset="utf-8"><style>body{font-family:"Noto Sans CJK SC"}</style><p>中文文档核验 PDF-1031</p>')
