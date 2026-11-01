@@ -12,7 +12,7 @@ function fixture(t) {
   const store = new SkillExecutionStore({ rootDirectory: root, scope: { agentId: 'agent1' }, command })
   const events = []; let policy; let mode = 'success'; let runs = 0
   const adapter = {
-    startOrResumeThread: async (_binding, value) => { assert.equal(value.cwd, '/execution'); assert.match(value.developerInstructions, /\/usr\/lib\/cyf-\*\/README\.md/); events.push('thread'); return { threadId: 'thread1' } },
+    startOrResumeThread: async (_binding, value) => { assert.equal(value.cwd, '/execution'); assert.match(value.developerInstructions, /\/usr\/lib\/cyf-\*\/README\.md/); assert.match(value.developerInstructions, /required even when the user asks for preview only/); assert.match(value.developerInstructions, /User acceptance is a separate explicit action/); events.push('thread'); return { threadId: 'thread1' } },
     runTurn: async options => {
       runs++; events.push('turn'); assert.equal(options.policy.cwd, '/execution')
       if (mode === 'acceptance-unknown') throw Object.assign(new Error('reply lost'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
@@ -155,4 +155,11 @@ test('completed turn missing required proposal reports execution failure and rec
   await assert.rejects(runNativeExecution(f.request), error => error.code === 'NATIVE_EXECUTION_TURN_FAILED' && error.cause.code === 'NATIVE_PROPOSAL_REQUIRED')
   assert.equal(f.runs(), 1)
   assert.equal(f.store.loadResult(), null)
+})
+
+test('preview-only task still returns proposed candidates without an acceptance action', async t => {
+  const f = fixture(t); f.command.instruction = '生成 roles-v2.txt 供预览，暂不验收';
+  const result = await runNativeExecution(f.request);
+  assert.equal(result.result.artifacts.length, 1); assert.equal(f.runs(), 1);
+  assert.equal(f.store.read('native-selection').artifacts.length, 1);
 })
