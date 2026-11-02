@@ -410,3 +410,17 @@ local-script解释器从整文件同步读取改为1MiB缓冲异步SHA，每次�
 - 既有模型选择不变，不自动改用目录默认模型。运营者应只配置本环境获准模型，目录不安装到技能包。安装成功、模型工具广告、真实检索和新闻时效验证分别记录。
 
 2026-11-02定向探针证实：仅web_search=live时模型回复无搜索；在启动时加载匹配目录后真实请求出现web_search/external_web_access=true，实际模型产生webSearch记录。该探针不是生产部署或完整最新新闻验收。详细候选/限制见CYF `specs/juyiting-skill-execution/reusable-packages-20261102.md`。
+
+### 2026-11-03 候选：文件命令发现事件化（未部署）
+
+候选 Runtime 1.3.36 / bridge 1.1.26。CYF API合同见固定基线
+`192a590b2c8b690337818606a6180fca6f99a600:docs/interface-catalog/native-work-notifications.md`。
+`workspaceFileWorkNotifications:1`独立注册协商成功后，使用既有WS的
+`runtime.work.available` / `WORKSPACE_FILE`提示触发原HTTP发现；不能由native1协商推断。
+旧服务端保留3秒发现，启动/重连仍补读，网络错误保留重试。
+
+空闲且已协商的文件lane不定时查询；满页接收不是领取，不因重复满页立即循环。
+复用processor的持久inbox/去重及drain完成通知继续发现，每个在途drain只观察一次；
+断连/替换后的旧回调不唤醒新会话。UNKNOWN、ACK恢复、心跳/租约不改变，不自动重放模型。
+API每节点单30秒订阅目标补偿与native lane共用，遗漏/跨节点提示可能等待30秒加处理时间。
+这不是线上收益或已发布声明；正式验证、源码和安装分别以CYF主handoff为准。

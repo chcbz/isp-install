@@ -58,6 +58,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let socket = null; let observer = null; let abort = null; let loop = null; let channelConfirmed = false;
       let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
       let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
+      let nativeWorkEnabled = false; let fileWorkEnabled = false;
       let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
       const inFlightSkillReceipts = new Set();
       let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false; let registeredAt = null; let serviceReadyAt = null; let replay = null;
@@ -87,7 +88,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         const healthy = durable(); declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
         const envelope = module.buildProtocolEnvelope('agent.register', { ...executor.registrationPayload(),
           messageId: randomUUID(), durableStateHealthy: healthy, readyCommandTypes: requestTypes }, executor.state().profile, instanceId);
-        observer.begin(envelope.messageId); channelConfirmed = false; registeredAt = null; serviceReadyAt = null;
+        observer.begin(envelope.messageId); nativeWorkEnabled = false; fileWorkEnabled = false; channelConfirmed = false; registeredAt = null; serviceReadyAt = null;
         if (!send(envelope)) observer.sendFailed(envelope.messageId);
         return true;
       };
@@ -160,7 +161,10 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
                 channelConfirmed = false; managementSession = null; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
               }
               channelConfirmed = true; managementSession = session; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null;
-              executor.bindWorkNotifications?.(payload.nativeWorkNotifications === 1 ? 1 : null);
+              nativeWorkEnabled = payload.nativeWorkNotifications === 1;
+              fileWorkEnabled = payload.workspaceFileWorkNotifications === 1;
+              executor.bindWorkNotifications?.(nativeWorkEnabled ? 1 : null);
+              executor.bindWorkspaceFileWorkNotifications?.(fileWorkEnabled ? 1 : null);
               // The first ACK supplies owner scope. If it starts a catalog measurement,
               // activation waits for the follow-up catalog registration ACK; otherwise the
               // shared host could freeze INITIALIZED while re-registration is in flight.
@@ -183,13 +187,16 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             }
             // This is a lossy scheduling hint, never an executable command or durable ACK.
             if (frame.messageType === 'runtime.work.available') {
-              if (frame.notificationVersion !== 1 || frame.lane !== 'NATIVE_CONVERSATION'
+              if (frame.notificationVersion !== 1 || !['NATIVE_CONVERSATION', 'WORKSPACE_FILE'].includes(frame.lane)
+                  || (frame.lane === 'WORKSPACE_FILE' ? !fileWorkEnabled : !nativeWorkEnabled)
                   || frame.agentId !== session.canonicalAgentId
                   || ['installationId', 'tenantId', 'clientId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
                     .some(key => frame[key] !== session[key])) {
                 logger('runtime-frame-rejected', { code: 'RUNTIME_WORK_HINT_INVALID' }); return;
               }
-              executor.nativeWorkAvailable?.(); return;
+              if (frame.lane === 'WORKSPACE_FILE') executor.workspaceFileWorkAvailable?.();
+              else executor.nativeWorkAvailable?.();
+              return;
             }
             // AgentWebSocketHandler.updateAgentStatus sends copyTrace(presence)
             // plus agentId/status as agent_status_updated, without messageType.

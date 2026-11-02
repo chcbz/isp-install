@@ -5443,7 +5443,7 @@ const exactResponseUrl = (response, endpoint) => {
  * websocket-delivered commands.
  */
 export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = state?.runtimeTransport?.nativeFetch || globalThis.fetch } = {}) => {
-  if (!profile || !state?.workspaceFileBridge || !state?.processor) return { dispatched: 0, rejected: 0 }
+  if (!profile || !state?.workspaceFileBridge || !state?.processor) return { dispatched: 0, rejected: 0, received: 0, admitted: 0 }
   const auth = state.workspaceFileRuntimeAuthHeader || ''
   if (!/^AgentRuntime rts1_[0-9a-f]{64}$/.test(auth) || typeof fetchFn !== 'function') {
     throw new AgentProtocolError('WORKSPACE_FILE_RUNTIME_UNAVAILABLE', 'workspace runtime polling is not configured')
@@ -5496,6 +5496,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
   }
   let dispatched = 0
   let rejected = 0
+  let admitted = 0
   for (const item of body.items) {
     try {
       const privateCommand = fromAgentWire(JSON.stringify(item))
@@ -5509,6 +5510,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
       const result = await state.processor.handle(JSON.stringify(privateCommand))
       if (result?.kind === 'rejected') throw result.error
       dispatched += 1
+      if (result?.kind === 'command') admitted += 1
     } catch (error) {
       rejected += 1
       state.processor.onReject?.(
@@ -5517,39 +5519,62 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
       )
     }
   }
-  return { dispatched, rejected }
+  return { dispatched, rejected, received: body.items.length, admitted }
 }
 
-const stopWorkspaceFilePoller = state => {
+export const stopWorkspaceFilePoller = state => {
   if (!state) return
-  clearInterval(state.workspaceFilePollTimer)
-  state.workspaceFilePollTimer = null
+  state.workspaceFileWakeup?.stop()
+  state.workspaceFileWakeup = null
   // Stopping admission must not release an in-flight owner's guard.
 }
 
-const startWorkspaceFilePoller = (profile, state) => {
+export const startWorkspaceFilePoller = (profile, state) => {
   stopWorkspaceFilePoller(state)
   if (!state?.workspaceFileBridge || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
-  const tick = async () => {
-    if (state.workspaceFilePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
-    state.workspaceFilePollInFlight = true
-    try {
-      const polling = pollWorkspaceFileCommands({ profile, state }); state.workspaceFilePollPromise = polling
-      const result = await polling
+  let observedDrain = null
+  const current = () => state.workspaceFileWakeup === loop && state.ws?.readyState === WebSocketClient.OPEN && !state.processor.paused
+  const loop = new NativeConversationWakeup({
+    eventDriven: state.workspaceFileWorkNotifications === 1,
+    current,
+    // The existing processor owns inbox recovery and execution. Discovery never replays UNKNOWN.
+    nextRecoveryAt: () => Infinity,
+    poll: async () => {
+      if (state.workspaceFilePollInFlight) return { status: 'BUSY' }
+      state.workspaceFilePollInFlight = true
+      try {
+        const polling = pollWorkspaceFileCommands({ profile, state })
+        state.workspaceFilePollPromise = polling
+        return await polling
+      } finally { state.workspaceFilePollInFlight = false }
+    },
+    onReport: result => {
       if (result.rejected) console.warn(`workspace command rejected | profile=${profile.profileId} | count=${result.rejected}`)
-    } catch (error) {
-      // Do not include request/header values in diagnostics.
+      // HTTP admission is not a claim. A full page can be the same durable commands while
+      // execution is active: wait for that processor drain, not a zero-delay rediscovery loop.
+      const drain = state.processor.drainPromise
+      if (drain && drain !== observedDrain) {
+        observedDrain = drain
+        const settled = () => {
+          if (observedDrain === drain) observedDrain = null
+          if (current()) loop.wake()
+        }
+        void drain.then(settled, settled)
+      } else if (!drain && result.received === 16 && result.admitted > 0) {
+        // Fast completion may have already cleared drainPromise before the HTTP pass finishes.
+        loop.wake()
+      }
+    },
+    onError: error => {
       console.warn(`workspace command poll unavailable | profile=${profile.profileId} | code=${error.code || 'WORKSPACE_FILE_QUEUE_UNAVAILABLE'}`)
-    } finally {
-      state.workspaceFilePollInFlight = false
     }
-  }
-  void tick()
-  state.workspaceFilePollTimer = setInterval(() => { void tick() }, 3000)
+  })
+  state.workspaceFileWakeup = loop
+  void loop.start()
 }
 
 // Native discovery is event-driven only after the current registration ACK confirms support.
-// Recovery reads local pending records independently; workspace-file remains a separate lane.
+// Recovery reads local pending records independently; file discovery has its own negotiated lane.
 export const stopNativeConversationPoller = state => {
   if (!state) return
   state.conversationNativeWakeup?.stop()
@@ -5846,7 +5871,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     })() : true,
     ws: null,
     heartbeatTimer: null,
-    workspaceFilePollTimer: null,
+    workspaceFileWakeup: null,
     workspaceFilePollInFlight: false,
     conversationNativePollTimer: null,
     conversationNativePollInFlight: false,
@@ -6345,6 +6370,8 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
         bindWorkNotifications: version => { entry.state.nativeWorkNotifications = version === 1 ? 1 : null },
         nativeWorkAvailable: () => { entry.state.conversationNativeWakeup?.wake() },
+        bindWorkspaceFileWorkNotifications: version => { entry.state.workspaceFileWorkNotifications = version === 1 ? 1 : null },
+        workspaceFileWorkAvailable: () => { entry.state.workspaceFileWakeup?.wake() },
         matchesSkillManagementAck: envelope => entry.state?.skillInstallManager.matchesDurableAckEnvelope(envelope) === true,
         matchesSkillInstallResult: envelope => entry.state?.skillInstallManager.matchesDurableResultEnvelope(envelope) === true,
         matchesSkillInstallReceipt: receipt => entry.state?.skillInstallManager.matchesDurableResultReceipt(receipt) === true,
@@ -6355,7 +6382,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           try { state.ackOutbox.pendingEnvelopes(); return state.skillInstallManager.isHealthy() } catch { return false }
         },
         registrationPayload: () => ({ ...buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
-          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry), nativeWorkNotifications: 1 }),
+          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry), nativeWorkNotifications: 1, workspaceFileWorkNotifications: 1 }),
         readyCommandTypes: () => runtimeReadyCommandTypes(entry.state),
         skillManagementReady: () => Boolean(entry.state && !entry.closed && !entry.state.disposed && entry.state.skillInstallManager.isHealthy()),
         chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),

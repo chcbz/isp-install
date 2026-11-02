@@ -458,7 +458,7 @@ test('toolchain validation refuses a host-global interpreter alias instead of fa
 
 // M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
 // lifecycle. Synthetic socket/HTTP only; no server/production claim.
-async function channelFixture(t, { ackRegistration = true, nativeWorkNotifications = null, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null, reconcileSkills = false } = {}) {
+async function channelFixture(t, { ackRegistration = true, nativeWorkNotifications = null, workspaceFileWorkNotifications = null, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null, reconcileSkills = false } = {}) {
   const { EventEmitter } = await import('node:events');
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
   const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
@@ -481,6 +481,7 @@ async function channelFixture(t, { ackRegistration = true, nativeWorkNotificatio
         installationId: frame.installationId, hostId: frame.hostId, sessionGeneration: frame.sessionGeneration,
         status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes,
         ...(nativeWorkNotifications === 1 ? { nativeWorkNotifications: 1 } : {}),
+        ...(workspaceFileWorkNotifications === 1 ? { workspaceFileWorkNotifications: 1 } : {}),
         ...(measureSkills ? { runtimeAuth: { scheme: 'native-runtime-v1', tenantId: frame.tenantId, clientId: frame.clientId,
           ownerJiacn: 'fixture-owner', agentId: frame.agentId, installationId: frame.installationId, hostId: frame.hostId,
           runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration, contextPackEnabled: true } } : {}) }));
@@ -506,6 +507,8 @@ async function channelFixture(t, { ackRegistration = true, nativeWorkNotificatio
           },
           bindWorkNotifications: version => { state.workNotificationVersion = version; },
           nativeWorkAvailable: () => { state.workHints = (state.workHints || 0) + 1; },
+          bindWorkspaceFileWorkNotifications: version => { state.fileWorkNotificationVersion = version; },
+          workspaceFileWorkAvailable: () => { state.fileWorkHints = (state.fileWorkHints || 0) + 1; },
           matchesSkillManagementAck: envelope => state.skillInstallManager?.matchesDurableAckEnvelope(envelope) === true,
           ...(reconcileSkills ? {
             reconcilePositionSkills: async () => { (state.reconciliation ||= []).push('positions'); if (state.reconcileFailure) throw Object.assign(new Error('private'), {code:'POSITION_TEST_FAILURE'}); },
@@ -1849,4 +1852,33 @@ test('skill receipt bypass never bypasses the manager transaction tail', { timeo
   assert.equal(frame.lane,'NATIVE_CONVERSATION');assert.equal(frame.sessionGeneration,'1');
   assert.equal(frame.installationId,'rti_'+'1'.repeat(32));assert.equal(frame.runtimeInstanceId,'runtime-current');
   assert.equal(Object.hasOwn(frame,'commandId'),false);
+});
+
+
+test('workspace hints negotiate independently and never enter command ingress', async t => {
+  const c = await channelFixture(t, { workspaceFileWorkNotifications: 1 }); await c.executors[0].activate();
+  const socket = c.sockets[0], state = c.states()[0], registration = socket.sent[0];
+  assert.equal(state.workNotificationVersion, null); assert.equal(state.fileWorkNotificationVersion, 1);
+  const hint = nativeWorkHint(registration); hint.data.lane = 'WORKSPACE_FILE';
+  socket.receive(hint); socket.receive(nativeWorkHint(registration));
+  socket.receive({ ...hint, data: { ...hint.data, sessionGeneration: '999' } });
+  socket.receive({ ...hint, data: { ...hint.data, notificationVersion: 2 } });
+  await c.tick();
+  assert.equal(state.fileWorkHints, 1); assert.equal(state.workHints, undefined); assert.deepEqual(state.accepted, []);
+});
+
+test('native-only ACK does not enable file discovery notifications', async t => {
+  const c = await channelFixture(t, { nativeWorkNotifications: 1 }); await c.executors[0].activate();
+  const socket = c.sockets[0], state = c.states()[0];
+  const hint = nativeWorkHint(socket.sent[0]); hint.data.lane = 'WORKSPACE_FILE';
+  socket.receive(hint); await c.tick();
+  assert.equal(state.fileWorkNotificationVersion, null); assert.equal(state.fileWorkHints, undefined);
+});
+
+test('API shared file work fixture preserves the existing wire envelope and proof', async () => {
+  const wire = JSON.parse(await readFile(new URL('./fixtures/workspace-file-work-hint-v1.json', import.meta.url), 'utf8'));
+  const frame = fromAgentWire(JSON.stringify(wire));
+  assert.equal(frame.messageType, 'runtime.work.available'); assert.equal(frame.lane, 'WORKSPACE_FILE');
+  assert.equal(frame.sessionGeneration, '1'); assert.equal(frame.installationId, 'rti_' + '1'.repeat(32));
+  assert.equal(Object.hasOwn(frame, 'commandId'), false);
 });

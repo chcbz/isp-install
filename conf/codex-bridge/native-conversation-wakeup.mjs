@@ -1,5 +1,5 @@
-// Scheduling only. Durable commands, authorization and effects remain in SkillConversationLane.
-// One timer per native lane; notifications during an active pass request a trailing discovery.
+// Scheduling only. Used by native and file discovery; their existing processors own durable work.
+// One timer per lane; notifications during an active pass request a trailing discovery.
 export class NativeConversationWakeup {
   constructor({ poll, nextRecoveryAt, hasMore = () => false, current, eventDriven,
     onReport = () => {}, onError = () => {}, now = Date.now,

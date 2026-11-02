@@ -1,4 +1,4 @@
-import { startNativeConversationPoller, stopNativeConversationPoller } from '../agent-client.mjs'
+import { startNativeConversationPoller, stopNativeConversationPoller, startWorkspaceFilePoller, stopWorkspaceFilePoller } from '../agent-client.mjs'
 import { toAgentWire, fromAgentWire } from '../agent-message-wire.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -3271,7 +3271,7 @@ test('workspace command polling accepts only exact native queue envelopes and di
       return nativeJsonFixture(url, { items: [valid, { ...valid, messageId: 'bad', commandId: 'bad', targetAgentId: 'other-agent' }] })
     }
   })
-  assert.deepEqual(result, { dispatched: 1, rejected: 1 })
+  assert.deepEqual(result, { dispatched: 1, rejected: 1, received: 2, admitted: 0 })
   assert.equal(handled.length, 1)
   assert.deepEqual(rejected, ['WORKSPACE_FILE_COMMAND_INVALID'])
   assert.deepEqual(fetchCalls, [{
@@ -3302,7 +3302,7 @@ test('workspace queue rejects invalid roots with value-free shape diagnostics', 
       { status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'native-fixture' } })
     Object.defineProperty(response, 'url', { value: String(url) }); return response
   } })
-  assert.deepEqual(result, { dispatched: 0, rejected: 1 })
+  assert.deepEqual(result, { dispatched: 0, rejected: 1, received: 1, admitted: 0 })
   assert.match(rejected[0].message, /PROTOCOL_INVALID_MESSAGE; rootKeys=8; versionType=number; dataType=object; replyFields=null,null,null/)
   assert.equal(rejected[0].message.includes(secret), false)
 })
@@ -3336,7 +3336,7 @@ test('workspace command polling retries one stale undici socket before dispatchi
       return nativeJsonFixture(nativeUrl, { items: [] })
     }
   })
-  assert.deepEqual(result, { dispatched: 0, rejected: 0 })
+  assert.deepEqual(result, { dispatched: 0, rejected: 0, received: 0, admitted: 0 })
   assert.equal(calls, 2)
 })
 
@@ -3659,7 +3659,7 @@ test('late correlated registration ACK restores native queue pickup without repe
     messageId: 'registration-late-queue', runtimeInstanceId: PROCESS_RUNTIME_INSTANCE_ID,
     status: 'online', durableStateHealthy: true, readyCommandTypes: [] }), 'registered')
   state.workspaceFileRuntimeAuthHeader = `AgentRuntime rts1_${'a'.repeat(64)}` // derived separately, never minted by registration
-  assert.deepEqual(await pollWorkspaceFileCommands({ profile, state, fetchFn }), { dispatched: 1, rejected: 0 })
+  assert.deepEqual(await pollWorkspaceFileCommands({ profile, state, fetchFn }), { dispatched: 1, rejected: 0, received: 1, admitted: 0 })
   assert.equal(queueCalls, 1)
   assert.deepEqual(handled, [{ ...valid, requestId: valid.messageId }])
 })
@@ -5027,4 +5027,111 @@ test('native poller resets local discovery on every authenticated start and reco
     assert.equal(events.length, 4)
     assert.equal(state.conversationNativePollTimer, null)
   } finally { stopNativeConversationPoller(state) }
+})
+
+
+// Actual HTTP discovery + persistent processor admission contract, controlled transport only.
+async function fileWakeFixture(t, { eventDriven = true, count = 0, activeDrain = false } = {}) {
+  const ws = await loadWebSocketClient()
+  const configured = { ...profile, workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'a'.repeat(64)}` }
+  const input = Buffer.from('input'), seen = new Set()
+  const valid = { schemaVersion: 1, messageType: 'command.dispatch', tenantId: '0', clientId: 'client-a',
+    ownerJiacn: 'owner-a', taskId: 'task-1', runId: 'run-1', targetAgentId: configured.agentId,
+    commandType: 'WORKSPACE_FILE_EXECUTE', instruction: 'create supplied result', payload: workspaceFilePayload(input) }
+  const state = { ws: { readyState: ws.OPEN }, workspaceFileBridge: { apiOrigin: 'https://api.example.test' },
+    workspaceFileRuntimeAuthHeader: configured.workspaceFileRuntimeAuthHeader,
+    workspaceFileWorkNotifications: eventDriven ? 1 : null, processor: { paused: false, drainPromise: null,
+      handle: async raw => { const id = JSON.parse(raw).commandId; const duplicate = seen.has(id); seen.add(id); return { kind: duplicate ? 'command-duplicate' : 'command' } } } }
+  let calls = 0, resolveDrain
+  if (activeDrain) state.processor.drainPromise = new Promise(resolve => { resolveDrain = resolve })
+  const counters = { count }
+  state.runtimeTransport = { nativeFetch: async url => { calls++; return nativeJsonFixture(url, {
+    items: Array.from({ length: counters.count }, (_, i) => ({ ...valid, messageId: `file-message-${i}`, commandId: `file-command-${i}` }))
+  }) } }
+  t.after(() => stopWorkspaceFilePoller(state))
+  const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setTimeout(resolve, 5)) }
+  startWorkspaceFilePoller(configured, state)
+  await state.workspaceFilePollPromise; await flush()
+  return { state, configured, counters, flush, calls: () => calls,
+    finish: () => { state.processor.drainPromise = null; resolveDrain?.() } }
+}
+
+test('workspace event discovery is idle after empty startup and coalesces hints', async t => {
+  const f = await fileWakeFixture(t)
+  assert.equal(f.calls(), 1); assert.equal(f.state.workspaceFileWakeup.timer, null)
+  for (let i = 0; i < 1000; i++) f.state.workspaceFileWakeup.wake()
+  await f.flush(); assert.equal(f.calls(), 2); assert.equal(f.state.workspaceFileWakeup.timer, null)
+})
+
+test('workspace full duplicate page waits for processor completion without spinning', async t => {
+  const f = await fileWakeFixture(t, { count: 16, activeDrain: true })
+  assert.equal(f.calls(), 1); assert.equal(f.state.workspaceFileWakeup.timer, null)
+  f.state.workspaceFileWakeup.wake(); await f.flush()
+  assert.equal(f.calls(), 2); assert.equal(f.state.workspaceFileWakeup.timer, null)
+  f.counters.count = 0; f.finish(); await f.flush()
+  assert.equal(f.calls(), 3); assert.equal(f.state.workspaceFileWakeup.timer, null)
+})
+
+test('workspace fast full admission gets one tail then duplicate page is quiet', async t => {
+  const f = await fileWakeFixture(t, { count: 16 })
+  await f.flush(); assert.equal(f.calls(), 2); assert.equal(f.state.workspaceFileWakeup.timer, null)
+})
+
+test('workspace old API retains fallback and reconnect ignores old drain callbacks', async t => {
+  const f = await fileWakeFixture(t, { eventDriven: false, activeDrain: true })
+  assert.ok(f.state.workspaceFileWakeup.timer)
+  stopWorkspaceFilePoller(f.state)
+  f.finish(); await f.flush(); assert.equal(f.calls(), 1)
+  f.state.workspaceFileWorkNotifications = 1
+  startWorkspaceFilePoller(f.configured, f.state); await f.flush()
+  assert.equal(f.calls(), 2); assert.equal(f.state.workspaceFileWakeup.timer, null)
+})
+
+test('workspace discovery preserves in-flight ownership across restart and trails hints once', async t => {
+  const f = await fileWakeFixture(t)
+  stopWorkspaceFilePoller(f.state)
+  const gate = deferred(); let calls = 0
+  f.state.runtimeTransport.nativeFetch = async url => { calls++; if (calls === 1) await gate.promise; return nativeJsonFixture(url, { items: [] }) }
+  startWorkspaceFilePoller(f.configured, f.state)
+  const oldRequest = f.state.workspaceFilePollPromise
+  assert.equal(f.state.workspaceFilePollInFlight, true)
+  startWorkspaceFilePoller(f.configured, f.state)
+  assert.equal(f.state.workspaceFilePollInFlight, true); assert.equal(calls, 1)
+  stopWorkspaceFilePoller(f.state); gate.resolve(); await oldRequest; await f.flush()
+  assert.equal(f.state.workspaceFilePollInFlight, false)
+  const second = deferred()
+  f.state.runtimeTransport.nativeFetch = async url => { calls++; if (calls === 2) await second.promise; return nativeJsonFixture(url, { items: [] }) }
+  startWorkspaceFilePoller(f.configured, f.state)
+  for (let i = 0; i < 1000; i++) f.state.workspaceFileWakeup.wake()
+  second.resolve(); await f.flush()
+  assert.equal(calls, 3); assert.equal(f.state.workspaceFileWakeup.timer, null)
+})
+
+test('workspace full page through real durable processor runs once and completion wakes next discovery', async t => {
+  const f = await fileWakeFixture(t); stopWorkspaceFilePoller(f.state)
+  const rootDir = temporaryDirectory(), gate = deferred(), runs = [], errors = []
+  const inbox = createInbox(rootDir)
+  const ledger = new DurableDedupeLedger({ rootDir: profileStorageRoot(rootDir), profile })
+  const ackOutbox = new AckOutbox({ rootDir: profileStorageRoot(rootDir), profile })
+  ledger.initialize(); ackOutbox.initialize()
+  const processor = new AgentMessageProcessor({ profile, inbox, ledger, ackOutbox, sendFn: () => true,
+    runChat: async () => {}, onReject: error => errors.push(error.code),
+    runCommand: async message => { runs.push(message.commandId); await gate.promise; return { status: 'completed' } } })
+  processor.start(); f.state.processor = processor
+  t.after(() => { gate.resolve(); processor.stop() })
+  let calls = 0, done = false
+  f.state.runtimeTransport.nativeFetch = async url => { calls++; return nativeJsonFixture(url, { items: done ? [] : Array.from({ length: 16 }, (_, i) => ({
+    schemaVersion: 1, messageType: 'command.dispatch', messageId: `pwe_msg_${i}`, commandId: `pwe_cmd_${i}`,
+    tenantId: '0', clientId: 'client-a', ownerJiacn: 'owner-a', taskId: 'task-1', runId: 'run-1',
+    targetAgentId: profile.agentId, commandType: 'WORKSPACE_FILE_EXECUTE', instruction: 'fixture file', payload: workspaceFilePayload(Buffer.from('input'))
+  })) }) }
+  startWorkspaceFilePoller(f.configured, f.state)
+  await f.state.workspaceFilePollPromise; await f.flush()
+  assert.deepEqual(errors, []); assert.equal(runs.length, 1)
+  assert.equal(inbox.count('pending'), 15); assert.equal(f.state.workspaceFileWakeup.timer, null)
+  f.state.workspaceFileWakeup.wake(); await f.flush()
+  assert.equal(calls, 2); assert.equal(runs.length, 1); assert.equal(inbox.count('pending'), 15)
+  done = true; gate.resolve(); await processor.waitForIdle(); await f.flush()
+  assert.equal(runs.length, 16); assert.equal(new Set(runs).size, 16)
+  assert.equal(calls, 3); assert.equal(f.state.workspaceFileWakeup.timer, null); assert.deepEqual(errors, [])
 })
