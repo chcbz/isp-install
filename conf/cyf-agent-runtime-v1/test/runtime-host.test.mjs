@@ -458,7 +458,7 @@ test('toolchain validation refuses a host-global interpreter alias instead of fa
 
 // M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
 // lifecycle. Synthetic socket/HTTP only; no server/production claim.
-async function channelFixture(t, { ackRegistration = true, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null, reconcileSkills = false } = {}) {
+async function channelFixture(t, { ackRegistration = true, nativeWorkNotifications = null, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null, reconcileSkills = false } = {}) {
   const { EventEmitter } = await import('node:events');
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
   const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
@@ -480,6 +480,7 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
         messageId: frame.messageId, agentId: frame.agentId, runtimeInstanceId: frame.runtimeInstanceId,
         installationId: frame.installationId, hostId: frame.hostId, sessionGeneration: frame.sessionGeneration,
         status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes,
+        ...(nativeWorkNotifications === 1 ? { nativeWorkNotifications: 1 } : {}),
         ...(measureSkills ? { runtimeAuth: { scheme: 'native-runtime-v1', tenantId: frame.tenantId, clientId: frame.clientId,
           ownerJiacn: 'fixture-owner', agentId: frame.agentId, installationId: frame.installationId, hostId: frame.hostId,
           runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration, contextPackEnabled: true } } : {}) }));
@@ -503,6 +504,8 @@ async function channelFixture(t, { ackRegistration = true, chatReady = false, ty
             queueMicrotask(() => { state.catalogMeasured = true; state.transport.refreshCapabilities(); });
             return true;
           },
+          bindWorkNotifications: version => { state.workNotificationVersion = version; },
+          nativeWorkAvailable: () => { state.workHints = (state.workHints || 0) + 1; },
           matchesSkillManagementAck: envelope => state.skillInstallManager?.matchesDurableAckEnvelope(envelope) === true,
           ...(reconcileSkills ? {
             reconcilePositionSkills: async () => { (state.reconciliation ||= []).push('positions'); if (state.reconcileFailure) throw Object.assign(new Error('private'), {code:'POSITION_TEST_FAILURE'}); },
@@ -547,6 +550,39 @@ const registrationReceipt = registration => ({ type: 'agent_registered',
   messageId: registration.messageId, agentId: registration.agentId, runtimeInstanceId: registration.runtimeInstanceId,
   installationId: registration.installationId, hostId: registration.hostId, sessionGeneration: registration.sessionGeneration,
   status: 'online', durableStateHealthy: registration.durableStateHealthy, readyCommandTypes: registration.readyCommandTypes });
+
+const nativeWorkHint = registration => ({ protocolVersion: 1, requestId: 'hint-request', messageId: 'hint-message',
+  messageType: 'runtime.work.available', data: { notificationVersion: 1, lane: 'NATIVE_CONVERSATION',
+    tenantId: registration.tenantId, clientId: registration.clientId, agentId: registration.agentId,
+    runtimeInstallationId: registration.installationId, hostId: registration.hostId,
+    runtimeInstanceId: registration.runtimeInstanceId, sessionGeneration: String(registration.sessionGeneration) } });
+
+test('native work hint only wakes the confirmed current session and never enters command ingress', async t => {
+  const c = await channelFixture(t, { nativeWorkNotifications: 1 }); await c.executors[0].activate();
+  const socket = c.sockets[0], state = c.states()[0];
+  const hint = nativeWorkHint(socket.sent.find(frame => frame.messageType === 'agent.register'));
+  assert.equal(state.workNotificationVersion, 1);
+  socket.receive({ ...hint, data: { ...hint.data, harmlessFutureField: true } });
+  for (const [field, value] of Object.entries({ tenantId: 'foreign', clientId: 'foreign', agentId: 'foreign',
+    runtimeInstallationId: 'foreign', hostId: 'foreign', runtimeInstanceId: 'old', sessionGeneration: '6',
+    notificationVersion: 2, lane: 'OTHER' })) socket.receive({ ...hint, data: { ...hint.data, [field]: value } });
+  const missing = { ...hint.data }; delete missing.hostId; socket.receive({ ...hint, data: missing });
+  await c.tick();
+  assert.equal(state.workHints, 1); assert.deepEqual(state.accepted, []);
+  assert.equal(c.executors[0].ready(), true);
+});
+
+test('native notification negotiation requires correlated registration and old ACK retains fallback', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0], state = c.states()[0], registration = socket.sent[0];
+  socket.receive(nativeWorkHint(registration));
+  socket.receive({ ...registrationReceipt(registration), messageId: 'unrelated', nativeWorkNotifications: 1 });
+  await c.tick();
+  assert.equal(state.workHints, undefined); assert.equal(state.workNotificationVersion, undefined);
+  socket.receive(registrationReceipt(registration)); await activating;
+  assert.equal(state.workNotificationVersion, null); assert.deepEqual(state.accepted, []);
+});
 
 test('presence receipt control stays out of business, never re-registers or mutates readiness', async t => {
   const c = await channelFixture(t, { validateBusiness: true });
@@ -1804,4 +1840,13 @@ test('skill receipt bypass never bypasses the manager transaction tail', { timeo
     transaction.resolve(); await c.tick(); await c.tick();
     assert.equal(c.manager.pendingResults().length, 0);
   } finally { transaction.resolve(); }
+});
+
+ test('API shared native work hint fixture decodes the exact session proof without command semantics', async () => {
+  const wire=JSON.parse(await readFile(new URL('./fixtures/native-work-hint-v1.json',import.meta.url),'utf8'));
+  const frame=fromAgentWire(JSON.stringify(wire));
+  assert.equal(frame.messageType,'runtime.work.available');assert.equal(frame.notificationVersion,1);
+  assert.equal(frame.lane,'NATIVE_CONVERSATION');assert.equal(frame.sessionGeneration,'1');
+  assert.equal(frame.installationId,'rti_'+'1'.repeat(32));assert.equal(frame.runtimeInstanceId,'runtime-current');
+  assert.equal(Object.hasOwn(frame,'commandId'),false);
 });

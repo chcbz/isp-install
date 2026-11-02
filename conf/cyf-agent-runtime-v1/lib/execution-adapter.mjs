@@ -160,6 +160,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
                 channelConfirmed = false; managementSession = null; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
               }
               channelConfirmed = true; managementSession = session; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null;
+              executor.bindWorkNotifications?.(payload.nativeWorkNotifications === 1 ? 1 : null);
               // The first ACK supplies owner scope. If it starts a catalog measurement,
               // activation waits for the follow-up catalog registration ACK; otherwise the
               // shared host could freeze INITIALIZED while re-registration is in flight.
@@ -179,6 +180,16 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             if (!channelConfirmed && !managementAuthorized()) {
               if (managementFacts) logger('runtime-management-not-admitted', { ...managementFacts, code: 'CHANNEL_NOT_CONFIRMED' });
               return;
+            }
+            // This is a lossy scheduling hint, never an executable command or durable ACK.
+            if (frame.messageType === 'runtime.work.available') {
+              if (frame.notificationVersion !== 1 || frame.lane !== 'NATIVE_CONVERSATION'
+                  || frame.agentId !== session.canonicalAgentId
+                  || ['installationId', 'tenantId', 'clientId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
+                    .some(key => frame[key] !== session[key])) {
+                logger('runtime-frame-rejected', { code: 'RUNTIME_WORK_HINT_INVALID' }); return;
+              }
+              executor.nativeWorkAvailable?.(); return;
             }
             // AgentWebSocketHandler.updateAgentStatus sends copyTrace(presence)
             // plus agentId/status as agent_status_updated, without messageType.
@@ -319,6 +330,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "message-envelope.mjs",
   "native-json.mjs",
   "native-poll-diagnostic.mjs",
+  "native-conversation-wakeup.mjs",
   "native-artifact-snapshot.mjs",
   "native-artifact-session.mjs",
   "native-output-format.mjs",

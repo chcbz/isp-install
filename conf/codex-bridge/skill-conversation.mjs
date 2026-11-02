@@ -165,11 +165,20 @@ export class SkillConversationLane {
     this.pendingExecutionIds = unresolved
     return pending
   }
-  async poll() {
+  nextRecoveryAt() {
+    let at = Infinity
+    for (const command of this.pendingCommands()) {
+      at = Math.min(at, this.unknownRetries.get(command.executionId)?.nextAt ?? this.now() + 3000)
+    }
+    return at
+  }
+
+  async poll({ discover = true } = {}) {
     if (this.active) return { status: 'BUSY', processed: 0, deferred: 0, executionErrors: [] }
     this.active = true
     try {
-      const page = await this.request(`${BASE}/conversation-executions/commands`, 'GET')
+      this.discoveryHasMore = false
+      const page = discover ? await this.request(`${BASE}/conversation-executions/commands`, 'GET') : { items: [] }
       if (!object(page) || !Array.isArray(page.items) || page.items.length > 16) fail('SKILL_INBOX_INVALID')
       const commands = new Map(this.pendingCommands().map(command => [command.executionId, command]))
       const inboxErrors = []
@@ -216,6 +225,7 @@ export class SkillConversationLane {
       }
       // Command-local failures remain explicit without misreporting the entire lane as unavailable.
       // Shared/session/store and unknown exceptions still escape above with their original cause.
+      this.discoveryHasMore = discover && page.items.length === 16 && processed > 0
       const status = executionErrors.length ? 'PARTIAL' : processed ? 'PROGRESSED' : deferred ? 'DEFERRED' : 'IDLE'
       return { status, processed, deferred, executionErrors }
     } finally { this.active = false }

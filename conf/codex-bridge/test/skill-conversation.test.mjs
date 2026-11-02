@@ -540,3 +540,13 @@ test('pending index never caches commands and an unsafe scan cannot publish a pa
   assert.equal(report.status, 'DEFERRED')
   assert.equal(f.modelCalls(), 0)
 })
+
+test('notification mode recovers local uncertainty at its due time without discovering the inbox', async t => {
+  const f = fixture(t); f.c.outputs.artifactsRequired = true; f.loseStage()
+  await partial(f.lane.poll(), 'SKILL_TRANSPORT_UNKNOWN')
+  const inboxCalls = f.calls.filter(path => path.endsWith('/commands')).length
+  assert.ok(Number.isFinite(f.lane.nextRecoveryAt()))
+  await f.lane.poll({ discover: false })
+  assert.equal(f.calls.filter(path => path.endsWith('/commands')).length, inboxCalls)
+  assert.equal(f.modelCalls(), 1); assert.equal(f.lane.nextRecoveryAt(), Infinity)
+})

@@ -1,3 +1,4 @@
+import { NativeConversationWakeup } from './native-conversation-wakeup.mjs'
 import { ArchiveJobReconciler } from './archive-job-reconciler.mjs'
 import { PositionSkillReconciler } from './position-skill-reconciler.mjs'
 import { nativePollDiagnostic } from './native-poll-diagnostic.mjs'
@@ -5547,10 +5548,12 @@ const startWorkspaceFilePoller = (profile, state) => {
   state.workspaceFilePollTimer = setInterval(() => { void tick() }, 3000)
 }
 
-// Independent timer and in-flight guard: a blocked legacy file queue must never starve
-// native CONVERSATION. Neither timer dispatches through ordinary WS/chat tooling.
+// Native discovery is event-driven only after the current registration ACK confirms support.
+// Recovery reads local pending records independently; workspace-file remains a separate lane.
 export const stopNativeConversationPoller = state => {
   if (!state) return
+  state.conversationNativeWakeup?.stop()
+  state.conversationNativeWakeup = null
   clearInterval(state.conversationNativePollTimer)
   state.conversationNativePollTimer = null
 }
@@ -5558,26 +5561,36 @@ export const startNativeConversationPoller = (profile, state) => {
   stopNativeConversationPoller(state)
   if (!state?.conversationNativeLane || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
   state.conversationNativeLane.resetPendingDiscovery?.()
-  const tick = async () => {
-    if (state.conversationNativePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
-    state.conversationNativePollInFlight = true
-    try {
-      const polling = state.conversationNativeLane.poll()
-      state.conversationNativePollPromise = polling
-      const report = await polling
+  const lane = state.conversationNativeLane
+  const loop = new NativeConversationWakeup({
+    eventDriven: state.nativeWorkNotifications === 1,
+    current: () => state.conversationNativeWakeup === loop && state.ws?.readyState === WebSocketClient.OPEN && !state.processor.paused,
+    nextRecoveryAt: () => lane.nextRecoveryAt?.() ?? Infinity,
+    hasMore: () => lane.discoveryHasMore === true,
+    poll: async options => {
+      if (state.conversationNativePollInFlight) return { status: 'BUSY' }
+      state.conversationNativePollInFlight = true
+      try {
+        const polling = lane.poll(options)
+        state.conversationNativePollPromise = polling
+        return await polling
+      } finally { state.conversationNativePollInFlight = false }
+    },
+    onReport: report => {
       if (report?.status === 'PARTIAL') {
         const errors = report.executionErrors.map(({ executionId, code }) => ({ executionId, code }))
         console.warn(`native conversation poll partial | profile=${profile.profileId} | processed=${report.processed} | deferred=${report.deferred} | errors=${JSON.stringify(errors)}`)
       }
-    } catch (error) {
+    },
+    onError: error => {
       const code = typeof error?.code === 'string' && /^(?:CONVERSATION|SKILL|MATERIALS)_[A-Z_]{1,80}$/.test(error.code)
         ? error.code : 'CONVERSATION_UNAVAILABLE'
       const processed = Number.isSafeInteger(error?.processed) && error.processed >= 0 ? error.processed : 0
       console.warn(`native conversation poll unavailable | profile=${profile.profileId} | code=${code} | processed=${processed} | diagnostic=${JSON.stringify(nativePollDiagnostic(error))}`)
-    } finally { state.conversationNativePollInFlight = false }
-  }
-  void tick()
-  state.conversationNativePollTimer = setInterval(() => { void tick() }, 3000)
+    }
+  })
+  state.conversationNativeWakeup = loop
+  void loop.start()
 }
 
 const canonicalizeConfiguredPath = configuredPath => {
@@ -6330,6 +6343,8 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           return state.archiveJobReconciler.poll()
         },
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
+        bindWorkNotifications: version => { entry.state.nativeWorkNotifications = version === 1 ? 1 : null },
+        nativeWorkAvailable: () => { entry.state.conversationNativeWakeup?.wake() },
         matchesSkillManagementAck: envelope => entry.state?.skillInstallManager.matchesDurableAckEnvelope(envelope) === true,
         matchesSkillInstallResult: envelope => entry.state?.skillInstallManager.matchesDurableResultEnvelope(envelope) === true,
         matchesSkillInstallReceipt: receipt => entry.state?.skillInstallManager.matchesDurableResultReceipt(receipt) === true,
@@ -6339,8 +6354,8 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           if (!state || state.disposed || state.processor.failClosedError || state.ledger.hasCorruption() || state.ackOutbox.hasCorruption()) return false
           try { state.ackOutbox.pendingEnvelopes(); return state.skillInstallManager.isHealthy() } catch { return false }
         },
-        registrationPayload: () => buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
-          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry),
+        registrationPayload: () => ({ ...buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
+          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry), nativeWorkNotifications: 1 }),
         readyCommandTypes: () => runtimeReadyCommandTypes(entry.state),
         skillManagementReady: () => Boolean(entry.state && !entry.closed && !entry.state.disposed && entry.state.skillInstallManager.isHealthy()),
         chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
