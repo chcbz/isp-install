@@ -5135,3 +5135,17 @@ test('workspace full page through real durable processor runs once and completio
   assert.equal(runs.length, 16); assert.equal(new Set(runs).size, 16)
   assert.equal(calls, 3); assert.equal(f.state.workspaceFileWakeup.timer, null); assert.deepEqual(errors, [])
 })
+
+test('workspace late response after stop cannot admit commands into replacement session', async t => {
+  const f = await fileWakeFixture(t); stopWorkspaceFilePoller(f.state)
+  const gate = deferred(); let handled = 0, canceled = 0
+  f.state.processor.handle = async () => { handled++; return { kind: 'command' } }
+  f.state.runtimeTransport.nativeFetch = async () => { await gate.promise; return {
+    status: 200, body: { cancel: async () => { canceled++ } },
+    json: () => assert.fail('retired session must discard response before decoding')
+  } }
+  startWorkspaceFilePoller(f.configured, f.state)
+  const request = f.state.workspaceFilePollPromise
+  stopWorkspaceFilePoller(f.state); gate.resolve(); await request; await f.flush()
+  assert.equal(handled, 0); assert.equal(canceled, 1); assert.equal(f.state.workspaceFilePollInFlight, false)
+})

@@ -5442,7 +5442,7 @@ const exactResponseUrl = (response, endpoint) => {
  * existing persistent inbox so crashes/restarts retain the same dedupe and recovery semantics as
  * websocket-delivered commands.
  */
-export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = state?.runtimeTransport?.nativeFetch || globalThis.fetch } = {}) => {
+export const pollWorkspaceFileCommands = async ({ profile, state, current = () => true, fetchFn = state?.runtimeTransport?.nativeFetch || globalThis.fetch } = {}) => {
   if (!profile || !state?.workspaceFileBridge || !state?.processor) return { dispatched: 0, rejected: 0, received: 0, admitted: 0 }
   const auth = state.workspaceFileRuntimeAuthHeader || ''
   if (!/^AgentRuntime rts1_[0-9a-f]{64}$/.test(auth) || typeof fetchFn !== 'function') {
@@ -5471,6 +5471,10 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
       throw new AgentProtocolError(workspaceQueueTransportCode(error), 'workspace runtime command pickup failed')
     }
   }
+  if (!current()) {
+    try { await response?.body?.cancel?.() } catch { /* best-effort transport disposal */ }
+    return { dispatched: 0, rejected: 0, received: 0, admitted: 0 }
+  }
   if (!response || !Number.isInteger(response.status)) {
     throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_RESPONSE', 'workspace runtime command pickup returned no valid response')
   }
@@ -5498,6 +5502,7 @@ export const pollWorkspaceFileCommands = async ({ profile, state, fetchFn = stat
   let rejected = 0
   let admitted = 0
   for (const item of body.items) {
+    if (!current()) break // A stopped/replaced discovery pass cannot admit a late response.
     try {
       const privateCommand = fromAgentWire(JSON.stringify(item))
       const normalized = normalizeInboundMessage(privateCommand)
@@ -5543,7 +5548,7 @@ export const startWorkspaceFilePoller = (profile, state) => {
       if (state.workspaceFilePollInFlight) return { status: 'BUSY' }
       state.workspaceFilePollInFlight = true
       try {
-        const polling = pollWorkspaceFileCommands({ profile, state })
+        const polling = pollWorkspaceFileCommands({ profile, state, current })
         state.workspaceFilePollPromise = polling
         return await polling
       } finally { state.workspaceFilePollInFlight = false }
