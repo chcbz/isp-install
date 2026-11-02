@@ -269,14 +269,15 @@ test('reconstructing a lane preserves native UNKNOWN despite resetting schedulin
   await partial(new SkillConversationLane(f.options).poll(), 'SKILL_RESULT_UNKNOWN')
   assert.equal(f.modelCalls(), 0)
 })
-test('a different recovery error clears UNKNOWN backoff and is not silently swallowed', async t => {
+test('changed recoverable failure starts its own backoff and remains explicitly reported', async t => {
   const f = fixture(t); let now = 0, code = 'SKILL_RESULT_UNKNOWN'
   const lane = new SkillConversationLane({ ...f.options, now: () => now, random: () => 1 })
   lane.process = async () => { throw Object.assign(new Error(code), { code }) }
   await partial(lane.poll(), 'SKILL_RESULT_UNKNOWN')
   now = 15000; code = 'SKILL_TRANSPORT_UNKNOWN'
   await partial(lane.poll(), 'SKILL_TRANSPORT_UNKNOWN')
-  assert.equal(lane.unknownRetries.size, 0)
+  assert.equal(lane.unknownRetries.get(f.c.executionId).nextAt, 30000)
+  assert.equal(lane.unknownRetries.get(f.c.executionId).code, 'SKILL_TRANSPORT_UNKNOWN')
 })
 
 
@@ -519,7 +520,9 @@ test('new inbox work enters an initialized index and resumes uncertainty with an
   assert.deepEqual(f.lane.pendingCommands(), [])
   f.loseStage(); await partial(f.lane.poll(), 'SKILL_TRANSPORT_UNKNOWN')
   assert.deepEqual([...f.lane.pendingExecutionIds], [f.c.executionId])
-  f.emptyInbox(); await f.lane.poll()
+  f.emptyInbox(); assert.equal((await f.lane.poll()).status, 'DEFERRED')
+  f.lane.now = () => f.lane.unknownRetries.get(f.c.executionId)?.nextAt ?? Date.now()
+  await f.lane.poll()
   assert.equal(f.modelCalls(), 1)
   assert.deepEqual(f.lane.pendingCommands(), [])
   assert.equal(f.lane.pendingExecutionIds.size, 0)
@@ -546,7 +549,32 @@ test('notification mode recovers local uncertainty at its due time without disco
   await partial(f.lane.poll(), 'SKILL_TRANSPORT_UNKNOWN')
   const inboxCalls = f.calls.filter(path => path.endsWith('/commands')).length
   assert.ok(Number.isFinite(f.lane.nextRecoveryAt()))
+  assert.equal((await f.lane.poll({ discover: false })).status, 'DEFERRED')
+  const due = f.lane.nextRecoveryAt(); f.lane.now = () => due
   await f.lane.poll({ discover: false })
   assert.equal(f.calls.filter(path => path.endsWith('/commands')).length, inboxCalls)
   assert.equal(f.modelCalls(), 1); assert.equal(f.lane.nextRecoveryAt(), Infinity)
+})
+
+
+test('authority 404 and incompatible retained environment do not cause 3-second heavy recovery or replay', async t => {
+  for (const code of ['SKILL_API_RESPONSE_UNCONFIRMED','NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED','TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT']) {
+    const f=fixture(t);let now=0,calls=0;
+    const lane=new SkillConversationLane({...f.options,now:()=>now,random:()=>1});
+    lane.process=async()=>{calls++;throw Object.assign(new Error(code),{code});};
+    await partial(lane.poll(),code);
+    for(now=3000;now<15000;now+=3000)assert.equal((await lane.poll()).deferred,1);
+    assert.equal(calls,1);assert.equal(f.modelCalls(),0);
+    now=15000;await partial(lane.poll(),code);assert.equal(calls,2);
+  }
+});
+
+test('unconfirmed HTTP response cancels its body, records status and preserves pending recovery', async t => {
+  const f=fixture(t);let cancelled=0
+  f.lane.fetch=async(url,opts)=>url.pathname.endsWith('/commands')?f.options.fetchFn(url,opts):
+    {status:404,url:url.href,body:{cancel:async()=>{cancelled++}}}
+  const report=await f.lane.poll()
+  assert.equal(report.executionErrors[0].httpStatus,404);assert.equal(cancelled,1)
+  assert.equal(f.modelCalls(),0);assert.deepEqual([...f.lane.pendingExecutionIds],[f.c.executionId])
+  assert.equal((await f.lane.poll({discover:false})).status,'DEFERRED');assert.equal(cancelled,1)
 })

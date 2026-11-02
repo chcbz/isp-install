@@ -40,6 +40,11 @@ const resultReceipt = value => {
   const { resultSha256, ...receipt } = value
   return { ...receipt, resultDigest: resultSha256 }
 }
+// Existing recovery timing, also used for command-local transport/authority/environment
+// failures. Never grant a new execution, rewrite UNKNOWN or expire accepted work.
+const deferredRecoveryCodes = new Set(['SKILL_RESULT_UNKNOWN', 'SKILL_TRANSPORT_UNKNOWN',
+  'SKILL_API_RESPONSE_UNCONFIRMED', 'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT',
+  'NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT', 'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED'])
 const engineTerminalCodes = new Set(['NATIVE_EXECUTION_TURN_FAILED', 'NATIVE_EXECUTION_TURN_INTERRUPTED'])
 const sourceKinds = new Set(['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'])
 const byteLength = value => {
@@ -106,11 +111,18 @@ export class SkillConversationLane {
     try { response = await this.fetch(endpoint, { method, redirect: 'error', headers,
       ...(body === undefined ? {} : { body: body instanceof FormData ? body : JSON.stringify(body) }) }) }
     catch (cause) { fail('SKILL_TRANSPORT_UNKNOWN', cause) }
-    if (JSON.stringify(proof) !== JSON.stringify(this.headers())) fail('SKILL_SESSION_CHANGED')
+    if (JSON.stringify(proof) !== JSON.stringify(this.headers())) {
+      try { await response?.body?.cancel?.() } catch {}
+      fail('SKILL_SESSION_CHANGED')
+    }
     if (!response || !statuses.includes(response.status) || response.redirected === true || response.url !== endpoint.href) {
+      try { await response?.body?.cancel?.() } catch {}
       throw Object.assign(new Error('SKILL_API_RESPONSE_UNCONFIRMED'), { code: 'SKILL_API_RESPONSE_UNCONFIRMED', status: response?.status })
     }
-    if (response.headers?.get?.('content-type') && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type'))) fail('SKILL_API_RESPONSE_UNCONFIRMED')
+    if (response.headers?.get?.('content-type') && !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type'))) {
+      try { await response?.body?.cancel?.() } catch {}
+      fail('SKILL_API_RESPONSE_UNCONFIRMED')
+    }
     try { return await readNativeJson(response) } catch (cause) { fail('SKILL_API_RESPONSE_UNCONFIRMED', cause) }
   }
   async readInput(path, command, fence, input, checkLease, signal) {
@@ -214,13 +226,13 @@ export class SkillConversationLane {
           const code = error?.code
           if (typeof code !== 'string' || !/^(?:SKILL|MATERIALS|NATIVE|TYPED_INSPECTION)_[A-Z_]{1,80}$/.test(code)
               || /^(?:SKILL_SESSION_|SKILL_STORE_|SKILL_SCOPE_|SKILL_LANE_CONFIG_|SKILL_API_ORIGIN_)/.test(code)) throw error
-          if (code === 'SKILL_RESULT_UNKNOWN') {
-            const attempt = Math.min((retry?.attempt || 0) + 1, 6)
+          if (deferredRecoveryCodes.has(code)) {
+            const attempt = Math.min((retry?.code === code ? retry.attempt : 0) + 1, 6)
             // 15s -> 30s -> ... -> 5min, with downward jitter; no deadline.
             const delay = Math.floor(Math.min(300000, 15000 * 2 ** (attempt - 1)) * (0.8 + 0.2 * this.random()))
-            this.unknownRetries.set(command.executionId, { attempt, nextAt: this.now() + delay })
+            this.unknownRetries.set(command.executionId, { code, attempt, nextAt: this.now() + delay })
           } else this.unknownRetries.delete(command.executionId)
-          executionErrors.push({ executionId: command.executionId, code })
+          executionErrors.push({ executionId: command.executionId, code, ...(Number.isInteger(error.status) ? { httpStatus: error.status } : {}) })
         }
       }
       // Command-local failures remain explicit without misreporting the entire lane as unavailable.

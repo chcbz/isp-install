@@ -424,3 +424,21 @@ local-script解释器从整文件同步读取改为1MiB缓冲异步SHA，每次�
 断连/替换后的旧回调不唤醒新会话。UNKNOWN、ACK恢复、心跳/租约不改变，不自动重放模型。
 API每节点单30秒订阅目标补偿与native lane共用，遗漏/跨节点提示可能等待30秒加处理时间。
 这不是线上收益或已发布声明；正式验证、源码和安装分别以CYF主handoff为准。
+
+### 2026-11-03 polling follow-up candidate (1.3.37 / bridge1.1.27)
+
+Source implementation is not installation evidence; CYF handoff
+`docs/implementation/handoffs/JUYITING-POLLING-20261102.md` tracks actual release.
+The authenticated correlated registration receipt may declare
+`archiveJobDiscovery:0|1`; zero skips archive job discovery, not position skill
+reconciliation. Absent field preserves older server behavior, invalid values
+reject registration, and re-registration renegotiates it. Old in-flight position
+queries cannot continue archive discovery under a replacement registration.
+Shared fixture `conf/cyf-agent-runtime-v1/test/fixtures/archive-discovery-registration-v1.json`
+is mirrored in the API mmd regression resources; API owns availability and authorization.
+Command-local transport/authority/environment recovery errors use the existing
+15s→5min jittered retry scheduler instead of redoing heavy work each 3s pass.
+No state deletion/rebinding, automatic UNKNOWN replay or fabricated completion.
+`NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED` reports a retained mapping
+content mismatch; unsafe file/mode errors remain separate. HTTP error status is
+safe diagnostic metadata, never proof of task completion/revocation.

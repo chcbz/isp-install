@@ -139,7 +139,8 @@ const stateMarker = (directory, binding, filename = 'binding.json') => {
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) }; fsyncDirectory(directory)
   }
   const lexical = lstatSync(path, { bigint: true })
-  if (lexical.isSymbolicLink() || !lexical.isFile() || Number(lexical.mode & 0o777n) !== 0o400 || readFileSync(path, 'utf8') !== serialized) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+  if (lexical.isSymbolicLink() || !lexical.isFile() || Number(lexical.mode & 0o777n) !== 0o400) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+  if (readFileSync(path, 'utf8') !== serialized) fail(filename === 'native-binding.json' ? 'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED' : 'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
   return path
 }
 const sealCredential = (engineState, processPid) => {

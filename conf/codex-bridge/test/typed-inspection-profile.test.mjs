@@ -265,3 +265,19 @@ for (const failureStage of ['start', 'spawn']) test(`failed inspection ${failure
     assert.equal(runtime.activeAdapters.size, 0)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
+
+ test('changed retained native mapping is explicit and never restaged or rewritten', () => {
+  const root=mkdtempSync(resolve(tmpdir(),'native-mapping-change-')); chmodSync(root,0o700)
+  try {
+    const binding={schemaVersion:1,requestKey:'key',authorizationId:'auth',manifestDigest:'digest',requestId:'request',turnId:'turn',inputPolicyDigest:'policy'}
+    const directory=resolve(root,'requests',canonicalSha256(binding).slice('sha256:'.length));mkdirSync(directory,{recursive:true,mode:0o700})
+    writeFileSync(resolve(directory,'binding.json'),JSON.stringify(binding)+'\n',{mode:0o400})
+    const marker=resolve(directory,'native-binding.json'), original=JSON.stringify({schemaVersion:1,executionId:'execution'})+'\n'
+    writeFileSync(marker,original,{mode:0o400})
+    const runtime={stateRoot:root,profile:{}}, options={requireExistingState:true,nativeExecution:true,nativeBinding:{schemaVersion:1,executionId:'execution',modelCatalogSha256:'a'.repeat(64)}}
+    assert.throws(()=>TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime,binding,options),{code:'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED'})
+    assert.equal(readFileSync(marker,'utf8'),original);assert.equal(existsSync(resolve(directory,'codex-home')),false)
+    chmodSync(marker,0o600)
+    assert.throws(()=>TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime,binding,options),{code:'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT'})
+  } finally {rmSync(root,{recursive:true,force:true})}
+ })

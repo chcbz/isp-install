@@ -58,7 +58,8 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let socket = null; let observer = null; let abort = null; let loop = null; let channelConfirmed = false;
       let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
       let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
-      let nativeWorkEnabled = false; let fileWorkEnabled = false;
+      let nativeWorkEnabled = false; let fileWorkEnabled = false; let archiveJobsEnabled = true;
+      let registrationEpoch = 0;
       let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
       const inFlightSkillReceipts = new Set();
       let ingress = Promise.resolve(); let requestTypes = []; let declaredHealthy = false; let registeredAt = null; let serviceReadyAt = null; let replay = null;
@@ -88,7 +89,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         const healthy = durable(); declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
         const envelope = module.buildProtocolEnvelope('agent.register', { ...executor.registrationPayload(),
           messageId: randomUUID(), durableStateHealthy: healthy, readyCommandTypes: requestTypes }, executor.state().profile, instanceId);
-        observer.begin(envelope.messageId); nativeWorkEnabled = false; fileWorkEnabled = false; channelConfirmed = false; registeredAt = null; serviceReadyAt = null;
+        registrationEpoch++; observer.begin(envelope.messageId); nativeWorkEnabled = false; fileWorkEnabled = false; channelConfirmed = false; registeredAt = null; serviceReadyAt = null;
         if (!send(envelope)) observer.sendFailed(envelope.messageId);
         return true;
       };
@@ -104,7 +105,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         replay = Promise.resolve().then(() => executor.resume()).catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' }));
         void replay.finally(() => { replay = null; });
       };
-      const disconnect = () => { channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const disconnect = () => { registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
       const connectOnce = async signal => {
         channelState = 'connecting';
         const session = await client.session({ signal });
@@ -157,6 +158,12 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               && declared.every(layer => layer.messageType === 'protocol.error');
             const observed = typeOnlyControl || registrationError ? observer.observe(frame) : null;
             if (observed === 'registered') {
+              if (Object.hasOwn(payload, 'archiveJobDiscovery') && ![0, 1].includes(payload.archiveJobDiscovery)) {
+                channelConfirmed = false; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_SERVICE_INVALID')); current.close(); return;
+              }
+              // Older APIs retain their existing discovery path; only an authenticated explicit
+              // disabled receipt suppresses it. Re-registration/connection renegotiates this value.
+              archiveJobsEnabled = payload.archiveJobDiscovery !== 0;
               if (payload.readyCommandTypes.length !== requestTypes.length || payload.readyCommandTypes.some(type => !requestTypes.includes(type)) || payload.durableStateHealthy !== declaredHealthy) {
                 channelConfirmed = false; managementSession = null; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
               }
@@ -291,7 +298,10 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           else if (!declaredHealthy) register();
           if (channelConfirmed) {
             resume();
-            void Promise.resolve(executor.reconcilePositionSkills?.()).then(()=>executor.reconcileArchiveJobs?.()).catch(error => {
+            const epoch = registrationEpoch, session = client.currentSession;
+            void Promise.resolve(executor.reconcilePositionSkills?.()).then(() =>
+              epoch === registrationEpoch && session === client.currentSession && archiveJobsEnabled && channelConfirmed
+                ? executor.reconcileArchiveJobs?.() : undefined).catch(error => {
               if (error.status !== 404) logger('position-skill-reconciliation-deferred', { code: error.code || 'POSITION_UNAVAILABLE' });
             });
           }

@@ -458,7 +458,7 @@ test('toolchain validation refuses a host-global interpreter alias instead of fa
 
 // M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
 // lifecycle. Synthetic socket/HTTP only; no server/production claim.
-async function channelFixture(t, { ackRegistration = true, nativeWorkNotifications = null, workspaceFileWorkNotifications = null, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null, reconcileSkills = false } = {}) {
+async function channelFixture(t, { ackRegistration = true, nativeWorkNotifications = null, workspaceFileWorkNotifications = null, archiveJobDiscovery = null, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null, reconcileSkills = false } = {}) {
   const { EventEmitter } = await import('node:events');
   const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
   const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
@@ -482,6 +482,7 @@ async function channelFixture(t, { ackRegistration = true, nativeWorkNotificatio
         status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes,
         ...(nativeWorkNotifications === 1 ? { nativeWorkNotifications: 1 } : {}),
         ...(workspaceFileWorkNotifications === 1 ? { workspaceFileWorkNotifications: 1 } : {}),
+        ...(archiveJobDiscovery !== null ? { archiveJobDiscovery } : {}),
         ...(measureSkills ? { runtimeAuth: { scheme: 'native-runtime-v1', tenantId: frame.tenantId, clientId: frame.clientId,
           ownerJiacn: 'fixture-owner', agentId: frame.agentId, installationId: frame.installationId, hostId: frame.hostId,
           runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration, contextPackEnabled: true } } : {}) }));
@@ -511,7 +512,7 @@ async function channelFixture(t, { ackRegistration = true, nativeWorkNotificatio
           workspaceFileWorkAvailable: () => { state.fileWorkHints = (state.fileWorkHints || 0) + 1; },
           matchesSkillManagementAck: envelope => state.skillInstallManager?.matchesDurableAckEnvelope(envelope) === true,
           ...(reconcileSkills ? {
-            reconcilePositionSkills: async () => { (state.reconciliation ||= []).push('positions'); if (state.reconcileFailure) throw Object.assign(new Error('private'), {code:'POSITION_TEST_FAILURE'}); },
+            reconcilePositionSkills: async () => { (state.reconciliation ||= []).push('positions'); if (state.positionGate) await state.positionGate; if (state.reconcileFailure) throw Object.assign(new Error('private'), {code:'POSITION_TEST_FAILURE'}); },
             reconcileArchiveJobs: async () => { (state.reconciliation ||= []).push('archive'); }
           } : {}),
           matchesSkillInstallResult: envelope => state.skillInstallManager?.matchesDurableResultEnvelope(envelope) === true,
@@ -1881,4 +1882,45 @@ test('API shared file work fixture preserves the existing wire envelope and proo
   assert.equal(frame.messageType, 'runtime.work.available'); assert.equal(frame.lane, 'WORKSPACE_FILE');
   assert.equal(frame.sessionGeneration, '1'); assert.equal(frame.installationId, 'rti_' + '1'.repeat(32));
   assert.equal(Object.hasOwn(frame, 'commandId'), false);
+});
+
+
+test('explicit archive disable suppresses only archive discovery and correlated re-registration can enable it', async t => {
+  const c=await channelFixture(t,{ackRegistration:false,reconcileSkills:true});
+  const activation=c.executors[0].activate();await c.opened();
+  const socket=c.sockets[0], state=c.states()[0];
+  socket.receive({...registrationReceipt(socket.sent[0]),archiveJobDiscovery:0});await activation;
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions']);
+  state.reconciliation=[];state.transport.refreshCapabilities();await c.tick();
+  // An unrelated ACK cannot change the negotiated service state.
+  const registration=socket.sent.filter(f=>f.messageType==='agent.register').at(-1);
+  socket.receive({...registrationReceipt(registration),messageId:'unrelated',archiveJobDiscovery:1});await c.tick();
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,[]);
+  socket.receive({...registrationReceipt(registration),archiveJobDiscovery:1});await c.tick();
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions','archive']);
+});
+
+test('invalid archive service declaration cannot silently disable or enable discovery', async t => {
+  const c=await channelFixture(t,{ackRegistration:false,reconcileSkills:true});
+  const activation=c.executors[0].activate();const rejected=assert.rejects(activation,{code:'RUNTIME_REGISTRATION_SERVICE_INVALID'});await c.opened();
+  c.sockets[0].receive({...registrationReceipt(c.sockets[0].sent[0]),archiveJobDiscovery:'0'});await rejected;
+  await c.adapters.heartbeat();await c.tick();assert.ok(!c.states()[0].reconciliation);
+});
+
+test('shared archive registration fixture carries explicit server capability without altering envelope', async () => {
+ const wire=JSON.parse(await readFile(new URL('./fixtures/archive-discovery-registration-v1.json',import.meta.url),'utf8'));
+ const decoded=fromAgentWire(JSON.stringify(wire));
+ assert.equal(decoded.type,'agent_registered');assert.equal(decoded.messageId,'register-file-1');
+ assert.equal(decoded.archiveJobDiscovery,0);assert.deepEqual(decoded.readyCommandTypes,[]);
+});
+
+test('old position discovery completion cannot run archive discovery after re-registration', async t => {
+ const c=await channelFixture(t,{ackRegistration:false,reconcileSkills:true});
+ const activation=c.executors[0].activate();await c.opened();const socket=c.sockets[0],state=c.states()[0];
+ socket.receive({...registrationReceipt(socket.sent[0]),archiveJobDiscovery:1});await activation;
+ let release;state.positionGate=new Promise(done=>{release=done});await c.adapters.heartbeat();await c.tick();
+ state.transport.refreshCapabilities();await c.tick();const registration=socket.sent.filter(f=>f.messageType==='agent.register').at(-1);
+ socket.receive({...registrationReceipt(registration),archiveJobDiscovery:1});await c.tick();release();await c.tick();
+ assert.deepEqual(state.reconciliation,['positions']);state.positionGate=null;
+ await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions','positions','archive']);
 });
