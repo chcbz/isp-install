@@ -9,7 +9,7 @@ import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { buildTypedInspectionCodexConfig, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
-import { buildNativeExecutionCodexConfig, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
+import { buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
 
 const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('hex')
 const mkdir = path => { mkdirSync(path, { mode: 0o700 }); chmodSync(path, 0o700); return path }
@@ -40,7 +40,7 @@ const stubRuntime = f => {
     measureBinary: async () => ({ snapshotIdentity: {} }),
     egressFactory: () => ({ proxyUrl: 'http://10.0.2.2:1', start: async () => {}, bindOwner: async () => {}, attach: async () => ({ measured: true }), dispose: async () => { disposals++ } }),
     _spawnAdapter: async args => { spawns++; const adapter = new EventEmitter(); adapter.child = {}; adapter.closed = false; adapter.readback = { tools: { data: [] } }; adapter.request = async () => discovery(args.nativeView.layout); adapter.shutdown = async () => { shutdowns++; adapter.closed = true }; adapter.spawnArgs = args; adapter.startOrResumeThread = async () => 'thread-started'; adapter.runTurn = async () => 'turn-started'; return adapter },
-    _initializeAndSeal: async adapter => { rmSync(adapter.spawnArgs.engineState.authPath, { force: true }); return { config: { config: { default_permissions: 'native-execution', approval_policy: 'never', permissions: { 'native-execution': { filesystem: nativeFilesystemPermissions, network: { enabled: true } } } } } } }
+    _initializeAndSeal: async adapter => { rmSync(adapter.spawnArgs.engineState.authPath, { force: true }); return { config: { config: { model_catalog_json: adapter.spawnArgs.engineState.modelCatalogPath ? '/state/codex-home/model-catalog.json' : null, web_search: adapter.spawnArgs.nativeView.layout.binding.webSearch || 'disabled', default_permissions: 'native-execution', approval_policy: 'never', permissions: { 'native-execution': { filesystem: nativeFilesystemPermissions, network: { enabled: true } } } } } } }
   })
   return { runtime, counts: () => ({ spawns, disposals, shutdowns }) }
 }
@@ -583,7 +583,7 @@ test('browser readiness requires a successful process probe and retains text/Off
 })
 
 test('native inner permissions allow socket IPC while retaining filesystem boundaries', () => {
-  const config = { approval_policy: 'never', default_permissions: 'native-execution', permissions: { 'native-execution': { filesystem: { ...nativeFilesystemPermissions }, network: { enabled: true } } } }
+  const config = { web_search: 'disabled', approval_policy: 'never', default_permissions: 'native-execution', permissions: { 'native-execution': { filesystem: { ...nativeFilesystemPermissions }, network: { enabled: true } } } }
   verifyNativeExecutionConfig({ config: { config } })
   config.permissions['native-execution'].network.enabled = false
   assert.throws(() => verifyNativeExecutionConfig({ config: { config } }), /CONFIG_READBACK_MISMATCH/)
@@ -628,4 +628,61 @@ test('PDF capability requires its real render/reopen probe; failure retains Offi
     assert.equal(runtime.nativePdfMeasurementFailure.code, 'NATIVE_PDF_PROBE_FAILED')
     assert.equal(runtime.activeAdapters.size, 0)
   } finally { f.cleanup() }
+})
+
+test('hosted live search stays in the selected skill binding, separate from shell egress and read-only inspection', async () => {
+  const f = fixture(); const { runtime } = stubRuntime(f)
+  try {
+    const disabled = prepareNativeExecutionLayout(f.options)
+    assert.equal(disabled.binding.webSearch, undefined)
+    const skillConfiguration = [{ skillKey: 'authorized-helper', configuration: {}, networkOrigins: [], webSearch: 'live' }]
+    const enabled = prepareNativeExecutionLayout({ ...f.options, skillConfiguration })
+    assert.equal(enabled.binding.webSearch, 'live')
+    assert.equal(enabled.binding.networkAccess, false)
+    assert.deepEqual(enabled.binding.networkOrigins, [])
+    assert.notEqual(enabled.digest, disabled.digest)
+    const inspection = buildTypedInspectionCodexConfig({})
+    assert.match(inspection, /web_search = "disabled"/)
+    assert.match(buildNativeExecutionCodexConfig(inspection), /web_search = "disabled"/)
+    assert.match(buildNativeExecutionCodexConfig(inspection, { webSearch: 'live' }), /web_search = "live"/)
+    const adapter = await open(runtime, f, { skillConfiguration })
+    assert.match(readFileSync(resolve(adapter.spawnArgs.engineState.codexHome, 'config.toml'), 'utf8'), /web_search = "live"/)
+    const config = { web_search: 'disabled', approval_policy: 'never', default_permissions: 'native-execution', permissions: { 'native-execution': { filesystem: nativeFilesystemPermissions, network: { enabled: true } } } }
+    assert.throws(() => verifyNativeExecutionConfig({ config: { config } }, 'live'), /CONFIG_READBACK_MISMATCH/)
+    config.web_search = 'live'
+    verifyNativeExecutionConfig({ config: { config } }, 'live')
+    assert.throws(() => verifyNativeExecutionConfig({ config: { config } }), /CONFIG_READBACK_MISMATCH/)
+    await runtime.dispose(); runtime.disposed = false
+    await assert.rejects(open(runtime, f, { requireExistingState: true }), /BINDING_CONFLICT/)
+  } finally { await runtime.dispose(); f.cleanup() }
+})
+
+test('operator model catalog is snapshotted, mounted read-only and bound across native recovery', async () => {
+  const f = fixture(); const { runtime } = stubRuntime(f)
+  try {
+    const path = resolve(f.root, 'models.json')
+    writeFileSync(path, JSON.stringify({ models: [{ slug: 'fixture-model', supports_tools: true, supports_search_tool: true }] }), { mode: 0o600 })
+    runtime.nativeModelCatalog = loadNativeModelCatalog(path)
+    const first = runtime.nativeModelCatalog.sha256
+    const adapter = await open(runtime, f)
+    const { engineState, nativeView } = adapter.spawnArgs
+    assert.equal(nativeView.layout.binding.modelCatalogSha256, first)
+    assert.match(readFileSync(resolve(engineState.codexHome, 'config.toml'), 'utf8'), /^model_catalog_json = "\/state\/codex-home\/model-catalog.json"/)
+    assert.equal(sha256(engineState.modelCatalogPath), first)
+    const args = nativeExecutionMountArgs({ layout: nativeView.layout, engineState, neutralDirectory: '/neutral', skillsDirectory: '/skills' })
+    assert.equal(args[args.indexOf(engineState.modelCatalogPath) - 1], '--ro-bind')
+    writeFileSync(path, JSON.stringify({ models: [{ slug: 'fixture-model', supports_search_tool: false }] }))
+    assert.equal(runtime.nativeModelCatalog.sha256, first)
+    await runtime.dispose(); runtime.disposed = false
+    runtime.nativeModelCatalog = loadNativeModelCatalog(path)
+    await assert.rejects(open(runtime, f, { requireExistingState: true }), /BINDING_CONFLICT/)
+    chmodSync(path, 0o666)
+    assert.throws(() => loadNativeModelCatalog(path), /CATALOG_UNSAFE/)
+  } finally { await runtime.dispose(); f.cleanup() }
+})
+
+test('native model catalog path survives the actual agent profile normalization', async () => {
+  const { normalizeProfile } = await import('../agent-client.mjs')
+  assert.equal(normalizeProfile({ nativeModelCatalogPath: '/private/models.json' }, {}, 0, { isolated: true }).nativeModelCatalogPath, '/private/models.json')
+  assert.equal(normalizeProfile({}, {}, 0, { isolated: true }).nativeModelCatalogPath, '')
 })

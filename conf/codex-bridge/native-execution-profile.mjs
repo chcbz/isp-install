@@ -8,7 +8,7 @@ import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, rea
 import { basename, dirname, resolve, sep } from 'node:path'
 import { canonicalSha256 } from './chat-runtime.mjs'
 import { skillPackageTreeDigest } from './skill-manifest.mjs'
-import { nativeSkillOrigins } from './native-skill-config.mjs'
+import { nativeSkillOrigins, nativeSkillWebSearch } from './native-skill-config.mjs'
 
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const within = (root, path) => path === root || path.startsWith(`${root}${sep}`)
@@ -111,6 +111,22 @@ if (!isMainThread && workerData?.kind === 'native-toolchain-verify') {
   } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' }) }
 }
 
+// Public model metadata is operator-owned configuration, never a skill payload.
+// Snapshot once per runtime instance; request bindings retain its exact bytes.
+export const loadNativeModelCatalog = path => {
+  if (!path) return null
+  if (typeof path !== 'string' || resolve(path) !== path || realpathSync(path) !== path) fail('NATIVE_MODEL_CATALOG_UNSAFE')
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || ![0, process.geteuid()].includes(stat.uid) || stat.mode & 0o022) fail('NATIVE_MODEL_CATALOG_UNSAFE')
+    const document = JSON.parse(readFileSync(fd, 'utf8'))
+    if (!object(document) || !Array.isArray(document.models) || !document.models.length) fail('NATIVE_MODEL_CATALOG_INVALID')
+    const text = `${JSON.stringify(document)}\n`
+    return Object.freeze({ text, sha256: createHash('sha256').update(text).digest('hex') })
+  } finally { closeSync(fd) }
+}
+
 // Explicit opt-in host measurement for the minimal Linux shell toolchain.
 // Persist/use the returned manifest, not ldd output as a readiness declaration.
 // No Python/Office/browser libraries or network clients are implicitly added.
@@ -173,7 +189,8 @@ export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory,
     if (!object(item) || !keys.has(item.skillKey) || configured.has(item.skillKey) || !object(item.configuration)) fail('NATIVE_SKILL_CONFIG_BINDING_INVALID')
     configured.add(item.skillKey)
     const networkOrigins = nativeSkillOrigins(item.networkOrigins || [])
-    return Object.freeze({ skillKey: item.skillKey, configuration: structuredClone(item.configuration), networkOrigins })
+    const webSearch = nativeSkillWebSearch(item.webSearch)
+    return Object.freeze({ skillKey: item.skillKey, configuration: structuredClone(item.configuration), networkOrigins, ...(webSearch === 'live' ? { webSearch } : {}) })
   }).sort((a, b) => a.skillKey.localeCompare(b.skillKey))
   const networkOrigins = nativeSkillOrigins(configurations.flatMap(item => item.networkOrigins))
   const networkAccess = nativeExecution.networkAccess === true
@@ -182,6 +199,8 @@ export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory,
     sandboxUser: { uid: 65534, gid: 65534 }, neutralMountTargets: NATIVE_NEUTRAL_MOUNT_TARGETS,
     input: directoryIdentity(input), scratch: directoryIdentity(scratch), drafts: directoryIdentity(drafts),
     skills: packages, toolchain: fixedToolchain, tools: structuredClone(nativeExecution.tools), networkAccess, networkOrigins,
+    ...(nativeExecution.modelCatalogSha256 ? { modelCatalogSha256: nativeExecution.modelCatalogSha256 } : {}),
+    ...(configurations.some(item => item.webSearch === 'live') ? { webSearch: 'live' } : {}),
     skillConfiguration: configurations.map(item => ({ skillKey: item.skillKey, digest: canonicalSha256(item) })) })
   return Object.freeze({ inputDirectory: input, scratchDirectory: scratch, draftsDirectory: drafts,
     skills: Object.freeze(packages), skillConfiguration: Object.freeze(configurations), toolchain: fixedToolchain, binding, digest: canonicalSha256(binding) })
@@ -198,8 +217,8 @@ export const nativeFilesystemPermissions = Object.freeze({
 // proxy boundary. Keep local socket syscalls available: Codex's network=false
 // seccomp also rejects shutdown(AF_UNIX), preventing Chromium's own sandbox.
 // This setting grants no destinations; layout.networkOrigins remains authoritative.
-export const buildNativeExecutionCodexConfig = readOnlyConfig =>
-  readOnlyConfig.replace('sandbox_mode = "read-only"', `default_permissions = "${NATIVE_PERMISSION_PROFILE}"`)
+export const buildNativeExecutionCodexConfig = (readOnlyConfig, { webSearch = 'disabled' } = {}) =>
+  readOnlyConfig.replace('web_search = "disabled"', `web_search = "${nativeSkillWebSearch(webSearch)}"`).replace('sandbox_mode = "read-only"', `default_permissions = "${NATIVE_PERMISSION_PROFILE}"`)
   + `\n[permissions.${NATIVE_PERMISSION_PROFILE}]\nfilesystem = { ${Object.entries(nativeFilesystemPermissions).map(([path, mode]) => `${JSON.stringify(path)} = ${JSON.stringify(mode)}`).join(', ')} }\n[permissions.${NATIVE_PERMISSION_PROFILE}.network]\nenabled = true\n`
 
 // Shared immutable dependency mounts; no execution state or credentials.
@@ -228,6 +247,7 @@ export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory
     '--dir', '/state/codex-home/skills', '--ro-bind', skillsDirectory, '/state/codex-home/skills',
     '--dir', '/workspace', '--bind', layout.scratchDirectory, '/workspace',
     '--dir', '/outputs', '--bind', layout.draftsDirectory, '/outputs']
+  if (engineState.modelCatalogPath) args.push('--ro-bind', engineState.modelCatalogPath, '/state/codex-home/model-catalog.json')
   if (layout.skillConfiguration.length) {
     if (!skillConfigurationDirectory || resolve(skillConfigurationDirectory) !== resolve(engineState.directory, 'skill-config')) fail('NATIVE_SKILL_CONFIG_BINDING_INVALID')
     args.push('--dir', '/skill-config', '--ro-bind', skillConfigurationDirectory, '/skill-config', '--setenv', 'CYF_SKILL_CONFIG_DIR', '/skill-config')
@@ -241,11 +261,13 @@ export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory
   return args
 }
 
-export const verifyNativeExecutionConfig = readback => {
+export const verifyNativeExecutionConfig = (readback, webSearch = 'disabled', modelCatalog = null) => {
   const config = readback?.config?.config
   const permissions = config?.permissions?.[NATIVE_PERMISSION_PROFILE]
   const filesystem = permissions?.filesystem
-  if (config?.default_permissions !== NATIVE_PERMISSION_PROFILE || config?.approval_policy !== 'never'
+  if (config?.web_search !== webSearch
+      || (config?.model_catalog_json ?? null) !== (modelCatalog ? '/state/codex-home/model-catalog.json' : null)
+      || config?.default_permissions !== NATIVE_PERMISSION_PROFILE || config?.approval_policy !== 'never'
       || permissions?.network?.enabled !== true
       || !filesystem || Object.entries(nativeFilesystemPermissions).some(([path, mode]) => filesystem[path] !== mode)
       || Object.keys(filesystem).some(path => path !== 'glob_scan_max_depth' && !Object.hasOwn(nativeFilesystemPermissions, path))) fail('NATIVE_EXECUTION_CONFIG_READBACK_MISMATCH')

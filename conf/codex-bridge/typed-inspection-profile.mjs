@@ -16,7 +16,7 @@ import {
 import { canonicalSha256 } from './chat-runtime.mjs'
 import { RestrictedProviderEgress, restrictedProviderNetworkPolicy } from './typed-inspection-network.mjs'
 
-import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, buildNativeExecutionCodexConfig, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
+import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -112,18 +112,19 @@ export const buildTypedInspectionCodexConfig = profile => {
   const systemProxy = profile?.typedInspectionProviderNetwork === 'restricted-proxy' ? '[features]\nrespect_system_proxy = true\n' : ''
   return `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile)}${systemProxy}`
 }
-const stageCodexHome = (profile, stateRoot, { nativeExecution = false } = {}) => {
+const stageCodexHome = (profile, stateRoot, { nativeExecution = false, webSearch = 'disabled', modelCatalog = null } = {}) => {
   const codexHome = ensurePrivateDirectory(resolve(stateRoot, 'codex-home')); ensurePrivateDirectory(resolve(stateRoot, 'home'))
   const sourceAuth = resolve(profile.codexHome || '', 'auth.json')
   if (!profile.codexHome || !existsSync(sourceAuth)) fail('TYPED_INSPECTION_AUTH_SOURCE_REQUIRED')
   const authDigest = copyCredentialFile(sourceAuth, resolve(codexHome, 'auth.json'))
-  const readOnlyConfig = buildTypedInspectionCodexConfig(profile)
-  const config = nativeExecution ? buildNativeExecutionCodexConfig(readOnlyConfig) : readOnlyConfig
+  const modelCatalogPath = nativeExecution && modelCatalog ? stateMarker(codexHome, JSON.parse(modelCatalog.text), 'model-catalog.json') : null
+  const readOnlyConfig = (modelCatalogPath ? 'model_catalog_json = "/state/codex-home/model-catalog.json"\n' : '') + buildTypedInspectionCodexConfig(profile)
+  const config = nativeExecution ? buildNativeExecutionCodexConfig(readOnlyConfig, { webSearch }) : readOnlyConfig
   const configPath = resolve(codexHome, 'config.toml'); const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(temporary, config, { mode: 0o600, flag: 'wx' }); chmodSync(temporary, 0o600)
   const configFd = openSync(temporary, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(configFd) } finally { closeSync(configFd) }
   renameSync(temporary, configPath); fsyncDirectory(codexHome)
-  return { codexHome, authPath: resolve(codexHome, 'auth.json'), authDigest, configDigest: `sha256:${sha256(Buffer.from(config))}` }
+  return { codexHome, modelCatalogPath, authPath: resolve(codexHome, 'auth.json'), authDigest, configDigest: `sha256:${sha256(Buffer.from(config))}` }
 }
 const engineStateBinding = value => {
   const keys = ['schemaVersion', 'requestKey', 'authorizationId', 'manifestDigest', 'requestId', 'turnId', 'inputPolicyDigest']
@@ -333,6 +334,7 @@ export class TypedInspectionProfileRuntime {
     if (overlaps(this.materializerRoot, this.stateRoot)) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
     for (const candidate of forbidden.filter(value => value && existsSync(resolve(value)))) if (overlaps(this.stateRoot, realpathSync(resolve(candidate)))) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
     this.providerCaTrust = profile.typedInspectionProviderNetwork === 'restricted-proxy' ? stageProviderCaTrust(profile, this.stateRoot) : null
+    this.nativeModelCatalog = loadNativeModelCatalog(profile.nativeModelCatalogPath)
     this.nativeToolchain = nativeToolchain; this.nativeExecutionReadback = null; this.nativeExecutionMeasurementPending = null; this.pendingNativeAdapters = new Map(); this.pendingInspectionKeys = new Set(); this.closingAdapters = new Map()
     this.bwrap = bwrapIdentity(bwrapBin); this.spawnFn = spawnFn; this.measureBinary = measureBinary; this.egressFactory = egressFactory; this.measurement = null; this.contractReadback = null; this.nativeReadback = null; this.activeAdapters = new Map(); this.disposed = false
   }
@@ -355,7 +357,7 @@ export class TypedInspectionProfileRuntime {
       if (!created && !existsSync(resolve(directory, 'native-binding.json'))) fail('NATIVE_EXECUTION_RECOVERY_MAPPING_MISSING')
       stateMarker(directory, nativeBinding, 'native-binding.json')
     }
-    return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory, { nativeExecution }) }
+    return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory, { nativeExecution, webSearch: nativeBinding?.webSearch, modelCatalog: nativeExecution ? this.nativeModelCatalog : null }) }
   }
   async _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '', nativeView = null, nativeExecution = null }) {
     if (Boolean(nativeView) !== Boolean(nativeExecution)) fail('NATIVE_EXECUTION_BINDING_INVALID')
@@ -471,7 +473,7 @@ export class TypedInspectionProfileRuntime {
   // The caller supplies an API-authorized execution/tool binding and pinned
   // package/toolchain bytes; this path measures its own actual engine view.
   openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, requireExistingState = false } = {}) {
-    if (nativeExecution) nativeExecution = Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools) })
+    if (nativeExecution) nativeExecution = Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools), ...(this.nativeModelCatalog ? { modelCatalogSha256: this.nativeModelCatalog.sha256 } : {}) })
     if (this.disposed) return Promise.reject(Object.assign(new Error('TYPED_INSPECTION_PROFILE_DISPOSED'), { code: 'TYPED_INSPECTION_PROFILE_DISPOSED' }))
     const binding = engineStateBinding(requestBinding)
     if (!nonblank(requestKey) || binding.requestKey !== requestKey) fail('NATIVE_EXECUTION_BINDING_INVALID')
@@ -529,7 +531,7 @@ export class TypedInspectionProfileRuntime {
         nativeView: { layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory }, nativeExecution: { ...nativeExecution, checkActive } })
       checkActive(); await egress.bindOwner(adapter.child, this.bwrap, schema.snapshotIdentity)
       const network = await egress.attach(); checkActive()
-      const readback = await this._initializeAndSeal(adapter); checkActive(); verifyNativeExecutionConfig(readback)
+      const readback = await this._initializeAndSeal(adapter); checkActive(); verifyNativeExecutionConfig(readback, layout.binding.webSearch, this.nativeModelCatalog)
       if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
       adapter.verifyNativeExecutionSkills = async () => {
         checkActive()

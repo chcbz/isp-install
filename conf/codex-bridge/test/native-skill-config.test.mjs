@@ -54,3 +54,17 @@ test('missing configured file is an execution-scoped recoverable failure', t => 
   f.write()
   assert.equal(loadNativeSkillConfiguration(f)[0].skillInstallationId, 'installed1')
 })
+
+test('hosted search is explicit, installation-bound and changes the pinned configuration digest', t => {
+  const f = fixture(t), original = loadNativeSkillConfiguration(f)[0]
+  f.config.installations.installed2.webSearch = 'live'; f.write()
+  assert.deepEqual(loadNativeSkillConfiguration(f)[0], original)
+  f.config.installations.installed1.webSearch = 'live'; f.write()
+  const enabled = loadNativeSkillConfiguration(f)[0]
+  assert.equal(enabled.webSearch, 'live')
+  assert.notEqual(enabled.digest, original.digest)
+  f.config.installations.installed1.webSearch = 'disabled'; f.write()
+  assert.deepEqual(loadNativeSkillConfiguration(f)[0], original)
+  f.config.installations.installed1.webSearch = 'cached'; f.write()
+  assert.throws(() => loadNativeSkillConfiguration(f), /WEB_SEARCH_INVALID/)
+})

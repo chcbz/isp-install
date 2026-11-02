@@ -8,6 +8,11 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const scopeKeys = ['tenantId', 'ownerJiacn', 'clientId', 'agentId']
 export { NATIVE_SKILL_SCRIPT_POLICY }
+// Hosted retrieval is an explicit installation permission, not shell egress.
+export function nativeSkillWebSearch(value = 'disabled') {
+  if (!['disabled', 'live'].includes(value)) fail('NATIVE_SKILL_WEB_SEARCH_INVALID')
+  return value
+}
 export function nativeSkillOrigins(values) {
   if (!Array.isArray(values)) fail('NATIVE_SKILL_NETWORK_INVALID')
   const origins = values.map(value => {
@@ -45,8 +50,10 @@ export function loadNativeSkillConfiguration({ file, scope, command, entries }) 
     if (entry === undefined) return []
     if (!object(entry) || !object(entry.configuration)) fail('NATIVE_SKILL_CONFIG_INVALID')
     const configuration = structuredClone(entry.configuration), networkOrigins = nativeSkillOrigins(entry.networkOrigins || [])
-    return [{ skillKey: descriptor.skillKey, skillInstallationId: descriptor.skillInstallationId, configuration, networkOrigins,
-      digest: skillDigest({ configuration, networkOrigins }) }]
+    const webSearch = nativeSkillWebSearch(entry.webSearch)
+    const searchPermission = webSearch === 'live' ? { webSearch } : {}
+    return [{ skillKey: descriptor.skillKey, skillInstallationId: descriptor.skillInstallationId, configuration, networkOrigins, ...searchPermission,
+      digest: skillDigest({ configuration, networkOrigins, ...searchPermission }) }]
   })
   return Object.freeze(selected.map(Object.freeze))
 }

@@ -568,6 +568,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     codexSessionMode: profile.codexSessionMode || fallback.codexSessionMode || 'new',
     codexTimeoutMs: parseCodexTimeoutMs(profile.codexTimeoutMs, fallback.codexTimeoutMs ?? 900000),
     codexModel: profile.codexModel || fallback.codexModel || '',
+    nativeModelCatalogPath: String(profile.nativeModelCatalogPath ?? fallback.nativeModelCatalogPath ?? '').trim(),
     chatEngine: profile.chatEngine || fallback.chatEngine || 'legacy-codex',
     chatModel: profile.chatModel || fallback.chatModel || '',
     chatReasoningEffort: profile.chatReasoningEffort || fallback.chatReasoningEffort || '',

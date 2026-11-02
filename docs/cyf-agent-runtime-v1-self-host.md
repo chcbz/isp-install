@@ -398,3 +398,15 @@ local-script解释器从整文件同步读取改为1MiB缓冲异步SHA，每次�
 ### CYF 本领维护与最小注册（2026-10-29 候选，发布见 CYF handoff）
 
 遵循 `/home/isp/wsps/cyf/api/docs/interface-standard.md` v1.4 和 RB-1。请上梁山/API 初始化资料和本领，随后本人在详情维护；Runtime 注册不读工作目录推测本领、不上报姓名/头像/角色资料/本领，presence 只报动态状态与会话 fence。保留 API 真实消费的 runtimeCapabilities、typedDeliberation（材料输入、nativeExecution）、skillExecution，不能用本领介绍代替就绪/授权。无旧客户端双轨；Runtime 1.3.24/bridge 1.1.15 候选需与对应 API/Web 协调部署，版本号修改不表示已启用。
+
+### 原生网页搜索与模型能力目录（2026-11-02源码候选，未部署）
+
+基线2464af9，接续工作区另含无关已提交修复6cb60ce；本节对应未提交候选，发布来源另行固定。遵循CYF RB-1，不把搜索站点适配或新闻编排放入bridge。
+
+- 普通技能安装不授予外网检索。现有`skillExecutionConfigFile`按实际安装ID配置`webSearch: "live"`（可与`configuration: {}`、`networkOrigins: []`配合）。缺省/disabled不启用；仅API已授权、选入当前SCRIPT执行的安装配置生效。本地文件/只读inspection不启用。
+- `webSearch`是模型服务侧检索，不是本机浏览器网络访问；远端检索站点不受本机CONNECT的networkOrigins限制。不要把内部资料或密钥作为搜索词。技能指令不能替代该边界。
+- 需要自定义模型能力目录的连接，在Agent profile明确指定`nativeModelCatalogPath`，指向运营者维护的常规JSON文件。文件由root/运行用户所有，不得组/全局可写，不含凭据或用户材料。目录内容须与实际模型/服务相符；声明supports_search_tool不等于服务已验收。不要自动复制其他账号完整HOME/config。
+- Runtime初始化读取一次目录快照；每次原生执行将其固定到隔离Home的`model-catalog.json`并只读挂载，在app-server启动前配置model_catalog_json。目录摘要进入执行绑定；更换目录的新Runtime不得恢复旧摘要执行。配置在thread/start时才补入，不能代替启动时加载模型目录。
+- 既有模型选择不变，不自动改用目录默认模型。运营者应只配置本环境获准模型，目录不安装到技能包。安装成功、模型工具广告、真实检索和新闻时效验证分别记录。
+
+2026-11-02定向探针证实：仅web_search=live时模型回复无搜索；在启动时加载匹配目录后真实请求出现web_search/external_web_access=true，实际模型产生webSearch记录。该探针不是生产部署或完整最新新闻验收。详细候选/限制见CYF `specs/juyiting-skill-execution/reusable-packages-20261102.md`。
