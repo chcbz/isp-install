@@ -289,7 +289,9 @@ export class SkillConversationLane {
         for (const artifact of artifacts) {
           checkLease()
           const blob = store.verifyBlob(artifact.outputId, artifact), form = new FormData()
-          form.set('file', await openAsBlob(blob.path, { type: artifact.contentMimeType }), artifact.outputId)
+          // Native staging already owns the display name; retain it on the upload.
+          // Older persisted artifacts have no displayName and keep their stable fallback.
+          form.set('file', await openAsBlob(blob.path, { type: artifact.contentMimeType }), artifact.displayName || artifact.outputId)
           for (const [key, value] of Object.entries({ version: String(fence.version), token: fence.token, sha256: artifact.sha256, byteLength: artifact.byteLength })) form.set(key, value)
           const staged = await this.request(`${path}/outputs/${artifact.outputId}/content`, 'POST', form, [200, 201])
           if (staged.outputId !== artifact.outputId || staged.sha256 !== artifact.sha256 || staged.byteLength !== artifact.byteLength

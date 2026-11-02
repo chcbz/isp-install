@@ -21,9 +21,9 @@ const headers = () => ({ Authorization: `AgentRuntime rts1_${'0'.repeat(64)}`, '
 const response = (url, value, status = 200, headers = {}) => {
   const reply = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'skill-test', code: 'E0', msg: 'ok', data: value }), { status, headers: { 'content-type': 'application/json', 'x-request-id': 'skill-test', ...headers } }); Object.defineProperty(reply, 'url', { value: url.href }); return reply
 }
-const fixture = t => {
+const fixture = (t, displayName) => {
   const root = mkdtempSync(resolve(tmpdir(), 'skill-lane-')); t.after(() => rmSync(root, { recursive: true, force: true }))
-  const c = command(), calls = [], effects = new Map(); let modelCalls = 0, serverManifest = null, loseCommit = false, loseStage = false, inboxEmpty = false, corruptDigest = false
+  const c = command(), calls = [], uploadedNames = [], effects = new Map(); let modelCalls = 0, serverManifest = null, loseCommit = false, loseStage = false, inboxEmpty = false, corruptDigest = false
   const descriptor = { manifest: { runner: 'native-model', parametersSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', additionalProperties: false }, inputs: { minItems: 0, maxItems: 32, acceptedMimeTypes: ['text/plain'] }, outputs: c.outputs } }
   const lease = () => ({ executionId: c.executionId, version: '9007199254740993', token: '00000000-0000-0000-0000-000000000001', expiresAt: Date.now() + 600000 })
   // Transport test double, not engine/model acceptance evidence. Native engine
@@ -34,7 +34,7 @@ const fixture = t => {
     const artifacts = []
     if (c.outputs.artifactsRequired) {
       const bytes = Buffer.from('真实正文'); store.writeBlob('output_1', bytes)
-      artifacts.push({ outputId: 'output_1', contentMimeType: 'text/plain', sha256: skillHash(bytes), byteLength: String(bytes.length) })
+      artifacts.push({ ...(displayName ? { displayName } : {}), outputId: 'output_1', contentMimeType: 'text/plain', sha256: skillHash(bytes), byteLength: String(bytes.length) })
     }
     return store.persistNativeResult({ data: { summary: '由模型实际返回' }, artifacts, inputReceipts: [], effectDependencies: [] })
   }
@@ -46,6 +46,7 @@ const fixture = t => {
     if (url.pathname.endsWith('/resume')) return response(url, { lease: lease(), resultManifest: serverManifest, phase: serverManifest ? 'ARCHIVING' : 'RUNNING', allowedWork: serverManifest ? ['STAGE_OUTPUTS', 'COMMIT_RESULT', 'PROJECT_RESULT'] : ['EXECUTE'] })
     if (url.pathname.endsWith('/inputs')) return response(url, { schemaVersion: 5, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotSha256: c.snapshotDigest, noReferencedMaterials: true, inputs: [] })
     if (/\/outputs\/[^/]+\/content$/.test(url.pathname)) {
+      uploadedNames.push(body.get('file').name)
       const bytes = Buffer.from(await body.get('file').arrayBuffer()); assert.equal(body.get('sha256'), skillHash(bytes)); assert.equal(body.get('byteLength'), String(bytes.length)); assert.equal(body.has('length'), false)
       if (loseStage) { loseStage = false; throw Object.assign(new Error('stage reply lost'), { code: 'ECONNRESET' }) }
       return response(url, { outputId: 'output_1', sha256: skillHash(bytes), byteLength: String(bytes.length), state: 'STAGED' }, 201)
@@ -62,7 +63,7 @@ const fixture = t => {
   }
   const options = { apiOrigin: 'https://api.example.test', rootDir: root, scope, agentId: 'agent', runtimeInstanceId: 'runtime', getRuntimeHeaders: headers, fetchFn,
     registry: { requireExact: async () => ({ descriptor, binding: null }) }, runNative, runners: new Map() }
-  return { c, calls, effects, options, lane: new SkillConversationLane(options), descriptor, modelCalls: () => modelCalls,
+  return { c, calls, uploadedNames, effects, options, lane: new SkillConversationLane(options), descriptor, modelCalls: () => modelCalls,
     loseCommit: () => { loseCommit = true }, loseStage: () => { loseStage = true }, emptyInbox: () => { inboxEmpty = true }, corruptDigest: () => { corruptDigest = true },
     serverManifest: () => serverManifest }
 }
@@ -478,3 +479,14 @@ test('unavailable skill configuration is scoped to its execution and does not bl
   await partial(f.lane.poll(), 'NATIVE_SKILL_CONFIG_UNAVAILABLE', 1)
   assert.deepEqual(seen, ['pwe_1', 'pwe_2'])
 })
+
+for (const displayName of ['plan.txt', '读书会安排.txt', undefined]) {
+  test(`native upload preserves display name across stage recovery: ${displayName || 'legacy fallback'}`, async t => {
+    const f = fixture(t, displayName); f.c.outputs.artifactsRequired = true; f.loseStage()
+    await partial(f.lane.poll(), 'SKILL_TRANSPORT_UNKNOWN')
+    await new SkillConversationLane(f.options).poll()
+    assert.deepEqual(f.uploadedNames, [displayName || 'output_1', displayName || 'output_1'])
+    assert.equal(f.modelCalls(), 1)
+    assert.equal(f.serverManifest().artifacts[0].outputId, 'output_1')
+  })
+}
