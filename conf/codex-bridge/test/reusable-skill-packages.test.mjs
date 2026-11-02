@@ -7,8 +7,9 @@ import { SkillInstallManager } from '../skill-install-manager.mjs'
 import { SkillRegistry } from '../skill-registry.mjs'
 import { zip, hash, binding, profile, headers, command, activate } from './fixtures/skill-management-fixture.mjs'
 
-for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research']) {
+for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'text-file']) {
   test(`${skillKey}: same ordinary package installs independently for two agents and resolves only its authorized binding`, async t => {
+    const version = skillKey === 'text-file' ? '1.1.0' : '1.0.0'
     const source = new URL(`../../skills/${skillKey}/`, import.meta.url), entries = []
     const collect = (prefix = '') => {
       for (const entry of readdirSync(new URL(prefix || './', source), { withFileTypes: true })) {
@@ -25,7 +26,7 @@ for (const skillKey of ['document-workbench', 'browser-workbench', 'image-unders
     for (const agentId of ['agt_alpha', 'agt_beta']) {
       const home = resolve(root, agentId, 'home'); mkdirSync(home, { recursive: true })
       const session = { scope: { ...binding.scope, agentId }, fence: { ...binding.fence, installationId: `rti_${agentId}` } }
-      const target = { skillInstallationId: `si_${agentId}`, productVersionId: `spv_${skillKey}_1_0_0`, skillVersion: '1.0.0',
+      const target = { skillInstallationId: `si_${agentId}`, productVersionId: `spv_${skillKey}_1_0_0`, skillVersion: version,
         packageSha256: hash(bytes), manifestSha256: null, byteLength: String(bytes.length), kind: 'INSTRUCTION' }
       let downloads = 0
       const manager = new SkillInstallManager({ profile: { ...profile(home), agentId }, stateRoot: resolve(root, agentId, 'state'),
