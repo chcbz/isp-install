@@ -131,7 +131,7 @@ test('recovery checks original mapping before staging credentials; inspection ca
     await runtime.dispose(); runtime.disposed = false
     // Same lexical path, different inode: never resume into a replacement directory.
     renameSync(f.options.draftsDirectory, `${f.options.draftsDirectory}-old`); mkdir(f.options.draftsDirectory)
-    await assert.rejects(open(runtime, f, { requireExistingState: true }), /BINDING_CONFLICT/)
+    await assert.rejects(open(runtime, f, { requireExistingState: true }), { code: 'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED' })
     assert.equal(existsSync(resolve(directory, 'codex-home/auth.json')), false)
     assert.throws(() => runtime._prepareRequestState(f.binding), /BINDING_CONFLICT/)
   } finally { await runtime.dispose(); f.cleanup() }
@@ -653,7 +653,7 @@ test('hosted live search stays in the selected skill binding, separate from shel
     verifyNativeExecutionConfig({ config: { config } }, 'live')
     assert.throws(() => verifyNativeExecutionConfig({ config: { config } }), /CONFIG_READBACK_MISMATCH/)
     await runtime.dispose(); runtime.disposed = false
-    await assert.rejects(open(runtime, f, { requireExistingState: true }), /BINDING_CONFLICT/)
+    await assert.rejects(open(runtime, f, { requireExistingState: true }), { code: 'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED' })
   } finally { await runtime.dispose(); f.cleanup() }
 })
 
@@ -675,7 +675,7 @@ test('operator model catalog is snapshotted, mounted read-only and bound across 
     assert.equal(runtime.nativeModelCatalog.sha256, first)
     await runtime.dispose(); runtime.disposed = false
     runtime.nativeModelCatalog = loadNativeModelCatalog(path)
-    await assert.rejects(open(runtime, f, { requireExistingState: true }), /BINDING_CONFLICT/)
+    await assert.rejects(open(runtime, f, { requireExistingState: true }), { code: 'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED' })
     chmodSync(path, 0o666)
     assert.throws(() => loadNativeModelCatalog(path), /CATALOG_UNSAFE/)
   } finally { await runtime.dispose(); f.cleanup() }
