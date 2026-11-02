@@ -93,6 +93,8 @@ export class SkillConversationLane {
     this.root = resolve(rootDir, 'skill-runs'); this.agentId = agentId; this.instanceId = runtimeInstanceId
     this.scope = scope; this.auth = getRuntimeHeaders; this.fetch = fetchFn; this.registry = registry; this.runners = runners; this.active = false; this.onCommitted = onCommitted; this.onFailed = onFailed
     this.runNative = runNative; this.now = now; this.random = random; this.unknownRetries = new Map()
+    // Discovery index only: commands, attempts and receipts remain authoritative on disk.
+    this.pendingExecutionIds = null
   }
   headers() { return nativeSessionHeaders(this.auth(), this.agentId, this.instanceId) }
   async request(path, method, body, statuses = [200]) {
@@ -123,13 +125,19 @@ export class SkillConversationLane {
     return reply.body
   }
 
+  resetPendingDiscovery() { this.pendingExecutionIds = null }
+
   pendingCommands() {
     this.pendingCommandErrors = []
     const subject = resolve(this.root, skillDigest({ ...this.scope, apiOrigin: this.origin }))
-    if (!existsSync(subject)) return []
+    if (!existsSync(subject)) {
+      if (this.pendingExecutionIds?.size) fail('SKILL_STORE_UNSAFE')
+      this.pendingExecutionIds = new Set()
+      return []
+    }
     if (realpathSync(subject) !== subject || !lstatSync(subject).isDirectory()) fail('SKILL_STORE_UNSAFE')
-    const pending = []
-    for (const id of readdirSync(subject)) {
+    const pending = [], unresolved = new Set()
+    for (const id of this.pendingExecutionIds ?? readdirSync(subject)) {
       if (!skillId(id)) fail('SKILL_STORE_UNSAFE')
       const directory = resolve(subject, id)
       if (realpathSync(directory) !== directory || !lstatSync(directory).isDirectory()) fail('SKILL_STORE_UNSAFE')
@@ -148,8 +156,13 @@ export class SkillConversationLane {
       } finally { closeSync(fd) }
       if (command.executionId !== id) fail('SKILL_STORE_IDENTITY_CONFLICT')
       const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
-      if (store.read('attempt') && !store.read('receipt') && !store.read('failure-receipt')) pending.push(command)
+      if (store.read('attempt') && !store.read('receipt') && !store.read('failure-receipt')) {
+        pending.push(command)
+        unresolved.add(id)
+      }
     }
+    // Publish only after a successful scan; a partial/unsafe scan must not lose pending work.
+    this.pendingExecutionIds = unresolved
     return pending
   }
   async poll() {
@@ -210,6 +223,7 @@ export class SkillConversationLane {
   async process(command) {
     const path = `${BASE}/${command.taskId}/runs/${command.runId}/conversation`
     const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
+    this.pendingExecutionIds?.add(command.executionId)
     const executionAbort = new AbortController()
     let fence = null, expiry = 0, timer, expiryTimer, renewalPromise, renewalError, running = true, proof
     const checkLease = () => {

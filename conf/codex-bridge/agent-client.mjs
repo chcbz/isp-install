@@ -5557,6 +5557,7 @@ export const stopNativeConversationPoller = state => {
 export const startNativeConversationPoller = (profile, state) => {
   stopNativeConversationPoller(state)
   if (!state?.conversationNativeLane || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
+  state.conversationNativeLane.resetPendingDiscovery?.()
   const tick = async () => {
     if (state.conversationNativePollInFlight || state.ws?.readyState !== WebSocketClient.OPEN || state.processor.paused) return
     state.conversationNativePollInFlight = true

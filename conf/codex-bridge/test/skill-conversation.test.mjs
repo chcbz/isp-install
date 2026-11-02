@@ -490,3 +490,53 @@ for (const displayName of ['plan.txt', '读书会安排.txt', undefined]) {
     assert.equal(f.serverManifest().artifacts[0].outputId, 'output_1')
   })
 }
+
+test('discovery retains only unresolved IDs and rescans history only on reset', async t => {
+  const f = fixture(t)
+  await f.lane.poll(); f.emptyInbox()
+  assert.deepEqual(f.lane.pendingCommands(), [])
+  assert.equal(f.lane.pendingExecutionIds.size, 0)
+  const historical = { ...command(), executionId: 'history_1' }
+  const store = new SkillExecutionStore({ rootDirectory: f.lane.root, scope: { ...scope, apiOrigin: f.lane.origin }, command: historical })
+  const legacy = { ...historical, executionProtocolVersion: 4 }
+  writeFileSync(store.path('command'), JSON.stringify(legacy))
+  // A newly discovered historical file is not a live inbox or an execution signal.
+  for (let i = 0; i < 20; i++) {
+    assert.deepEqual(f.lane.pendingCommands(), [])
+    assert.deepEqual(f.lane.pendingCommandErrors, [])
+  }
+  f.lane.resetPendingDiscovery()
+  assert.deepEqual(f.lane.pendingCommands(), [])
+  assert.equal(f.lane.pendingCommandErrors[0].error.code, 'SKILL_COMMAND_INVALID')
+  assert.equal(f.lane.pendingExecutionIds.size, 0)
+  assert.deepEqual(f.lane.pendingCommands(), [])
+  assert.deepEqual(f.lane.pendingCommandErrors, [])
+  assert.equal(f.modelCalls(), 1)
+})
+
+test('new inbox work enters an initialized index and resumes uncertainty with an empty inbox', async t => {
+  const f = fixture(t); f.c.outputs.artifactsRequired = true
+  assert.deepEqual(f.lane.pendingCommands(), [])
+  f.loseStage(); await partial(f.lane.poll(), 'SKILL_TRANSPORT_UNKNOWN')
+  assert.deepEqual([...f.lane.pendingExecutionIds], [f.c.executionId])
+  f.emptyInbox(); await f.lane.poll()
+  assert.equal(f.modelCalls(), 1)
+  assert.deepEqual(f.lane.pendingCommands(), [])
+  assert.equal(f.lane.pendingExecutionIds.size, 0)
+})
+
+test('pending index never caches commands and an unsafe scan cannot publish a partial replacement', async t => {
+  const f = fixture(t); f.effects.set('native-model', { status: 'START_RECORDED' })
+  await partial(f.lane.poll(), 'SKILL_RESULT_UNKNOWN')
+  const store = new SkillExecutionStore({ rootDirectory: f.lane.root, scope: { ...scope, apiOrigin: f.lane.origin }, command: f.c })
+  const original = readFileSync(store.path('command'))
+  writeFileSync(store.path('command'), JSON.stringify({ ...f.c, executionId: 'different' }))
+  assert.throws(() => f.lane.pendingCommands(), /SKILL_STORE_IDENTITY_CONFLICT/)
+  assert.deepEqual([...f.lane.pendingExecutionIds], [f.c.executionId])
+  writeFileSync(store.path('command'), original)
+  assert.equal(f.lane.pendingCommands().length, 1)
+  f.emptyInbox()
+  const report = await f.lane.poll()
+  assert.equal(report.status, 'DEFERRED')
+  assert.equal(f.modelCalls(), 0)
+})

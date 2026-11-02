@@ -5007,3 +5007,24 @@ test('action CHAT prepared final is recovered by the existing scheduler after re
     assert.equal(runtime.processor.chatRecoveryRetries.size, 0)
   } finally { runtime.processor.stop() }
 })
+
+test('native poller resets local discovery on every authenticated start and reconnect', async () => {
+  const ws = await loadWebSocketClient(), events = []
+  const state = { ws: { readyState: ws.OPEN }, processor: { paused: false },
+    workspaceFileRuntimeAuthHeader: `AgentRuntime rts1_${'0'.repeat(64)}`,
+    conversationNativeLane: {
+      resetPendingDiscovery: () => events.push('reset'),
+      poll: async () => { events.push('poll'); return { status: 'IDLE' } }
+    } }
+  try {
+    for (let i = 0; i < 2; i++) {
+      startNativeConversationPoller({ profileId: 'fixture' }, state)
+      await state.conversationNativePollPromise; await Promise.resolve()
+    }
+    assert.deepEqual(events, ['reset', 'poll', 'reset', 'poll'])
+    state.workspaceFileRuntimeAuthHeader = null
+    startNativeConversationPoller({ profileId: 'fixture' }, state)
+    assert.equal(events.length, 4)
+    assert.equal(state.conversationNativePollTimer, null)
+  } finally { stopNativeConversationPoller(state) }
+})
