@@ -7,9 +7,9 @@ import { SkillInstallManager } from '../skill-install-manager.mjs'
 import { SkillRegistry } from '../skill-registry.mjs'
 import { zip, hash, binding, profile, headers, command, activate } from './fixtures/skill-management-fixture.mjs'
 
-for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'text-file']) {
+for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'text-file', 'analysis']) {
   test(`${skillKey}: same ordinary package installs independently for two agents and resolves only its authorized binding`, async t => {
-    const version = skillKey === 'text-file' ? '1.1.0' : '1.0.0'
+    const version = ['text-file', 'analysis'].includes(skillKey) ? '1.1.0' : '1.0.0'
     const source = new URL(`../../skills/${skillKey}/`, import.meta.url), entries = []
     const collect = (prefix = '') => {
       for (const entry of readdirSync(new URL(prefix || './', source), { withFileTypes: true })) {
