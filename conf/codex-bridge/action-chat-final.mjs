@@ -21,8 +21,11 @@ export async function publishActionChatFinal({ profile, message, finalPrepared, 
     engineTurnId: finalPrepared.result?.turnId, threadKey: finalPrepared.result?.threadKey, finalSeq: finalPrepared.extra?.finalSeq })
   if (canonicalSha256(expected) !== canonicalSha256(finalPrepared)) fail('CHAT_FINAL_PREPARED_INVALID')
   let sent = false, errorCode = null
+  const sendStarted = performance.now()
   try { sent = await sendFinal(profile, message, expected.content, expected.extra) === true }
   catch (error) { errorCode = error.code || 'CHAT_FINAL_SEND_FAILED' }
+  try { console.info(JSON.stringify({ event: 'chat-final-send-timing', atMs: Date.now(), turnId: message.turnId,
+    durationMs: performance.now() - sendStarted, accepted: sent, errorCode })) } catch {}
   const publication = { schemaVersion: 1, outboundMessageId: expected.outboundMessageId,
     state: sent ? 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED' : 'NOT_SENT', errorCode }
   await controls.markFinalPublication(publication)

@@ -458,14 +458,25 @@ export class AppServerAdapter extends EventEmitter {
   }
   notify(method, params = {}) { if (!this.closed) this.send({ method, params }) }
   async initialize() {
-    if (this.readback.schema?.measured === true && !this.readback.processExecutable) await this.verifySpawnedExecutable()
-    this.readback.initialize = await this.request('initialize', { clientInfo: { name: 'cyf-juyiting-runtime', version: '2' }, ...(this.nativeExecution ? { capabilities: { experimentalApi: true } } : {}) })
-    this.notify('initialized', {})
-    this.readback.account = await this.request('account/read', { refreshToken: false })
-    this.readback.models = await this.request('model/list', {})
-    this.readback.config = await this.request('config/read', {})
-    this.readback.tools = await this.request('mcpServerStatus/list', { detail: 'toolsAndAuthOnly' }).catch(error => ({ unavailable: true, reason: error.code || error.message }))
-    return this.readback
+    const timings = []
+    const measured = async (phase, operation) => {
+      const started = performance.now(); let completed = false
+      try { const result = await operation(); completed = true; return result }
+      finally { timings.push({ phase, completed, durationMs: performance.now() - started }) }
+    }
+    try {
+      if (this.readback.schema?.measured === true && !this.readback.processExecutable) await measured('executable-readback', () => this.verifySpawnedExecutable())
+      this.readback.initialize = await measured('initialize', () => this.request('initialize', { clientInfo: { name: 'cyf-juyiting-runtime', version: '2' }, ...(this.nativeExecution ? { capabilities: { experimentalApi: true } } : {}) }))
+      this.notify('initialized', {})
+      this.readback.account = await measured('account/read', () => this.request('account/read', { refreshToken: false }))
+      this.readback.models = await measured('model/list', () => this.request('model/list', {}))
+      this.readback.config = await measured('config/read', () => this.request('config/read', {}))
+      this.readback.tools = await measured('mcpServerStatus/list', () => this.request('mcpServerStatus/list', { detail: 'toolsAndAuthOnly' })).catch(error => ({ unavailable: true, reason: error.code || error.message }))
+      return this.readback
+    } finally {
+      try { console.info(JSON.stringify({ event: 'app-server-initialize-timing', atMs: Date.now(),
+        pid: this.child?.pid || null, native: Boolean(this.nativeExecution), timings })) } catch {}
+    }
   }
   async startOrResumeThread(binding, policy) {
     const params = { cwd: policy.cwd, model: policy.model || undefined, approvalPolicy: 'never', sandbox: 'read-only', config: { ...(policy.config || {}), network: false }, developerInstructions: policy.developerInstructions || policy.instructions || '', ...(policy.baseInstructions ? { baseInstructions: policy.baseInstructions } : {}) }

@@ -500,11 +500,14 @@ export class TypedInspectionProfileRuntime {
   }
   async _openNativeExecutionAdapter(binding, layout, nativeExecution, requireExistingState, slot) {
     let engineState, adapter, egress
+    const timings = []; let stage = 'binary-measure', stageStarted = performance.now(), ready = false
+    const phase = next => { timings.push({ phase: stage, durationMs: performance.now() - stageStarted }); stage = next; stageStarted = performance.now() }
     const checkActive = () => { if (this.disposed || slot.cancelled) fail('NATIVE_EXECUTION_START_CANCELLED'); nativeExecution.checkActive() }
     try {
       checkActive()
       if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
       const schema = await this.measureBinary(this.profile); checkActive()
+      phase('request-state-and-skill-view')
       engineState = this._prepareRequestState(binding, { requireExistingState, nativeExecution: true, nativeBinding: layout.binding })
       slot.engineState = engineState
       const skillConfigurationDirectory = ensurePrivateDirectory(resolve(engineState.directory, 'skill-config'))
@@ -522,16 +525,21 @@ export class TypedInspectionProfileRuntime {
         const mountpoint = ensurePrivateDirectory(resolve(skillsDirectory, skill.skillKey))
         if (readdirSync(mountpoint).length) fail('NATIVE_EXECUTION_DISCOVERY_ROOT_UNSAFE')
       }
+      phase('egress-start')
       egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins })
       await egress.start(); checkActive()
       // Recheck bytes/identities after asynchronous setup, immediately before bind.
+      phase('layout-recheck')
       const current = prepareNativeExecutionLayout({ ...layout, nativeExecution, toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
       if (current.digest !== layout.digest) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
+      phase('adapter-spawn')
       adapter = await this._spawnAdapter({ inputDirectory: layout.inputDirectory, engineState, schemaMeasurement: schema,
         networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl,
         nativeView: { layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory }, nativeExecution: { ...nativeExecution, checkActive } })
-      checkActive(); await egress.bindOwner(adapter.child, this.bwrap, schema.snapshotIdentity)
+      checkActive(); phase('egress-bind'); await egress.bindOwner(adapter.child, this.bwrap, schema.snapshotIdentity)
+      phase('egress-attach')
       const network = await egress.attach(); checkActive()
+      phase('initialize-and-seal')
       const readback = await this._initializeAndSeal(adapter); checkActive(); verifyNativeExecutionConfig(readback, layout.binding.webSearch, this.nativeModelCatalog)
       if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
       adapter.verifyNativeExecutionSkills = async () => {
@@ -539,6 +547,7 @@ export class TypedInspectionProfileRuntime {
         const discovery = verifyNativeExecutionSkillCatalog(await adapter.request('skills/list', { cwds: ['/execution'], forceReload: true }), layout)
         checkActive(); return discovery
       }
+      phase('skill-discovery')
       const discovery = await adapter.verifyNativeExecutionSkills()
       // Recheck actual engine discovery at both new/resumed thread and turn
       // boundaries; a cached startup inventory is not refresh/resume evidence.
@@ -558,14 +567,21 @@ export class TypedInspectionProfileRuntime {
         rmSync(resolve(engineState.directory, 'skill-config'), { recursive: true, force: true })
         void egress.dispose().catch(() => {})
       })
+      ready = true
       return adapter
     } catch (error) {
+      phase('failure-cleanup')
       await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress?.dispose().catch(() => {})
       if (engineState?.authPath) rmSync(engineState.authPath, { force: true })
       if (engineState?.directory) rmSync(resolve(engineState.directory, 'skill-config'), { recursive: true, force: true })
       if (engineState?.created && !slot.preserveState) rmSync(engineState.directory, { recursive: true, force: true })
       if (engineState && slot.preserveState) { this.suspendedNativeStates ||= new Map(); this.suspendedNativeStates.set(binding.requestKey, engineState.directory) }
       throw error
+    } finally {
+      phase('done')
+      try { console.info(JSON.stringify({ event: 'native-execution-prepare-timing', atMs: Date.now(),
+        profileKey: createHash('sha256').update(this.profile.profileId || '').digest('hex'),
+        requestKey: binding.requestKey, ready, timings })) } catch {}
     }
   }
   suspendAdapter(requestKey) { return this.releaseAdapter(requestKey, { preserveState: true }) }

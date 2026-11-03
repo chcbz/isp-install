@@ -118,6 +118,38 @@ test('native open is single flight, binds callbacks/execution/mapping/tools and 
   } finally { await runtime.dispose(); f.cleanup() }
 })
 
+test('native preparation timings separate phases without exposing payloads or changing failure cleanup', async t => {
+  const lines = []; t.mock.method(console, 'info', line => lines.push(JSON.parse(line)))
+  const f = fixture(); const { runtime } = stubRuntime(f)
+  try {
+    await open(runtime, f)
+    const timing = lines.find(line => line.event === 'native-execution-prepare-timing')
+    assert.equal(timing.ready, true)
+    assert.deepEqual(timing.timings.map(row => row.phase), ['binary-measure', 'request-state-and-skill-view',
+      'egress-start', 'layout-recheck', 'adapter-spawn', 'egress-bind', 'egress-attach', 'initialize-and-seal', 'skill-discovery'])
+    assert.ok(timing.timings.every(row => Number.isFinite(row.durationMs) && row.durationMs >= 0))
+    assert.ok(!JSON.stringify(timing).includes('nonfunctional-isolation-fixture'))
+    await runtime.releaseAdapter(f.binding.requestKey)
+  } finally { f.cleanup() }
+  const failed = fixture(); const r = stubRuntime(failed)
+  try {
+    r.runtime._spawnAdapter = async () => { throw new Error('sensitive-failure-fixture') }
+    await assert.rejects(open(r.runtime, failed), /sensitive-failure-fixture/)
+    const timing = lines.filter(line => line.event === 'native-execution-prepare-timing').at(-1)
+    assert.equal(timing.ready, false)
+    assert.equal(timing.timings.at(-1).phase, 'failure-cleanup')
+    assert.equal(r.counts().disposals, 1)
+    assert.ok(!JSON.stringify(timing).includes('sensitive-failure-fixture'))
+  } finally { failed.cleanup() }
+})
+
+test('native preparation telemetry failure never fails a ready adapter', async t => {
+  t.mock.method(console, 'info', () => { throw new Error('observer unavailable') })
+  const f = fixture(); const { runtime } = stubRuntime(f)
+  try { assert.ok(await open(runtime, f)); await runtime.releaseAdapter(f.binding.requestKey) }
+  finally { f.cleanup() }
+})
+
 test('recovery checks original mapping before staging credentials; inspection cannot reuse native state', async () => {
   const f = fixture(); const { runtime, counts } = stubRuntime(f)
   try {

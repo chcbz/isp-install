@@ -223,6 +223,29 @@ test('thread bindings persist exactly and dedicated CHAT workdir rejects symlink
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('app-server initialization telemetry preserves RPC order, readback and failure behavior', async t => {
+  const lines = []; t.mock.method(console, 'info', line => lines.push(JSON.parse(line)))
+  const adapter = Object.create(AppServerAdapter.prototype); adapter.readback = {}
+  const calls = []; adapter.notify = method => calls.push(method)
+  adapter.request = async method => { calls.push(method); return { fixture: method } }
+  const result = await adapter.initialize()
+  assert.deepEqual(calls, ['initialize', 'initialized', 'account/read', 'model/list', 'config/read', 'mcpServerStatus/list'])
+  assert.deepEqual(Object.keys(result), ['initialize', 'account', 'models', 'config', 'tools'])
+  assert.deepEqual(lines[0].timings.map(row => row.phase), calls.filter(method => method !== 'initialized'))
+  assert.ok(lines[0].timings.every(row => row.completed && row.durationMs >= 0))
+  adapter.request = async () => { throw new Error('private-provider-detail') }
+  await assert.rejects(adapter.initialize(), /private-provider-detail/)
+  assert.equal(lines[1].timings.length, 1); assert.equal(lines[1].timings[0].completed, false)
+  assert.ok(!JSON.stringify(lines).includes('private-provider-detail'))
+})
+
+test('app-server initialization telemetry failure cannot fail initialization', async t => {
+  t.mock.method(console, 'info', () => { throw new Error('observer failed') })
+  const adapter = Object.create(AppServerAdapter.prototype); adapter.readback = {}
+  adapter.notify = () => {}; adapter.request = async () => ({})
+  assert.equal(await adapter.initialize(), adapter.readback)
+})
+
 test('app-server initializes readback and waits for matching real delta/final/terminal', async () => {
   const child = fakeChild(); const sent = []; child.stdin.on('data', data => {
     for (const line of data.toString().trim().split('\n').filter(Boolean)) {

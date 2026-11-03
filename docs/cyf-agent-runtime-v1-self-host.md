@@ -451,3 +451,10 @@ No state deletion/rebinding, automatic UNKNOWN replay or fabricated completion.
 `NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED` reports a retained mapping
 content mismatch; unsafe file/mode errors remain separate. HTTP error status is
 safe diagnostic metadata, never proof of task completion/revocation.
+
+### 最终回复确认与原生准备计时（2026-11-03，1.3.40候选，未发布）
+
+- `PersistentChatInbox`的最终回复确认不再每次读取全部聊天正文；仅复用文件身份（dev/ino/size/mtime/ctime）对应的turnId，仍逐文件检查元数据并权威回读匹配记录。首次/重启冷读取仍扫描全部保留记录；外部改写、移动、新文件重新读取，删除路径逐出。缓存只含小型标识，不含上下文/技能包，不新增索引文件、DB表、写盘或后台任务。不宣称查找已为O(1)。原有歧义、身份绑定、幂等与恢复行为不变。
+- 现有日志新增`chat-final-storage-timing`（prepare/publication/confirm的锁建立、操作、释放）、`chat-final-send-timing`（transport返回，不等于API落库）、`native-execution-prepare-timing`（binary/state/egress/layout/spawn/initialize/skills）、`app-server-initialize-timing`（已有RPC逐项）。只输出标识/耗时/成功状态，不输出正文、凭据、模型推理或异常内容；观测输出失败不改变业务结果。不新增轮询、模型调用或业务deadline。
+- 计时仍须结合既有执行/消息ID与服务端接收和提交事件；native准备计时不包含调用前输入快照等所有外层耗时，失败清理单独计时。不能用send返回或读盘前时间戳冒充服务端确认。
+- 本机只读30份记录（约2MB）同输入对照：旧逻辑热读取约23ms，候选热读取约1.5–1.7ms；冷读取仍约22ms。只是查找阶段，不能解释此前33秒或证明端到端提速。生产文件未修改，未安装此候选。

@@ -240,6 +240,7 @@ export class PersistentChatInbox {
     this.dedupeDir = resolve(this.dir, 'dedupe-ledger'); this.dedupeUsagePath = resolve(this.dir, 'dedupe-ledger-usage.json')
     this.turnIndexDir = resolve(this.dir, 'turn-index'); this.turnIndexVersionPath = resolve(this.dir, 'turn-index-version.json')
     this.legacyDedupePath = resolve(this.dir, 'dedupe-index.json'); this.lockPath = resolve(this.dir, '.profile.lock')
+    this.finalSavedLookupCache = new Map()
   }
   _processStartTime(pid) {
     try { const raw = readFileSync(`/proc/${pid}/stat`, 'utf8'); const fields = raw.slice(raw.lastIndexOf(') ') + 2).trim().split(/\s+/); return fields[19] || '' } catch { return '' }
@@ -315,10 +316,21 @@ export class PersistentChatInbox {
     if (!owned) throw new Error('CHAT_INBOX_LOCK_OWNERSHIP_LOST')
     unlinkSync(this.lockPath); directoryFsync(this.dir)
   }
-  _withLock(operation) {
+  _withLock(operation, phase = null) {
+    const started = phase ? performance.now() : 0
     const lock = this._tryAcquireLock()
     if (!lock) { const error = new Error('CHAT_INBOX_LOCK_BUSY'); error.code = 'CHAT_INBOX_CAPACITY_EXCEEDED'; throw error }
-    try { return operation() } finally { this._releaseLock(lock) }
+    const acquired = phase ? performance.now() : 0
+    let completed = false
+    try { const result = operation(); completed = true; return result } finally {
+      const operated = phase ? performance.now() : 0
+      try { this._releaseLock(lock) } finally {
+        if (phase) { try { console.info(JSON.stringify({ event: 'chat-final-storage-timing', atMs: Date.now(), phase,
+          agentKey: createHash('sha256').update(this.profile.agentId).digest('hex'), completed,
+          lockMs: acquired - started, operationMs: operated - acquired, releaseMs: performance.now() - operated,
+          ...(phase === 'confirm' ? { lookup: this.finalSavedLookupMetrics || null } : {}) })) } catch {} }
+      }
+    }
   }
   async _withLockAsync(operation) {
     const deadline = Date.now() + this.lockTimeoutMs
@@ -613,7 +625,7 @@ export class PersistentChatInbox {
     const record = { ...current, state: item.state === 'processing' ? 'FINAL_PREPARED' : current.state,
       finalPrepared: current.finalPrepared || finalPrepared, finalPreparedAt: current.finalPreparedAt || Date.now() }
     atomicJson(item.path, record); item.record = record; return record.finalPrepared
-  }) }
+  }, 'prepare') }
   markFinalPublication(item, publication) { return this._withLock(() => {
     if (!item || !['processing', 'recovery'].includes(item.state) || !object(publication)) throw new Error('CHAT_FINAL_PUBLICATION_INVALID')
     const latest = this.findByKey(item.key)
@@ -626,7 +638,7 @@ export class PersistentChatInbox {
     const record = { ...current, finalPublication: { ...publication, attemptedAt: Date.now() } }
     atomicJson(latest.path, record); latest.record = record; item.path = latest.path; item.state = latest.state; item.record = record
     return record.finalPublication
-  }) }
+  }, 'publication') }
   complete(item, result = {}) { return this._withLock(() => {
     const latest = item?.key ? this.findByKey(item.key) : null
     if (latest?.record?.state === 'COMPLETED') return latest.record
@@ -678,19 +690,41 @@ export class PersistentChatInbox {
     if (matches.size > 1) { const error = new Error('CHAT_STOP_AMBIGUOUS'); error.code = 'CHAT_STOP_AMBIGUOUS'; throw error }
     return matches.values().next().value || null
   }
+  _findFinalSavedTurn(turnId) {
+    // Cache identifiers only, never message/context/package bytes. Stat every retained
+    // file under the existing lock so another writer's atomic OR in-place changes
+    // cannot hide a new/ambiguous turn. No extra durable index or write amplification.
+    this.finalSavedLookupMetrics = null
+    const next = new Map(), matches = []
+    let parsedFiles = 0
+    const started = performance.now()
+    for (const state of ['pending', 'processing', 'recovery', 'archive']) {
+      for (const name of readdirSync(this[state])) {
+        if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
+        const key = name.slice(0, -5), path = this.path(state, key)
+        const stat = statSync(path, { bigint: true })
+        const identity = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].map(field => String(stat[field])).join(':')
+        let entry = this.finalSavedLookupCache.get(path), record
+        if (!entry || entry.identity !== identity) {
+          record = JSON.parse(readFileSync(path, 'utf8')); parsedFiles++
+          entry = { identity, turnId: typeof record.message?.turnId === 'string' ? record.message.turnId : null }
+        }
+        next.set(path, entry)
+        if (entry.turnId === turnId) {
+          if (!record) { record = JSON.parse(readFileSync(path, 'utf8')); parsedFiles++ }
+          if (record.message?.turnId === turnId) matches.push({ key, state, path, record })
+        }
+      }
+    }
+    this.finalSavedLookupCache = next // Prune deleted/archived paths on every lookup.
+    this.finalSavedLookupMetrics = { files: next.size, parsedFiles, durationMs: performance.now() - started }
+    return matches
+  }
   confirmFinalSaved(rawAck) {
     const candidateTurnId = object(rawAck) && visible(rawAck.turnId) ? rawAck.turnId : null
     if (!candidateTurnId) return { status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH' }
     return this._withLock(() => {
-      const matches = []
-      for (const state of ['pending', 'processing', 'recovery', 'archive']) {
-        for (const name of readdirSync(this[state])) {
-          if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
-          const key = name.slice(0, -5); const path = this.path(state, key)
-          const record = JSON.parse(readFileSync(path, 'utf8'))
-          if (record.message?.turnId === candidateTurnId) matches.push({ key, state, path, record })
-        }
-      }
+      const matches = this._findFinalSavedTurn(candidateTurnId)
       if (matches.length > 1) { const error = new Error('CHAT_FINAL_ACK_AMBIGUOUS'); error.code = 'CHAT_FINAL_ACK_AMBIGUOUS'; throw error }
       if (!matches.length) return { status: 'ignored', reason: 'NO_DURABLE_INSPECT_MATCH' }
       const item = matches[0]
@@ -737,7 +771,7 @@ export class PersistentChatInbox {
         ...item.record, state: 'COMPLETED', completedAt: confirmedAt, finalConfirmation: confirmation, result
       })
       return { status: 'confirmed', key: item.key, record, confirmation }
-    })
+    }, 'confirm')
   }
   count(state) { if (state === 'ledger') return this._readDedupeUsage().count; return readdirSync(this[state]).filter(name => /^[0-9a-f]{64}\.json$/.test(name)).length }
 }

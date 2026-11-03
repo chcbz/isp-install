@@ -585,6 +585,54 @@ test('final-saved duplicate ACK completes a prepared recovery after process relo
   runtime.processor.stop()
 })
 
+test('final-saved lookup reuses only unchanged identifiers and prunes deleted records', async () => {
+  const root = temporaryDirectory(); const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+  const messages = [1101, 1102, 1103].map(n => normalizeInboundMessage(durableChat(n, { route: 'INSPECT' })))
+  for (const message of messages) {
+    const accepted = await inbox.accept(message); const item = inbox.claim(accepted.key)
+    inbox.markFinalPrepared(item, preparedInspectionFinal(message)); inbox.confirmFinalSaved(finalSavedAck(message))
+  }
+  assert.equal(inbox.confirmFinalSaved(finalSavedAck(messages[0])).status, 'duplicate')
+  assert.equal(inbox.confirmFinalSaved(finalSavedAck(messages[0])).status, 'duplicate')
+  assert.equal(inbox.finalSavedLookupMetrics.files, 3)
+  assert.equal(inbox.finalSavedLookupMetrics.parsedFiles, 1, 'warm ACK must read only its authoritative record')
+  for (const entry of inbox.finalSavedLookupCache.values()) assert.deepEqual(Object.keys(entry).sort(), ['identity', 'turnId'])
+  const archived = inbox._findFinalSavedTurn(messages[2].turnId)[0]
+  rmSync(archived.path)
+  assert.equal(inbox.confirmFinalSaved(finalSavedAck(messages[2])).status, 'ignored')
+  assert.equal(inbox.finalSavedLookupCache.size, 2)
+  assert.equal(inbox.finalSavedLookupMetrics.parsedFiles, 0)
+})
+
+test('final-saved lookup observes another inbox writer, in-place edits and newly ambiguous turns', async () => {
+  const root = temporaryDirectory(); const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+  const message = normalizeInboundMessage(durableChat(1111, { route: 'INSPECT' }))
+  const accepted = await inbox.accept(message); const item = inbox.claim(accepted.key)
+  inbox.markFinalPrepared(item, preparedInspectionFinal(message)); inbox.confirmFinalSaved(finalSavedAck(message))
+  inbox.confirmFinalSaved(finalSavedAck(message))
+  const other = new PersistentChatInbox({ rootDir: root, profile }); other.initialize()
+  const newMessage = normalizeInboundMessage(durableChat(1112, { route: 'INSPECT' }))
+  const added = await other.accept(newMessage); const second = other.claim(added.key)
+  other.markFinalPrepared(second, preparedInspectionFinal(newMessage))
+  assert.equal(inbox.confirmFinalSaved(finalSavedAck(message)).status, 'duplicate')
+  const record = JSON.parse(readFileSync(second.path, 'utf8'))
+  record.message.turnId = message.turnId
+  writeFileSync(second.path, JSON.stringify(record))
+  assert.throws(() => inbox.confirmFinalSaved(finalSavedAck(message)), error => error.code === 'CHAT_FINAL_ACK_AMBIGUOUS')
+})
+
+test('final-saved lookup rebuilds on restart without a new persistent index', async () => {
+  const root = temporaryDirectory(); const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
+  const message = normalizeInboundMessage(durableChat(1121, { route: 'INSPECT' }))
+  const accepted = await inbox.accept(message); const item = inbox.claim(accepted.key)
+  inbox.markFinalPrepared(item, preparedInspectionFinal(message))
+  inbox._findFinalSavedTurn(message.turnId)
+  const restarted = new PersistentChatInbox({ rootDir: root, profile }); restarted.initialize()
+  assert.equal(restarted.finalSavedLookupCache.size, 0)
+  assert.equal(restarted.confirmFinalSaved(finalSavedAck(message)).status, 'confirmed')
+  assert.equal(restarted.confirmFinalSaved(finalSavedAck(message)).status, 'duplicate')
+})
+
 test('final-saved ACK ignores unmatched legacy events but rejects ambiguous, stale, unprepared and terminal-conflicting INSPECT bindings', async () => {
   const root = temporaryDirectory(); const inbox = new PersistentChatInbox({ rootDir: root, profile }); inbox.initialize()
   const unpreparedMessage = normalizeInboundMessage(durableChat(93, { route: 'INSPECT' }))
