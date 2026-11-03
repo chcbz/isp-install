@@ -302,6 +302,15 @@ Linux x64 archive SHA-256: `6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fc
 
 The host installation entry is `/home/isp/apps/node`. Existing RPM-managed Node/npm must be inventoried and migrated together with global CLI resolution; merely prepending PATH is not convergence. Preserve existing global packages and their permissions. Coordinate other owners' active Node/Codex processes: changing filesystem entries does not change their running interpreter. Old artifacts are recovery material, not active alternative toolchains. Do not mark full-system convergence until actual service processes and Flow runs use the unified version. Runtime activation follows §7.1 and preserves identities, HOME and state; do not modify a running immutable artifact.
 
+## 受限网络探针即时拒绝（2026-11-03，1.3.39源码候选）
+
+基线 `73204aefb1e823aa6f80ba850be42f6098e2902b` 后的局部变更（bridge1.1.29）；仅网络隔离实现，不代表已上线。
+
+- input/output 仍默认 DROP，保留 loopback、已建立连接和精确代理地址/端口允许项；output 最后增加 `reject with icmpx type admin-prohibited`，仅使原本禁止的出站连接立即失败，不开放新目标。
+- nft 真实读回须含末尾唯一 REJECT（标准读回为 `reject with icmpx admin-prohibited`）；真实代理、宿主 canary、直接出网探针及namespace/PID所有权校验全部保留。允许连接的传输超时不变，不按性能预算中止请求。
+- 原实现两个负向探针顺序等待配置的连接超时；当前主机配置每个15秒。独立namespace同探针/mock代理对照为DROP30.889秒、REJECT0.096秒；候选实际生成规则0.042秒，禁止canary零连接。仅为隔离定向测试，不是生产端到端收益或完整Runtime验收。
+- 不跨执行缓存隔离状态，不新增定时器/队列表，不更改Web/API合同。正式测试、制品与安装结果单独记录在CYF `docs/implementation/handoffs/JUYITING-POLLING-20261102.md`，其余准备和模型回复耗时仍待定位。
+
 ## UNKNOWN 技能恢复诊断（2026-10-22 局部源码核对）
 
 覆盖源码 `2d7650a77b058c7d80bec95e5511ef1faf6126cb`（Runtime 候选 1.2.5），仅技能 conversation lane 调度和安全日志，不代表已安装或激活。

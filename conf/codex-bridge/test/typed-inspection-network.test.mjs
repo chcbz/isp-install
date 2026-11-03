@@ -62,8 +62,15 @@ test('restricted provider policy binds one exact HTTPS authority and explicit tr
 })
 
 test('nft readback requires default-drop chains and only loopback, established traffic, and the exact proxy port', () => {
-  const readback = `table inet cyf_typed_inspection {\n chain input {\n  type filter hook input priority filter; policy drop;\n  ct state established,related accept\n  iifname "lo" accept\n }\n chain output {\n  type filter hook output priority filter; policy drop;\n  ct state established,related accept\n  oifname "lo" accept\n  ip daddr 10.0.2.2 tcp dport 46211 accept\n }\n}\n`
+  const readback = `table inet cyf_typed_inspection {\n chain input {\n  type filter hook input priority filter; policy drop;\n  ct state established,related accept\n  iifname "lo" accept\n }\n chain output {\n  type filter hook output priority filter; policy drop;\n  ct state established,related accept\n  oifname "lo" accept\n  ip daddr 10.0.2.2 tcp dport 46211 accept\n  reject with icmpx admin-prohibited\n }\n}\n`
   assert.match(verifyRestrictedNftReadback(readback, 46211, 46212).digest, /^sha256:[a-f0-9]{64}$/)
+  // A missing/early denial must not pass as the new prompt-denial layout.
+  for (const invalid of [
+    readback.replace('  reject with icmpx admin-prohibited\n', ''),
+    readback.replace('  reject with icmpx admin-prohibited\n', '  reject with icmpx admin-prohibited\n  reject with icmpx admin-prohibited\n'),
+    readback.replace('  reject with icmpx admin-prohibited\n', '').replace('  oifname', '  reject with icmpx admin-prohibited\n  oifname'),
+    readback.replace('ip daddr 10.0.2.2 tcp dport 46211 accept', 'ip daddr 10.0.2.2 tcp dport 46212 accept')
+  ]) assert.throws(() => verifyRestrictedNftReadback(invalid, 46211, 46212), error => error.code === 'TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH')
   assert.throws(() => verifyRestrictedNftReadback(readback.replace('oifname "lo" accept', 'oifname "lo" accept\n  tcp dport 46212 accept'), 46211, 46212), error => error.code === 'TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH' && error.message.includes('46212') && error.message.includes('nft exact readback'))
 })
 
@@ -125,9 +132,14 @@ test('mount isolation failure fails closed without a direct-slirp retry', async 
   ct state established,related accept
   oifname "lo" accept
   ip daddr 10.0.2.2 tcp dport ${egress.port} accept
+  reject with icmpx admin-prohibited
  }
 }`
-  egress._nsenter = async () => ({ status: 0, stdout: readback })
+  let installedRules = null
+  egress._nsenter = async (_pid, args, options = {}) => {
+    if (args.includes('-f')) installedRules = options.input
+    return { status: 0, stdout: readback }
+  }
   egress.spawnFn = (bin, args, options) => {
     calls.push({ bin, args, options })
     const process = new EventEmitter(); process.exitCode = null
@@ -138,6 +150,8 @@ test('mount isolation failure fails closed without a direct-slirp retry', async 
   }
   try {
     await assert.rejects(() => egress.attach(), error => error.code === 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED' && error.message.includes('mount namespace denied'))
+    assert.match(installedRules, /tcp dport \d+ accept; reject with icmpx type admin-prohibited;/)
+    assert.equal((installedRules.match(/policy drop;/g) || []).length, 2)
     assert.equal(calls.length, 1)
     assert.equal(calls[0].bin, '/usr/bin/unshare')
     assert.deepEqual(calls[0].options, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env: { PATH: '' } })

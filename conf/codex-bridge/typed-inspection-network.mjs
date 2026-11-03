@@ -156,12 +156,15 @@ const chainBody = (readback, name) => {
 export const verifyRestrictedNftReadback = (readback, proxyPort, canaryPort) => {
   const input = chainBody(readback, 'input'); const output = chainBody(readback, 'output')
   const inputAccepts = input.split(/\r?\n/).map(line => line.trim()).filter(line => /\baccept\b/.test(line))
-  const outputAccepts = output.split(/\r?\n/).map(line => line.trim()).filter(line => /\baccept\b/.test(line))
+  const outputLines = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  const outputAccepts = outputLines.filter(line => /\baccept\b/.test(line))
+  const terminalReject = 'reject with icmpx admin-prohibited'
   const proxyRule = new RegExp(`^ip daddr 10\\.0\\.2\\.2 tcp dport ${proxyPort} accept$`)
   if (!/policy drop;/.test(input) || !/policy drop;/.test(output) || inputAccepts.length !== 2 || outputAccepts.length !== 3 ||
       !inputAccepts.includes('ct state established,related accept') || !inputAccepts.includes('iifname "lo" accept') ||
       !outputAccepts.includes('ct state established,related accept') || !outputAccepts.includes('oifname "lo" accept') ||
-      !outputAccepts.some(line => proxyRule.test(line)) || readback.includes(`dport ${canaryPort}`)) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH', `nft exact readback ${JSON.stringify({ proxyPort, canaryPort, readback })}`)
+      !outputAccepts.some(line => proxyRule.test(line)) || outputLines.at(-1) !== terminalReject ||
+      outputLines.filter(line => /\breject\b/.test(line)).length !== 1 || readback.includes(`dport ${canaryPort}`)) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH', `nft exact readback ${JSON.stringify({ proxyPort, canaryPort, readback })}`)
   return Object.freeze({ validated: true, digest: `sha256:${createHash('sha256').update(readback).digest('hex')}` })
 }
 
@@ -273,7 +276,10 @@ export class RestrictedProviderEgress {
   async attach({ signal = this.lifecycle.signal } = {}) {
     if (!this.server || !this.canaryServer || !this.hostCanary?.reachable) fail('TYPED_INSPECTION_EGRESS_ATTACH_INVALID')
     cancelled(signal); const owner = await this._assertOwner(); const pid = owner.holder.pid
-    const rules = `table inet cyf_typed_inspection {\n chain input { type filter hook input priority 0; policy drop; ct state established,related accept; iifname "lo" accept; }\n chain output { type filter hook output priority 0; policy drop; ct state established,related accept; oifname "lo" accept; ip daddr 10.0.2.2 tcp dport ${this.port} accept; }\n}\n`
+    // Keep fail-closed policies and the exact allowlist. Explicitly reject denied
+    // output so both real negative probes finish without two transport timeouts.
+    // This changes no allowed destination and keeps every namespace probe.
+    const rules = `table inet cyf_typed_inspection {\n chain input { type filter hook input priority 0; policy drop; ct state established,related accept; iifname "lo" accept; }\n chain output { type filter hook output priority 0; policy drop; ct state established,related accept; oifname "lo" accept; ip daddr 10.0.2.2 tcp dport ${this.port} accept; reject with icmpx type admin-prohibited; }\n}\n`
     const applied = await this._nsenter(pid, [this.nftBin, '-f', '-'], { input: rules, signal })
     if (applied.status !== 0) fail('TYPED_INSPECTION_EGRESS_NFT_FAILED', applied.stderr || 'nft failed')
     const listed = await this._nsenter(pid, [this.nftBin, 'list', 'table', 'inet', 'cyf_typed_inspection'], { signal })
