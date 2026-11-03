@@ -533,12 +533,16 @@ test('normal typed reply emits marked deltas before model final without a second
         assert.equal(frames.map(f => f.payload.content).join(''), '你好，')
         assert.ok(frames.every(f => f.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA && f.payload.streamOutcomeKind === kind))
         options.onDelta({ content: raw.slice(boundary) })
-        assert.equal(frames.map(f => f.payload.content).join(''), outcome.text)
+        assert.equal(frames.map(f => f.payload.content).join(''), '你好，', 'tail is coalesced until window or final flush')
         return { threadId: 'reply-thread', turnId: 'reply-turn', content: raw }
       }, interrupt: async () => {}
     }
     await runFastChat(profile, typedMessage(), { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
       sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+    const deltas = frames.filter(f => f.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA)
+    assert.equal(deltas.map(f => f.payload.content).join(''), outcome.text)
+    assert.deepEqual(deltas.map(f => f.payload.deltaSeq), ['1', '2'])
+    assert.equal(frames.at(-1).payload.finalSeq, '2')
     assert.equal(runs, 1)
     assert.equal(frames.at(-1).type, MESSAGE_TYPES.CHAT_MESSAGE)
     assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)

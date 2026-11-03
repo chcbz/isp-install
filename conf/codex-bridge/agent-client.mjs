@@ -1,3 +1,4 @@
+import { createChatDeltaCoalescer } from './chat-delta-coalescer.mjs'
 import { NativeConversationWakeup } from './native-conversation-wakeup.mjs'
 import { ArchiveJobReconciler } from './archive-job-reconciler.mjs'
 import { PositionSkillReconciler } from './position-skill-reconciler.mjs'
@@ -2824,7 +2825,11 @@ export class AgentMessageProcessor {
 
   resume() {
     if (this.stopped || this.failClosedError) return
+    const reconnecting = this.paused
     this.paused = false
+    // A fresh transport can recover immediately; repeated ready notifications
+    // on the same transport must not bypass an outstanding retry timer.
+    if (reconnecting) for (const retry of this.chatRecoveryRetries.values()) { clearTimeout(retry.timer); retry.timer = null }
     this._replayChatAcks()
     void this.drain()
     this._schedulePendingChats()
@@ -2936,7 +2941,11 @@ export class AgentMessageProcessor {
     if (!item || this.stopped || this.paused) return
     const current = this.chatRecoveryRetries.get(item.key) || { attempt: 0, timer: null }
     if (current.timer) return
-    const delay = Math.min(this.chatRecoveryRetryMaxMs, this.chatRecoveryRetryBaseMs * (2 ** Math.min(current.attempt, 8)))
+    // A successful socket write is not a durable ACK. Wait for that ACK and
+    // use the existing maximum retry cadence as compensation, not 250ms replay.
+    const awaitingAck = item.record?.finalPublication?.state === 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED'
+    const delay = awaitingAck ? this.chatRecoveryRetryMaxMs
+      : Math.min(this.chatRecoveryRetryMaxMs, this.chatRecoveryRetryBaseMs * (2 ** Math.min(current.attempt, 8)))
     current.attempt++
     current.timer = setTimeout(() => {
       current.timer = null
@@ -2974,7 +2983,7 @@ export class AgentMessageProcessor {
     }
   }
   _scheduleChatRecovery(item) {
-    if (!item || this.activeChats.has(item.key)) return
+    if (!item || this.stopped || this.paused || this.activeChats.has(item.key) || this.chatRecoveryRetries.get(item.key)?.timer) return
     item = this.chatInbox?.findByKey(item.key)
     if (!item || item.state !== 'recovery') { if (item?.key) this._clearChatRecoveryRetry(item.key); return }
     const message = item.record.message; const active = { key: item.key, state: 'RECONCILING', message, cancelRequested: false, cancel: null }
@@ -2982,6 +2991,11 @@ export class AgentMessageProcessor {
     const task = async () => {
       let retry = false
       try {
+        if (this.stopped || this.paused) return
+        const latest = this.chatInbox?.findByKey(item.key)
+        // A saved ACK can arrive while this recovery is waiting in its lane.
+        if (!latest || latest.state !== 'recovery') { this._clearChatRecoveryRetry(item.key); return }
+        item = latest
         const recoveryControls = {
           markFinalPrepared: finalPrepared => this.chatInbox.markFinalPrepared(item, finalPrepared),
           markFinalPublication: publication => this.chatInbox.markFinalPublication(item, publication)
@@ -4723,6 +4737,17 @@ export const runFastChat = async (profile, message, {
   metrics.engineStartAt = Date.now()
   let acceptedTurn = null; let typedStreamError = null
   const decoder = typedRequest ? new TypedUserReplyStreamDecoder() : null
+  const stream = createChatDeltaCoalescer({
+    isCancelled: () => controls.isCancelled(),
+    send: content => {
+      metrics.firstEventAt ||= Date.now()
+      sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', ...(decoder ? { streamOutcomeKind: decoder.kind } : {}) }, sendProtocolFn)
+    },
+    onError: error => {
+      typedStreamError = error
+      if (acceptedTurn) void selectedAdapter.interrupt(acceptedTurn.threadId, acceptedTurn.turnId).catch(() => {})
+    }
+  })
   try {
     const result = await selectedAdapter.runTurn({
       threadId: binding.threadId, clientUserMessageId: message.messageId, input: preparedMaterials ? [{ type: 'text', text: JSON.stringify(envelope) }, ...preparedMaterials.nativeInputs] : JSON.stringify(envelope),
@@ -4739,7 +4764,7 @@ export const runFastChat = async (profile, message, {
           }
         }
         if (!content) return
-        metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', ...(decoder ? { streamOutcomeKind: decoder.kind } : {}) }, sendProtocolFn)
+        stream.push(content)
       }
     })
     if (typedStreamError) throw typedStreamError
@@ -4750,8 +4775,9 @@ export const runFastChat = async (profile, message, {
       const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null) : validateTypedInteractionOutcome(result.content, typedRequest)
       if (profile.trueDeltaEnabled) {
         const suffix = decoder.finish(outcome.text, outcome.kind)
-        if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', streamOutcomeKind: decoder.kind }, sendProtocolFn) }
+        if (suffix) stream.push(suffix)
       }
+      stream.flush()
       if (materials) {
         const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
         const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: outcome, receiptDraft: preparedMaterials.inspectionInputReceiptDraft,
@@ -4766,6 +4792,7 @@ export const runFastChat = async (profile, message, {
       return recoverActionChat(profile, message, { finalPrepared }, { controls,
         sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
     } else {
+      stream.flush()
       sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
     }
     metrics.publishAt = Date.now(); bindingStore?.put(key, { ...binding, state: 'IDLE', lastAppliedContextHash: message.contextSnapshot.contextHash, updatedAt: Date.now() })
@@ -4777,7 +4804,7 @@ export const runFastChat = async (profile, message, {
     }
     if (typedStreamError && error.code !== 'TURN_ACCEPTANCE_UNKNOWN') throw typedStreamError
     throw error
-  }
+  } finally { stream.close() }
 }
 
 export const recoverActionChat = async (profile, message, record, { controls, sendFinal } = {}) => {

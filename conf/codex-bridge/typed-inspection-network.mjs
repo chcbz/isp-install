@@ -189,35 +189,48 @@ export class RestrictedProviderEgress {
     this.lifecycle = new AbortController()
   }
   async bindOwner(child, expectedWrapperExecutable, expectedSandboxExecutable, { signal = this.lifecycle.signal } = {}) {
-    if (this.owner || !child || !Number.isInteger(child.pid) || child.pid <= 0 || !expectedWrapperExecutable?.sha256 || !expectedSandboxExecutable?.sha256) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
-    cancelled(signal)
-    const inspector = this.processInspector; const currentPid = inspector.currentPid(); const rootPid = child.pid; const hostNamespace = inspector.namespace(currentPid)
-    const rootStat = inspector.stat(rootPid); const rootExecutable = await inspector.executable(rootPid)
-    if (rootStat.ppid !== currentPid || child.exitCode !== null || !sameExecutable(rootExecutable, expectedWrapperExecutable)) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
-    let holder = null
-    while (!holder) {
+    const began = performance.now(), phases = {}, counts = { rounds: 0, pids: 0, descendants: 0 }; let ready = false
+    const sync = (phase, fn) => { const at = performance.now(); try { return fn() } finally { phases[phase] = (phases[phase] || 0) + performance.now() - at } }
+    const asyncPhase = async (phase, fn) => { const at = performance.now(); try { return await fn() } finally { phases[phase] = (phases[phase] || 0) + performance.now() - at } }
+    try {
+      if (this.owner || !child || !Number.isInteger(child.pid) || child.pid <= 0 || !expectedWrapperExecutable?.sha256 || !expectedSandboxExecutable?.sha256) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
       cancelled(signal)
-      if (child.exitCode !== null) fail('TYPED_INSPECTION_EGRESS_OWNER_LOST')
-      const candidates = []
-      for (const pid of inspector.pids()) {
-        if (pid === rootPid || !inspector.descendantOf(pid, rootPid)) continue
-        try {
-          const executable = await inspector.executable(pid)
-          if (!sameExecutable(executable, expectedSandboxExecutable)) continue
-          const namespace = inspector.namespace(pid); const stat = inspector.stat(pid)
-          if (sameNamespace(namespace, hostNamespace)) fail('TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED')
-          candidates.push({ pid, startticks: stat.startticks, namespace, executable })
-        } catch (error) {
-          if (['TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED'].includes(error?.code)) throw error
+      const inspector = this.processInspector; const currentPid = inspector.currentPid(); const rootPid = child.pid; const hostNamespace = inspector.namespace(currentPid)
+      const rootStat = inspector.stat(rootPid); const rootExecutable = await asyncPhase('rootExecutableMs', () => inspector.executable(rootPid))
+      if (rootStat.ppid !== currentPid || child.exitCode !== null || !sameExecutable(rootExecutable, expectedWrapperExecutable)) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+      let holder = null
+      while (!holder) {
+        cancelled(signal)
+        if (child.exitCode !== null) fail('TYPED_INSPECTION_EGRESS_OWNER_LOST')
+        counts.rounds++
+        const candidates = []
+        for (const pid of sync('pidScanMs', () => inspector.pids())) {
+          counts.pids++
+          if (pid === rootPid || !sync('ancestryMs', () => inspector.descendantOf(pid, rootPid))) continue
+          counts.descendants++
+          try {
+            const executable = await asyncPhase('candidateExecutableMs', () => inspector.executable(pid))
+            if (!sameExecutable(executable, expectedSandboxExecutable)) continue
+            const namespace = inspector.namespace(pid); const stat = inspector.stat(pid)
+            if (sameNamespace(namespace, hostNamespace)) fail('TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED')
+            candidates.push({ pid, startticks: stat.startticks, namespace, executable })
+          } catch (error) {
+            if (['TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED'].includes(error?.code)) throw error
+          }
         }
+        if (candidates.length > 1) fail('TYPED_INSPECTION_EGRESS_OWNER_AMBIGUOUS')
+        holder = candidates[0] || null
+        if (!holder) await asyncPhase('pollWaitMs', () => poll(signal))
       }
-      if (candidates.length > 1) fail('TYPED_INSPECTION_EGRESS_OWNER_AMBIGUOUS')
-      holder = candidates[0] || null
-      if (!holder) await poll(signal)
+      this.owner = Object.freeze({ child, rootPid, rootStartticks: rootStat.startticks, rootPpid: rootStat.ppid, rootExecutable: Object.freeze({ ...rootExecutable }), hostNamespace: Object.freeze({ ...hostNamespace }), holder: Object.freeze({ ...holder, namespace: Object.freeze({ ...holder.namespace }), executable: Object.freeze({ ...holder.executable }) }) })
+      await asyncPhase('finalOwnerCheckMs', () => this._assertOwner())
+      ready = true
+      return Object.freeze({ rootPid, rootStartticks: rootStat.startticks, pid: holder.pid, startticks: holder.startticks, namespace: Object.freeze({ ...holder.namespace }) })
+    } finally {
+      // One aggregate per bind; no per-process log, provider URL or file bytes.
+      try { console.info(JSON.stringify({ event: 'egress-owner-bind-timing', atMs: Date.now(), ready,
+        durationMs: performance.now() - began, counts, phases })) } catch {}
     }
-    this.owner = Object.freeze({ child, rootPid, rootStartticks: rootStat.startticks, rootPpid: rootStat.ppid, rootExecutable: Object.freeze({ ...rootExecutable }), hostNamespace: Object.freeze({ ...hostNamespace }), holder: Object.freeze({ ...holder, namespace: Object.freeze({ ...holder.namespace }), executable: Object.freeze({ ...holder.executable }) }) })
-    await this._assertOwner()
-    return Object.freeze({ rootPid, rootStartticks: rootStat.startticks, pid: holder.pid, startticks: holder.startticks, namespace: Object.freeze({ ...holder.namespace }) })
   }
   async _assertOwner() {
     const owner = this.owner; const inspector = this.processInspector; const currentPid = inspector.currentPid()

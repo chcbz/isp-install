@@ -86,6 +86,27 @@ test('network owner rejects a sandbox executable still in the host namespace and
   await assert.rejects(() => egressFor(inspector({ foreign: true })).bindOwner(child(), wrapperExecutable, sandboxExecutable), error => error.code === 'TYPED_INSPECTION_EGRESS_NAMESPACE_FOREIGN_PROCESS')
 })
 
+test('owner bind emits one aggregate on success and failure without changing rejection', async t => {
+  const events = []
+  t.mock.method(console, 'info', line => events.push(JSON.parse(line)))
+  await egressFor(inspector()).bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  await assert.rejects(() => egressFor(inspector({ foreign: true })).bindOwner(child(), wrapperExecutable, sandboxExecutable),
+    error => error.code === 'TYPED_INSPECTION_EGRESS_NAMESPACE_FOREIGN_PROCESS')
+  assert.equal(events.length, 2)
+  assert.deepEqual(events.map(event => event.ready), [true, false])
+  for (const event of events) {
+    assert.equal(event.event, 'egress-owner-bind-timing')
+    assert.ok(Number.isFinite(event.durationMs) && event.durationMs >= 0)
+    assert.ok(Number.isFinite(event.atMs))
+    assert.equal(event.counts.rounds, 1)
+    assert.equal(event.counts.descendants, 2)
+    for (const phase of ['rootExecutableMs', 'pidScanMs', 'ancestryMs', 'candidateExecutableMs', 'finalOwnerCheckMs']) {
+      assert.ok(Number.isFinite(event.phases[phase]) && event.phases[phase] >= 0, phase)
+    }
+    assert.equal(JSON.stringify(event).includes('provider.example'), false)
+  }
+})
+
 test('network owner cancellation replaces an arbitrary bind deadline when no sandbox holder has appeared', async () => {
   const processInspector = inspector(); processInspector.executables.set(201, helperExecutable)
   const controller = new AbortController(); controller.abort()
