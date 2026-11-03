@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { Worker } from 'node:worker_threads'
-import { createExecutableInspector, fileStamp } from './executable-integrity.mjs'
+import { inspectExecutable, fileStamp } from './executable-integrity.mjs'
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
@@ -13,7 +13,6 @@ const deniedMethods = /(?:command|file|permission|network|mcp|dynamic.?tool|tool
 const terminalMethods = new Set(['turn/failed', 'turn/cancelled', 'turn/interrupted'])
 const binaryMeasurementCache = new Map()
 const verifiedBinaryStates = new WeakMap()
-const inspectExecutable = createExecutableInspector({ cacheResults: false })
 const snapshotReclamationTimers = new Map()
 const failTrust = message => { const error = new Error(message); error.code = 'APP_SERVER_BINARY_UNTRUSTED'; error.trustReason = message; return error }
 const trustCause = error => error?.trustReason || (error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? error?.message : error?.code) || 'UNKNOWN'

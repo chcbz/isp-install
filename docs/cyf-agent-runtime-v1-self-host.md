@@ -458,3 +458,9 @@ safe diagnostic metadata, never proof of task completion/revocation.
 - 现有日志新增`chat-final-storage-timing`（prepare/publication/confirm的锁建立、操作、释放）、`chat-final-send-timing`（transport返回，不等于API落库）、`native-execution-prepare-timing`（binary/state/egress/layout/spawn/initialize/skills）、`app-server-initialize-timing`（已有RPC逐项）。只输出标识/耗时/成功状态，不输出正文、凭据、模型推理或异常内容；观测输出失败不改变业务结果。不新增轮询、模型调用或业务deadline。
 - 计时仍须结合既有执行/消息ID与服务端接收和提交事件；native准备计时不包含调用前输入快照等所有外层耗时，失败清理单独计时。不能用send返回或读盘前时间戳冒充服务端确认。
 - 本机只读30份记录（约2MB）同输入对照：旧逻辑热读取约23ms，候选热读取约1.5–1.7ms；冷读取仍约22ms。只是查找阶段，不能解释此前33秒或证明端到端提速。生产文件未修改，未安装此候选。
+
+### 进程可执行摘要复用（2026-11-03，1.3.41候选，未发布）
+
+- egress归属与App Server可执行回读共用`executable-integrity.mjs`，以实际打开文件的dev/ino/size/mtimeNs/ctimeNs/mode/uid/gid复用摘要，不按PID路径或TTL信任旧内容。保留最多两份近期摘要（对应普通wrapper+engine）；仅缓存小型身份/摘要、不存文件字节，淘汰只触发重新测量，不拒绝新程序。
+- 同身份并发读取合并，失败不缓存；每个调用者仍独立打开实际/proc路径、检查前后fstat并重新open确认当前映射。替换、原地修改（即使恢复mtime）、权限变化都会失效；PID/startticks/父子关系/namespace及原有来源校验保留。只收口同一责任层的重复内容IO，不跨执行共享身份/会话或网络能力。
+- 低负载真实沙箱探针证实旧逻辑每个新PID重复读取同一319346888字节引擎，单次2.2–4.8秒；候选命中时可执行回读毫秒级。不是线上48秒的全部归因或端到端提速保证。最终回复send→服务器确认延迟仍单独定位，本候选不修改API/Web或模型。

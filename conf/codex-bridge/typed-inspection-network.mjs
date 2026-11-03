@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { createExecutableInspector, fileStamp } from './executable-integrity.mjs'
+import { inspectExecutable, fileStamp } from './executable-integrity.mjs'
 import { createHash } from 'node:crypto'
 import { readFileSync, readlinkSync, readdirSync, statSync } from 'node:fs'
 import { createServer as createHttpServer } from 'node:http'
@@ -24,7 +24,7 @@ const defaultProcessInspector = () => ({
   currentPid: () => process.pid,
   stat: processStat,
   namespace: namespaceIdentity,
-  executable: (() => { const inspect = createExecutableInspector(); return pid => inspect(`/proc/${pid}/exe`) })(),
+  executable: pid => inspectExecutable(`/proc/${pid}/exe`),
   executableStamp: pid => fileStamp(statSync(`/proc/${pid}/exe`, { bigint: true })),
   pids: () => readdirSync('/proc').filter(value => /^[1-9][0-9]*$/.test(value)).map(Number),
   descendantOf
