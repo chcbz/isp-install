@@ -1,4 +1,3 @@
-import { createChatDeltaCoalescer } from './chat-delta-coalescer.mjs'
 import { NativeConversationWakeup } from './native-conversation-wakeup.mjs'
 import { ArchiveJobReconciler } from './archive-job-reconciler.mjs'
 import { PositionSkillReconciler } from './position-skill-reconciler.mjs'
@@ -2941,11 +2940,7 @@ export class AgentMessageProcessor {
     if (!item || this.stopped || this.paused) return
     const current = this.chatRecoveryRetries.get(item.key) || { attempt: 0, timer: null }
     if (current.timer) return
-    // A successful socket write is not a durable ACK. Wait for that ACK and
-    // use the existing maximum retry cadence as compensation, not 250ms replay.
-    const awaitingAck = item.record?.finalPublication?.state === 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED'
-    const delay = awaitingAck ? this.chatRecoveryRetryMaxMs
-      : Math.min(this.chatRecoveryRetryMaxMs, this.chatRecoveryRetryBaseMs * (2 ** Math.min(current.attempt, 8)))
+    const delay = Math.min(this.chatRecoveryRetryMaxMs, this.chatRecoveryRetryBaseMs * (2 ** Math.min(current.attempt, 8)))
     current.attempt++
     current.timer = setTimeout(() => {
       current.timer = null
@@ -4737,17 +4732,6 @@ export const runFastChat = async (profile, message, {
   metrics.engineStartAt = Date.now()
   let acceptedTurn = null; let typedStreamError = null
   const decoder = typedRequest ? new TypedUserReplyStreamDecoder() : null
-  const stream = createChatDeltaCoalescer({
-    isCancelled: () => controls.isCancelled(),
-    send: content => {
-      metrics.firstEventAt ||= Date.now()
-      sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', ...(decoder ? { streamOutcomeKind: decoder.kind } : {}) }, sendProtocolFn)
-    },
-    onError: error => {
-      typedStreamError = error
-      if (acceptedTurn) void selectedAdapter.interrupt(acceptedTurn.threadId, acceptedTurn.turnId).catch(() => {})
-    }
-  })
   try {
     const result = await selectedAdapter.runTurn({
       threadId: binding.threadId, clientUserMessageId: message.messageId, input: preparedMaterials ? [{ type: 'text', text: JSON.stringify(envelope) }, ...preparedMaterials.nativeInputs] : JSON.stringify(envelope),
@@ -4764,7 +4748,7 @@ export const runFastChat = async (profile, message, {
           }
         }
         if (!content) return
-        stream.push(content)
+        metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', ...(decoder ? { streamOutcomeKind: decoder.kind } : {}) }, sendProtocolFn)
       }
     })
     if (typedStreamError) throw typedStreamError
@@ -4775,9 +4759,8 @@ export const runFastChat = async (profile, message, {
       const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null) : validateTypedInteractionOutcome(result.content, typedRequest)
       if (profile.trueDeltaEnabled) {
         const suffix = decoder.finish(outcome.text, outcome.kind)
-        if (suffix) stream.push(suffix)
+        if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', streamOutcomeKind: decoder.kind }, sendProtocolFn) }
       }
-      stream.flush()
       if (materials) {
         const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
         const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: outcome, receiptDraft: preparedMaterials.inspectionInputReceiptDraft,
@@ -4792,7 +4775,6 @@ export const runFastChat = async (profile, message, {
       return recoverActionChat(profile, message, { finalPrepared }, { controls,
         sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
     } else {
-      stream.flush()
       sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
     }
     metrics.publishAt = Date.now(); bindingStore?.put(key, { ...binding, state: 'IDLE', lastAppliedContextHash: message.contextSnapshot.contextHash, updatedAt: Date.now() })
@@ -4804,7 +4786,7 @@ export const runFastChat = async (profile, message, {
     }
     if (typedStreamError && error.code !== 'TURN_ACCEPTANCE_UNKNOWN') throw typedStreamError
     throw error
-  } finally { stream.close() }
+  }
 }
 
 export const recoverActionChat = async (profile, message, record, { controls, sendFinal } = {}) => {

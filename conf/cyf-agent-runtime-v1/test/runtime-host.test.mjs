@@ -259,7 +259,6 @@ test('unified library catalog closes actual engine imports without retired provi
     'toolchain/browser/package.json', 'toolchain/browser/package-lock.json']) {
     assert.ok(EXECUTION_PAYLOAD_FILES.includes(path), path);
   }
-  assert.equal(EXECUTION_PAYLOAD_FILES.includes('chat-delta-coalescer.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('skill-manifest.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('juyiting-review-basis.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('schemas/skill-manifest-v1.schema.json'), true);

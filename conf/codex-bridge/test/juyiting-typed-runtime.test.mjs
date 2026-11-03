@@ -533,7 +533,7 @@ test('normal typed reply emits marked deltas before model final without a second
         assert.equal(frames.map(f => f.payload.content).join(''), '你好，')
         assert.ok(frames.every(f => f.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA && f.payload.streamOutcomeKind === kind))
         options.onDelta({ content: raw.slice(boundary) })
-        assert.equal(frames.map(f => f.payload.content).join(''), '你好，', 'tail is coalesced until window or final flush')
+        assert.equal(frames.map(f => f.payload.content).join(''), outcome.text, 'native user deltas are forwarded without a batching window')
         return { threadId: 'reply-thread', turnId: 'reply-turn', content: raw }
       }, interrupt: async () => {}
     }

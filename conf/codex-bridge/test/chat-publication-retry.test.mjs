@@ -8,14 +8,14 @@ const fixture = (state = 'WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED') => {
     chatInbox: { findByKey: () => item }, _replayChatAcks: () => {}, drain: async () => {}, _schedulePendingChats: () => {} })
   return { p, item }
 }
-test('accepted final waits for ACK at existing compensation cadence, NOT_SENT retains short backoff', t => {
+test('all unconfirmed finals use existing bounded exponential backoff without a fixed ACK delay', t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   for (const state of ['WS_WRITE_ACCEPTED_PERSISTENCE_UNCONFIRMED', 'NOT_SENT']) {
     const { p, item } = fixture(state); let calls = 0
     p._scheduleChatRecovery = () => calls++
     p._retryChatRecovery(item); p._retryChatRecovery(item)
     t.mock.timers.tick(250)
-    assert.equal(calls, state === 'NOT_SENT' ? 1 : 0)
+    assert.equal(calls, 1)
     t.mock.timers.tick(29750); assert.equal(calls, 1)
     p._clearChatRecoveryRetry(item.key)
   }
