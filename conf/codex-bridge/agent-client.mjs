@@ -4703,7 +4703,7 @@ export const runFastChat = async (profile, message, {
   if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
   const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
   const developerInstructions = typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}\nEmit the top-level kind field before text so user-facing replies can stream without exposing internal action instructions.` : FAST_CHAT_INSTRUCTIONS
-  const typedContractBinding = typedRequest ? { contractDigest: outcomeContractDigest, dispatchFacts: typedRequest, outputSchema } : null
+  const typedContractBinding = typedRequest ? { contractDigest: outcomeContractDigest, dispatchFacts: typedRequest, outputSchema, developerInstructions } : null
   const effectiveEnginePolicyHash = enginePolicyHash
     ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
     : canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {}, ...(typedRequest ? { typedContractBinding } : {}) })

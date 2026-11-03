@@ -545,3 +545,21 @@ test('normal typed reply emits marked deltas before model final without a second
     assert.equal(frames.at(-1).payload.finalSeq, String(frames.length - 1))
   }
 })
+
+test('early-purpose instruction is bound into typed thread identity with supplied policy hashes', async () => {
+  const store = bindingStore(); let instructions
+  const adapter = {
+    closed: false, readback: measuredReadback(), startOrResumeThread: async (_prior, policy) => {
+      instructions = policy.developerInstructions; return { threadId: 'purpose-binding-thread' }
+    },
+    runTurn: async () => ({ threadId: 'purpose-binding-thread', turnId: 'purpose-binding-turn', content: JSON.stringify(fixture.outcomes[0]) }),
+    interrupt: async () => {}
+  }
+  await runFastChat(profile, typedMessage(), { adapter, bindingStore: store, chatWorkdir: '/empty-chat',
+    instructionSourceHash: 'fixed-host-source-hash', enginePolicyHash: 'fixed-host-engine-hash', sendProtocolFn: () => true })
+  assert.match(instructions, /Emit the top-level kind field before text/)
+  // Validate actual production key construction, not an independently invented digest fixture.
+  const source = readFileSync(new URL('../agent-client.mjs', import.meta.url), 'utf8')
+  assert.match(source, /typedContractBinding = typedRequest \? \{[^\n]*developerInstructions \}/)
+  assert.equal(store.values.size, 1)
+})
