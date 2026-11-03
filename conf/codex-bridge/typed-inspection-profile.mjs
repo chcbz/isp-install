@@ -669,6 +669,8 @@ export class TypedInspectionProfileRuntime {
       requestId: id, turnId: id, inputPolicyDigest: id }
     this.nativeBrowserReady = false
     let directory, ready = false, scriptReady = false, documentReady = false, browserReady = false, pdfReady = false, stage = 'toolchain'
+    const timings = []; let phaseStarted = performance.now()
+    const phase = next => { timings.push({ phase: stage, durationMs: performance.now() - phaseStarted }); stage = next; phaseStarted = performance.now() }
     try {
       validateNativeExecutionToolchain(this.nativeToolchain)
       directory = ensurePrivateDirectory(mkdtempSync(resolve(this.materializerRoot, '.native-declaration-')))
@@ -678,15 +680,15 @@ export class TypedInspectionProfileRuntime {
       writeFileSync(resolve(inputs, 'probe.txt'), 'native-declaration-probe', { mode: 0o600 })
       const nativeExecution = { executionId: id, tools: [], checkActive: () => { if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED') },
         callTool: async () => { fail('NATIVE_EXECUTION_TOOL_UNAVAILABLE') } }
-      stage = 'engine-open'
+      phase('engine-open')
       const adapter = await this.openNativeExecutionAdapter(inputs, id, binding, { scratchDirectory, draftsDirectory, skills: [], nativeExecution })
       const network = adapter.nativeExecutionIsolation?.network
       if (network?.measured !== true || network.nftDefaultDropReadback !== true || network.directInternetBlocked !== true) fail('NATIVE_EXECUTION_NETWORK_UNVERIFIED')
       const egress = this.activeAdapters.get(id)?.egress
-      stage = 'provider-tls'
+      phase('provider-tls')
       const tls = await egress.measureAllowedTls(adapter.readback.providerCaTrust)
       if (tls?.measured !== true || tls.tlsVerified !== true) fail('NATIVE_EXECUTION_PROVIDER_TLS_UNVERIFIED')
-      stage = 'shell'
+      phase('shell')
       const result = await adapter.request('command/exec', { command: [this.nativeToolchain.shell, '-c',
         'set -e; cat /inputs/probe.txt > /workspace/probe.txt; cat /workspace/probe.txt > /outputs/probe.txt; ! (echo bad > /inputs/probe.txt) 2>/dev/null; ! (echo bad > /state/codex-home/probe.txt) 2>/dev/null; cat /outputs/probe.txt'],
         cwd: '/execution', disableTimeout: true, sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/workspace', '/outputs'], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } }, null)
@@ -694,6 +696,7 @@ export class TypedInspectionProfileRuntime {
           || readFileSync(resolve(draftsDirectory, 'probe.txt'), 'utf8') !== 'native-declaration-probe'
           || readFileSync(resolve(inputs, 'probe.txt'), 'utf8') !== 'native-declaration-probe') fail('NATIVE_EXECUTION_SHELL_UNVERIFIED')
       validateNativeExecutionToolchain(this.nativeToolchain)
+      phase('document-probe')
       if (this.nativeToolchain.files.some(file => file.sandboxPath === DOCUMENT_PROBE)) {
         this.nativeDocumentMeasurementFailure = null
         try {
@@ -703,6 +706,7 @@ export class TypedInspectionProfileRuntime {
           if (!documentReady) this.nativeDocumentMeasurementFailure = { stage: 'document-probe', code: 'NATIVE_DOCUMENT_PROBE_FAILED' }
         } catch { this.nativeDocumentMeasurementFailure = { stage: 'document-probe', code: 'NATIVE_DOCUMENT_PROBE_FAILED' } }
       }
+      phase('browser-probe')
       const browserProbe = this.nativeToolchain.files.find(file => file.sandboxPath === BROWSER_PROBE)
       if (browserProbe) {
         this.nativeBrowserMeasurementFailure = null
@@ -712,6 +716,7 @@ export class TypedInspectionProfileRuntime {
           if (!browserReady) this.nativeBrowserMeasurementFailure = { stage: 'browser-probe', code: 'NATIVE_BROWSER_PROBE_FAILED' }
         } catch { this.nativeBrowserMeasurementFailure = { stage: 'browser-probe', code: 'NATIVE_BROWSER_PROBE_FAILED' } }
       }
+      phase('pdf-probe')
       if (documentReady && browserReady && this.nativeToolchain.files.some(file => file.sandboxPath === PDF_PROBE)) {
         this.nativePdfMeasurementFailure = null
         try {
@@ -720,13 +725,17 @@ export class TypedInspectionProfileRuntime {
           if (!pdfReady) this.nativePdfMeasurementFailure = { stage: 'pdf-probe', code: 'NATIVE_PDF_PROBE_FAILED' }
         } catch { this.nativePdfMeasurementFailure = { stage: 'pdf-probe', code: 'NATIVE_PDF_PROBE_FAILED' } }
       }
+      phase('skill-script-probe')
       ready = !this.disposed
       if (ready) { try { scriptReady = await this._measureNativeSkillScript() } catch { this.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_MEASUREMENT_FAILED' } } }
     } catch (error) { ready = false; this.nativeExecutionMeasurementFailure = { stage, code: error.code || 'NATIVE_EXECUTION_MEASUREMENT_FAILED' } }
     finally {
+      phase('cleanup')
       try { await this.releaseAdapter(id, { requestBinding: binding }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
       try { if (directory) rmSync(directory, { recursive: true, force: true }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
     }
+    phase('finished')
+    console.info(JSON.stringify({ event: 'native-execution-startup-timing', profileKey: createHash('sha256').update(this.profile.profileId || '').digest('hex'), ready, timings }))
     this.nativeBrowserReady = ready && !this.disposed && browserReady
     return ready && !this.disposed ? Object.freeze({ schemaVersion: 1, executionProtocolVersion: 5,
       toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: Object.freeze(['text/plain', 'text/markdown', 'text/html', 'application/json', ...(scriptReady || browserReady ? ['image/png'] : []), ...(documentReady ? DOCUMENT_MIMES : []), ...(pdfReady ? ['application/pdf'] : [])]),

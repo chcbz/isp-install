@@ -114,40 +114,81 @@ print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig
 // Library discovery/ldd/hash IO runs off the WS/event-loop thread. Its result is
 // a local immutable-tool manifest, not registration payload or model input.
 if (!isMainThread && workerData?.kind === 'native-document-measurement') {
+  const timings = []
+  const measure = (phase, work) => {
+    const started = performance.now()
+    try { return work() } finally { timings.push({ phase, durationMs: performance.now() - started }) }
+  }
   try {
-    const base = measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath })
+    const base = measure('base-discovery', () => measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath }))
     let toolchain = base, documentFailure, browserFailure
-    try { toolchain = measureNativeDocumentToolchain({ base }) }
+    try { toolchain = measure('document-discovery', () => measureNativeDocumentToolchain({ base })) }
     catch (error) { documentFailure = error.code || 'NATIVE_DOCUMENT_TOOLCHAIN_UNAVAILABLE' }
-    try { toolchain = measureNativeBrowserToolchain({ base: toolchain }) }
+    try { toolchain = measure('browser-discovery', () => measureNativeBrowserToolchain({ base: toolchain })) }
     catch (error) { browserFailure = error.code || 'NATIVE_BROWSER_TOOLCHAIN_UNAVAILABLE' }
-    parentPort.postMessage({ toolchain, documentFailure, browserFailure })
-  } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' }) }
+    parentPort.postMessage({ toolchain, documentFailure, browserFailure, timings })
+  } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED', timings }) }
 }
 
-export async function initializeNativeToolchain(runtime) {
-  if (runtime.nativeToolchainPending) return runtime.nativeToolchainPending
-  if (runtime.nativeToolchain) return runtime.nativeToolchain
-  const pending = new Promise((resolve, reject) => {
-    const worker = new Worker(new URL(import.meta.url), { execArgv: [], workerData: { kind: 'native-document-measurement' } })
-    let result
-    worker.once('message', value => { result = value })
-    worker.once('error', error => { result = { code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' } })
-    worker.once('exit', async () => {
-      if (!result?.toolchain) { reject(Object.assign(new Error(result?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED'), { code: result?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' })); return }
-      if (result.documentFailure) {
-        runtime.nativeDocumentMeasurementFailure = { stage: 'toolchain', code: result.documentFailure }
-        console.warn(`native documents unavailable | code=${runtime.nativeDocumentMeasurementFailure.code}`)
-      }
-      if (result.browserFailure) runtime.nativeBrowserMeasurementFailure = { stage: 'toolchain', code: result.browserFailure }
-      // Missing optional libraries must not remove existing text/image tools.
-      try {
-        const verified = await validateNativeExecutionToolchainAsync(result.toolchain)
-        if (!runtime.disposed) runtime.nativeToolchain = verified
-        resolve(runtime.nativeToolchain || null)
-      } catch (error) { reject(error) }
-    })
+const measureSharedToolchain = () => new Promise((resolve, reject) => {
+  const worker = new Worker(new URL(import.meta.url), { execArgv: [], workerData: { kind: 'native-document-measurement' } })
+  let result
+  worker.once('message', value => { result = value })
+  worker.once('error', reject)
+  worker.once('exit', async () => {
+    // Fixed stage names and numeric timings only: never log provider data or local paths.
+    for (const timing of result?.timings || []) console.info(JSON.stringify({ event: 'native-toolchain-timing', ...timing }))
+    if (!result?.toolchain) { reject(Object.assign(new Error(result?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED'), { code: result?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' })); return }
+    const started = performance.now()
+    try {
+      const toolchain = await validateNativeExecutionToolchainAsync(result.toolchain)
+      resolve(Object.freeze({ toolchain, documentFailure: result.documentFailure, browserFailure: result.browserFailure }))
+    } catch (error) { reject(error) }
+    finally { console.info(JSON.stringify({ event: 'native-toolchain-timing', phase: 'final-verification', durationMs: performance.now() - started })) }
   })
-  runtime.nativeToolchainPending = pending
-  try { return await pending } finally { if (runtime.nativeToolchainPending === pending) runtime.nativeToolchainPending = null }
+})
+
+// One slot, not a cache per Agent/skill/request. All discovery inputs are fixed by
+// this installed module and the process executable; subjects contribute no paths.
+// Identity changes cannot reuse the slot. The existing verifier still detects
+// file/ancestor drift before attachment, and before every execution layout.
+export function createNativeToolchainInitializer({ measure = measureSharedToolchain,
+  verify = validateNativeExecutionToolchain,
+  identity = () => `${process.geteuid()}:${process.getegid()}:${realpathSync(process.execPath)}` } = {}) {
+  let shared = null
+  const acquire = () => {
+    const key = identity()
+    if (!shared || shared.key !== key) {
+      const entry = { key, promise: null }
+      entry.promise = Promise.resolve().then(measure).catch(error => {
+        if (shared === entry) shared = null
+        throw error
+      })
+      shared = entry
+    }
+    return shared
+  }
+  return async runtime => {
+    if (runtime.disposed) return null
+    if (runtime.nativeToolchainPending) return runtime.nativeToolchainPending
+    if (runtime.nativeToolchain) return runtime.nativeToolchain
+    const entry = acquire()
+    const pending = entry.promise.then(result => {
+      if (runtime.disposed) return null
+      // A changed execution identity must not attach a result measured by its predecessor.
+      if (identity() !== entry.key) fail('NATIVE_EXECUTION_TOOLCHAIN_IDENTITY_CHANGED')
+      let verified
+      try { verified = verify(result.toolchain) }
+      catch (error) { if (shared === entry) shared = null; throw error }
+      runtime.nativeDocumentMeasurementFailure = result.documentFailure ? { stage: 'toolchain', code: result.documentFailure } : null
+      runtime.nativeBrowserMeasurementFailure = result.browserFailure ? { stage: 'toolchain', code: result.browserFailure } : null
+      runtime.nativeToolchain = verified
+      return verified
+    })
+    runtime.nativeToolchainPending = pending
+    try { return await pending }
+    finally { if (runtime.nativeToolchainPending === pending) runtime.nativeToolchainPending = null }
+  }
 }
+
+export const initializeNativeToolchain = createNativeToolchainInitializer()
