@@ -95,7 +95,8 @@ test('real AppServerAdapter callback boundary passes native outputSchema and ato
   assert.deepEqual(turnStart.params.outputSchema, buildActionOutcomeContract(fixture.dispatchFacts).outputSchema)
   assert.equal(Object.hasOwn(threadStart.params, 'outputSchema'), false)
   const deltas = frames.filter(frame => frame.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA)
-  assert.equal(deltas.map(frame => frame.payload.content).join(''), outcome.text)
+  assert.equal(outcome.kind, 'ACTION_REQUEST')
+  assert.equal(deltas.length, 0) // internal instructions never leave the Runtime as visible deltas
   assert.equal(deltas.some(frame => /source_1|schemaVersion|proposal|\{/.test(frame.payload.content)), false)
   const final = frames.at(-1)
   assert.equal(final.type, MESSAGE_TYPES.CHAT_MESSAGE); assert.equal(final.payload.content, outcome.text)
@@ -232,7 +233,7 @@ test('v5 runs through native CHAT schema, streams only text and emits action sid
   assert.match(calls[0].developerInstructions, /exact requested values, operations, acceptance criteria/)
   assert.equal(frames.at(-1).payload.outcomeContractVersion, 5)
   assert.deepEqual(frames.at(-1).payload.interactionOutcome, v3.outcomes[2])
-  assert.equal(frames.filter(f => f.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA).map(f => f.payload.content).join(''), v3.outcomes[2].text)
+  assert.equal(frames.filter(f => f.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA).length, 0)
   assert.equal(frames.some(f => f.type !== MESSAGE_TYPES.CHAT_MESSAGE && f.type !== MESSAGE_TYPES.CHAT_MESSAGE_DELTA), false)
 
   adapter.runTurn = async () => ({ threadId: 'v3-thread', turnId: 'v3-turn', content: JSON.stringify({ ...fixture.outcomes[0], schemaVersion: 1 }) })
@@ -514,4 +515,33 @@ test('action CHAT retains computed final across disconnect/restart and completes
   assert.equal(restarted.findByKey(item.key).record.result.serverPersistence, 'confirmed')
   assert.equal(restarted.confirmFinalSaved(ack).status, 'duplicate')
   assert.equal(starts, 1)
+})
+
+test('normal typed reply emits marked deltas before model final without a second model call', async () => {
+  for (const kind of ['ANSWER', 'CLARIFY']) {
+    const frames = []; let runs = 0
+    const outcome = { ...structuredClone(fixture.outcomes[0]), kind, text: '你好，请说明需求', action: null,
+      clarification: kind === 'CLARIFY' ? { question: '请说明需求', requiredFacts: ['需求'] } : null,
+      deliverable: false, deliveryRelation: null, revision: null }
+    const raw = JSON.stringify(outcome)
+    const boundary = raw.indexOf('请说明')
+    const adapter = {
+      closed: false, readback: measuredReadback(), startOrResumeThread: async () => ({ threadId: 'reply-thread' }),
+      runTurn: async options => {
+        runs++; options.onAccepted({ threadId: 'reply-thread', turnId: 'reply-turn' })
+        options.onDelta({ content: raw.slice(0, boundary) })
+        assert.equal(frames.map(f => f.payload.content).join(''), '你好，')
+        assert.ok(frames.every(f => f.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA && f.payload.streamOutcomeKind === kind))
+        options.onDelta({ content: raw.slice(boundary) })
+        assert.equal(frames.map(f => f.payload.content).join(''), outcome.text)
+        return { threadId: 'reply-thread', turnId: 'reply-turn', content: raw }
+      }, interrupt: async () => {}
+    }
+    await runFastChat(profile, typedMessage(), { adapter, bindingStore: bindingStore(), chatWorkdir: '/empty-chat',
+      sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+    assert.equal(runs, 1)
+    assert.equal(frames.at(-1).type, MESSAGE_TYPES.CHAT_MESSAGE)
+    assert.deepEqual(frames.at(-1).payload.interactionOutcome, outcome)
+    assert.equal(frames.at(-1).payload.finalSeq, String(frames.length - 1))
+  }
 })

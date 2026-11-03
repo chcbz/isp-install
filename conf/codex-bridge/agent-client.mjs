@@ -76,7 +76,7 @@ import {
   TYPED_DELIBERATION_CONTRACT_DIGEST, TYPED_DELIBERATION_INSTRUCTIONS, TYPED_DELIBERATION_OUTPUT_SCHEMA,
   buildTypedDeliberationDeclaration, resolveTypedDeliberationRequest, typedDeliberationAdapterReady, validateTypedInteractionOutcome
 } from './juyiting-typed-outcome.mjs'
-import { TypedOutcomeTextStreamDecoder } from './juyiting-typed-outcome-stream.mjs'
+import { TypedUserReplyStreamDecoder } from './juyiting-typed-outcome-stream.mjs'
 import { TypedInspectionMaterializer, recoverTypedInspection, resolveTypedInspectionRequest, runTypedInspection } from './typed-inspection-runtime.mjs'
 import { TypedInspectionProfileRuntime } from './typed-inspection-profile.mjs'
 export { buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, AppServerAdapter, measureCodexAppServerBinary, verifyHostedWireContract, buildNativeBountyExecutionDeclaration, TypedInspectionMaterializer, resolveTypedInspectionRequest }
@@ -4702,7 +4702,7 @@ export const runFastChat = async (profile, message, {
   }
   if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
   const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
-  const developerInstructions = typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}` : FAST_CHAT_INSTRUCTIONS
+  const developerInstructions = typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}\nEmit the top-level kind field before text so user-facing replies can stream without exposing internal action instructions.` : FAST_CHAT_INSTRUCTIONS
   const typedContractBinding = typedRequest ? { contractDigest: outcomeContractDigest, dispatchFacts: typedRequest, outputSchema } : null
   const effectiveEnginePolicyHash = enginePolicyHash
     ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
@@ -4722,7 +4722,7 @@ export const runFastChat = async (profile, message, {
     inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft, threadKey: key, engineThreadId: binding.threadId })
   metrics.engineStartAt = Date.now()
   let acceptedTurn = null; let typedStreamError = null
-  const decoder = typedRequest ? new TypedOutcomeTextStreamDecoder() : null
+  const decoder = typedRequest ? new TypedUserReplyStreamDecoder() : null
   try {
     const result = await selectedAdapter.runTurn({
       threadId: binding.threadId, clientUserMessageId: message.messageId, input: preparedMaterials ? [{ type: 'text', text: JSON.stringify(envelope) }, ...preparedMaterials.nativeInputs] : JSON.stringify(envelope),
@@ -4739,7 +4739,7 @@ export const runFastChat = async (profile, message, {
           }
         }
         if (!content) return
-        metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn)
+        metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', ...(decoder ? { streamOutcomeKind: decoder.kind } : {}) }, sendProtocolFn)
       }
     })
     if (typedStreamError) throw typedStreamError
@@ -4749,8 +4749,8 @@ export const runFastChat = async (profile, message, {
     if (typedRequest) {
       const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null) : validateTypedInteractionOutcome(result.content, typedRequest)
       if (profile.trueDeltaEnabled) {
-        const suffix = decoder.finish(outcome.text)
-        if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained' }, sendProtocolFn) }
+        const suffix = decoder.finish(outcome.text, outcome.kind)
+        if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', streamOutcomeKind: decoder.kind }, sendProtocolFn) }
       }
       if (materials) {
         const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)

@@ -28,7 +28,7 @@ const skipValue = (text, start) => {
   for (; index < text.length; index++) if (text[index] === ',' || text[index] === '}') return index
   return -1
 }
-const locateTopLevelText = text => {
+const locateTopLevelText = (text, field = 'text') => {
   let index = skipWhitespace(text, 0); if (text[index] !== '{') return null; index++
   while (true) {
     index = skipWhitespace(text, index)
@@ -38,7 +38,7 @@ const locateTopLevelText = text => {
     let key; try { key = JSON.parse(text.slice(index, keyEnd + 1)) } catch { fail('TYPED_STREAM_INVALID_JSON') }
     index = skipWhitespace(text, keyEnd + 1); if (index >= text.length) return null; if (text[index] !== ':') fail('TYPED_STREAM_INVALID_JSON')
     index = skipWhitespace(text, index + 1); if (index >= text.length) return null
-    if (key === 'text') {
+    if (key === field) {
       if (text[index] !== '"') fail('TYPED_STREAM_TEXT_NOT_STRING')
       const end = stringEnd(text, index)
       return { raw: text.slice(index + 1, end < 0 ? text.length : end), complete: end >= 0 }
@@ -97,5 +97,33 @@ export class TypedOutcomeTextStreamDecoder {
   finish(finalText) {
     if (typeof finalText !== 'string' || !finalText.startsWith(this.emitted)) fail('TYPED_STREAM_FINAL_PREFIX_MISMATCH')
     const suffix = finalText.slice(this.emitted.length); this.emitted = finalText; return suffix
+  }
+}
+
+// Display purpose is parsed from the model's root object, never inferred from prose.
+// Field order is not assumed: text received before kind stays buffered locally.
+// This is provisional display metadata, not an execution or completion authority.
+export class TypedUserReplyStreamDecoder {
+  constructor() { this.decoder = new TypedOutcomeTextStreamDecoder(); this.kind = null; this.emitted = '' }
+  push(chunk) {
+    this.decoder.push(chunk)
+    const field = locateTopLevelText(this.decoder.raw, 'kind')
+    if (field?.complete) {
+      const kind = decodePrefix(field)
+      if (this.kind !== null && this.kind !== kind) fail('TYPED_STREAM_KIND_CONFLICT')
+      this.kind = kind
+    }
+    return this.release(this.decoder.emitted)
+  }
+  release(text) {
+    if (!['ANSWER', 'CLARIFY'].includes(this.kind)) return ''
+    if (!text.startsWith(this.emitted)) fail('TYPED_STREAM_PREFIX_CONFLICT')
+    const suffix = text.slice(this.emitted.length); this.emitted = text; return suffix
+  }
+  finish(finalText, finalKind) {
+    if (this.kind !== null && this.kind !== finalKind) fail('TYPED_STREAM_KIND_CONFLICT')
+    this.decoder.finish(finalText)
+    this.kind = finalKind
+    return this.release(finalText)
   }
 }
