@@ -2,7 +2,7 @@ import { fromAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
 import { agentMessageFixture, httpFixture } from './agent-wire-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -140,12 +140,20 @@ test('one pending registration cannot block existing peer heartbeat or host SIGT
 });
 
 test('private socket trusted-group child UID1001/GID1000 can exchange while untrusted GID is denied (root-only local fixture)', { skip: process.getuid() !== 0 }, async t => {
-  const f = await hostingFixture(t); f.controlConfig.socketGid = 1000;
+  // Close the listener before hostingFixture removes its owned socket/root,
+  // including when an assertion fails. Otherwise cleanup itself leaks a server.
+  let server; t.after(async () => { await server?.close(); });
+  // This test intentionally crosses UID boundaries. Private CI TMPDIR and its
+  // downloaded Node parent are not searchable by the synthetic client UID.
+  // Expose only this synthetic fixture and its executable, never the CI HOME.
+  const f = await hostingFixture(t, { rootParent: '/tmp' }); f.controlConfig.socketGid = 1000;
+  const clientNode = resolve(f.root, 'client-node');
+  await copyFile(process.execPath, clientNode); await chmod(clientNode, 0o755);
   const { chown } = await import('node:fs/promises'); await chmod(f.root, 0o711); await chown(resolve(f.root, 'socket'), 0, 1000);
-  const server = await startHostingServer({ control: f.control() }); t.after(() => server.close());
+  server = await startHostingServer({ control: f.control() });
   const run = gid => new Promise((done, reject) => {
     const script = `const s=require('net').connect(${JSON.stringify(f.controlConfig.socketPath)});let b='';s.on('connect',()=>s.write(${JSON.stringify(JSON.stringify({ protocolVersion: 1, requestId: 'req', messageType: 'hosting.capabilities', messageId: 'msg', data: { tenantId: wire.capabilitiesRequest.tenantId, clientId: wire.capabilitiesRequest.clientId, ownerJiacn: wire.capabilitiesRequest.ownerJiacn } }) + '\n')}));s.on('data',v=>b+=v);s.on('end',()=>{console.log(b);process.exit(0)});s.on('error',e=>{console.log(e.code);process.exit(13)});`;
-    const child = spawn(process.execPath, ['-e', script], { uid: 1001, gid, env: { PATH: '/usr/bin:/bin' } }); let stdout = ''; let stderr = '';
+    const child = spawn(clientNode, ['-e', script], { uid: 1001, gid, cwd: f.root, env: { PATH: '/usr/bin:/bin' } }); let stdout = ''; let stderr = '';
     child.on('error', reject); child.stdout.on('data', bytes => { stdout += bytes; }); child.stderr.on('data', bytes => { stderr += bytes; }); child.on('exit', exit => done({ exit, stdout, stderr }));
   });
   const trusted = await run(1000); assert.equal(trusted.exit, 0, trusted.stderr); assert.equal(JSON.parse(trusted.stdout).data.available, true);

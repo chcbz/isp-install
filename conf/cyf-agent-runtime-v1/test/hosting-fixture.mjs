@@ -10,8 +10,8 @@ import { RuntimeV1Client } from '../lib/runtime-client.mjs';
 
 export const tick = () => new Promise(done => setImmediate(done));
 export const code = expected => cause => cause?.code === expected;
-export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false } = {}) {
-  const root = await mkdtemp(resolve(tmpdir(), 'gss-hosting-owned-')); await mkdir(resolve(root, 'host'), { mode: 0o700 });
+export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false, rootParent = tmpdir() } = {}) {
+  const root = await mkdtemp(resolve(rootParent, 'gss-hosting-owned-')); await mkdir(resolve(root, 'host'), { mode: 0o700 });
   await mkdir(resolve(root, 'managed'), { mode: 0o700 }); await mkdir(resolve(root, 'socket'), { mode: 0o750 });
   // Parent test runners may deliberately use umask 077. The real server requires
   // this exact group-searchable socket directory; retain all production checks.
