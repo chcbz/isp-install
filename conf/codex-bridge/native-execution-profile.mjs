@@ -4,7 +4,7 @@
 import { spawnSync } from 'node:child_process'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { createHash } from 'node:crypto'
-import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
+import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, resolve, sep } from 'node:path'
 import { canonicalSha256 } from './chat-runtime.mjs'
 import { skillPackageTreeDigest } from './skill-manifest.mjs'
@@ -34,6 +34,53 @@ const fileDigest = path => {
 // frozen, SHA-verified manifest can reuse hashes. Recheck files AND ancestors
 // synchronously before every use; ctime prevents restored-mtime substitutions.
 const verifiedToolchains = new WeakMap()
+const verifiedToolchainMounts = new WeakMap()
+// Derive the same file view, not a broader host directory grant. A directory is
+// eligible only when every immediate entry is an already-pinned file or an
+// eligible child directory. Omitted files, links and empty directories prevent
+// grouping at that boundary. Existing ancestor ctime checks invalidate the plan.
+const toolchainMountPlan = files => {
+  const root = { children: new Map(), target: '' }
+  for (const file of files) {
+    let node = root
+    for (const segment of file.sandboxPath.split('/').filter(Boolean)) {
+      if (node.file) return files
+      if (!node.children.has(segment)) node.children.set(segment, { children: new Map(), target: `${node.target}/${segment}` })
+      node = node.children.get(segment)
+    }
+    if (node.children.size) return files
+    node.file = file
+  }
+  const qualify = node => {
+    if (node.file) {
+      node.source = node.file.sourcePath; node.count = 1
+      node.eligible = basename(node.source) === basename(node.target); return
+    }
+    const children = [...node.children.values()]; children.forEach(qualify)
+    node.count = children.reduce((sum, child) => sum + child.count, 0)
+    if (!children.length || children.some(child => !child.eligible)) return
+    const parents = new Set(children.map(child => dirname(child.source)))
+    if (parents.size !== 1) return
+    node.source = [...parents][0]
+    if (basename(node.source) !== basename(node.target)) return
+    const stat = lstatSync(node.source)
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return
+    const actual = readdirSync(node.source).sort(), expected = [...node.children.keys()].sort()
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) return
+    node.eligible = true
+  }
+  qualify(root)
+  const mounts = []
+  const select = node => {
+    if (node.file) { mounts.push(node.file); return }
+    if (node.eligible && node.count > 1) {
+      mounts.push(Object.freeze({ sourcePath: node.source, sandboxPath: node.target })); return
+    }
+    node.children.forEach(select)
+  }
+  select(root)
+  return Object.freeze(mounts)
+}
 const toolchainState = toolchain => {
   const paths = new Set()
   for (const file of toolchain.files) {
@@ -81,9 +128,11 @@ export const validateNativeExecutionToolchain = toolchain => {
   if (![toolchain.shell, '/bin/sh'].every(path => targets.has(path))) fail('NATIVE_EXECUTION_TOOLCHAIN_SHELL_REQUIRED')
   for (const path of [toolchain.shell, '/bin/sh']) if (!(lstatSync(files.find(file => file.sandboxPath === path).sourcePath).mode & 0o111)) fail('NATIVE_EXECUTION_TOOLCHAIN_SHELL_REQUIRED')
   const result = Object.freeze({ shell: toolchain.shell, files: Object.freeze(files) })
+  const mounts = toolchainMountPlan(result.files)
   const after = toolchainState(result)
   if (!before || !sameState(before, after)) fail('NATIVE_EXECUTION_TOOLCHAIN_DRIFT')
   verifiedToolchains.set(result, after)
+  verifiedToolchainMounts.set(result, mounts)
   return result
 }
 
@@ -100,6 +149,7 @@ export const validateNativeExecutionToolchainAsync = toolchain => new Promise((r
       const result = freezeToolchain(reply.toolchain)
       if (!sameState(reply.verification, toolchainState(result))) fail('NATIVE_EXECUTION_TOOLCHAIN_DRIFT')
       verifiedToolchains.set(result, reply.verification)
+      verifiedToolchainMounts.set(result, Object.freeze(reply.mounts.map(mount => Object.freeze(mount))))
       resolveJob(result)
     } catch (error) { reject(error) }
   })
@@ -107,7 +157,7 @@ export const validateNativeExecutionToolchainAsync = toolchain => new Promise((r
 if (!isMainThread && workerData?.kind === 'native-toolchain-verify') {
   try {
     const toolchain = validateNativeExecutionToolchain(workerData.toolchain)
-    parentPort.postMessage({ toolchain, verification: verifiedToolchains.get(toolchain) })
+    parentPort.postMessage({ toolchain, verification: verifiedToolchains.get(toolchain), mounts: verifiedToolchainMounts.get(toolchain) })
   } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' }) }
 }
 
@@ -231,10 +281,12 @@ export const buildChatFileCodexConfig = readOnlyConfig =>
   + `\n[permissions.${CHAT_FILE_PERMISSION_PROFILE}]\nfilesystem = { "/" = "read", "/tmp/chat-files" = "write", "/proc" = "write", "/proc/.git" = "write", "/proc/.agents" = "write", "/proc/.codex" = "write", "/proc/.aws" = "write" }\n[permissions.${CHAT_FILE_PERMISSION_PROFILE}.network]\nenabled = false\n`
 
 // Shared immutable dependency mounts; no execution state or credentials.
+// Only the integrity owner derives grouped mounts; unverified input retains the
+// original per-file view. Callers keep their existing pre-spawn validation.
 export const nativeToolchainMountArgs = toolchain => {
   const args = []
   const directories = new Set()
-  for (const file of toolchain.files) {
+  for (const file of verifiedToolchainMounts.get(toolchain) || toolchain.files) {
     const parents = []; let cursor = dirname(file.sandboxPath)
     while (cursor !== '/') { parents.unshift(cursor); cursor = dirname(cursor) }
     for (const path of parents) if (!directories.has(path)) { args.push('--dir', path); directories.add(path) }

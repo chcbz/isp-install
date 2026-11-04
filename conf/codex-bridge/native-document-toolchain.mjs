@@ -1,5 +1,6 @@
 /** RB-03/05: fixed document libraries in the existing file-manifest sandbox.
- * No host directory mount, package installation, or document workflow selection. */
+ * Exact manifest-closed dependency subtrees may share one read-only mount;
+ * no broad host directory, package installation, or document workflow selection. */
 import { measureNativeBrowserToolchain } from './native-browser-toolchain.mjs'
 import { spawnSync } from 'node:child_process'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'

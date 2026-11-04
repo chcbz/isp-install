@@ -483,3 +483,11 @@ safe diagnostic metadata, never proof of task completion/revocation.
 沙箱启动信息不是应用就绪。适配器等待现有initialize响应，再单次遍历本次启动的有限子树核对固定app-server可执行文件；成功后才发送initialized及account/config/tools等后续请求。非沙箱适配器保持原先的验证顺序。启动管道失败/子进程退出/取消仍失败并由既有拥有者清理；没有新增服务、就绪文件轮询或强制性能deadline。
 
 回归：`test/sandbox-startup.test.mjs`、`test/typed-inspection-network.test.mjs`、`test/app-server-stream.test.mjs`、`test/typed-inspection-profile.test.mjs`。`CYF_SANDBOX_STARTUP_PROBE=1`只在具备bwrap/slirp4netns/nft及配置CLI的隔离验证主机运行：覆盖真实reaper、受限网络＋模拟协议、空Home真实app-server无模型初始化；不是生产请求耗时验收。源码候选/Flow制品/实际部署分别记录，候选版本号不代表已上线。
+
+
+### 固定工具链只读挂载合并（2026-11-05，候选1.3.53/bridge1.1.43）
+
+- 请求日志的`initialize`阶段包含bwrap建立文件视图的时间，并不等于app-server内部RPC处理时间。Run145工具链在本机无凭据探针中含1682个固定文件；逐文件绑定导致大量挂载/路径查找，事件化启动只消除进程发现轮询，不消除这部分工作。
+- `native-execution-profile.mjs`在既有完整性验证时派生只读挂载计划：只有源目录的直接子项与固定manifest精确一致、子目录也满足相同条件，才合并为目录挂载。目录中有未声明文件、软链接或空目录时保持原逐文件视图；不挂载整个宿主/usr、Home或状态目录，不新增复制工具树/缓存服务/定时器。CHAT材料与原生执行共用该入口。
+- 文件SHA清单、合同摘要和文件可见范围不变。派生计划只关联本进程已验证的冻结工具链；复用已有文件/祖先dev/ino/mtime/ctime/权限核对，新增文件会使旧计划失效，重新派生不能把未知内容挂入沙箱。worker验证通过既有元数据回读传递计划，不新增另一套每请求完整性检查。未验证对象只生成原逐文件参数，不据其声明扩大目录授权。
+- 定向验证入口：`test/native-toolchain-mounts.test.mjs`、既有integrity/single-flight、native-execution-profile及document/browser工具链回归。无凭据实际沙箱探针另验证文档读写、库目录只读、原生浏览器/PDF可用；CHAT网络=false本就禁止浏览器所需的部分本地socket，不能为测试放宽CHAT权限。正式矩阵/制品在Flow执行，候选说明不代表已安装或线上提速。

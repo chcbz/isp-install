@@ -1,4 +1,5 @@
-/** Browser dependencies are fixed, shared, per-file read-only mounts (RB-03/05).
+/** Browser dependencies use a fixed file manifest and read-only mounts (RB-03/05).
+ * The common integrity owner may group exact dependency directory closures.
  * Optional browser failure must not remove the existing document/image tools. */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
