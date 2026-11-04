@@ -358,6 +358,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "native-document-toolchain.mjs",
   "native-browser-toolchain.mjs",
   "app-server-adapter.mjs",
+  "sandbox-startup.mjs",
   "app-server-integrity-worker.mjs",
   "executable-integrity.mjs",
   "chat-runtime.mjs",

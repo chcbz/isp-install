@@ -276,7 +276,7 @@ test('thread bindings persist exactly and dedicated CHAT workdir rejects symlink
 
 test('app-server initialization telemetry preserves RPC order, readback and failure behavior', async t => {
   const lines = []; t.mock.method(console, 'info', line => lines.push(JSON.parse(line)))
-  const adapter = Object.create(AppServerAdapter.prototype); adapter.readback = {}
+  const adapter = Object.create(AppServerAdapter.prototype); adapter.child = fakeChild(); adapter.readback = {}
   const calls = []; adapter.notify = method => calls.push(method)
   adapter.request = async method => { calls.push(method); return { fixture: method } }
   const result = await adapter.initialize()
@@ -292,7 +292,7 @@ test('app-server initialization telemetry preserves RPC order, readback and fail
 
 test('app-server initialization telemetry failure cannot fail initialization', async t => {
   t.mock.method(console, 'info', () => { throw new Error('observer failed') })
-  const adapter = Object.create(AppServerAdapter.prototype); adapter.readback = {}
+  const adapter = Object.create(AppServerAdapter.prototype); adapter.child = fakeChild(); adapter.readback = {}
   adapter.notify = () => {}; adapter.request = async () => ({})
   assert.equal(await adapter.initialize(), adapter.readback)
 })
