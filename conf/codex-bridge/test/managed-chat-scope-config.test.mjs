@@ -146,3 +146,13 @@ test('independent INSPECT API profile setting is rejected, not silently retained
   assert.throws(() => normalizeProfile({ typedInspectionApiOrigin: 'https://other.example.test' }), /Separate typedInspectionApiOrigin/)
   assert.throws(() => normalizeProfile({}, { typedInspectionApiOrigin: 'http://127.0.0.1:19001' }), /Separate typedInspectionApiOrigin/)
 })
+
+test('scoped CHAT permits the generic LOCAL_FILE carrier without treating it as native image or parsed text', () => {
+  const file = { mediaKind: 'file', mimeType: '*/*', carrier: 'LOCAL_FILE', carrierContractDigest: `sha256:${'7'.repeat(64)}` }
+  const grants = parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection, supportedInputs: [...inspection.supportedInputs, file] } }]))
+  const enabled = resolveManagedRuntimeProfile(profile, { codexModel: 'existing-model', workspaceFileApiOrigin: 'http://127.0.0.1:19001' }, undefined, grants)
+  assert.deepEqual(enabled.typedInspectionSupportedInputs.at(-1), file)
+  for (const patch of [{ mediaKind: 'image' }, { carrier: 'LOCAL_IMAGE' }, { carrier: 'PARSED_TEXT' }]) {
+    assert.throws(() => parseManagedChatScopes(doc([{ ...authorization, inspection: { ...inspection, supportedInputs: [{ ...file, ...patch }] } }])))
+  }
+})

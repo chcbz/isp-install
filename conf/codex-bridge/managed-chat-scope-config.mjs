@@ -33,7 +33,7 @@ const parseInspection = value => {
   const supportedInputs = value.supportedInputs.map(item => {
     const key = [item?.mediaKind, item?.mimeType, item?.carrier].join('\0')
     if (!exactKeys(item, ['mediaKind', 'mimeType', 'carrier', 'carrierContractDigest']) || !digest(item.carrierContractDigest) ||
-      ![...IMAGE_INPUT_MIMES.map(mime => `image\0${mime}\0LOCAL_IMAGE`), 'audio\0audio/wav\0LOCAL_AUDIO', 'text\0text/plain\0DIRECT_TEXT'].includes(key) || seen.has(key)) {
+      ![...IMAGE_INPUT_MIMES.map(mime => `image\0${mime}\0LOCAL_IMAGE`), 'audio\0audio/wav\0LOCAL_AUDIO', 'text\0text/plain\0DIRECT_TEXT', 'file\0*/*\0LOCAL_FILE'].includes(key) || seen.has(key)) {
       throw new Error('Invalid scoped INSPECT supported input')
     }
     seen.add(key); return Object.freeze({ ...item })
