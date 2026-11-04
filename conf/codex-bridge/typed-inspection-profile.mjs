@@ -1,5 +1,5 @@
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
-import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
+import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE, initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -372,7 +372,7 @@ console.log('script-ok')
 }
 
 export class TypedInspectionProfileRuntime {
-  constructor({ profile, materializerRoot, stateRoot, bwrapBin = '/usr/bin/bwrap', spawnFn = spawn, measureBinary = measureCodexAppServerBinaryAsync, forbidden = [], egressFactory = options => new RestrictedProviderEgress(options), nativeToolchain = null } = {}) {
+  constructor({ profile, materializerRoot, stateRoot, bwrapBin = '/usr/bin/bwrap', spawnFn = spawn, measureBinary = measureCodexAppServerBinaryAsync, forbidden = [], egressFactory = options => new RestrictedProviderEgress(options), nativeToolchain = null, initializeToolchain = initializeNativeToolchain } = {}) {
     if (!object(profile) || !nonblank(profile.agentId) || !nonblank(profile.profileId) || !nonblank(profile.codexBin) || !nonblank(profile.codexHome)) fail('TYPED_INSPECTION_PROFILE_CONFIG_INVALID')
     this.profile = profile; this.materializerRoot = ensurePrivateDirectory(materializerRoot); this.stateRoot = ensurePrivateDirectory(stateRoot)
     if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!Number.isSafeInteger(profile.typedInspectionNetworkConnectTimeoutMs) || profile.typedInspectionNetworkConnectTimeoutMs <= 0)) fail('TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_REQUIRED')
@@ -380,7 +380,7 @@ export class TypedInspectionProfileRuntime {
     for (const candidate of forbidden.filter(value => value && existsSync(resolve(value)))) if (overlaps(this.stateRoot, realpathSync(resolve(candidate)))) fail('TYPED_INSPECTION_PROFILE_ROOT_OVERLAP')
     this.providerCaTrust = profile.typedInspectionProviderNetwork === 'restricted-proxy' ? stageProviderCaTrust(profile, this.stateRoot) : null
     this.nativeModelCatalog = loadNativeModelCatalog(profile.nativeModelCatalogPath)
-    this.nativeToolchain = nativeToolchain; this.nativeExecutionReadback = null; this.nativeExecutionMeasurementPending = null; this.pendingNativeAdapters = new Map(); this.pendingInspectionKeys = new Set(); this.closingAdapters = new Map()
+    this.initializeToolchain = initializeToolchain; this.nativeToolchain = nativeToolchain; this.nativeExecutionReadback = null; this.nativeExecutionMeasurementPending = null; this.pendingNativeAdapters = new Map(); this.pendingInspectionKeys = new Set(); this.closingAdapters = new Map()
     this.bwrap = bwrapIdentity(bwrapBin); this.spawnFn = spawnFn; this.measureBinary = measureBinary; this.egressFactory = egressFactory; this.measurement = null; this.contractReadback = null; this.nativeReadback = null; this.activeAdapters = new Map(); this.disposed = false
   }
   _prepareEphemeralState(label) {
@@ -580,7 +580,13 @@ export class TypedInspectionProfileRuntime {
   async measure() {
     if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
     if (this.measurement) return this.measurement
-    if (usesChatFiles(this.profile)) this.nativeToolchain = validateNativeExecutionToolchain(this.nativeToolchain)
+    if (usesChatFiles(this.profile)) {
+      // CHAT now needs the same process-wide toolchain before material readiness,
+      // not only in the later native-execution startup phase.
+      await this.initializeToolchain(this)
+      if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+      this.nativeToolchain = validateNativeExecutionToolchain(this.nativeToolchain)
+    }
     const schemaMeasurement = await this.measureBinary(this.profile)
     const probeDirectory = mkdtempSync(resolve(this.materializerRoot, '.profile-probe-')); chmodSync(probeDirectory, 0o700)
     const probePath = resolve(probeDirectory, '.cyf-inspection-profile-probe.txt'); writeFileSync(probePath, 'typed-inspection-profile-probe\n', { mode: 0o400 }); chmodSync(probePath, 0o400)

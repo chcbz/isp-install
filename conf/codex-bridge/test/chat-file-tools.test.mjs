@@ -39,11 +39,14 @@ test('real CHAT file sandbox reads documents with temp-only writes and no execut
     pinned[key] = resolve(root, key); copyFileSync(new URL(`../toolchain/${name}`, import.meta.url), pinned[key])
   }
   const nativeToolchain = measureNativeDocumentToolchain({ base: measureMinimalNativeExecutionToolchain(), pythonBin: process.env.CYF_CHAT_FILE_PROBE_PYTHON, ...pinned })
+  let initialized = 0
   const runtime = new TypedInspectionProfileRuntime({ profile: {
     profileId: 'chat-file-probe', agentId: 'synthetic', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex',
     codexHome: home, typedInspectionSupportedInputs: supportedInputs,
     typedInspectionProviderId: 'synthetic', typedInspectionProviderBaseUrl: 'https://provider.invalid/v1'
-  }, materializerRoot: resolve(root, 'inputs'), stateRoot: resolve(root, 'state'), nativeToolchain })
+  }, materializerRoot: resolve(root, 'inputs'), stateRoot: resolve(root, 'state'), initializeToolchain: async runtime => {
+    initialized++; await Promise.resolve(); runtime.nativeToolchain = nativeToolchain; return nativeToolchain
+  } })
   const spawn = runtime._spawnAdapter.bind(runtime)
   runtime._spawnAdapter = async args => {
     const adapter = await spawn(args), request = adapter.request.bind(adapter)
@@ -61,5 +64,21 @@ test('real CHAT file sandbox reads documents with temp-only writes and no execut
     assert.equal(measured.nativeAttestation.processView.hostCanaryHidden, true)
     assert.equal(measured.contractReady, false, 'local tools do not substitute provider carrier evidence')
     assert.equal(await runtime.measure(), measured, 'startup probe is reused, not repeated per message')
+    assert.equal(initialized, 1, 'material readiness awaits toolchain initialization once')
   } finally { await runtime.dispose() }
+})
+
+test('file-enabled startup initializes the shared toolchain before native measurement without a preloaded manifest', async t => {
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-tool-startup-'))
+  const order = [], stop = new Error('stop before engine or credentials')
+  const toolchain = measureMinimalNativeExecutionToolchain()
+  const runtime = new TypedInspectionProfileRuntime({ profile: { profileId: 'startup-test', agentId: 'synthetic', codexBin: '/synthetic/codex', codexHome: resolve(root, 'source'), typedInspectionSupportedInputs: supportedInputs },
+    materializerRoot: resolve(root, 'inputs'), stateRoot: resolve(root, 'state'),
+    initializeToolchain: async state => { order.push('initialize'); await Promise.resolve(); state.nativeToolchain = toolchain; order.push('ready') },
+    measureBinary: async () => { order.push('measure'); throw stop }
+  })
+  t.after(async () => { await runtime.dispose(); rmSync(root, { recursive: true, force: true }) })
+  assert.equal(runtime.nativeToolchain, null)
+  await assert.rejects(runtime.measure(), error => error === stop)
+  assert.deepEqual(order, ['initialize', 'ready', 'measure'])
 })
