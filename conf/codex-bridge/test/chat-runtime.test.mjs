@@ -137,6 +137,57 @@ test('production Fast CHAT path emits only real schema-v1 delta/final with exact
   })
 })
 
+test('Fast CHAT isolates host project docs and never resumes a pre-isolation binding', async () => {
+  const message = normalizedWire({ route: 'CHAT' }); const bindings = new Map(); const starts = []
+  const hashes = { enginePolicyHash: 'engine-before', instructionSourceHash: 'instructions', modelConfigHash: 'model', toolPolicyHash: 'tools' }
+  const oldKey = buildThreadKey({ tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn,
+    profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId,
+    mode: 'CHAT', workspaceScopeHash: 'none', cwd: '/empty-chat', ...hashes,
+    conversationGeneration: String(message.conversationGeneration), taskAuthorityDigest: chatTaskAuthorityDigest(message) })
+  bindings.set(oldKey, { threadId: 'old-host-doc-thread', state: 'IDLE' })
+  const adapter = {
+    readback: {},
+    startOrResumeThread: async (prior, policy) => {
+      starts.push(prior)
+      assert.deepEqual(policy.config, { network: false, project_doc_max_bytes: 0 })
+      assert.match(policy.developerInstructions, /supplied Context Envelope/)
+      assert.equal(policy.baseInstructions, undefined, 'do not replace native base instructions')
+      return { threadId: 'isolated-thread', state: 'HOT' }
+    },
+    runTurn: async options => {
+      assert.deepEqual(JSON.parse(options.input), buildContextEnvelope(message), 'authorized facts are unchanged')
+      return { threadId: 'isolated-thread', turnId: 'turn', content: 'reply' }
+    }
+  }
+  const options = { adapter, chatWorkdir: '/empty-chat', ...hashes,
+    bindingStore: { get: key => bindings.get(key), put: (key, value) => bindings.set(key, value) }, sendProtocolFn: () => {} }
+  const enabled = { ...profile, fastChatEnabled: true, appServerEnabled: true }
+  const first = await runFastChat(enabled, message, options)
+  const second = await runFastChat(enabled, message, options)
+  assert.notEqual(first.threadKey, oldKey)
+  assert.equal(second.threadKey, first.threadKey)
+  assert.equal(starts[0], undefined)
+  assert.equal(starts[1].threadId, 'isolated-thread', 'resume only a policy-matching thread')
+  assert.equal(bindings.get(oldKey).threadId, 'old-host-doc-thread', 'do not delete historical state')
+})
+
+test('app-server forwards CHAT document policy on start and resume without changing the native default', async () => {
+  const adapter = Object.create(AppServerAdapter.prototype); const calls = []
+  adapter.request = async (method, params) => { calls.push({ method, params }); return { thread: { id: 'thread' } } }
+  adapter.now = () => 1
+  const policy = { cwd: '/empty', config: { network: false, project_doc_max_bytes: 0 }, developerInstructions: 'authorized instructions' }
+  const binding = await adapter.startOrResumeThread(null, policy)
+  await adapter.startOrResumeThread(binding, policy)
+  assert.deepEqual(calls.map(call => call.method), ['thread/start', 'thread/resume'])
+  for (const { params } of calls) {
+    assert.deepEqual(params.config, policy.config)
+    assert.equal(params.sandbox, 'read-only'); assert.equal(params.approvalPolicy, 'never')
+    assert.equal(params.developerInstructions, policy.developerInstructions)
+  }
+  await adapter.startOrResumeThread(null, { cwd: '/other-lane' })
+  assert.deepEqual(calls[2].params.config, { network: false }, 'generic adapter must not override other lanes')
+})
+
 test('Fast CHAT persists unknown turn acceptance as recovery-required after readback', async () => {
   const message = normalizedWire({ route: 'CHAT' }); const recovered = []
   const adapter = {

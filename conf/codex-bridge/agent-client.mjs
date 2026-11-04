@@ -4715,9 +4715,13 @@ export const runFastChat = async (profile, message, {
   const developerInstructions = (typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}\nEmit the top-level kind field before text so user-facing replies can stream without exposing internal action instructions.` : FAST_CHAT_INSTRUCTIONS)
     + (conversationToolSession ? `\n${conversationToolSession.instructions}` : '')
   const typedContractBinding = typedRequest ? { contractDigest: outcomeContractDigest, dispatchFacts: typedRequest, outputSchema, developerInstructions } : null
-  const effectiveEnginePolicyHash = enginePolicyHash
+  // CHAT consumes the authorized envelope, not ancestor host maintenance docs.
+  // Bind this policy to thread identity so old injected instructions cannot survive resume.
+  const chatThreadConfig = { network: false, project_doc_max_bytes: 0 }
+  const baseEnginePolicyHash = enginePolicyHash
     ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
     : canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {}, ...(typedRequest ? { typedContractBinding } : {}) })
+  const effectiveEnginePolicyHash = canonicalSha256({ base: baseEnginePolicyHash, chatThreadConfig })
   const effectiveToolPolicyHash = conversationToolSession ? canonicalSha256({ catalog: conversationToolSession.catalog, dispatchId: message.dispatchId }) : materials ? canonicalSha256({ profile: materialsRuntime.contractReadback, manifestDigest: materials.manifestDigest }) : toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
   const effectiveInstructionSourceHash = instructionSourceHash
     ? (typedRequest ? canonicalSha256({ base: instructionSourceHash, typedContractBinding }) : instructionSourceHash)
@@ -4727,7 +4731,7 @@ export const runFastChat = async (profile, message, {
   metrics.queueAt = Date.now()
   const prior = materials ? null : bindingStore?.get(key)
   if (prior?.state === 'RECOVERY_REQUIRED') throw Object.assign(new Error('THREAD_BINDING_RECOVERY_REQUIRED'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
-  const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: { network: false }, developerInstructions })
+  const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: chatThreadConfig, developerInstructions })
   bindingStore?.put(key, binding)
   if (materials) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
     inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft, threadKey: key, engineThreadId: binding.threadId })

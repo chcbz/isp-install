@@ -94,6 +94,7 @@ test('real AppServerAdapter callback boundary passes native outputSchema and ato
   const turnStart = rpc.find(frame => frame.method === 'turn/start'); const threadStart = rpc.find(frame => frame.method === 'thread/start')
   assert.deepEqual(turnStart.params.outputSchema, buildActionOutcomeContract(fixture.dispatchFacts).outputSchema)
   assert.equal(Object.hasOwn(threadStart.params, 'outputSchema'), false)
+  assert.deepEqual(threadStart.params.config, { network: false, project_doc_max_bytes: 0 })
   const deltas = frames.filter(frame => frame.type === MESSAGE_TYPES.CHAT_MESSAGE_DELTA)
   assert.equal(outcome.kind, 'ACTION_REQUEST')
   assert.equal(deltas.length, 0) // internal instructions never leave the Runtime as visible deltas

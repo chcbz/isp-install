@@ -45,7 +45,7 @@ function context(t, message = messageFixture(), outcome = { revision: null, sche
     assert.match(policy.developerInstructions, /Context Envelope and the authorized material carriers actually attached/);
     assert.match(policy.developerInstructions, /inputMimeTypes list restricts that skill execution, not native reading/);
     assert.match(policy.developerInstructions, /if a carrier is absent or genuinely unreadable/);
-    assert.equal(prior, null); assert.equal(policy.cwd, '/inputs'); assert.equal(policy.config.network, false); return { threadId: 'materials-thread' }
+    assert.equal(prior, null); assert.equal(policy.cwd, '/inputs'); assert.deepEqual(policy.config, { network: false, project_doc_max_bytes: 0 }); return { threadId: 'materials-thread' }
   }, runTurn: async options => {
     starts++; events.push('turn'); assert.equal(options.input.length, 33)
     assert.equal(JSON.parse(options.input[0].text).currentUserMessage.content, '请整理资料')
