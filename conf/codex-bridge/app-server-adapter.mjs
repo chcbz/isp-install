@@ -1,4 +1,4 @@
-import { NATIVE_PERMISSION_PROFILE } from './native-execution-profile.mjs'
+import { CHAT_FILE_PERMISSION_PROFILE, NATIVE_PERMISSION_PROFILE } from './native-execution-profile.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -474,7 +474,7 @@ export class AppServerAdapter extends EventEmitter {
     }
     try {
       if (this.readback.schema?.measured === true && !this.readback.processExecutable) await measured('executable-readback', () => this.verifySpawnedExecutable())
-      this.readback.initialize = await measured('initialize', () => this.request('initialize', { clientInfo: { name: 'cyf-juyiting-runtime', version: '2' }, ...(this.toolBinding ? { capabilities: { experimentalApi: true } } : {}) }))
+      this.readback.initialize = await measured('initialize', () => this.request('initialize', { clientInfo: { name: 'cyf-juyiting-runtime', version: '2' }, ...(this.toolBinding || this.chatFileTools ? { capabilities: { experimentalApi: true } } : {}) }))
       this.notify('initialized', {})
       this.readback.account = await measured('account/read', () => this.request('account/read', { refreshToken: false }))
       this.readback.models = await measured('model/list', () => this.request('model/list', {}))
@@ -494,6 +494,7 @@ export class AppServerAdapter extends EventEmitter {
       delete params.sandbox
       params.permissions = NATIVE_PERMISSION_PROFILE
     }
+    if (this.chatFileTools && !this.nativeExecution) { delete params.sandbox; params.permissions = CHAT_FILE_PERMISSION_PROFILE }
     if (this.toolBinding) {
       // Dynamic tools persist with the thread. Resume cannot replace its catalog;
       // local dispatch still checks the current trusted binding.
@@ -608,7 +609,7 @@ export class AppServerAdapter extends EventEmitter {
     let response
     try {
       const userInput = Array.isArray(input) ? input : [{ type: 'text', text: String(input) }]
-      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', ...(this.nativeExecution ? { permissions: NATIVE_PERMISSION_PROFILE } : { sandboxPolicy: { type: 'readOnly', networkAccess: false } }), ...(policy.outputSchema ? { outputSchema: policy.outputSchema } : {}) })
+      response = await this.request('turn/start', { threadId, clientUserMessageId, input: userInput, cwd: policy.cwd, model: policy.model || undefined, effort: policy.effort || undefined, approvalPolicy: 'never', ...(this.nativeExecution ? { permissions: NATIVE_PERMISSION_PROFILE } : this.chatFileTools ? { permissions: CHAT_FILE_PERMISSION_PROFILE } : { sandboxPolicy: { type: 'readOnly', networkAccess: false } }), ...(policy.outputSchema ? { outputSchema: policy.outputSchema } : {}) })
     } catch (cause) {
       cleanup(); turn.state = 'ACCEPTANCE_UNKNOWN'; turn.error = cause.message
       const reconciliation = await this.reconcileTurn(turn).catch(() => ({ status: 'RECOVERY_REQUIRED' }))
@@ -680,7 +681,7 @@ export class AppServerAdapter extends EventEmitter {
       if (![...this.turns.values()].some(turn => turn.threadId === params.threadId && (!turn.turnId || turn.turnId === params.turnId))) { this._denyServerRequest(frame); return }
       this.emit('native_tool_call', { ...params, frame }); return
     }
-    const toolNotification = (this.nativeExecution || this.conversationTools && frame.params?.item?.type === 'dynamicToolCall') && frame.id == null && [
+    const toolNotification = (this.nativeExecution || this.chatFileTools || this.conversationTools && frame.params?.item?.type === 'dynamicToolCall') && frame.id == null && [
       'item/started', 'item/completed', 'item/commandExecution/outputDelta',
       'item/commandExecution/terminalInteraction', 'item/fileChange/outputDelta', 'item/mcpToolCall/progress'
     ].includes(frame.method)

@@ -221,6 +221,14 @@ export const buildNativeExecutionCodexConfig = (readOnlyConfig, { webSearch = 'd
   readOnlyConfig.replace('web_search = "disabled"', `web_search = "${nativeSkillWebSearch(webSearch)}"`).replace('sandbox_mode = "read-only"', `default_permissions = "${NATIVE_PERMISSION_PROFILE}"`)
   + `\n[permissions.${NATIVE_PERMISSION_PROFILE}]\nfilesystem = { ${Object.entries(nativeFilesystemPermissions).map(([path, mode]) => `${JSON.stringify(path)} = ${JSON.stringify(mode)}`).join(', ')} }\n[permissions.${NATIVE_PERMISSION_PROFILE}.network]\nenabled = true\n`
 
+// CHAT gets file-reading tools, not execution callbacks, skill credentials or outputs.
+// Keep the same procfs placeholder workaround as native permissions above;
+// regular file writes are restricted to the dedicated temporary directory.
+export const CHAT_FILE_PERMISSION_PROFILE = 'chat-files'
+export const buildChatFileCodexConfig = readOnlyConfig =>
+  readOnlyConfig.replace('sandbox_mode = "read-only"', `default_permissions = "${CHAT_FILE_PERMISSION_PROFILE}"`)
+  + `\n[permissions.${CHAT_FILE_PERMISSION_PROFILE}]\nfilesystem = { "/" = "read", "/tmp/chat-files" = "write", "/proc" = "write", "/proc/.git" = "write", "/proc/.agents" = "write", "/proc/.codex" = "write", "/proc/.aws" = "write" }\n[permissions.${CHAT_FILE_PERMISSION_PROFILE}.network]\nenabled = false\n`
+
 // Shared immutable dependency mounts; no execution state or credentials.
 export const nativeToolchainMountArgs = toolchain => {
   const args = []

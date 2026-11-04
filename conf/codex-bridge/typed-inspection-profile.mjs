@@ -16,7 +16,7 @@ import {
 import { canonicalSha256 } from './chat-runtime.mjs'
 import { RestrictedProviderEgress, restrictedProviderNetworkPolicy } from './typed-inspection-network.mjs'
 
-import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
+import { CHAT_FILE_PERMISSION_PROFILE, buildChatFileCodexConfig, nativeToolchainMountArgs, NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -75,6 +75,42 @@ const verifyProviderTrustView = (pid, trust) => {
 const within = (root, path) => path === root || path.startsWith(`${root}${sep}`)
 const overlaps = (left, right) => within(left, right) || within(right, left)
 const SANDBOX_MOUNTS = Object.freeze(['runtime:ro', 'request-inputs:ro', 'request-engine-state:rw', 'provider-ca-trust:ro', 'proc', 'dev', 'tmpfs:/tmp'])
+const CHAT_FILE_MOUNTS = Object.freeze([...SANDBOX_MOUNTS, 'pinned-toolchain:ro'])
+// Startup-only probe through the same Codex permission profile used by CHAT.
+// It performs no provider/model request and creates no business execution.
+export const measureChatFileTools = async (adapter, state) => {
+  const script = `import os, tempfile
+from pathlib import Path
+from docx import Document
+from openpyxl import Workbook, load_workbook
+from pypdf import PdfReader, PdfWriter
+assert Path('/inputs/.cyf-inspection-profile-probe.txt').read_text() == 'typed-inspection-profile-probe\\n'
+assert not Path(os.environ['CODEX_HOME'], 'auth.json').exists()
+assert not any(Path(p).exists() for p in ['/outputs', '/workspace', '/execution', '/skill-config'])
+with tempfile.TemporaryDirectory() as d:
+    p = Path(d)
+    doc = Document(); doc.add_paragraph('chat-file-probe'); doc.save(p / 'a.docx')
+    assert Document(p / 'a.docx').paragraphs[0].text == 'chat-file-probe'
+    book = Workbook(); book.active['A1'] = 'chat-file-probe'; book.save(p / 'a.xlsx'); book.close()
+    book = load_workbook(p / 'a.xlsx', read_only=True); assert book.active['A1'].value == 'chat-file-probe'; book.close()
+    writer = PdfWriter(); writer.add_blank_page(width=100, height=100)
+    with open(p / 'a.pdf', 'wb') as f: writer.write(f)
+    assert len(PdfReader(p / 'a.pdf').pages) == 1
+for target in ['/inputs/.cyf-inspection-profile-probe.txt', os.environ['CODEX_HOME'] + '/chat-write-probe']:
+    try:
+        with open(target, 'a') as f: f.write('forbidden')
+    except PermissionError: pass
+    except OSError as e:
+        if e.errno != 30: raise
+    else: raise AssertionError('write unexpectedly allowed: ' + target)
+print('chat-files-ready')
+`
+  const result = await adapter.request('command/exec', { command: ['/usr/bin/python3', '-I', '-B', '-c', script],
+    cwd: state.chatWorkdir, disableTimeout: true, permissionProfile: CHAT_FILE_PERMISSION_PROFILE }, null)
+  if (result?.exitCode !== 0 || result.stdout?.trim() !== 'chat-files-ready') fail('CHAT_FILE_TOOLS_UNVERIFIED')
+  return Object.freeze({ permissionProfile: CHAT_FILE_PERMISSION_PROFILE, probeDigest: canonicalSha256(script),
+    inputReadable: true, inputWriteDenied: true, homeWriteDenied: true, tempWritable: true, documentToolsReady: true })
+}
 const PROVIDER_CA_SANDBOX_PATH = '/trust/ca-bundle.pem'
 const DEFAULT_CA_BUNDLES = Object.freeze(['/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/certs/ca-certificates.crt'])
 const bwrapPolicy = identity => Object.freeze({ version: identity.version, sha256: identity.sha256 })
@@ -108,9 +144,11 @@ const providerConfig = profile => {
   const escaped = value => value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
   return `model_provider = "${escaped(id)}"\npreferred_auth_method = "apikey"\n[model_providers."${escaped(id)}"]\nname = "Typed Inspection Provider"\nbase_url = "${escaped(parsed.toString().replace(/\/$/, ''))}"\nwire_api = "${wireApi}"\nrequires_openai_auth = true\n`
 }
+const usesChatFiles = profile => profile?.typedInspectionSupportedInputs?.some(input => input.carrier === 'LOCAL_FILE') === true
 export const buildTypedInspectionCodexConfig = profile => {
   const systemProxy = profile?.typedInspectionProviderNetwork === 'restricted-proxy' ? '[features]\nrespect_system_proxy = true\n' : ''
-  return `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile)}${systemProxy}`
+  const config = `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile)}${systemProxy}`
+  return usesChatFiles(profile) ? buildChatFileCodexConfig(config) : config
 }
 const stageCodexHome = (profile, stateRoot, { nativeExecution = false, webSearch = 'disabled', modelCatalog = null } = {}) => {
   const codexHome = ensurePrivateDirectory(resolve(stateRoot, 'codex-home')); ensurePrivateDirectory(resolve(stateRoot, 'home'))
@@ -118,7 +156,7 @@ const stageCodexHome = (profile, stateRoot, { nativeExecution = false, webSearch
   if (!profile.codexHome || !existsSync(sourceAuth)) fail('TYPED_INSPECTION_AUTH_SOURCE_REQUIRED')
   const authDigest = copyCredentialFile(sourceAuth, resolve(codexHome, 'auth.json'))
   const modelCatalogPath = nativeExecution && modelCatalog ? stateMarker(codexHome, JSON.parse(modelCatalog.text), 'model-catalog.json') : null
-  const readOnlyConfig = (modelCatalogPath ? 'model_catalog_json = "/state/codex-home/model-catalog.json"\n' : '') + buildTypedInspectionCodexConfig(profile)
+  const readOnlyConfig = (modelCatalogPath ? 'model_catalog_json = "/state/codex-home/model-catalog.json"\n' : '') + buildTypedInspectionCodexConfig(nativeExecution ? { ...profile, typedInspectionSupportedInputs: [] } : profile)
   const config = nativeExecution ? buildNativeExecutionCodexConfig(readOnlyConfig, { webSearch }) : readOnlyConfig
   const configPath = resolve(codexHome, 'config.toml'); const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(temporary, config, { mode: 0o600, flag: 'wx' }); chmodSync(temporary, 0o600)
@@ -164,7 +202,7 @@ const verifyBwrapIdentity = identity => {
   if (!lexical.isFile() || lexical.isSymbolicLink() || String(lexical.dev) !== identity.dev || String(lexical.ino) !== identity.ino || String(lexical.size) !== identity.size || `sha256:${sha256(readFileSync(identity.path))}` !== identity.sha256) fail('TYPED_INSPECTION_BWRAP_IDENTITY_DRIFT')
 }
 const snapshotDirectory = measurement => dirname(dirname(measurement.snapshotPath))
-const sandboxArgs = ({ snapshot, stateRoot, stateMountPath = '/state', chatWorkdir = '/inputs', inputDirectory, networkMode, proxyUrl = '', caTrust = null, nativeView = null }) => {
+const sandboxArgs = ({ snapshot, stateRoot, stateMountPath = '/state', chatWorkdir = '/inputs', inputDirectory, networkMode, proxyUrl = '', caTrust = null, nativeView = null, chatToolchain = null }) => {
   const args = ['--unshare-all']
   args.push('--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
     '--dir', '/runtime', '--ro-bind', snapshot, '/runtime', '--dir', '/inputs', '--ro-bind', inputDirectory, '/inputs')
@@ -174,7 +212,12 @@ const sandboxArgs = ({ snapshot, stateRoot, stateMountPath = '/state', chatWorkd
     verifyStagedCaTrust(caTrust); args.push('--dir', '/trust', '--ro-bind', caTrust.directory, '/trust')
   }
   if (nativeView) args.push(...nativeExecutionMountArgs(nativeView))
-  args.push('--setenv', 'HOME', `${stateMountPath}/home`, '--setenv', 'CODEX_HOME', `${stateMountPath}/codex-home`, '--setenv', 'PATH', nativeView ? '/runtime/bin:/usr/bin:/bin' : '/runtime/bin')
+  if (chatToolchain) {
+    args.push('--uid', '65534', '--gid', '65534', '--cap-drop', 'ALL', ...nativeToolchainMountArgs(chatToolchain),
+      '--setenv', 'LD_LIBRARY_PATH', '/usr/lib:/usr/lib64:/lib:/lib64', '--setenv', 'PYTHONDONTWRITEBYTECODE', '1',
+      '--dir', '/tmp/chat-files', '--setenv', 'TMPDIR', '/tmp/chat-files', '--setenv', 'SHELL', chatToolchain.shell, '--remount-ro', '/')
+  }
+  args.push('--setenv', 'HOME', `${stateMountPath}/home`, '--setenv', 'CODEX_HOME', `${stateMountPath}/codex-home`, '--setenv', 'PATH', nativeView || chatToolchain ? '/runtime/bin:/usr/bin:/bin' : '/runtime/bin')
   if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', '', '--setenv', 'no_proxy', '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH, '--setenv', 'NODE_EXTRA_CA_CERTS', PROVIDER_CA_SANDBOX_PATH)
   else args.push('--unsetenv', 'HTTP_PROXY', '--unsetenv', 'HTTPS_PROXY', '--unsetenv', 'ALL_PROXY', '--unsetenv', 'http_proxy', '--unsetenv', 'https_proxy', '--unsetenv', 'all_proxy')
   args.push('--chdir', nativeView ? '/execution' : chatWorkdir, '/runtime/bin/codex')
@@ -203,11 +246,12 @@ const stableExecutionNetworkAttestation = value => value ? Object.freeze({
   directInternetBlocked: value.directInternetBlocked === true,
   providerTls: value.providerTls ? Object.freeze({ measured: value.providerTls.measured === true, providerAuthority: value.providerTls.providerAuthority, tlsVerified: value.providerTls.tlsVerified === true, caBundleSha256: value.providerTls.caBundleSha256 }) : null
 }) : null
-export const buildTypedInspectionNativeAttestation = ({ schemaMeasurement, bwrap, view, isolatedConfigDigest, mcpCatalogCount, executionNetworkAttestation = null }) => Object.freeze({
+export const buildTypedInspectionNativeAttestation = ({ schemaMeasurement, bwrap, view, isolatedConfigDigest, mcpCatalogCount, executionNetworkAttestation = null, chatFileTools = null, toolchainDigest = null }) => Object.freeze({
   schemaVersion: 1,
   schema: Object.freeze({ contractId: schemaMeasurement.schemaContractId, bundleSha256: schemaMeasurement.bundleSha256, binaryIdentityDigest: schemaMeasurement.binaryIdentityDigest }),
   bwrap: bwrapPolicy(bwrap),
-  mounts: SANDBOX_MOUNTS,
+  mounts: chatFileTools ? CHAT_FILE_MOUNTS : SANDBOX_MOUNTS,
+  ...(chatFileTools ? { chatFileTools, toolchainDigest } : {}),
   network: Object.freeze({ measurementNamespace: 'isolated', parentNamespaceShared: false, execution: stableExecutionNetworkAttestation(executionNetworkAttestation) }),
   processView: Object.freeze({ inputVisible: view.inputVisible === true, hostCanaryHidden: view.hostCanaryHidden === true, sourceHomeHidden: view.sourceHomeHidden === true, credentialPathAbsent: view.credentialPathAbsent === true, curlAbsent: view.curlAbsent === true, networkNamespaceIsolated: view.networkNamespaceIsolated === true, defaultRouteAbsent: view.defaultRouteAbsent === true, networkInterfaces: view.networkInterfaces }),
   isolatedConfigDigest,
@@ -376,7 +420,13 @@ export class TypedInspectionProfileRuntime {
     if (!active.idle && !active.adapter.closed) fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
     if (active.closing) return active.closing
     this.chatAdapterLifecycle?.closing(active.adapter)
-    active.closing = active.adapter.shutdown({ timeoutMs: 1000 })
+    active.closing = (async () => {
+      try { await active.adapter.shutdown({ timeoutMs: 1000 }) }
+      finally {
+        try { await active.egress?.dispose() }
+        finally { if (active.emptyInputs) rmSync(active.emptyInputs, { recursive: true, force: true }) }
+      }
+    })()
     await active.closing
     if (this.warmChatAdapters.get(conversationKey) === active) this.warmChatAdapters.delete(conversationKey)
     if (this.conversationOwners?.get(conversationKey) === active.owner) this.conversationOwners.delete(conversationKey)
@@ -413,25 +463,41 @@ export class TypedInspectionProfileRuntime {
     const owner = Symbol(`warm:${conversationKey}`)
     this.conversationOwners.set(conversationKey, owner)
     const pending = (async () => {
-      let adapter, engineState
+      let adapter, engineState, egress, emptyInputs
       try {
         engineState = this._prepareConversationState(conversationKey, { requireExistingState })
-        adapter = await AppServerAdapter.spawnAsync({ ...this.profile, codexHome: engineState.codexHome }, {
-          cwd: engineState.chatWorkdir, schemaMeasurement, shouldSpawn: () => !this.disposed,
-          spawnFn: (binary, args, options) => spawnFn(binary, args, { ...options, env: { ...environment, ...options.env,
-            HOME: resolve(engineState.directory, 'home'), CODEX_HOME: engineState.codexHome } }) })
-        adapter.typedInspectionEngineState = engineState
-        await adapter.verifySpawnedExecutable(); await adapter.initialize()
+        if (usesChatFiles(this.profile)) {
+          const measured = await this.measure()
+          if (!measured.contractReady) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_REQUIRED')
+          emptyInputs = ensurePrivateDirectory(mkdtempSync(resolve(this.materializerRoot, '.warm-chat-')))
+          egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl,
+            networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs })
+          await egress.start()
+          if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+          adapter = await this._spawnAdapter({ inputDirectory: emptyInputs, engineState,
+            schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
+          await egress.bindOwner(adapter.child, this.bwrap, this.nativeReadback.schema.snapshotIdentity)
+          await egress.attach(); await this._initializeAndSeal(adapter)
+        } else {
+          adapter = await AppServerAdapter.spawnAsync({ ...this.profile, codexHome: engineState.codexHome }, {
+            cwd: engineState.chatWorkdir, schemaMeasurement, shouldSpawn: () => !this.disposed,
+            spawnFn: (binary, args, options) => spawnFn(binary, args, { ...options, env: { ...environment, ...options.env,
+              HOME: resolve(engineState.directory, 'home'), CODEX_HOME: engineState.codexHome } }) })
+          adapter.typedInspectionEngineState = engineState
+          await adapter.verifySpawnedExecutable(); await adapter.initialize()
+          const pid = adapter.readback.processExecutable?.pid
+          if (!Number.isInteger(pid) || pid <= 0) fail('TYPED_INSPECTION_SANDBOX_PROCESS_REQUIRED')
+          adapter.readback.credentialIsolation = sealCredential(engineState, pid)
+        }
         if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
         if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
-        const pid = adapter.readback.processExecutable?.pid
-        if (!Number.isInteger(pid) || pid <= 0) fail('TYPED_INSPECTION_SANDBOX_PROCESS_REQUIRED')
-        adapter.readback.credentialIsolation = sealCredential(engineState, pid)
-        this.warmChatAdapters.set(conversationKey, { adapter, engineState, owner, requestKey, idle: false })
+        this.warmChatAdapters.set(conversationKey, { adapter, engineState, owner, requestKey, idle: false, egress, emptyInputs })
         await this.chatAdapterLifecycle?.ready(adapter)
         return adapter
       } catch (error) {
         await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {})
+        await egress?.dispose().catch(() => {})
+        if (emptyInputs) rmSync(emptyInputs, { recursive: true, force: true })
         if (engineState?.authPath) rmSync(engineState.authPath, { force: true })
         if (this.conversationOwners.get(conversationKey) === owner) this.conversationOwners.delete(conversationKey)
         throw error
@@ -481,13 +547,14 @@ export class TypedInspectionProfileRuntime {
 
   async _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '', nativeView = null, nativeExecution = null }) {
     if (Boolean(nativeView) !== Boolean(nativeExecution)) fail('NATIVE_EXECUTION_BINDING_INVALID')
+    if (!nativeView && usesChatFiles(this.profile)) this.nativeToolchain = validateNativeExecutionToolchain(this.nativeToolchain)
     const input = realpathSync(inputDirectory); if (!nativeView && !within(this.materializerRoot, input)) fail('TYPED_INSPECTION_INPUT_DIRECTORY_OUTSIDE_ROOT')
     const lexical = lstatSync(input, { bigint: true }); if (lexical.isSymbolicLink() || !lexical.isDirectory() || Number(lexical.mode & 0o777n) !== 0o700) fail('TYPED_INSPECTION_INPUT_DIRECTORY_UNSAFE')
     if (!engineState?.directory || !within(this.stateRoot, engineState.directory) || realpathSync(engineState.directory) !== engineState.directory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     const stateDirectory = engineState.conversationDirectory || engineState.directory
     if (!within(this.stateRoot, stateDirectory) || realpathSync(stateDirectory) !== stateDirectory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: stateDirectory,
-      stateMountPath: engineState.sandboxStatePath || '/state', chatWorkdir: engineState.chatWorkdir || '/inputs', inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust, nativeView })
+      stateMountPath: engineState.sandboxStatePath || '/state', chatWorkdir: engineState.chatWorkdir || '/inputs', inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust, nativeView, chatToolchain: !nativeView && usesChatFiles(this.profile) ? this.nativeToolchain : null })
     const spawnWrapped = (_binary, commandArgs, options) => {
       verifyBwrapIdentity(this.bwrap)
       if (nativeView) {
@@ -497,6 +564,7 @@ export class TypedInspectionProfileRuntime {
       }
       return this.spawnFn(this.bwrap.path, [...args, ...commandArgs], { ...options, cwd: '/', env: { LANG: 'C.UTF-8' } }) }
     const adapter = await AppServerAdapter.spawnAsync(this.profile, { cwd: nativeView ? '/execution' : engineState.chatWorkdir || '/inputs', nativeExecution, schemaMeasurement, spawnFn: spawnWrapped, shouldSpawn: () => !this.disposed, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
+    adapter.chatFileTools = !nativeView && usesChatFiles(this.profile)
     adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
   }
   async _initializeAndSeal(adapter) {
@@ -512,6 +580,7 @@ export class TypedInspectionProfileRuntime {
   async measure() {
     if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
     if (this.measurement) return this.measurement
+    if (usesChatFiles(this.profile)) this.nativeToolchain = validateNativeExecutionToolchain(this.nativeToolchain)
     const schemaMeasurement = await this.measureBinary(this.profile)
     const probeDirectory = mkdtempSync(resolve(this.materializerRoot, '.profile-probe-')); chmodSync(probeDirectory, 0o700)
     const probePath = resolve(probeDirectory, '.cyf-inspection-profile-probe.txt'); writeFileSync(probePath, 'typed-inspection-profile-probe\n', { mode: 0o400 }); chmodSync(probePath, 0o400)
@@ -522,6 +591,9 @@ export class TypedInspectionProfileRuntime {
       const isolatedReadback = await this._initializeAndSeal(adapter)
       if (!emptyMcpCatalog(isolatedReadback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
       const view = verifyProcessView({ pid: isolatedReadback.processExecutable.pid, inputDirectory: probeDirectory, stateRoot: isolatedState.directory, sandboxStatePath: isolatedState.sandboxStatePath, sourceCodexHome: realpathSync(this.profile.codexHome), outsideCanary })
+      const chatFileTools = usesChatFiles(this.profile) ? await measureChatFileTools(adapter, isolatedState) : null
+      const toolchainDigest = chatFileTools ? canonicalSha256(this.nativeToolchain) : null
+      const mounts = chatFileTools ? CHAT_FILE_MOUNTS : SANDBOX_MOUNTS
       let executionReadback = null; let executionNetworkAttestation = null
       if (this.profile.typedInspectionProviderNetwork === 'restricted-proxy') {
         const egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs })
@@ -541,12 +613,12 @@ export class TypedInspectionProfileRuntime {
       const profileId = String(this.profile.typedInspectionProfileId || `${this.profile.profileId}-typed-inspection-v1`)
       const engineContractId = String(this.profile.typedInspectionEngineContractId || 'codex-app-server-typed-inspection-v1')
       const networkPolicy = this.profile.typedInspectionProviderNetwork === 'restricted-proxy' ? restrictedProviderNetworkPolicy(this.profile.typedInspectionProviderBaseUrl, { connectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs }) : null
-      const enginePolicyDigest = canonicalSha256({ schemaContractId: schemaMeasurement.schemaContractId, bundleSha256: schemaMeasurement.bundleSha256, binaryIdentityDigest: schemaMeasurement.binaryIdentityDigest, bwrap: bwrapPolicy(this.bwrap), mounts: SANDBOX_MOUNTS, networkPolicy, providerHttpRoute: 'respect_system_proxy=true/readback-required', providerCaTrustDigest: executionReadback?.providerCaTrust?.sha256 || null })
-      const toolPolicyDigest = canonicalSha256({ policy: 'MANIFEST_READ_ONLY', mcpCatalogEmptyMeasured: true, mcpCatalogNotStrictNoToolsProof: true, webSearch: 'disabled', adapterDeniedRequests: 'command|file|permission|network|mcp|dynamic-tool|tool', bootstrapCredential: 'removed-before-model-turn', sandboxPolicy: { type: 'readOnly', networkAccess: false }, filesystem: SANDBOX_MOUNTS })
+      const enginePolicyDigest = canonicalSha256({ schemaContractId: schemaMeasurement.schemaContractId, bundleSha256: schemaMeasurement.bundleSha256, binaryIdentityDigest: schemaMeasurement.binaryIdentityDigest, bwrap: bwrapPolicy(this.bwrap), mounts, ...(chatFileTools ? { toolchainDigest } : {}), networkPolicy, providerHttpRoute: 'respect_system_proxy=true/readback-required', providerCaTrustDigest: executionReadback?.providerCaTrust?.sha256 || null })
+      const toolPolicyDigest = canonicalSha256({ policy: 'MANIFEST_READ_ONLY', mcpCatalogEmptyMeasured: true, mcpCatalogNotStrictNoToolsProof: true, webSearch: 'disabled', adapterDeniedRequests: 'command|file|permission|network|mcp|dynamic-tool|tool', bootstrapCredential: 'removed-before-model-turn', sandboxPolicy: chatFileTools ? { permissionProfile: CHAT_FILE_PERMISSION_PROFILE, tempWritable: true, networkAccess: false } : { type: 'readOnly', networkAccess: false }, filesystem: mounts, ...(chatFileTools ? { toolchainDigest, chatFileTools } : {}) })
       const inputPolicyDigest = canonicalSha256({ sourcesStrictlyOrdered: true, requestDirectoryReadOnly: true, supportedInputs })
       const binding = Object.freeze({ profileId, engineContractId, enginePolicyDigest, toolPolicyDigest, inputPolicyDigest })
       const nativeProbe = { schemaVersion: 1, schemaContractId: schemaMeasurement.schemaContractId, processExecutable: isolatedReadback.processExecutable, bwrap: this.bwrap, view, authSourceDigest: isolatedState.authDigest, isolatedConfigDigest: isolatedState.configDigest, credentialIsolation: isolatedReadback.credentialIsolation, executionNetworkReadback: executionNetworkAttestation, providerSystemProxyEnabled: executionReadback?.providerSystemProxy?.enabled === true, providerCaTrust: executionReadback?.providerCaTrust || null, modelCount: Array.isArray(isolatedReadback.models?.data) ? isolatedReadback.models.data.length : null, mcpCatalogCount: isolatedReadback.tools.data.length }
-      const nativeAttestation = buildTypedInspectionNativeAttestation({ schemaMeasurement, bwrap: this.bwrap, view, isolatedConfigDigest: isolatedState.configDigest, mcpCatalogCount: isolatedReadback.tools.data.length, executionNetworkAttestation })
+      const nativeAttestation = buildTypedInspectionNativeAttestation({ schemaMeasurement, bwrap: this.bwrap, view, isolatedConfigDigest: isolatedState.configDigest, mcpCatalogCount: isolatedReadback.tools.data.length, executionNetworkAttestation, chatFileTools, toolchainDigest })
       const nativeAttestationDigest = canonicalSha256(nativeAttestation)
       const providerModel = String(this.profile.chatModel || this.profile.codexModel || '')
       const carrierEvidence = loadTypedInspectionCarrierEvidence({ path: this.profile.typedInspectionCarrierEvidencePath,
@@ -812,7 +884,11 @@ export class TypedInspectionProfileRuntime {
   async dispose() {
     this.disposed = true
     await Promise.all([...(this.pendingWarmChats?.values() || [])].map(promise => promise.catch(() => {})))
-    await Promise.all([...(this.warmChatAdapters?.values() || [])].map(item => (item.closing || item.adapter.shutdown({ timeoutMs: 1000 })).catch(() => {})))
+    await Promise.all([...(this.warmChatAdapters?.values() || [])].map(async item => {
+      await (item.closing || item.adapter.shutdown({ timeoutMs: 1000 })).catch(() => {})
+      await item.egress?.dispose().catch(() => {})
+      if (item.emptyInputs) rmSync(item.emptyInputs, { recursive: true, force: true })
+    }))
     this.warmChatAdapters?.clear(); this.idleWarmChatKey = null
     await Promise.all([...(this.pendingInspectionAdapters?.values() || [])].map(promise => promise.catch(() => {})))
     await Promise.all([...(this.closingAdapters?.values() || [])].map(promise => promise.catch(() => {})))

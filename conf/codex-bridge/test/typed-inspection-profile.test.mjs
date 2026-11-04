@@ -533,3 +533,34 @@ test('warm Home handoff waits for shutdown and refuses acquisition after disposa
   await disposed
   assert.equal(spawned.length, 1)
 })
+
+test('file-enabled ordinary CHAT reuses warm engine, canonical Home and joins egress cleanup', async t => {
+  const { runtime, root, conversationKey } = conversationStateFixture(t)
+  runtime.materializerRoot = resolve(root, 'materializer'); mkdirSync(runtime.materializerRoot, { mode: 0o700 })
+  runtime.profile.typedInspectionSupportedInputs = [{ carrier: 'LOCAL_FILE' }]
+  runtime.nativeReadback = { schema: { snapshotIdentity: {} } }
+  runtime.measure = async () => ({ contractReady: true })
+  const opens = [], disposed = []
+  runtime.egressFactory = () => ({ proxyUrl: 'synthetic', start: async () => {}, bindOwner: async () => {}, attach: async () => {}, dispose: async () => { disposed.push(true) } })
+  runtime._spawnAdapter = async options => {
+    opens.push(options)
+    const adapter = { closed: false, typedInspectionEngineState: options.engineState, readback: { tools: { data: [] }, processExecutable: { pid: process.pid } },
+      initialize: async () => adapter.readback, shutdown: async () => { adapter.closed = true } }
+    return adapter
+  }
+  t.after(() => runtime.dispose())
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'one')
+  assert.equal(existsSync(first.typedInspectionEngineState.authPath), false)
+  const config = readFileSync(resolve(first.typedInspectionEngineState.codexHome, 'config.toml'), 'utf8')
+  assert.match(config, /default_permissions = "chat-files"/)
+  await runtime.finishWarmChatAdapter(conversationKey, 'one')
+  const second = await runtime.openWarmChatAdapter(conversationKey, 'two')
+  assert.equal(second, first); assert.equal(opens.length, 1)
+  assert.equal(opens[0].networkMode, 'provider-restricted')
+  await runtime.finishWarmChatAdapter(conversationKey, 'two')
+  await runtime._closeWarmChat(conversationKey)
+  assert.equal(disposed.length, 1)
+  assert.equal(existsSync(opens[0].inputDirectory), false)
+  assert.equal(existsSync(first.typedInspectionEngineState.codexHome), true)
+  assert.equal(runtime.conversationOwners.size, 0)
+})

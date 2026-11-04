@@ -233,3 +233,26 @@ test('a fresh adapter resumes the thread but uses only the new turn callback bin
     assert.equal(newCalls, 1); assert.equal(oldCalls, 0)
   } finally { next.adapter.close() }
 })
+
+test('file-reading CHAT fixes one permission profile on start/resume/turn without execution tools', async () => {
+  const f = fixture(); f.adapter.chatFileTools = true
+  try {
+    for (const thread of [null, 'thread1']) {
+      await f.adapter.startOrResumeThread(thread, { cwd: '/inputs', dynamicTools: [tool] })
+      const params = f.sent.at(-1).params
+      assert.equal(params.permissions, 'chat-files')
+      assert.equal(params.sandbox, undefined); assert.equal(params.dynamicTools, undefined)
+    }
+    const events = []
+    const running = f.adapter.runTurn({ threadId: 'thread1', clientUserMessageId: 'message1', input: 'read', policy: { cwd: '/inputs' }, onToolEvent: e => events.push(e) })
+    await tick()
+    assert.equal(f.sent.find(x => x.method === 'turn/start').params.permissions, 'chat-files')
+    f.event('item/commandExecution/outputDelta', { threadId: 'thread1', turnId: 'turn1', itemId: 'read1', delta: 'PRIVATE_FILE_BODY' })
+    completed(f); await running
+    assert.ok(!JSON.stringify(events).includes('PRIVATE_FILE_BODY'))
+    const next = start(f); await tick()
+    const rejected = assert.rejects(next, /FAST_CHAT_TOOL_POLICY_VIOLATION/)
+    call(f); await rejected
+    assert.equal(f.sent.find(x => x.id === 'rpc1').error.code, -32001)
+  } finally { f.adapter.close() }
+})
