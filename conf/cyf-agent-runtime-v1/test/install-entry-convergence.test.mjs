@@ -148,7 +148,8 @@ test('fixed app target refuses an existing artifact before executing toolchain o
 test('new artifact freezes its Python base after launcher relocation and before validation/publication', () => {
   const installer = text('conf/cyf-agent-runtime-v1/install.sh')
   const freeze = '"$STAGE/codex-bridge/.toolchain/bin/python" -I -B "$STAGE/runtime/lib/freeze-python.py" "$STAGE/codex-bridge/.toolchain"'
-  assert.ok(installer.includes('lib/freeze-python.py lib/hosting-config.mjs'))
+  assert.ok(installer.includes('lib/freeze-python.py'))
+  assert.ok(installer.includes('lib/hosting-config.mjs'))
   assert.ok(installer.indexOf(freeze) > installer.lastIndexOf('\nPY_RUNTIME_RELOCATE\n'))
   assert.ok(installer.indexOf(freeze) < installer.indexOf('"$STAGE/runtime/validate.sh" --root "$STAGE"'))
   assert.ok(installer.indexOf(freeze) < installer.indexOf('mv -T -n "$STAGE" "$TARGET"'))
@@ -164,4 +165,17 @@ test('optional browser install consumes a paired archive/manifest before validat
     assert.match(result.stderr, /usage:/)
   }
   assert.doesNotMatch(installer, /build-browser-toolchain\.sh|playwright install/)
+})
+
+
+test('sandbox image is prepared only in install stage after fixed dependencies and verified before publication', () => {
+  const installer = text('conf/cyf-agent-runtime-v1/install.sh')
+  const prepare = installer.indexOf('"$STAGE/node/bin/node" "$STAGE/runtime/lib/prepare-toolchain-image.mjs" --root "$STAGE"')
+  assert.ok(installer.includes('lib/prepare-toolchain-image.mjs'))
+  assert.ok(prepare > installer.indexOf('--root "$STAGE/codex-bridge/.browser-toolchain"'))
+  assert.ok(prepare < installer.indexOf('"$STAGE/runtime/validate.sh" --root "$STAGE"'))
+  assert.ok(prepare < installer.indexOf('mv -T -n "$STAGE" "$TARGET"'))
+  assert.match(text('conf/cyf-agent-runtime-v1/validate.sh'), /validateNativeExecutionToolchain\(readNativeToolchainImage/)
+  const startup = text('conf/codex-bridge/native-document-toolchain.mjs').split('// Load the installed immutable image')[1]
+  assert.doesNotMatch(startup, /measureMinimalNativeExecutionToolchain|measureNativeDocumentToolchain|measureNativeBrowserToolchain|copyFileSync/)
 })

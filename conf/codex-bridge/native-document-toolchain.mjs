@@ -1,14 +1,13 @@
 /** RB-03/05: fixed document libraries in the existing file-manifest sandbox.
- * Exact manifest-closed dependency subtrees may share one read-only mount;
+ * Installed images expose a fixed manifest-closed read-only directory view;
  * no broad host directory, package installation, or document workflow selection. */
-import { measureNativeBrowserToolchain } from './native-browser-toolchain.mjs'
 import { spawnSync } from 'node:child_process'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, realpathSync, lstatSync, existsSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { measureMinimalNativeExecutionToolchain, validateNativeExecutionToolchain, validateNativeExecutionToolchainAsync } from './native-execution-profile.mjs'
+import { readNativeToolchainImage, validateNativeExecutionToolchain, validateNativeExecutionToolchainAsync } from './native-execution-profile.mjs'
 
 export const DOCUMENT_MIMES = Object.freeze(['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'])
 export const DOCUMENT_PROBE = '/usr/lib/cyf-documents/document_probe.py'
@@ -112,27 +111,18 @@ print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig
   return validateNativeExecutionToolchain({ shell: base.shell, files })
 }
 
-// Library discovery/ldd/hash IO runs off the WS/event-loop thread. Its result is
-// a local immutable-tool manifest, not registration payload or model input.
-if (!isMainThread && workerData?.kind === 'native-document-measurement') {
-  const timings = []
-  const measure = (phase, work) => {
-    const started = performance.now()
-    try { return work() } finally { timings.push({ phase, durationMs: performance.now() - started }) }
-  }
+// Load the installed immutable image off the WS thread. No Python, ldd or
+// browser discovery at startup; those belong to installation preparation.
+if (!isMainThread && workerData?.kind === 'native-toolchain-image-load') {
+  const started = performance.now()
   try {
-    const base = measure('base-discovery', () => measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath }))
-    let toolchain = base, documentFailure, browserFailure
-    try { toolchain = measure('document-discovery', () => measureNativeDocumentToolchain({ base })) }
-    catch (error) { documentFailure = error.code || 'NATIVE_DOCUMENT_TOOLCHAIN_UNAVAILABLE' }
-    try { toolchain = measure('browser-discovery', () => measureNativeBrowserToolchain({ base: toolchain })) }
-    catch (error) { browserFailure = error.code || 'NATIVE_BROWSER_TOOLCHAIN_UNAVAILABLE' }
-    parentPort.postMessage({ toolchain, documentFailure, browserFailure, timings })
-  } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED', timings }) }
+    const result = readNativeToolchainImage(resolve(root, '.sandbox-toolchain'))
+    parentPort.postMessage({ ...result, timings: [{ phase: 'image-load', durationMs: performance.now() - started }] })
+  } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_TOOLCHAIN_IMAGE_REQUIRED' }) }
 }
 
-const measureSharedToolchain = () => new Promise((resolve, reject) => {
-  const worker = new Worker(new URL(import.meta.url), { execArgv: [], workerData: { kind: 'native-document-measurement' } })
+const loadSharedToolchain = () => new Promise((resolve, reject) => {
+  const worker = new Worker(new URL(import.meta.url), { execArgv: [], workerData: { kind: 'native-toolchain-image-load' } })
   let result
   worker.once('message', value => { result = value })
   worker.once('error', reject)
@@ -149,11 +139,11 @@ const measureSharedToolchain = () => new Promise((resolve, reject) => {
   })
 })
 
-// One slot, not a cache per Agent/skill/request. All discovery inputs are fixed by
+// One slot, not a cache per Agent/skill/request. The installed image is fixed by
 // this installed module and the process executable; subjects contribute no paths.
 // Identity changes cannot reuse the slot. The existing verifier still detects
 // file/ancestor drift before attachment, and before every execution layout.
-export function createNativeToolchainInitializer({ measure = measureSharedToolchain,
+export function createNativeToolchainInitializer({ measure = loadSharedToolchain,
   verify = validateNativeExecutionToolchain,
   identity = () => `${process.geteuid()}:${process.getegid()}:${realpathSync(process.execPath)}` } = {}) {
   let shared = null

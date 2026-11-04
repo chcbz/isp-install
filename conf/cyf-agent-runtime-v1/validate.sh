@@ -36,6 +36,12 @@ done
   const { validateExecutionPayload } = await import(pathToFileURL(process.argv[1]));
   await validateExecutionPayload(process.argv[2]);
 ' "$PACKAGE_ROOT/runtime/lib/execution-adapter.mjs" "$PACKAGE_ROOT/codex-bridge"
+# Verify the prepared image without regenerating it or discovering host tools.
+"$NODE_BIN" --input-type=module -e '
+  const { pathToFileURL } = await import("node:url");
+  const { readNativeToolchainImage, validateNativeExecutionToolchain } = await import(pathToFileURL(process.argv[1]));
+  validateNativeExecutionToolchain(readNativeToolchainImage(process.argv[2]).toolchain);
+' "$PACKAGE_ROOT/codex-bridge/native-execution-profile.mjs" "$PACKAGE_ROOT/codex-bridge/.sandbox-toolchain"
 # A healthy Python import does not validate relocated generated CLI launchers.
 # Reject stale staging paths in launchers/activation/config without importing
 # host modules, activating the venv or running a retired authentication entry.

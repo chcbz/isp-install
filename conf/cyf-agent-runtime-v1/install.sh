@@ -56,7 +56,7 @@ for file in agent-runtime.mjs install.sh validate.sh; do
 done
 for file in README.md package.json runtime.env.example manifest.example.json lib/manifest.mjs lib/runtime-client.mjs lib/api-envelope.mjs lib/message-envelope.mjs \
     lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs \
-    lib/python-artifact.py lib/freeze-python.py lib/hosting-config.mjs lib/hosting-wire.mjs lib/hosting-control.mjs lib/hosting-server.mjs \
+    lib/python-artifact.py lib/freeze-python.py lib/prepare-toolchain-image.mjs lib/hosting-config.mjs lib/hosting-wire.mjs lib/hosting-control.mjs lib/hosting-server.mjs \
     hosting-control.example.json HOSTING-CONTROL.md systemd/cyf-agent-runtime-v1-hosting.tmpfiles.conf.example systemd/cyf-agent-runtime-v1@.service; do
     install -m 0644 "$SOURCE_DIR/$file" "$STAGE/runtime/$file"
 done
@@ -193,6 +193,8 @@ if [ -n "$BROWSER_ARCHIVE" ]; then
         --root "$STAGE/codex-bridge/.browser-toolchain" \
         --archive "$BROWSER_ARCHIVE" --manifest "$BROWSER_MANIFEST"
 fi
+# Freeze the sandbox view once in the owned installation stage, never per request.
+"$STAGE/node/bin/node" "$STAGE/runtime/lib/prepare-toolchain-image.mjs" --root "$STAGE"
 "$STAGE/runtime/validate.sh" --root "$STAGE"
 # Do not let a competing operator install be overwritten between preflight and publication.
 [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ] || { echo 'Runtime target appeared during staging' >&2; exit 1; }

@@ -34,52 +34,33 @@ const fileDigest = path => {
 // frozen, SHA-verified manifest can reuse hashes. Recheck files AND ancestors
 // synchronously before every use; ctime prevents restored-mtime substitutions.
 const verifiedToolchains = new WeakMap()
-const verifiedToolchainMounts = new WeakMap()
-// Derive the same file view, not a broader host directory grant. A directory is
-// eligible only when every immediate entry is an already-pinned file or an
-// eligible child directory. Omitted files, links and empty directories prevent
-// grouping at that boundary. Existing ancestor ctime checks invalidate the plan.
-const toolchainMountPlan = files => {
-  const root = { children: new Map(), target: '' }
-  for (const file of files) {
-    let node = root
-    for (const segment of file.sandboxPath.split('/').filter(Boolean)) {
-      if (node.file) return files
-      if (!node.children.has(segment)) node.children.set(segment, { children: new Map(), target: `${node.target}/${segment}` })
-      node = node.children.get(segment)
-    }
-    if (node.children.size) return files
-    node.file = file
+// Installed images contain exactly the pinned file view. Unlike the former
+// dynamic grouping heuristic, this is a fixed installation layout, not a plan
+// rediscovered for each host directory. Extra entries are never granted.
+const imageDirectory = path => {
+  if (typeof path !== 'string' || resolve(path) !== path || realpathSync(path) !== path) fail('NATIVE_TOOLCHAIN_IMAGE_UNSAFE')
+  const stat = lstatSync(path)
+  if (!stat.isDirectory() || stat.isSymbolicLink() || ![0, process.geteuid()].includes(stat.uid) || stat.mode & 0o022) fail('NATIVE_TOOLCHAIN_IMAGE_UNSAFE')
+  return path
+}
+const validateToolchainImage = toolchain => {
+  if (!toolchain.imageRoot) return
+  const root = imageDirectory(toolchain.imageRoot)
+  const expected = new Set(), directories = new Set()
+  for (const file of toolchain.files) {
+    if (file.sourcePath !== `${root}${file.sandboxPath}`) fail('NATIVE_TOOLCHAIN_IMAGE_MAPPING_INVALID')
+    expected.add(file.sourcePath)
+    for (let path = dirname(file.sourcePath); path !== root; path = dirname(path)) directories.add(path)
   }
-  const qualify = node => {
-    if (node.file) {
-      node.source = node.file.sourcePath; node.count = 1
-      node.eligible = basename(node.source) === basename(node.target); return
+  const walk = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = resolve(directory, entry.name)
+      if (entry.isDirectory() && directories.delete(path)) walk(path)
+      else if (!entry.isFile() || !expected.delete(path)) fail('NATIVE_TOOLCHAIN_IMAGE_CLOSURE_INVALID')
     }
-    const children = [...node.children.values()]; children.forEach(qualify)
-    node.count = children.reduce((sum, child) => sum + child.count, 0)
-    if (!children.length || children.some(child => !child.eligible)) return
-    const parents = new Set(children.map(child => dirname(child.source)))
-    if (parents.size !== 1) return
-    node.source = [...parents][0]
-    if (basename(node.source) !== basename(node.target)) return
-    const stat = lstatSync(node.source)
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return
-    const actual = readdirSync(node.source).sort(), expected = [...node.children.keys()].sort()
-    if (JSON.stringify(actual) !== JSON.stringify(expected)) return
-    node.eligible = true
   }
-  qualify(root)
-  const mounts = []
-  const select = node => {
-    if (node.file) { mounts.push(node.file); return }
-    if (node.eligible && node.count > 1) {
-      mounts.push(Object.freeze({ sourcePath: node.source, sandboxPath: node.target })); return
-    }
-    node.children.forEach(select)
-  }
-  select(root)
-  return Object.freeze(mounts)
+  walk(root)
+  if (expected.size || directories.size) fail('NATIVE_TOOLCHAIN_IMAGE_CLOSURE_INVALID')
 }
 const toolchainState = toolchain => {
   const paths = new Set()
@@ -98,7 +79,7 @@ const toolchainState = toolchain => {
   })
 }
 const sameState = (left, right) => JSON.stringify(left) === JSON.stringify(right)
-const freezeToolchain = value => Object.freeze({ shell: value.shell, files: Object.freeze(value.files.map(file => Object.freeze({ ...file }))) })
+const freezeToolchain = value => Object.freeze({ shell: value.shell, ...(value.imageRoot ? { imageRoot: value.imageRoot } : {}), files: Object.freeze(value.files.map(file => Object.freeze({ ...file }))) })
 
 export const validateNativeExecutionToolchain = toolchain => {
   if (!object(toolchain) || !Array.isArray(toolchain.files) || !toolchain.files.length || !['/bin/bash', '/bin/sh'].includes(toolchain.shell)) fail('NATIVE_EXECUTION_TOOLCHAIN_REQUIRED')
@@ -127,13 +108,27 @@ export const validateNativeExecutionToolchain = toolchain => {
   }).sort((a, b) => a.sandboxPath.localeCompare(b.sandboxPath))
   if (![toolchain.shell, '/bin/sh'].every(path => targets.has(path))) fail('NATIVE_EXECUTION_TOOLCHAIN_SHELL_REQUIRED')
   for (const path of [toolchain.shell, '/bin/sh']) if (!(lstatSync(files.find(file => file.sandboxPath === path).sourcePath).mode & 0o111)) fail('NATIVE_EXECUTION_TOOLCHAIN_SHELL_REQUIRED')
-  const result = Object.freeze({ shell: toolchain.shell, files: Object.freeze(files) })
-  const mounts = toolchainMountPlan(result.files)
+  const result = Object.freeze({ shell: toolchain.shell, ...(toolchain.imageRoot ? { imageRoot: toolchain.imageRoot } : {}), files: Object.freeze(files) })
+  validateToolchainImage(result)
   const after = toolchainState(result)
   if (!before || !sameState(before, after)) fail('NATIVE_EXECUTION_TOOLCHAIN_DRIFT')
   verifiedToolchains.set(result, after)
-  verifiedToolchainMounts.set(result, mounts)
   return result
+}
+
+// Relative paths survive staging -> canonical app publication. The manifest is
+// installation metadata outside the mounted rootfs, never model input.
+export const readNativeToolchainImage = directory => {
+  const parent = imageDirectory(directory)
+  const path = resolve(parent, 'manifest.json')
+  const stat = lstatSync(path)
+  if (!stat.isFile() || stat.isSymbolicLink() || ![0, process.geteuid()].includes(stat.uid) || stat.mode & 0o022) fail('NATIVE_TOOLCHAIN_IMAGE_UNSAFE')
+  const value = JSON.parse(readFileSync(path, 'utf8'))
+  if (value.schemaVersion !== 1 || !Array.isArray(value.files)) fail('NATIVE_TOOLCHAIN_IMAGE_INVALID')
+  const imageRoot = resolve(parent, 'rootfs')
+  return { toolchain: { shell: value.shell, imageRoot, files: value.files.map(file => ({
+    sourcePath: `${imageRoot}${file.sandboxPath}`, sandboxPath: file.sandboxPath, sha256: file.sha256
+  })) }, documentFailure: value.documentFailure, browserFailure: value.browserFailure }
 }
 
 // One initial verification off the WS thread. The synchronous final metadata
@@ -149,7 +144,6 @@ export const validateNativeExecutionToolchainAsync = toolchain => new Promise((r
       const result = freezeToolchain(reply.toolchain)
       if (!sameState(reply.verification, toolchainState(result))) fail('NATIVE_EXECUTION_TOOLCHAIN_DRIFT')
       verifiedToolchains.set(result, reply.verification)
-      verifiedToolchainMounts.set(result, Object.freeze(reply.mounts.map(mount => Object.freeze(mount))))
       resolveJob(result)
     } catch (error) { reject(error) }
   })
@@ -157,7 +151,7 @@ export const validateNativeExecutionToolchainAsync = toolchain => new Promise((r
 if (!isMainThread && workerData?.kind === 'native-toolchain-verify') {
   try {
     const toolchain = validateNativeExecutionToolchain(workerData.toolchain)
-    parentPort.postMessage({ toolchain, verification: verifiedToolchains.get(toolchain), mounts: verifiedToolchainMounts.get(toolchain) })
+    parentPort.postMessage({ toolchain, verification: verifiedToolchains.get(toolchain) })
   } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' }) }
 }
 
@@ -281,12 +275,16 @@ export const buildChatFileCodexConfig = readOnlyConfig =>
   + `\n[permissions.${CHAT_FILE_PERMISSION_PROFILE}]\nfilesystem = { "/" = "read", "/tmp/chat-files" = "write", "/proc" = "write", "/proc/.git" = "write", "/proc/.agents" = "write", "/proc/.codex" = "write", "/proc/.aws" = "write" }\n[permissions.${CHAT_FILE_PERMISSION_PROFILE}.network]\nenabled = false\n`
 
 // Shared immutable dependency mounts; no execution state or credentials.
-// Only the integrity owner derives grouped mounts; unverified input retains the
-// original per-file view. Callers keep their existing pre-spawn validation.
+// Only verified installed images grant directory roots. Explicit diagnostic
+// file manifests retain their exact file view; no automatic directory grouping.
 export const nativeToolchainMountArgs = toolchain => {
   const args = []
   const directories = new Set()
-  for (const file of verifiedToolchainMounts.get(toolchain) || toolchain.files) {
+  if (toolchain.imageRoot && verifiedToolchains.has(toolchain)) {
+    const roots = [...new Set(toolchain.files.map(file => `/${file.sandboxPath.split('/')[1]}`))].sort()
+    return roots.flatMap(path => ['--ro-bind', `${toolchain.imageRoot}${path}`, path])
+  }
+  for (const file of toolchain.files) {
     const parents = []; let cursor = dirname(file.sandboxPath)
     while (cursor !== '/') { parents.unshift(cursor); cursor = dirname(cursor) }
     for (const path of parents) if (!directories.has(path)) { args.push('--dir', path); directories.add(path) }

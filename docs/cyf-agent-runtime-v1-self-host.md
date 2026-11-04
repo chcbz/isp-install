@@ -485,9 +485,11 @@ safe diagnostic metadata, never proof of task completion/revocation.
 回归：`test/sandbox-startup.test.mjs`、`test/typed-inspection-network.test.mjs`、`test/app-server-stream.test.mjs`、`test/typed-inspection-profile.test.mjs`。`CYF_SANDBOX_STARTUP_PROBE=1`只在具备bwrap/slirp4netns/nft及配置CLI的隔离验证主机运行：覆盖真实reaper、受限网络＋模拟协议、空Home真实app-server无模型初始化；不是生产请求耗时验收。源码候选/Flow制品/实际部署分别记录，候选版本号不代表已上线。
 
 
-### 固定工具链只读挂载合并（2026-11-05，候选1.3.53/bridge1.1.43）
+### 固定沙箱工具链目录（2026-11-05，候选1.3.54/bridge1.1.44，未部署）
 
-- 请求日志的`initialize`阶段包含bwrap建立文件视图的时间，并不等于app-server内部RPC处理时间。Run145工具链在本机无凭据探针中含1682个固定文件；逐文件绑定导致大量挂载/路径查找，事件化启动只消除进程发现轮询，不消除这部分工作。
-- `native-execution-profile.mjs`在既有完整性验证时派生只读挂载计划：只有源目录的直接子项与固定manifest精确一致、子目录也满足相同条件，才合并为目录挂载。目录中有未声明文件、软链接或空目录时保持原逐文件视图；不挂载整个宿主/usr、Home或状态目录，不新增复制工具树/缓存服务/定时器。CHAT材料与原生执行共用该入口。
-- 文件SHA清单、合同摘要和文件可见范围不变。派生计划只关联本进程已验证的冻结工具链；复用已有文件/祖先dev/ino/mtime/ctime/权限核对，新增文件会使旧计划失效，重新派生不能把未知内容挂入沙箱。worker验证通过既有元数据回读传递计划，不新增另一套每请求完整性检查。未验证对象只生成原逐文件参数，不据其声明扩大目录授权。
-- 定向验证入口：`test/native-toolchain-mounts.test.mjs`、既有integrity/single-flight、native-execution-profile及document/browser工具链回归。无凭据实际沙箱探针另验证文档读写、库目录只读、原生浏览器/PDF可用；CHAT网络=false本就禁止浏览器所需的部分本地socket，不能为测试放宽CHAT权限。正式矩阵/制品在Flow执行，候选说明不代表已安装或线上提速。
+- `initialize`含bwrap建文件视图。旧1682逐文件挂载，Run146候选动态合并到796；新方案删除动态分组，改为安装暂存时准备专用`.sandbox-toolchain/rootfs`，运行时挂载其顶层目录。不是挂整个宿主`/usr`，不增加沙箱可见文件。
+- Flow负责固定依赖测试/构建/打包。Python/browser来自同Run制品；shell/ELF系统库按目标主机既有清单度量，不能混用worker ABI。主机在持有发布锁、固定Run及制品校验后，**依赖展开完成、stage验证及停生产前**调用：`<stage>/node/bin/node <stage>/runtime/lib/prepare-toolchain-image.mjs --root <stage>`。仅布局复制，无下载/编译/打包/服务控制。普通源码安装入口也接入同一helper；CYF正式安装不得运行源码构建入口。
+- helper只创建全新目录，保留文件目标路径/字节/执行权限，不复制未列文件、软链接或空目录；验证实际副本摘要及闭包。不覆盖已有目录；失败只删除本次独占创建目录。manifest用沙箱目标路径+SHA，不记录暂存sourcePath，stage移入固定app无需重写。生成目录随程序纳入实际安装manifest、归档/恢复；原锁、备份、身份/state保护不变。升级随制品重做一次，不按请求/Agent复制，也不后台刷新。
+- 启动worker仅读取固定image manifest，再由既有完整性责任层核对副本、目录闭包；不运行Python/ldd/浏览器发现。冻结manifest复用原文件/祖先元数据漂移检测。未准备或损坏的image不降级到旧宿主发现/动态分组，明确初始化失败，不伪称工具READY。显式逐文件manifest仅供安装/诊断，不是生产fallback。
+- 同1682文件在当前主机可用3个工具链目录挂载（不含状态/输入/引擎挂载）；实际数量来自文件顶层路径，不硬编码成资源门槛。初始化探针不含初始image完整性核验，不等同线上首字延迟。新目录有一次磁盘副本成本，发布前按实际空间核对，不用请求级缓存掩盖。
+- 回归：`native-toolchain-mounts.test.mjs`覆盖闭包、重命名、迁移、篡改/额外文件/软链及禁止覆盖；原integrity/single-flight和安装入口回归保持。真实无凭据bwrap/app-server验证全部文件SHA/集合、只读、DOCX/XLSX/PDF、原生Chromium，不放宽CHAT网络限制。代码/Flow与上线证据分别记录。
