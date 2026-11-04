@@ -464,3 +464,14 @@ safe diagnostic metadata, never proof of task completion/revocation.
 - egress归属与App Server可执行回读共用`executable-integrity.mjs`，以实际打开文件的dev/ino/size/mtimeNs/ctimeNs/mode/uid/gid复用摘要，不按PID路径或TTL信任旧内容。保留最多两份近期摘要（对应普通wrapper+engine）；仅缓存小型身份/摘要、不存文件字节，淘汰只触发重新测量，不拒绝新程序。
 - 同身份并发读取合并，失败不缓存；每个调用者仍独立打开实际/proc路径、检查前后fstat并重新open确认当前映射。替换、原地修改（即使恢复mtime）、权限变化都会失效；PID/startticks/父子关系/namespace及原有来源校验保留。只收口同一责任层的重复内容IO，不跨执行共享身份/会话或网络能力。
 - 低负载真实沙箱探针证实旧逻辑每个新PID重复读取同一319346888字节引擎，单次2.2–4.8秒；候选命中时可执行回读毫秒级。不是线上48秒的全部归因或端到端提速保证。最终回复send→服务器确认延迟仍单独定位，本候选不修改API/Web或模型。
+
+### 2026-11-04：CHAT会话连续性（Runtime 1.3.49 / bridge 1.1.39 源码候选）
+
+此节描述基于96cd66b的源码改动与本机定向验证，不表示已构建、安装或线上验收。
+
+- 同一tenant/client/任务Owner、好汉、聚义厅会话及generation、任务/assignment、真实模型/工具/隔离策略共用conversation Home和thread。派发ID、材料manifest、每轮outputSchema、需求版本不再作为记忆世代。已具备assignmentRevision时，grantId/grantVersion仅作为本轮执行授权事实，不因同一委派的技能授权升级丢失聊天历史；缺失assignment时不猜测不同grant的连续性。其他未识别的授权维度继续保留在标识中。
+- API仍验证当前grant和任务版本；完整contextSnapshot/contextHash与当前可选动作原样进入本轮，不复用上轮工具callback。会话记忆不是执行授权；真实重新委派、换Owner/好汉/会话世代、不同工具目录/模型/隔离策略仍隔离。历史已经见过的材料不会因撤挂输入文件而从模型记忆中消失。
+- conversation历史位于材料Runtime stateRoot下的`conversations/<digest>/codex-home`，request回执仍位于`requests/<bindingDigest>`。宿主和材料sandbox使用相同绝对CODEX_HOME/cwd；只挂当前conversation目录，不挂全部历史根，不复制rollout或修改原生SQLite。最终ACK只清request资源，不删历史。不自动转换/重放旧任务。
+- 正常完成后每个profile保留一个可复用idle聊天引擎。相同Provider/认证机制下，真实会话引擎接管后关闭启动引擎；文字连续轮不重启，材料完成后恢复同Home的host引擎。就绪状态引用实际活进程；主动交接不触发旧启动引擎重启。未知接纳保留原Owner并查询原turn，不强行中断或重放；真实不同工具/Provider边界和未知在途不受“任何时候只能有一个进程”的虚假限制。
+- API历史输入当前最多24条recent message，authorizedContext整体8,192字节；不是完整历史复制。继续保留当前权威摘要/消息/引用，不增加历史同步表、缓存服务或逐轮额外持久写。删除整个历史块会漏掉其他入口产生的消息；更细增量只有测得净收益并证明原thread已接纳对应内容后再做。
+- 证据及发布状态以CYF协调仓`docs/implementation/handoffs/JUYITING-POLLING-20261102.md`和固定Flow Run为准。上述源码版本不代表当前运行版本。

@@ -568,3 +568,114 @@ test('early-purpose instruction is bound into typed thread identity with supplie
   assert.match(source, /typedContractBinding = typedRequest \? \{[^\n]*developerInstructions \}/)
   assert.equal(store.values.size, 1)
 })
+
+test('same authorized CHAT resumes across per-turn action facts and output schemas without accepting stale actions', async () => {
+  const store = bindingStore(); const priors = []; const turns = []; let stale = false
+  const adapter = { closed: false, readback: measuredReadback(),
+    startOrResumeThread: async prior => { priors.push(prior); return prior || { threadId: 'continuous-thread' } },
+    runTurn: async options => {
+      turns.push(options)
+      return { threadId: options.threadId, turnId: `turn-${turns.length}`, content: JSON.stringify(fixture.outcomes[stale ? 2 : 0]) }
+    } }
+  const options = { adapter, bindingStore: store, chatWorkdir: '/empty-chat', sendProtocolFn: () => true }
+  const initial = typedMessage()
+  const next = mutateTypedMessage((_message, facts) => { facts.typedDeliberation.availableActions = [] })
+  await runFastChat(profile, initial, options)
+  await runFastChat(profile, next, options)
+  assert.equal(priors[0], undefined)
+  assert.equal(priors[1].threadId, 'continuous-thread')
+  assert.equal(store.values.size, 1)
+  assert.notDeepEqual(turns[0].policy.outputSchema, turns[1].policy.outputSchema)
+  assert.deepEqual(turns[1].policy.outputSchema, buildActionOutcomeContract(next.contextSnapshot.facts.typedDeliberation).outputSchema)
+  assert.deepEqual(JSON.parse(turns[1].input).authoritative.facts.typedDeliberation.availableActions, [])
+  stale = true
+  await assert.rejects(() => runFastChat(profile, next, options), error => error.code === 'ACTION_NOT_ADVERTISED')
+  assert.equal(priors[2].threadId, 'continuous-thread')
+})
+
+test('dispatch IDs do not split a stable tool catalog, while actual catalog and instructions do', async () => {
+  const store = bindingStore(); const priors = []
+  const adapter = { closed: false, readback: measuredReadback(),
+    startOrResumeThread: async prior => { priors.push(prior); return prior || { threadId: `tool-thread-${priors.length}` } },
+    runTurn: async options => ({ threadId: options.threadId, turnId: `tool-turn-${priors.length}`, content: JSON.stringify(fixture.outcomes[0]) }) }
+  const session = { catalog: { tools: [{ name: 'tool-a' }] }, instructions: 'Use the current authenticated callback only.' }
+  const options = { adapter, bindingStore: store, chatWorkdir: '/empty-chat', sendProtocolFn: () => true, conversationToolSession: session }
+  await runFastChat(profile, typedMessage(), options)
+  await runFastChat(profile, mutateTypedMessage(message => { message.dispatchId = 'dispatch-next'; message.dedupeKey = `${message.tenantId}:${message.ownerJiacn}:${message.clientId}:${message.dispatchId}` }), options)
+  assert.equal(priors[1].threadId, 'tool-thread-1')
+  await runFastChat(profile, typedMessage(), { ...options, conversationToolSession: { ...session, catalog: { tools: [{ name: 'tool-b' }] } } })
+  assert.equal(priors[2], undefined)
+  await runFastChat(profile, typedMessage(), { ...options, conversationToolSession: { ...session, instructions: 'Changed skill instructions.' } })
+  assert.equal(priors[3], undefined)
+  assert.equal(store.values.size, 3)
+})
+
+
+test('requirement and grant renewal resume CHAT within one assignment with the current authority unchanged', async () => {
+  const store = bindingStore(); const priors = []; const turns = []
+  const adapter = { closed: false, readback: measuredReadback(),
+    startOrResumeThread: async prior => { priors.push(prior); return prior || { threadId: `revision-thread-${priors.length}` } },
+    runTurn: async options => {
+      turns.push(options)
+      return { threadId: options.threadId, turnId: `revision-turn-${turns.length}`, content: JSON.stringify(fixture.outcomes[0]) }
+    } }
+  const options = { adapter, bindingStore: store, chatWorkdir: '/empty-chat', sendProtocolFn: () => true }
+  const initial = mutateTypedMessage((_message, facts) => { facts.taskAuthority = { grantId: 'grant-a', grantVersion: '1', assignmentRevision: '7', requirementRevision: '1' } })
+  const revised = mutateTypedMessage((_message, facts) => { facts.taskAuthority = { ...initial.contextSnapshot.facts.taskAuthority, requirementRevision: '2' } })
+  await runFastChat(profile, initial, options)
+  await runFastChat(profile, revised, options)
+  assert.equal(priors[1].threadId, 'revision-thread-1')
+  assert.deepEqual(JSON.parse(turns[1].input).authoritative.facts.taskAuthority, revised.contextSnapshot.facts.taskAuthority)
+  assert.equal(initial.contextSnapshot.facts.taskAuthority.requirementRevision, '1')
+  const replaced = mutateTypedMessage((_message, facts) => { facts.taskAuthority = { ...revised.contextSnapshot.facts.taskAuthority, grantId: 'grant-b' } })
+  await runFastChat(profile, replaced, options)
+  assert.equal(priors[2].threadId, 'revision-thread-1')
+  assert.deepEqual(JSON.parse(turns[2].input).authoritative.facts.taskAuthority, replaced.contextSnapshot.facts.taskAuthority)
+  const reassigned = mutateTypedMessage((_message, facts) => { facts.taskAuthority = { ...replaced.contextSnapshot.facts.taskAuthority, assignmentRevision: '8' } })
+  await runFastChat(profile, reassigned, options)
+  assert.equal(priors[3], undefined)
+  assert.equal(store.values.size, 2)
+})
+
+test('ordinary warm CHAT recovery reads the original native turn without model replay or clearing newer recovery', async () => {
+  const store = bindingStore(), message = typedMessage(), record = {}, opened = [], finished = []
+  let runs = 0, terminal = false
+  const adapter = { closed: false, readback: measuredReadback(),
+    typedInspectionEngineState: { conversationKey: 'sha256:' + 'a'.repeat(64), chatWorkdir: '/conversation/chat', configDigest: 'sha256:' + 'b'.repeat(64) },
+    startOrResumeThread: async () => ({ threadId: 'original-thread' }),
+    runTurn: async options => {
+      runs++; options.onAccepted({ threadId: 'original-thread', turnId: 'original-turn' })
+      throw Object.assign(new Error('synthetic-unknown'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+    },
+    reconcileTurn: async binding => {
+      assert.equal(binding.threadId, 'original-thread')
+      if (!terminal) return { status: 'RECOVERY_REQUIRED' }
+      assert.equal(binding.clientUserMessageId, message.messageId)
+      assert.equal(binding.turnId, 'original-turn')
+      return { status: 'TERMINAL', terminalStatus: 'completed', turnId: 'original-turn',
+        turn: { items: [{ type: 'agent_message', text: JSON.stringify(fixture.outcomes[0]) }] } }
+    }
+  }
+  const runtime = { canShareChatProvider: () => true,
+    openWarmChatAdapter: async (key, requestKey, options) => { opened.push({ key, requestKey, options }); return adapter },
+    finishWarmChatAdapter: async (key, requestKey) => { finished.push({ key, requestKey }) } }
+  const controls = { isCancelled: () => false, markPrepared: preparation => { record.preparation = preparation },
+    markRunning: (_interrupt, engine) => { record.engine = engine }, markFinalPrepared: final => { record.finalPrepared = final }, markFinalPublication: () => {} }
+  await assert.rejects(runFastChat(profile, message, { adapter, bindingStore: store, conversationRuntime: runtime, controls }), error => error.code === 'TURN_ACCEPTANCE_UNKNOWN')
+  assert.equal(finished.length, 0)
+  const key = record.preparation.threadKey
+  assert.equal(store.get(key).state, 'RECOVERY_REQUIRED')
+  terminal = true
+  await recoverActionChat(profile, message, record, { profileRuntime: runtime, bindingStore: store, controls, sendFinal: () => false })
+  assert.equal(runs, 1); assert.equal(opened.length, 2)
+  assert.equal(opened[1].key, record.preparation.conversationKey)
+  assert.equal(opened[1].options.requireExistingState, true)
+  assert.equal(record.finalPrepared.result.turnId, 'original-turn')
+  assert.equal(store.get(key).state, 'IDLE'); assert.equal(finished.length, 1)
+  store.put(key, { ...store.get(key), state: 'RECOVERY_REQUIRED', recoveryMessageId: 'newer-message' })
+  runtime.openWarmChatAdapter = () => assert.fail('durable final must not reopen the engine')
+  await recoverActionChat(profile, message, record, { profileRuntime: runtime, bindingStore: store, controls, sendFinal: () => true })
+  assert.equal(store.get(key).state, 'RECOVERY_REQUIRED')
+  assert.equal(store.get(key).recoveryMessageId, 'newer-message')
+  assert.equal(runs, 1)
+})

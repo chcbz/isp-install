@@ -59,3 +59,14 @@ test('lost or invalid operation response is not automatically replayed', async (
   const session = await prepareConversationTools(f.options)
   await assert.rejects(invoke(session), /transport lost/); assert.equal(f.calls.length, 2)
 })
+
+test('same catalog on a later turn binds callbacks to the new request, never the prior dispatch', async () => {
+  const f = fixture(); const first = await prepareConversationTools(f.options)
+  const second = await prepareConversationTools({ ...f.options,
+    message: { ...message, requestId: 'request2', turnId: 'turn2', dispatchId: 'dispatch2', messageId: 'message2' } })
+  assert.deepEqual(second.catalog, first.catalog)
+  await assert.rejects(second.binding.callTool({ bindingId: 'dispatch1', messageId: 'message1', tool: tool.name }), /BINDING_CHANGED/)
+  assert.equal(f.calls.length, 2)
+  assert.deepEqual(await second.binding.callTool({ bindingId: 'dispatch2', messageId: 'message2', tool: tool.name, arguments: {} }), { disposition: 'UPDATED' })
+  assert.equal(f.calls[2].url, 'https://api.test/internal/agent/chat/requests/request2/turns/turn2/tools/domain_maintenance')
+})

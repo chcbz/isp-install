@@ -794,13 +794,22 @@ export class ChatAckOutbox {
 export function chatTaskAuthorityDigest(message) {
   const facts = message.contextSnapshot?.facts
   if (!object(facts)) throw new Error('CHAT_CONTEXT_BINDING_REQUIRED')
-  return canonicalSha256({ taskId: facts.task?.id ?? null, taskAuthority: facts.taskAuthority ?? null })
+  // API history access follows the scoped conversation/reader, not an execution
+  // grant ID. Skill-baseline promotion can renew that grant within the same
+  // assignment. Keep its current values in the turn; do not use them as memory IDs.
+  // Without an explicit assignment epoch, preserve the opaque grant boundary.
+  const hasAssignment = object(facts.taskAuthority) && facts.taskAuthority.assignmentRevision != null
+  const turnFields = hasAssignment ? ['requirementRevision', 'grantId', 'grantVersion'] : ['requirementRevision']
+  const taskAuthority = object(facts.taskAuthority)
+    ? Object.fromEntries(Object.entries(facts.taskAuthority).filter(([key]) => !turnFields.includes(key)))
+    : facts.taskAuthority ?? null
+  return canonicalSha256({ taskId: facts.task?.id ?? null, taskAuthority })
 }
 
 export function buildThreadKey({ tenantId, clientId, ownerJiacn, profileId, agentId, conversationId, mode, workspaceScopeHash = '', cwd = '', enginePolicyHash = '', toolPolicyHash = '', instructionSourceHash = '', modelConfigHash = '', conversationGeneration = '', taskAuthorityDigest = '', authorizationId = '', manifestDigest = '', inputPolicyDigest = '' }) {
   const components = [tenantId, clientId, ownerJiacn, profileId, agentId, conversationId, mode, workspaceScopeHash, cwd, enginePolicyHash, toolPolicyHash, instructionSourceHash, modelConfigHash, String(conversationGeneration)]
   if (!components.every(value => typeof value === 'string' && value.length > 0)) throw new Error('THREAD_KEY_BINDING_REQUIRED')
-  // A grant replacement must never resume a thread with the previous authorization's context.
+  // Task/assignment and any additional history-access dimensions stay isolated.
   if (mode === 'CHAT') components.push(taskAuthorityDigest)
   if (mode === 'INSPECT') {
     const inspectionBindings = [authorizationId, manifestDigest, inputPolicyDigest]

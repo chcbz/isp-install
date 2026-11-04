@@ -147,7 +147,7 @@ const sealCredential = (engineState, processPid) => {
   const lexical = lstatSync(engineState.authPath, { bigint: true })
   if (lexical.isSymbolicLink() || !lexical.isFile() || Number(lexical.mode & 0o777n) !== 0o600) fail('TYPED_INSPECTION_AUTH_COPY_UNSAFE')
   unlinkSync(engineState.authPath); fsyncDirectory(engineState.codexHome)
-  if (existsSync(engineState.authPath) || existsSync(resolve(`/proc/${processPid}/root`, 'state', 'codex-home', 'auth.json'))) fail('TYPED_INSPECTION_AUTH_VISIBLE_AFTER_INITIALIZE')
+  if (existsSync(engineState.authPath) || existsSync(`/proc/${processPid}/root${engineState.sandboxStatePath || '/state'}/codex-home/auth.json`)) fail('TYPED_INSPECTION_AUTH_VISIBLE_AFTER_INITIALIZE')
   return Object.freeze({ bootstrapCredentialRemoved: true, modelPhaseCredentialPathAbsent: true })
 }
 const bwrapIdentity = path => {
@@ -164,29 +164,29 @@ const verifyBwrapIdentity = identity => {
   if (!lexical.isFile() || lexical.isSymbolicLink() || String(lexical.dev) !== identity.dev || String(lexical.ino) !== identity.ino || String(lexical.size) !== identity.size || `sha256:${sha256(readFileSync(identity.path))}` !== identity.sha256) fail('TYPED_INSPECTION_BWRAP_IDENTITY_DRIFT')
 }
 const snapshotDirectory = measurement => dirname(dirname(measurement.snapshotPath))
-const sandboxArgs = ({ snapshot, stateRoot, inputDirectory, networkMode, proxyUrl = '', caTrust = null, nativeView = null }) => {
+const sandboxArgs = ({ snapshot, stateRoot, stateMountPath = '/state', chatWorkdir = '/inputs', inputDirectory, networkMode, proxyUrl = '', caTrust = null, nativeView = null }) => {
   const args = ['--unshare-all']
   args.push('--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
     '--dir', '/runtime', '--ro-bind', snapshot, '/runtime', '--dir', '/inputs', '--ro-bind', inputDirectory, '/inputs')
-  if (!nativeView) args.push('--dir', '/state', '--bind', stateRoot, '/state')
+  if (!nativeView) args.push('--dir', stateMountPath, '--bind', stateRoot, stateMountPath)
   if (networkMode === 'provider-restricted') {
     if (!caTrust) fail('TYPED_INSPECTION_CA_SOURCE_REQUIRED')
     verifyStagedCaTrust(caTrust); args.push('--dir', '/trust', '--ro-bind', caTrust.directory, '/trust')
   }
   if (nativeView) args.push(...nativeExecutionMountArgs(nativeView))
-  args.push('--setenv', 'HOME', '/state/home', '--setenv', 'CODEX_HOME', '/state/codex-home', '--setenv', 'PATH', nativeView ? '/runtime/bin:/usr/bin:/bin' : '/runtime/bin')
+  args.push('--setenv', 'HOME', `${stateMountPath}/home`, '--setenv', 'CODEX_HOME', `${stateMountPath}/codex-home`, '--setenv', 'PATH', nativeView ? '/runtime/bin:/usr/bin:/bin' : '/runtime/bin')
   if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', '', '--setenv', 'no_proxy', '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH, '--setenv', 'NODE_EXTRA_CA_CERTS', PROVIDER_CA_SANDBOX_PATH)
   else args.push('--unsetenv', 'HTTP_PROXY', '--unsetenv', 'HTTPS_PROXY', '--unsetenv', 'ALL_PROXY', '--unsetenv', 'http_proxy', '--unsetenv', 'https_proxy', '--unsetenv', 'all_proxy')
-  args.push('--chdir', nativeView ? '/execution' : '/inputs', '/runtime/bin/codex')
+  args.push('--chdir', nativeView ? '/execution' : chatWorkdir, '/runtime/bin/codex')
   return args
 }
 const emptyMcpCatalog = tools => Array.isArray(tools?.data) && tools.data.length === 0 && (tools.nextCursor === null || tools.nextCursor === undefined)
-const verifyProcessView = ({ pid, inputDirectory, stateRoot, sourceCodexHome, outsideCanary }) => {
+const verifyProcessView = ({ pid, inputDirectory, stateRoot, sandboxStatePath = '/state', sourceCodexHome, outsideCanary }) => {
   const root = `/proc/${pid}/root`; const inputName = '.cyf-inspection-profile-probe.txt'
   if (readFileSync(resolve(root, 'inputs', inputName), 'utf8') !== 'typed-inspection-profile-probe\n') fail('TYPED_INSPECTION_INPUT_VIEW_MISMATCH')
   if (existsSync(`${root}${outsideCanary}`) || existsSync(`${root}${sourceCodexHome}`) || existsSync(resolve(root, 'usr', 'bin', 'curl'))) fail('TYPED_INSPECTION_HOST_CANARY_VISIBLE')
-  if (existsSync(resolve(root, 'state', 'codex-home', 'auth.json'))) fail('TYPED_INSPECTION_AUTH_VISIBLE_AFTER_INITIALIZE')
-  if (!existsSync(resolve(root, 'state', 'codex-home', 'config.toml'))) fail('TYPED_INSPECTION_STATE_VIEW_MISSING')
+  if (existsSync(`${root}${sandboxStatePath}/codex-home/auth.json`)) fail('TYPED_INSPECTION_AUTH_VISIBLE_AFTER_INITIALIZE')
+  if (!existsSync(`${root}${sandboxStatePath}/codex-home/config.toml`)) fail('TYPED_INSPECTION_STATE_VIEW_MISSING')
   const parentNet = readlinkSync(`/proc/${process.pid}/ns/net`); const childNet = readlinkSync(`/proc/${pid}/ns/net`)
   if (parentNet === childNet) fail('TYPED_INSPECTION_NETWORK_NAMESPACE_SHARED')
   const routes = readFileSync(`/proc/${pid}/net/route`, 'utf8').trim().split(/\r?\n/).slice(1).filter(Boolean)
@@ -342,9 +342,117 @@ export class TypedInspectionProfileRuntime {
   _prepareEphemeralState(label) {
     const root = ensurePrivateDirectory(resolve(this.stateRoot, 'measurement'))
     const directory = ensurePrivateDirectory(mkdtempSync(resolve(root, `.${label}-`)))
-    return { directory, markerPath: null, created: true, bindingDigest: null, ...stageCodexHome(this.profile, directory) }
+    return { directory, sandboxStatePath: directory, chatWorkdir: ensurePrivateDirectory(resolve(directory, 'chat')),
+      markerPath: null, created: true, bindingDigest: null, ...stageCodexHome(this.profile, directory) }
   }
-  _prepareRequestState(rawBinding, { requireExistingState = false, nativeExecution = false, nativeBinding = null } = {}) {
+  canShareChatProvider(readback) {
+    const config = readback?.config?.config, provider = config?.model_providers?.[config?.model_provider]
+    return this.profile.typedInspectionProviderNetwork === 'restricted-proxy'
+      && config?.model_provider === this.profile.typedInspectionProviderId
+      && typeof provider?.base_url === 'string'
+      && provider.base_url.replace(/\/$/, '') === this.profile.typedInspectionProviderBaseUrl?.replace(/\/$/, '')
+      && provider.wire_api === (this.profile.typedInspectionProviderWireApi || 'responses')
+      && provider.requires_openai_auth === true
+      && !provider.env_key && [provider.http_headers, provider.env_http_headers, provider.query_params]
+        .every(value => value == null || (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0))
+  }
+  _conversationDirectory(conversationKey) {
+    if (!DIGEST.test(conversationKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
+    return resolve(this.stateRoot, 'conversations', conversationKey.slice('sha256:'.length))
+  }
+  _prepareConversationState(conversationKey, { requireExistingState = false } = {}) {
+    const directory = this._conversationDirectory(conversationKey)
+    if (requireExistingState && (!existsSync(resolve(directory, 'binding.json')) || !existsSync(resolve(directory, 'codex-home'))))
+      fail('TYPED_INSPECTION_RECOVERY_STATE_MISSING')
+    ensurePrivateDirectory(dirname(directory)); ensurePrivateDirectory(directory)
+    const markerPath = stateMarker(directory, { schemaVersion: 1, conversationKey })
+    return { directory, conversationDirectory: directory, conversationKey, markerPath,
+      sandboxStatePath: directory, chatWorkdir: ensurePrivateDirectory(resolve(directory, 'chat')),
+      ...stageCodexHome(this.profile, directory) }
+  }
+  async _closeWarmChat(conversationKey) {
+    const active = this.warmChatAdapters?.get(conversationKey)
+    if (!active) return
+    if (!active.idle && !active.adapter.closed) fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
+    if (active.closing) return active.closing
+    this.chatAdapterLifecycle?.closing(active.adapter)
+    active.closing = active.adapter.shutdown({ timeoutMs: 1000 })
+    await active.closing
+    if (this.warmChatAdapters.get(conversationKey) === active) this.warmChatAdapters.delete(conversationKey)
+    if (this.conversationOwners?.get(conversationKey) === active.owner) this.conversationOwners.delete(conversationKey)
+    if (this.idleWarmChatKey === conversationKey) this.idleWarmChatKey = null
+  }
+  async _closeIdleWarmChat(exceptKey = null) {
+    if (this.idleWarmChatKey && this.idleWarmChatKey !== exceptKey) await this._closeWarmChat(this.idleWarmChatKey)
+  }
+  // One reusable idle engine per profile. An unresolved turn retains its own
+  // owner until exact recovery; switching conversations never interrupts it.
+  async openWarmChatAdapter(conversationKey, requestKey, { requireExistingState = false, schemaMeasurement = null, environment = {}, spawnFn = spawn } = {}) {
+    if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+    this._conversationDirectory(conversationKey)
+    if (!nonblank(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
+    this.warmChatAdapters ||= new Map(); this.pendingWarmChats ||= new Map(); this.conversationOwners ||= new Map()
+    if (this.pendingWarmChats.has(conversationKey)) fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
+    let active = this.warmChatAdapters.get(conversationKey)
+    if (active && !active.idle && !(requireExistingState && active.requestKey === requestKey)) fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
+    await this._closeIdleWarmChat(conversationKey)
+    if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+    if (active?.closing) await active.closing
+    if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+    active = this.warmChatAdapters.get(conversationKey)
+    if (active && !active.idle && !(requireExistingState && active.requestKey === requestKey)) fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
+    if (active && !active.adapter.closed) {
+      active.idle = false; active.requestKey = requestKey
+      if (this.idleWarmChatKey === conversationKey) this.idleWarmChatKey = null
+      await this.chatAdapterLifecycle?.ready(active.adapter)
+      return active.adapter
+    }
+    if (active) await this._closeWarmChat(conversationKey)
+    if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+    if (this.conversationOwners.has(conversationKey)) fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
+    const owner = Symbol(`warm:${conversationKey}`)
+    this.conversationOwners.set(conversationKey, owner)
+    const pending = (async () => {
+      let adapter, engineState
+      try {
+        engineState = this._prepareConversationState(conversationKey, { requireExistingState })
+        adapter = await AppServerAdapter.spawnAsync({ ...this.profile, codexHome: engineState.codexHome }, {
+          cwd: engineState.chatWorkdir, schemaMeasurement, shouldSpawn: () => !this.disposed,
+          spawnFn: (binary, args, options) => spawnFn(binary, args, { ...options, env: { ...environment, ...options.env,
+            HOME: resolve(engineState.directory, 'home'), CODEX_HOME: engineState.codexHome } }) })
+        adapter.typedInspectionEngineState = engineState
+        await adapter.verifySpawnedExecutable(); await adapter.initialize()
+        if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+        if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
+        const pid = adapter.readback.processExecutable?.pid
+        if (!Number.isInteger(pid) || pid <= 0) fail('TYPED_INSPECTION_SANDBOX_PROCESS_REQUIRED')
+        adapter.readback.credentialIsolation = sealCredential(engineState, pid)
+        this.warmChatAdapters.set(conversationKey, { adapter, engineState, owner, requestKey, idle: false })
+        await this.chatAdapterLifecycle?.ready(adapter)
+        return adapter
+      } catch (error) {
+        await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {})
+        if (engineState?.authPath) rmSync(engineState.authPath, { force: true })
+        if (this.conversationOwners.get(conversationKey) === owner) this.conversationOwners.delete(conversationKey)
+        throw error
+      }
+    })()
+    this.pendingWarmChats.set(conversationKey, pending)
+    try { return await pending } finally { this.pendingWarmChats.delete(conversationKey) }
+  }
+  async finishWarmChatAdapter(conversationKey, requestKey) {
+    const active = this.warmChatAdapters?.get(conversationKey)
+    if (this.disposed || !active || active.closing || active.requestKey !== requestKey) return false
+    // Publish the idle slot before yielding. Concurrent recovery completions must
+    // not each observe an empty slot and leave two reusable engines resident.
+    const previousIdleKey = this.idleWarmChatKey
+    active.idle = true
+    this.idleWarmChatKey = conversationKey
+    if (previousIdleKey && previousIdleKey !== conversationKey) await this._closeWarmChat(previousIdleKey)
+    return true
+  }
+  _prepareRequestState(rawBinding, { requireExistingState = false, nativeExecution = false, nativeBinding = null, conversationKey = null } = {}) {
+    if (conversationKey !== null && (nativeExecution || !/^sha256:[a-f0-9]{64}$/.test(conversationKey))) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     const binding = engineStateBinding(rawBinding); const rootPath = resolve(this.stateRoot, 'requests')
     const bindingDigest = canonicalSha256(binding); const directory = resolve(rootPath, bindingDigest.slice('sha256:'.length))
     if (requireExistingState && (!existsSync(directory) || !existsSync(resolve(directory, 'binding.json'))))
@@ -358,14 +466,28 @@ export class TypedInspectionProfileRuntime {
       if (!created && !existsSync(resolve(directory, 'native-binding.json'))) fail('NATIVE_EXECUTION_RECOVERY_MAPPING_MISSING')
       stateMarker(directory, nativeBinding, 'native-binding.json')
     }
-    return { directory, markerPath, created, bindingDigest, binding, ...stageCodexHome(this.profile, directory, { nativeExecution, webSearch: nativeBinding?.webSearch, modelCatalog: nativeExecution ? this.nativeModelCatalog : null }) }
+    let conversationState = null
+    if (conversationKey !== null) {
+      if (requireExistingState && !existsSync(resolve(directory, 'conversation-binding.json'))) fail('TYPED_INSPECTION_RECOVERY_STATE_MISSING')
+      const mapping = { schemaVersion: 1, conversationKey }
+      stateMarker(directory, mapping, 'conversation-binding.json')
+      conversationState = this._prepareConversationState(conversationKey, { requireExistingState })
+    } else if (existsSync(resolve(directory, 'conversation-binding.json'))) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+    // Request receipts own directory; the separately owned Home survives ACK cleanup.
+    return { ...(conversationState || { conversationDirectory: null, sandboxStatePath: '/state', chatWorkdir: '/inputs',
+      ...stageCodexHome(this.profile, directory, { nativeExecution, webSearch: nativeBinding?.webSearch, modelCatalog: nativeExecution ? this.nativeModelCatalog : null }) }),
+      directory, markerPath, created, bindingDigest, binding, conversationKey }
   }
+
   async _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '', nativeView = null, nativeExecution = null }) {
     if (Boolean(nativeView) !== Boolean(nativeExecution)) fail('NATIVE_EXECUTION_BINDING_INVALID')
     const input = realpathSync(inputDirectory); if (!nativeView && !within(this.materializerRoot, input)) fail('TYPED_INSPECTION_INPUT_DIRECTORY_OUTSIDE_ROOT')
     const lexical = lstatSync(input, { bigint: true }); if (lexical.isSymbolicLink() || !lexical.isDirectory() || Number(lexical.mode & 0o777n) !== 0o700) fail('TYPED_INSPECTION_INPUT_DIRECTORY_UNSAFE')
     if (!engineState?.directory || !within(this.stateRoot, engineState.directory) || realpathSync(engineState.directory) !== engineState.directory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
-    const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: engineState.directory, inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust, nativeView })
+    const stateDirectory = engineState.conversationDirectory || engineState.directory
+    if (!within(this.stateRoot, stateDirectory) || realpathSync(stateDirectory) !== stateDirectory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
+    const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: stateDirectory,
+      stateMountPath: engineState.sandboxStatePath || '/state', chatWorkdir: engineState.chatWorkdir || '/inputs', inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust, nativeView })
     const spawnWrapped = (_binary, commandArgs, options) => {
       verifyBwrapIdentity(this.bwrap)
       if (nativeView) {
@@ -374,7 +496,7 @@ export class TypedInspectionProfileRuntime {
         if (current.digest !== nativeView.layout.digest) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
       }
       return this.spawnFn(this.bwrap.path, [...args, ...commandArgs], { ...options, cwd: '/', env: { LANG: 'C.UTF-8' } }) }
-    const adapter = await AppServerAdapter.spawnAsync(this.profile, { cwd: nativeView ? '/execution' : '/inputs', nativeExecution, schemaMeasurement, spawnFn: spawnWrapped, shouldSpawn: () => !this.disposed, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
+    const adapter = await AppServerAdapter.spawnAsync(this.profile, { cwd: nativeView ? '/execution' : engineState.chatWorkdir || '/inputs', nativeExecution, schemaMeasurement, spawnFn: spawnWrapped, shouldSpawn: () => !this.disposed, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
     adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
   }
   async _initializeAndSeal(adapter) {
@@ -399,7 +521,7 @@ export class TypedInspectionProfileRuntime {
       adapter = await this._spawnAdapter({ inputDirectory: probeDirectory, engineState: isolatedState, schemaMeasurement, networkMode: 'isolated' })
       const isolatedReadback = await this._initializeAndSeal(adapter)
       if (!emptyMcpCatalog(isolatedReadback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
-      const view = verifyProcessView({ pid: isolatedReadback.processExecutable.pid, inputDirectory: probeDirectory, stateRoot: isolatedState.directory, sourceCodexHome: realpathSync(this.profile.codexHome), outsideCanary })
+      const view = verifyProcessView({ pid: isolatedReadback.processExecutable.pid, inputDirectory: probeDirectory, stateRoot: isolatedState.directory, sandboxStatePath: isolatedState.sandboxStatePath, sourceCodexHome: realpathSync(this.profile.codexHome), outsideCanary })
       let executionReadback = null; let executionNetworkAttestation = null
       if (this.profile.typedInspectionProviderNetwork === 'restricted-proxy') {
         const egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs })
@@ -440,35 +562,66 @@ export class TypedInspectionProfileRuntime {
     }
   }
   async openAdapter(inputDirectory, requestKey = '', requestBinding = null, options = {}) {
-    this.pendingInspectionKeys ||= new Set()
+    if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+    this.pendingInspectionKeys ||= new Set(); this.pendingInspectionAdapters ||= new Map(); this.conversationOwners ||= new Map()
     if (this.closingAdapters?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_CLOSING')
     if (this.pendingInspectionKeys.has(requestKey) || this.pendingNativeAdapters?.has(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+    if (this.activeAdapters.get(requestKey)?.adapter.closed) await this.releaseAdapter(requestKey, { preserveState: true })
+    if (this.disposed || this.pendingInspectionKeys.has(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+    const conversationKey = options.conversationKey ?? null
+    if (conversationKey && this.warmChatAdapters?.has(conversationKey)) await this._closeWarmChat(conversationKey)
+    if (this.idleWarmChatKey) await this._closeIdleWarmChat()
+    if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
+    if (conversationKey !== null && !/^sha256:[a-f0-9]{64}$/.test(conversationKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
+    if (conversationKey && this.conversationOwners.has(conversationKey) && this.conversationOwners.get(conversationKey) !== requestKey)
+      fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
     this.pendingInspectionKeys.add(requestKey)
-    try { return await this._openInspectionAdapter(inputDirectory, requestKey, requestBinding, options) }
-    finally { this.pendingInspectionKeys.delete(requestKey) }
+    if (conversationKey) this.conversationOwners.set(conversationKey, requestKey)
+    const pending = this._openInspectionAdapter(inputDirectory, requestKey, requestBinding, { ...options, conversationKey })
+    this.pendingInspectionAdapters.set(requestKey, pending)
+    try { return await pending }
+    finally {
+      this.pendingInspectionKeys.delete(requestKey); this.pendingInspectionAdapters.delete(requestKey)
+      if (conversationKey && this.activeAdapters.get(requestKey)?.engineState.conversationKey !== conversationKey && this.conversationOwners.get(conversationKey) === requestKey) this.conversationOwners.delete(conversationKey)
+    }
   }
-  async _openInspectionAdapter(inputDirectory, requestKey = '', requestBinding = null, { requireExistingState = false } = {}) {
-    const measurement = await this.measure(); if (!measurement.contractReady) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_REQUIRED')
+  async _openInspectionAdapter(inputDirectory, requestKey = '', requestBinding = null, { requireExistingState = false, conversationKey = null } = {}) {
+    const checkActive = () => { if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED') }
+    const measurement = await this.measure(); checkActive(); if (!measurement.contractReady) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_REQUIRED')
     if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
     if (!nonblank(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     if (this.pendingNativeAdapters?.has(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     const binding = engineStateBinding(requestBinding); const bindingDigest = canonicalSha256(binding)
+    if (binding.requestKey !== requestKey) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     if (requestKey && this.activeAdapters.has(requestKey)) {
       const active = this.activeAdapters.get(requestKey)
-      if (!active.nativeLayout && !active.adapter.closed && active.inputDirectory === realpathSync(inputDirectory) && active.engineState.bindingDigest === bindingDigest) return active.adapter
+      if (!active.nativeLayout && !active.adapter.closed && active.inputDirectory === realpathSync(inputDirectory)
+          && active.engineState.bindingDigest === bindingDigest && (active.engineState.conversationKey ?? null) === conversationKey) return active.adapter
       fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     }
-    const engineState = this._prepareRequestState(binding, { requireExistingState })
+    const engineState = this._prepareRequestState(binding, { requireExistingState, conversationKey })
     const egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs })
     let adapter
     try {
-      await egress.start()
+      await egress.start(); checkActive()
       adapter = await this._spawnAdapter({ inputDirectory, engineState, schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
-      await egress.bindOwner(adapter.child, this.bwrap, this.nativeReadback.schema.snapshotIdentity); await egress.attach(); await this._initializeAndSeal(adapter)
+      checkActive(); await egress.bindOwner(adapter.child, this.bwrap, this.nativeReadback.schema.snapshotIdentity); await egress.attach(); checkActive(); await this._initializeAndSeal(adapter); checkActive()
       if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
-      this.activeAdapters.set(requestKey, { adapter, egress, engineState, inputDirectory: realpathSync(inputDirectory) }); adapter.once('exit', () => { if (this.activeAdapters.get(requestKey)?.adapter === adapter) this.activeAdapters.delete(requestKey); void egress.dispose() })
+      this.suspendedNativeStates?.delete(requestKey)
+      this.activeAdapters.set(requestKey, { adapter, egress, engineState, inputDirectory: realpathSync(inputDirectory) })
+      if (conversationKey) await this.chatAdapterLifecycle?.ready(adapter)
+      adapter.once('exit', () => {
+        // Retain ownership until shutdown/egress cleanup is joined; a new request
+        // must not open the same durable Home while this process is still dying.
+        void egress.dispose().catch(() => {})
+      })
       return adapter
-    } catch (error) { await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose().catch(() => {}); if (engineState.created) rmSync(engineState.directory, { recursive: true, force: true }); throw error }
+    } catch (error) {
+      await adapter?.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose().catch(() => {})
+      if (engineState.authPath) rmSync(engineState.authPath, { force: true })
+      if (engineState.created) rmSync(engineState.directory, { recursive: true, force: true })
+      throw error
+    }
   }
   // Native execution is NOT authorized by the read-only carrier evidence.
   // The caller supplies an API-authorized execution/tool binding and pinned
@@ -585,7 +738,10 @@ export class TypedInspectionProfileRuntime {
     }
   }
   suspendAdapter(requestKey) { return this.releaseAdapter(requestKey, { preserveState: true }) }
-  async releaseAdapter(requestKey, { preserveState = false, requestBinding = null } = {}) {
+  async releaseAdapter(requestKey, { preserveState = false, requestBinding = null, conversationKey = null } = {}) {
+    const inspectionStart = this.pendingInspectionAdapters?.get(requestKey)
+    if (inspectionStart) await inspectionStart.catch(() => {})
+    if (conversationKey !== null && (!/^sha256:[a-f0-9]{64}$/.test(conversationKey) || !requestBinding)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     let retainedDirectory = null, expectedDirectory = null, expectedBindingDigest = null
     if (requestBinding !== null) {
       const binding = engineStateBinding(requestBinding)
@@ -597,15 +753,16 @@ export class TypedInspectionProfileRuntime {
         ensurePrivateDirectory(requests); ensurePrivateDirectory(directory)
         // Read-only exact lookup after restart: never scan directories, create
         // a marker, restage auth, or invoke the engine to retire a committed Home.
-        for (const name of ['binding.json', 'native-binding.json']) {
+        const mappingName = conversationKey ? 'conversation-binding.json' : 'native-binding.json'
+        for (const name of ['binding.json', mappingName]) {
           const path = resolve(directory, name)
           if (!existsSync(path)) fail('NATIVE_EXECUTION_RECOVERY_MAPPING_MISSING')
           const stat = lstatSync(path)
           if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.geteuid() || (stat.mode & 0o777) !== 0o400) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
         }
         if (readFileSync(resolve(directory, 'binding.json'), 'utf8') !== `${JSON.stringify(binding)}\n`) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
-        let mapping; try { mapping = JSON.parse(readFileSync(resolve(directory, 'native-binding.json'), 'utf8')) } catch { fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT') }
-        if (mapping?.schemaVersion !== 1 || !nonblank(mapping.executionId)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+        let mapping; try { mapping = JSON.parse(readFileSync(resolve(directory, mappingName), 'utf8')) } catch { fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT') }
+        if (mapping?.schemaVersion !== 1 || (conversationKey ? mapping.conversationKey !== conversationKey : !nonblank(mapping.executionId))) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
         retainedDirectory = directory
       }
     }
@@ -615,7 +772,7 @@ export class TypedInspectionProfileRuntime {
       await closing
       // A commit-time release following a concurrent suspension still removes
       // the retained Home, without racing a replacement adapter's startup.
-      if (!preserveState) return this.releaseAdapter(requestKey, { requestBinding })
+      if (!preserveState) return this.releaseAdapter(requestKey, { requestBinding, conversationKey })
       return true
     }
     const pending = this.pendingNativeAdapters?.get(requestKey)
@@ -636,8 +793,11 @@ export class TypedInspectionProfileRuntime {
         return true
       }
       if (active.slot) active.slot.cancelled = true
+      if (active.engineState.conversationKey) this.chatAdapterLifecycle?.closing(active.adapter)
       try { await active.adapter.shutdown({ timeoutMs: 1000 }) } finally { await active.egress?.dispose() }
       if (this.activeAdapters.get(requestKey) === active) this.activeAdapters.delete(requestKey)
+      const conversationKey = active.engineState.conversationKey
+      if (conversationKey && this.conversationOwners?.get(conversationKey) === requestKey) this.conversationOwners.delete(conversationKey)
       if (active.nativeLayout) rmSync(resolve(active.engineState.directory, 'skill-config'), { recursive: true, force: true })
       if (!preserveState) { rmSync(active.engineState.directory, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey) }
       else {
@@ -651,9 +811,13 @@ export class TypedInspectionProfileRuntime {
   }
   async dispose() {
     this.disposed = true
+    await Promise.all([...(this.pendingWarmChats?.values() || [])].map(promise => promise.catch(() => {})))
+    await Promise.all([...(this.warmChatAdapters?.values() || [])].map(item => (item.closing || item.adapter.shutdown({ timeoutMs: 1000 })).catch(() => {})))
+    this.warmChatAdapters?.clear(); this.idleWarmChatKey = null
+    await Promise.all([...(this.pendingInspectionAdapters?.values() || [])].map(promise => promise.catch(() => {})))
     await Promise.all([...(this.closingAdapters?.values() || [])].map(promise => promise.catch(() => {})))
     await Promise.all([...(this.pendingNativeAdapters?.values() || [])].map(slot => slot.promise.catch(() => {})))
-    const active = [...this.activeAdapters.values()]; this.activeAdapters.clear()
+    const active = [...this.activeAdapters.values()]; this.activeAdapters.clear(); this.conversationOwners?.clear()
     await Promise.all(active.map(async item => { await item.adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await item.egress?.dispose().catch(() => {}); if (item.nativeLayout) rmSync(resolve(item.engineState.directory, 'skill-config'), { recursive: true, force: true }) }))
     if (this.providerCaTrust?.directory) rmSync(this.providerCaTrust.directory, { recursive: true, force: true })
   }

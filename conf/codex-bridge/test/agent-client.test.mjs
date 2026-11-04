@@ -12,6 +12,7 @@ import { PassThrough } from 'node:stream'
 import test, { afterEach } from 'node:test'
 
 import {
+  bindProfileChatAdapter, unbindProfileChatAdapter, restoreProfileChatIdleAdapter, disposeAppServerState,
   observeRuntimePhase,
   ACK_STATUS,
   AckOutbox,
@@ -485,6 +486,33 @@ test('processor sends INSPECT through its isolated lane and reconciles unknown a
 })
 
 
+
+test('processor reconciles an unknown ordinary warm CHAT without restarting the model', async () => {
+  const root = temporaryDirectory(); let starts = 0; let reads = 0
+  const runtime = createChatRuntime(root, {
+    runChat: async (_message, controls) => {
+      starts++
+      controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-action-chat-preparation-v1',
+        conversationKey: 'sha256:' + 'a'.repeat(64), threadKey: 'original-binding', engineThreadId: 'original-thread' })
+      controls.markRunning(() => {}, { threadId: 'original-thread', turnId: 'original-turn' })
+      throw Object.assign(new Error('opaque response loss'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+    },
+    recoverChat: async (_message, record) => {
+      reads++
+      assert.equal(record.preparation.engineThreadId, 'original-thread')
+      assert.equal(record.engine.turnId, 'original-turn')
+      return { status: 'completed' }
+    },
+    onReject: () => {}
+  })
+  runtime.processor.start()
+  try {
+    await runtime.processor.handle(durableChat(888, { route: 'CHAT' }))
+    for (let attempt = 0; attempt < 50 && reads === 0; attempt++) await new Promise(resolve => setTimeout(resolve, 10))
+    await runtime.processor.waitForIdle()
+    assert.equal(starts, 1); assert.equal(reads, 1)
+  } finally { runtime.processor.stop() }
+})
 
 test('processor recovery controls durably prepare a final produced by native readback before replay', async () => {
   const root = temporaryDirectory(); let starts = 0; let recoveries = 0
@@ -5196,4 +5224,66 @@ test('workspace late response after stop cannot admit commands into replacement 
   const request = f.state.workspaceFilePollPromise
   stopWorkspaceFilePoller(f.state); gate.resolve(); await request; await f.flush()
   assert.equal(handled, 0); assert.equal(canceled, 1); assert.equal(f.state.workspaceFilePollInFlight, false)
+})
+
+
+const lifecycleAdapter = conversationKey => {
+  const adapter = Object.assign(new EventEmitter(), { closed: false, readback: { initialize: {}, schema: { measured: true } },
+    ...(conversationKey ? { typedInspectionEngineState: { conversationKey } } : {}),
+    shutdown: async () => { adapter.closed = true; adapter.emit('exit') }
+  })
+  return adapter
+}
+
+test('profile live owner retires bootstrap, joins shutdown and ignores stale exit without faking readiness', async () => {
+  const state = {}, bootstrap = lifecycleAdapter(), warm = lifecycleAdapter('conversation')
+  let restarts = 0, finishShutdown
+  const callbacks = { onExit: () => { restarts++ } }
+  await bindProfileChatAdapter(state, bootstrap, callbacks)
+  const stop = bootstrap.shutdown
+  bootstrap.shutdown = () => new Promise(resolve => { finishShutdown = async () => { await stop(); resolve() } })
+  let bound = false
+  const binding = bindProfileChatAdapter(state, warm, callbacks).then(() => { bound = true })
+  assert.equal(bound, false); assert.equal(state.appServerAdapter, warm)
+  await finishShutdown(); await binding
+  assert.equal(bootstrap.closed, true); assert.equal(restarts, 0)
+  await bindProfileChatAdapter(state, warm, callbacks)
+  assert.equal(warm.listenerCount('exit'), 1)
+  unbindProfileChatAdapter(state, bootstrap)
+  assert.equal(state.appServerAdapter, warm)
+  warm.closed = true; warm.emit('exit')
+  assert.equal(state.appServerAdapter, null); assert.equal(restarts, 1)
+})
+
+test('profile retains unknown baseline until lifecycle disposal rather than interrupting it on handoff', async () => {
+  const bootstrap = lifecycleAdapter(), warm = lifecycleAdapter('conversation')
+  const state = { retainedChatAdapters: new Set([bootstrap]) }
+  await bindProfileChatAdapter(state, bootstrap)
+  await bindProfileChatAdapter(state, warm)
+  assert.equal(bootstrap.closed, false)
+  await disposeAppServerState(state)
+  assert.equal(bootstrap.closed, true); assert.equal(warm.closed, true)
+  assert.equal(state.appServerAdapter, null)
+  assert.equal(await bindProfileChatAdapter(state, lifecycleAdapter('late')), null)
+})
+
+test('profile restores the same idle Home but never claims an unknown request as idle or changes providers', async () => {
+  const calls = [], adapter = lifecycleAdapter('conversation')
+  const runtime = { conversationOwners: new Map(), warmChatAdapters: new Map(),
+    openWarmChatAdapter: async (...args) => { calls.push(args); return adapter },
+    finishWarmChatAdapter: async (...args) => { calls.push(args) }
+  }
+  const state = { typedInspectionProfileRuntime: runtime, chatProviderShared: true,
+    chatConversationKey: 'conversation', chatAppServerSchema: { measured: true } }
+  assert.equal(await restoreProfileChatIdleAdapter(state, { RUNTIME_ID: 'synthetic' }), adapter)
+  assert.deepEqual(calls[0], ['conversation', 'profile-idle', { requireExistingState: true,
+    schemaMeasurement: state.chatAppServerSchema, environment: { RUNTIME_ID: 'synthetic' } }])
+  assert.deepEqual(calls[1], ['conversation', 'profile-idle'])
+  runtime.conversationOwners.set('conversation', 'unknown-request')
+  runtime.warmChatAdapters.set('conversation', { idle: false, adapter: { closed: true } })
+  assert.equal(await restoreProfileChatIdleAdapter(state), null)
+  runtime.warmChatAdapters.get('conversation').idle = true
+  state.chatProviderShared = false
+  assert.equal(await restoreProfileChatIdleAdapter(state), null)
+  assert.equal(calls.length, 2)
 })

@@ -1,12 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
+import { TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
+import { AppServerAdapter } from '../app-server-adapter.mjs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { normalizeInboundMessage, runFastChat, recoverMaterialsChat, buildAgentRegistrationPayload, buildAgentPresencePayload, publishTypedInspectionReadiness, MESSAGE_TYPES } from '../agent-client.mjs'
+import { bindProfileChatAdapter, unbindProfileChatAdapter, restoreProfileChatIdleAdapter, normalizeInboundMessage, runFastChat, recoverMaterialsChat, buildAgentRegistrationPayload, buildAgentPresencePayload, publishTypedInspectionReadiness, MESSAGE_TYPES } from '../agent-client.mjs'
 import { canonicalSha256, validateChatDispatch, PersistentChatInbox } from '../chat-runtime.mjs'
-import { resolveChatMaterials } from '../materials-chat.mjs'
+import { resolveChatMaterials, chatConversationKey } from '../materials-chat.mjs'
 import { TypedInspectionMaterializer } from '../typed-inspection-runtime.mjs'
 import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from './fixtures/recorded-app-server-schemas.mjs'
 import { materialsChatHttpScope } from '../../cyf-agent-runtime-v1/lib/runtime-client.mjs'
@@ -74,6 +77,7 @@ function context(t, message = messageFixture(), outcome = { revision: null, sche
     } })
   const runtime = { contractReadback: { schemaVersion: 1, measured: true, inputPolicyDigest: `sha256:${'c'.repeat(64)}`,
     toolPolicy: 'MANIFEST_READ_ONLY', recovery: 'durable-inbox-turn-readback-v1', supportedInputs: formats },
+    suspendAdapter: async () => { events.push('suspend'); return true },
     openAdapter: async (_dir, _key, binding) => { assert.equal(binding.authorizationId, message.contextSnapshot.facts.materialsInput.authorizationId); return adapter }, mapInputPath: path => path }
   const controls = { markPrepared: preparation => { preparations.push(preparation); events.push('prepare') },
     markRunning: () => events.push('running'), markFinalPrepared: value => { finalPrepared = value; events.push('final-durable') },
@@ -90,7 +94,7 @@ test('public CHAT consumes the same 32 real mixed bytes, host receipts, durable 
   const result = await runFastChat(profile, c.message, c.options)
   assert.equal(result.serverPersistence, 'unconfirmed'); assert.equal(c.starts, 1); assert.equal(c.fetched.length, 32)
   assert.deepEqual(c.fetched, historicalSources.map(source => source.sourceRefId))
-  assert.ok(c.events.indexOf('final-durable') < c.events.indexOf('publish'))
+  assert.ok(c.events.indexOf('final-durable') < c.events.indexOf('publish')); assert.ok(c.events.indexOf('publish') < c.events.indexOf('suspend'))
   const first = c.frames[0]; assert.equal(first.type, MESSAGE_TYPES.CHAT_MESSAGE); assert.equal(first.payload.routeUsed, 'CHAT_FAST')
   const receipt = first.payload.inspectionInputReceipt; assert.equal(receipt.sources.length, 32)
   assert.equal(receipt.engineThreadId, 'materials-thread'); assert.equal(receipt.engineTurnId, 'materials-turn')
@@ -189,4 +193,194 @@ test('native-only measured readiness refreshes registration without claiming rea
   state.typedInspectionProfileRuntime.nativeExecutionDeclaration = () => null
   assert.equal(publishTypedInspectionReadiness(p, state), false)
   assert.equal(refreshed, 1)
+})
+
+test('successive material requests share conversation memory but retain distinct request receipts', async t => {
+  const first = context(t)
+  const nextMessage = structuredClone(messageFixture())
+  nextMessage.requestId = 'request-next'; nextMessage.turnId = 'turn-next'; nextMessage.messageId = 'message-next'; nextMessage.dispatchId = 'dispatch-next'
+  nextMessage.dedupeKey = `${nextMessage.tenantId}:${nextMessage.ownerJiacn}:${nextMessage.clientId}:${nextMessage.dispatchId}`
+  const material = nextMessage.contextSnapshot.facts.materialsInput
+  for (const source of material.manifest.sources) source.downloadUrl = `/internal/agent/chat/requests/${nextMessage.requestId}/turns/${nextMessage.turnId}/materials/inputs/${source.sourceRefId}/content`
+  const binding = Object.fromEntries(['tenantId','ownerJiacn','clientId','conversationId','conversationGeneration','taskId','requestId','turnId','targetAgentId'].map(key => [key, String(nextMessage[key])]))
+  material.manifestDigest = canonicalSha256({ domain: 'juyiting.materials-input', binding, manifest: material.manifest })
+  material.authorizationId = `materials_${material.manifestDigest.slice(7,47)}`
+  const second = context(t, validateChatDispatch(reseal(nextMessage)))
+  const values = new Map(), store = { get: key => values.get(key), put: (key, value) => values.set(key, value) }
+  await runFastChat(profile, first.message, { ...first.options, bindingStore: store })
+  let resumed = false
+  second.adapter.startOrResumeThread = async prior => { assert.equal(prior.threadId, 'materials-thread'); resumed = true; return prior }
+  await runFastChat(profile, second.message, { ...second.options, bindingStore: store })
+  assert.ok(resumed); assert.equal(values.size, 1)
+  const a = first.preparations.at(-1), b = second.preparations.at(-1)
+  assert.equal(a.conversationKey, b.conversationKey); assert.equal(a.threadKey, b.threadKey)
+  assert.notEqual(a.engineStateBinding.requestKey, b.engineStateBinding.requestKey)
+  assert.notEqual(a.manifestDigest, b.manifestDigest)
+  assert.equal(first.starts, 1); assert.equal(second.starts, 1)
+  const changed = structuredClone(second.message); changed.ownerJiacn = 'another-owner'
+  assert.notEqual(chatConversationKey(profile, changed, second.runtime), b.conversationKey)
+  changed.ownerJiacn = second.message.ownerJiacn; changed.contextSnapshot.facts.taskAuthority = { grantId: 'another-grant' }
+  assert.notEqual(chatConversationKey(profile, changed, second.runtime), b.conversationKey)
+})
+
+test('material recovery reopens the recorded conversation Home and clears only its matching recovery binding', async t => {
+  const c = context(t); await runFastChat(profile, c.message, c.options)
+  const preparation = c.preparations.at(-1); let reopened = false, suspended = false, updated
+  const runtime = { contractReadback: c.runtime.contractReadback,
+    openAdapter: async (_directory, key, binding, options) => {
+      reopened = true; assert.equal(key, c.message.dedupeKey)
+      assert.deepEqual(binding, preparation.engineStateBinding)
+      assert.deepEqual(options, { requireExistingState: true, conversationKey: preparation.conversationKey })
+      return { reconcileTurn: async () => ({ status: 'TERMINAL', terminalStatus: 'completed', turnId: 'materials-turn', turn: { items: [{ type: 'agent_message', text: JSON.stringify(c.outcome) }] } }) }
+    }, suspendAdapter: async () => { suspended = true } }
+  const store = { get: () => ({ threadId: 'materials-thread', state: 'RECOVERY_REQUIRED', recoveryMessageId: c.message.messageId }), put: (key, value) => { updated = { key, value } } }
+  await recoverMaterialsChat(profile, c.message, { preparation, engine: { threadId: 'materials-thread', turnId: 'materials-turn' } }, {
+    profileRuntime: runtime, bindingStore: store, controls: { markFinalPrepared: () => {} }, sendFinal: () => false })
+  assert.ok(reopened && suspended); assert.equal(updated.key, preparation.threadKey); assert.equal(updated.value.state, 'IDLE')
+  assert.equal(c.starts, 1)
+})
+
+test('failure before a material turn releases its engine without replaying the turn', async t => {
+  const c = context(t)
+  c.adapter.startOrResumeThread = async () => { throw new Error('SYNTHETIC_THREAD_RESUME_FAILURE') }
+  await assert.rejects(runFastChat(profile, c.message, c.options), /SYNTHETIC_THREAD_RESUME_FAILURE/)
+  assert.equal(c.starts, 0); assert.ok(c.events.includes('suspend'))
+})
+
+test('material terminal failure releases the engine, but unknown acceptance never replays or interrupts it', async t => {
+  for (const code of ['TURN_FAILED', 'TURN_INTERRUPTED', 'TURN_ACCEPTANCE_UNKNOWN']) {
+    const c = context(t); let runs = 0, recovery = null
+    c.adapter.runTurn = async () => { runs++; throw Object.assign(new Error(code), { code, reconciliation: { status: 'RECOVERY_REQUIRED' } }) }
+    const store = { get: () => null, put: (_key, value) => { if (value.state === 'RECOVERY_REQUIRED') { recovery = value.recoveryReason; assert.equal(value.recoveryMessageId, c.message.messageId) } } }
+    await assert.rejects(runFastChat(profile, c.message, { ...c.options, bindingStore: store }), error => error.code === code)
+    assert.equal(runs, 1); assert.equal(c.events.includes('publish'), false)
+    assert.equal(c.events.includes('suspend'), code !== 'TURN_ACCEPTANCE_UNKNOWN')
+    if (code === 'TURN_ACCEPTANCE_UNKNOWN') assert.equal(recovery, code)
+  }
+})
+
+test('late final replay cannot clear a newer unknown turn on the same material thread', async t => {
+  const c = context(t); await runFastChat(profile, c.message, c.options)
+  const bindingStore = { get: () => ({ threadId: 'materials-thread', state: 'RECOVERY_REQUIRED', recoveryMessageId: 'newer-message' }),
+    put: () => assert.fail('late replay must not clear another turn recovery') }
+  const result = await recoverMaterialsChat(profile, c.message, { finalPrepared: c.finalPrepared }, { bindingStore, controls: {}, sendFinal: () => false })
+  assert.equal(result.serverPersistence, 'unconfirmed'); assert.equal(c.starts, 1)
+})
+
+
+test('material conversation identity survives grant renewal within one assignment without changing dispatch facts', () => {
+  const message = messageFixture()
+  message.contextSnapshot.facts.taskAuthority = { grantId: 'grant-a', grantVersion: '1', assignmentRevision: '7', requirementRevision: '1' }
+  const runtime = { contractReadback: { toolPolicy: 'MANIFEST_READ_ONLY' } }
+  const before = structuredClone(message)
+  const key = chatConversationKey(profile, message, runtime)
+  assert.deepEqual(message, before)
+  message.contextSnapshot.facts.taskAuthority.requirementRevision = '2'
+  assert.equal(chatConversationKey(profile, message, runtime), key)
+  assert.equal(message.contextSnapshot.facts.taskAuthority.requirementRevision, '2')
+  message.contextSnapshot.facts.taskAuthority.grantVersion = '2'
+  message.contextSnapshot.facts.taskAuthority.grantId = 'skill-baseline-grant'
+  assert.equal(chatConversationKey(profile, message, runtime), key)
+  message.contextSnapshot.facts.taskAuthority.assignmentRevision = '8'
+  assert.notEqual(chatConversationKey(profile, message, runtime), key)
+})
+
+test('material CHAT uses its canonical conversation cwd for thread resume and turn, not a request path', async t => {
+  const c = context(t)
+  const cwd = '/synthetic/conversations/a/chat'
+  c.adapter.typedInspectionEngineState = { chatWorkdir: cwd }
+  c.adapter.startOrResumeThread = async (_prior, policy) => {
+    assert.equal(policy.cwd, cwd)
+    return { threadId: 'materials-thread' }
+  }
+  const runTurn = c.adapter.runTurn
+  c.adapter.runTurn = async options => {
+    assert.equal(options.policy.cwd, cwd)
+    return runTurn(options)
+  }
+  await runFastChat(profile, c.message, c.options)
+  assert.equal(c.preparations.at(-1).engineThreadId, 'materials-thread')
+})
+
+test('production CHAT wiring retains one thread across warm text, material sandbox, and warm text', async t => {
+  const c = context(t), root = mkdtempSync(resolve(tmpdir(), 'chat-continuity-wiring-'))
+  const source = resolve(root, 'source'); mkdirSync(source, { mode: 0o700 }); writeFileSync(resolve(source, 'auth.json'), '{}', { mode: 0o600 })
+  const selectedProfile = { ...profile, codexHome: source, typedInspectionProviderNetwork: 'restricted-proxy',
+    typedInspectionProviderId: 'synthetic', typedInspectionProviderBaseUrl: 'https://provider.example/v1' }
+  const readback = { ...c.adapter.readback, tools: { data: [] }, processExecutable: { pid: process.pid },
+    config: { config: { model_provider: 'synthetic', model_providers: { synthetic: { base_url: 'https://provider.example/v1', wire_api: 'responses', requires_openai_auth: true } } } } }
+  const spawned = [], priors = [], turns = [], stopped = []
+  const createAdapter = kind => {
+    const adapter = Object.assign(new EventEmitter(), { closed: false, readback: structuredClone(readback),
+      verifySpawnedExecutable: async () => {}, initialize: async () => {},
+      startOrResumeThread: async (prior, policy) => { priors.push(prior); assert.equal(policy.cwd, adapter.typedInspectionEngineState.chatWorkdir); return prior || { threadId: 'one-continuous-thread' } },
+      runTurn: async options => {
+        turns.push(options); const turnId = `native-turn-${turns.length}`
+        options.onAccepted({ threadId: options.threadId, turnId })
+        return { threadId: options.threadId, turnId, finishReason: 'completed', content: JSON.stringify(c.outcome) }
+      }, shutdown: async () => { adapter.closed = true; stopped.push(kind); adapter.emit('exit') } })
+    // Different incidental startup/catalog readback must not split native memory.
+    if (kind === 'material') { adapter.readback.initialize = { environment: 'sandbox' }; adapter.readback.models = { data: [{ id: 'catalog-changed' }] } }
+    spawned.push({ kind, adapter }); return adapter
+  }
+  const runtime = Object.assign(Object.create(TypedInspectionProfileRuntime.prototype), {
+    profile: selectedProfile, stateRoot: root, activeAdapters: new Map(), conversationOwners: new Map(),
+    contractReadback: c.runtime.contractReadback, nativeReadback: readback,
+    measure: async () => ({ contractReady: true }),
+    egressFactory: () => ({ start: async () => {}, bindOwner: async () => {}, attach: async () => {}, dispose: async () => {} }),
+    _spawnAdapter: async ({ engineState }) => { const adapter = createAdapter('material'); adapter.typedInspectionEngineState = engineState; return adapter },
+    _initializeAndSeal: async adapter => { unlinkSync(adapter.typedInspectionEngineState.authPath) },
+    mapInputPath: path => path
+  })
+  const original = AppServerAdapter.spawnAsync
+  AppServerAdapter.spawnAsync = async () => createAdapter('warm')
+  t.after(async () => { await runtime.dispose(); AppServerAdapter.spawnAsync = original; rmSync(root, { recursive: true, force: true }) })
+  const values = new Map(), store = { get: key => values.get(key), put: (key, value) => values.set(key, value) }
+  const state = { disposed: false, chatProviderShared: true, typedInspectionProfileRuntime: runtime }
+  let restarts = 0
+  const lifecycle = { onExit: () => { restarts++ } }
+  await bindProfileChatAdapter(state, createAdapter('bootstrap'), lifecycle)
+  runtime.chatAdapterLifecycle = {
+    ready: adapter => bindProfileChatAdapter(state, adapter, lifecycle),
+    closing: adapter => unbindProfileChatAdapter(state, adapter)
+  }
+  const run = async message => {
+    try { return await runFastChat(selectedProfile, message, { ...c.options, adapter: state.appServerAdapter,
+      conversationRuntime: runtime, materialsRuntime: runtime, bindingStore: store }) }
+    finally { if (!state.appServerAdapter) await restoreProfileChatIdleAdapter(state) }
+  }
+
+  const plain = suffix => {
+    const message = structuredClone(c.message); delete message.contextSnapshot.facts.materialsInput
+    message.messageId = `message-${suffix}`; message.requestId = `request-${suffix}`; message.turnId = `turn-${suffix}`; message.dispatchId = `dispatch-${suffix}`
+    message.dedupeKey = `${message.tenantId}:${message.ownerJiacn}:${message.clientId}:${message.dispatchId}`
+    return validateChatDispatch(reseal(message))
+  }
+  await run(plain('first'))
+  await run(plain('second'))
+  assert.deepEqual(spawned.map(item => item.kind), ['bootstrap', 'warm'], 'consecutive text turns must not cold start')
+  assert.equal(runtime.warmChatAdapters.size, 1)
+  await run(c.message)
+  assert.deepEqual(stopped, ['bootstrap', 'warm', 'material'])
+  assert.equal(runtime.warmChatAdapters.size, 1)
+  assert.equal(state.appServerAdapter.closed, false)
+  assert.equal(spawned.filter(item => !item.adapter.closed).length, 1)
+  await run(plain('third'))
+  await run(plain('fourth'))
+  assert.deepEqual(spawned.map(item => item.kind), ['bootstrap', 'warm', 'material', 'warm'])
+  assert.equal(values.size, 1)
+  assert.equal(priors[0], undefined)
+  assert.ok(priors.slice(1).every(prior => prior.threadId === 'one-continuous-thread'))
+  assert.equal(new Set(spawned.filter(item => item.kind !== 'bootstrap').map(item => item.adapter.typedInspectionEngineState.codexHome)).size, 1)
+  assert.equal(new Set(turns.map(turn => turn.policy.cwd)).size, 1)
+  assert.equal(Array.isArray(turns[2].input), true)
+  assert.equal(typeof turns[3].input, 'string')
+  assert.equal(runtime.warmChatAdapters.size, 1)
+  assert.equal(spawned.filter(item => !item.adapter.closed).length, 1)
+  assert.equal(restarts, 0, 'intentional handoff must not restart the bootstrap')
+  const live = state.appServerAdapter
+  assert.equal(buildAgentRegistrationPayload(selectedProfile, null, true, live).typedDeliberation.state, 'READY')
+  live.closed = true; live.emit('exit')
+  assert.equal(state.appServerAdapter, null); assert.equal(restarts, 1)
+  assert.equal(buildAgentRegistrationPayload(selectedProfile, null, true, state.appServerAdapter).typedDeliberation.state, 'UNAVAILABLE')
 })

@@ -213,3 +213,23 @@ test('conversation binding requires one trusted message and cannot combine execu
   }
   assert.throws(() => fixture(execution(), conversation()), /CONVERSATION_TOOL_BINDING_INVALID/)
 })
+
+test('a fresh adapter resumes the thread but uses only the new turn callback binding', async () => {
+  let oldCalls = 0, newCalls = 0
+  const old = fixture(null, conversation(async () => { oldCalls++; return {} }))
+  let binding
+  try { binding = await old.adapter.startOrResumeThread(null, { cwd: '/chat' }) } finally { old.adapter.close() }
+  const next = fixture(null, { ...conversation(async context => {
+    newCalls++; assert.equal(context.bindingId, 'dispatch2'); assert.equal(context.messageId, 'message2'); return {}
+  }), bindingId: 'dispatch2', messageId: 'message2' })
+  try {
+    await next.adapter.startOrResumeThread(binding, { cwd: '/chat' })
+    assert.equal(next.sent[0].method, 'thread/resume')
+    assert.equal(next.sent[0].params.threadId, binding.threadId)
+    assert.equal(Object.hasOwn(next.sent[0].params, 'dynamicTools'), false)
+    await assert.rejects(start(next), /MESSAGE_MISMATCH/)
+    const running = next.adapter.runTurn({ threadId: binding.threadId, clientUserMessageId: 'message2', input: 'next', policy: { cwd: '/chat' } })
+    await tick(); call(next); await tick(); completed(next); await running
+    assert.equal(newCalls, 1); assert.equal(oldCalls, 0)
+  } finally { next.adapter.close() }
+})

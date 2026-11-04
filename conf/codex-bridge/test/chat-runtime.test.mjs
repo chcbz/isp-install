@@ -940,17 +940,32 @@ test('measured deployed CLI 0.161.0 schema preserves app-server fields used by R
 })
 
 
-test('external task CHAT thread identity separates A owners and persisted grant generations for the same B', () => {
+test('external task CHAT memory separates owners and assignments, not renewed execution grants', () => {
   const base = { tenantId: 't', clientId: 'c', ownerJiacn: 'task-A', profileId: 'executor-B', agentId: 'agent-B', conversationId: '42', mode: 'CHAT', workspaceScopeHash: 'none', cwd: '/chat', enginePolicyHash: 'engine', toolPolicyHash: 'tools', instructionSourceHash: 'instructions', modelConfigHash: 'model', conversationGeneration: '1' }
   const message = { contextSnapshot: { facts: { task: { id: 'task-1' }, taskAuthority: { grantId: 'grant-1', grantVersion: '1', assignmentRevision: '7' } } } }
   const key = value => buildThreadKey({ ...base, taskAuthorityDigest: chatTaskAuthorityDigest(value) })
   assert.equal(key(message), key(structuredClone(message)))
   const progressed = structuredClone(message); progressed.contextSnapshot.facts.task.status = 'reviewing'; progressed.contextSnapshot.facts.task.revision = '99'
   assert.equal(key(message), key(progressed), 'ordinary task progress is not an authorization generation')
-  for (const [field, value] of [['grantId', 'grant-2'], ['grantVersion', '2'], ['assignmentRevision', '8']]) {
+  const revised = structuredClone(message); revised.contextSnapshot.facts.taskAuthority.requirementRevision = '2'
+  const before = structuredClone(revised)
+  assert.equal(key(message), key(revised), 'requirement version alone does not replace authorized conversation memory')
+  assert.deepEqual(revised, before, 'identity calculation must not remove current dispatch facts')
+  const otherTask = structuredClone(message); otherTask.contextSnapshot.facts.task.id = 'task-2'
+  assert.notEqual(key(message), key(otherTask))
+  for (const [field, value] of [['assignmentRevision', '8'], ['accessScope', 'other']]) {
     const changed = structuredClone(message); changed.contextSnapshot.facts.taskAuthority[field] = value
     assert.notEqual(key(message), key(changed), field)
   }
+  for (const [field, value] of [['grantId', 'grant-2'], ['grantVersion', '2']]) {
+    const renewed = structuredClone(message); renewed.contextSnapshot.facts.taskAuthority[field] = value
+    assert.equal(key(message), key(renewed), field)
+    delete renewed.contextSnapshot.facts.taskAuthority.assignmentRevision
+    const beforeRenewal = structuredClone(message); delete beforeRenewal.contextSnapshot.facts.taskAuthority.assignmentRevision
+    assert.notEqual(key(beforeRenewal), key(renewed), 'missing assignment must not infer grant continuity')
+  }
+  for (const [field, value] of [['tenantId', 'other'], ['clientId', 'other'], ['agentId', 'other'], ['conversationId', 'other'], ['conversationGeneration', '2']])
+    assert.notEqual(key(message), buildThreadKey({ ...base, [field]: value, taskAuthorityDigest: chatTaskAuthorityDigest(message) }), field)
   assert.notEqual(key(message), buildThreadKey({ ...base, ownerJiacn: 'task-C', taskAuthorityDigest: chatTaskAuthorityDigest(message) }))
   assert.throws(() => chatTaskAuthorityDigest({}), /CHAT_CONTEXT_BINDING_REQUIRED/)
 })
@@ -991,7 +1006,7 @@ test('version is optional telemetry and runtime never generates or compares prot
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('Fast CHAT includes installed maintenance guidance and isolates tool binding by dispatch', async () => {
+test('Fast CHAT includes installed maintenance guidance without splitting thread identity by dispatch', async () => {
   const keys = []; const instructions = []
   const adapter = {
     readback: { initialize: {}, account: {}, models: {}, config: {}, tools: {} },
@@ -1005,7 +1020,7 @@ test('Fast CHAT includes installed maintenance guidance and isolates tool bindin
     const message = normalizedWire({ route: 'CHAT', dispatchId })
     await runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, message, options)
   }
-  assert.notEqual(keys[0], keys[1]); assert.equal(instructions.length, 2)
+  assert.equal(keys[0], keys[1]); assert.equal(instructions.length, 2)
   assert.ok(instructions.every(text => text.includes('Verified installed maintenance guidance')))
 })
 

@@ -45,7 +45,7 @@ import { initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { loadNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
 import { buildActionChatFinal, publishActionChatFinal } from './action-chat-final.mjs'
-import { resolveChatMaterials, prepareChatMaterials, materialsEngineBinding, buildMaterialsChatFinal, publishMaterialsChatFinal } from './materials-chat.mjs'
+import { resolveChatMaterials, prepareChatMaterials, chatConversationKey, materialsEngineBinding, buildMaterialsChatFinal, publishMaterialsChatFinal } from './materials-chat.mjs'
 import { skillDigest } from './skill-executor.mjs'
 import { SkillRegistry } from './skill-registry.mjs'
 import { ExecutionReportOutbox } from './report-outbox.mjs'
@@ -74,7 +74,7 @@ import {
 } from './app-server-adapter.mjs'
 import { buildActionOutcomeContract, resolveActionChatRequest, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import {
-  TYPED_DELIBERATION_CONTRACT_DIGEST, TYPED_DELIBERATION_INSTRUCTIONS, TYPED_DELIBERATION_OUTPUT_SCHEMA,
+  TYPED_DELIBERATION_INSTRUCTIONS, TYPED_DELIBERATION_OUTPUT_SCHEMA,
   buildTypedDeliberationDeclaration, resolveTypedDeliberationRequest, typedDeliberationAdapterReady, validateTypedInteractionOutcome
 } from './juyiting-typed-outcome.mjs'
 import { TypedUserReplyStreamDecoder } from './juyiting-typed-outcome-stream.mjs'
@@ -3045,7 +3045,7 @@ export class AgentMessageProcessor {
           const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
           const recovered = this.chatInbox.recoveryRequired(claimed, `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`, unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED')
           if (!(recovered.state === 'COMPLETED' && recovered.finalConfirmation?.serverPersistence === 'confirmed')) {
-            reconcileInspection = unknown && ((claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' || claimed.record.message?.contextSnapshot?.facts?.materialsInput)
+            reconcileInspection = unknown && ((claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' || claimed.record.message?.contextSnapshot?.facts?.materialsInput || claimed.record.preparation?.contract === 'juyiting-action-chat-preparation-v1')
             const recoveryAck = { status: 'recovery_required', errorCode: error?.code || 'CHAT_RUNTIME_ERROR', reason: String(error.message || 'CHAT runtime failure').slice(0, 512) }
             try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
             this.onReject(new AgentProtocolError(unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : (error?.code || 'CHAT_RUNTIME_ERROR'), error.message), claimed.record.message.rawPayload)
@@ -4658,7 +4658,7 @@ export const runFastChat = async (profile, message, {
   adapter = null, adapterPromise = null, bindingStore = null, controls = { markRunning: () => {}, isCancelled: () => false },
   fallback = null, sendProtocolFn = sendProtocol, chatWorkdir = profile.chatWorkdir, getAppServerFailure = () => null,
   enginePolicyHash = '', instructionSourceHash = '', modelConfigHash = '', toolPolicyHash = '',
-  materialsRuntime = null, materialsMaterializer = null, materialsInputAdapters = {}, conversationToolSession = null
+  materialsRuntime = null, materialsMaterializer = null, materialsInputAdapters = {}, conversationToolSession = null, conversationRuntime = null, warmChatOptions = {}
 } = {}) => {
   const modern = message?.durable === true || (message?.ackRequired === true && message?.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED')
   const legacy = (reason, secureBoundaryRequired = false) => {
@@ -4681,137 +4681,211 @@ export const runFastChat = async (profile, message, {
   const actionContract = actionRequest ? buildActionOutcomeContract(actionRequest, message.contextSnapshot?.facts?.reviewBasis ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? []) : null
   const outputSchema = actionContract ? actionContract.outputSchema : TYPED_DELIBERATION_OUTPUT_SCHEMA
   const outcomeInstructions = actionContract ? actionContract.instructions : TYPED_DELIBERATION_INSTRUCTIONS
-  const outcomeContractDigest = actionContract ? actionContract.contractDigest : TYPED_DELIBERATION_CONTRACT_DIGEST
   if (!profile.fastChatEnabled || !profile.appServerEnabled) {
     throw new AgentProtocolError('FAST_CHAT_FEATURE_DISABLED', 'Modern durable CHAT is disabled for this profile; legacy workspace execution is forbidden')
   }
   if (!message.contextSnapshot) throw new AgentProtocolError('FAST_CHAT_CONTEXT_REQUIRED', 'Modern durable CHAT requires contextSnapshot')
   let selectedAdapter = adapter
-  let preparedMaterials = null
-  if (materials) {
-    preparedMaterials = await prepareChatMaterials({ profile, message, materials, materializer: materialsMaterializer, profileRuntime: materialsRuntime, adapters: materialsInputAdapters })
-    await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
-      inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft })
-    selectedAdapter = await materialsRuntime.openAdapter(preparedMaterials.inputDirectory, message.dedupeKey || message.messageId, materialsEngineBinding(message, materials, materialsRuntime))
-    chatWorkdir = '/inputs'
-  }
-  if (!selectedAdapter && adapterPromise) {
-    try { selectedAdapter = await adapterPromise }
-    catch (error) {
-      const code = error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? 'APP_SERVER_BINARY_UNTRUSTED' : 'APP_SERVER_UNAVAILABLE'
-      throw new AgentProtocolError(code, error?.message || code)
-    }
-  }
-  if (!selectedAdapter) {
-    const permanent = getAppServerFailure?.()
-    if (permanent) throw new AgentProtocolError(permanent.code || 'APP_SERVER_BINARY_UNTRUSTED', permanent.message || 'Permanent app-server trust failure')
-    throw new AgentProtocolError('APP_SERVER_UNAVAILABLE', 'Modern durable CHAT app-server is unavailable; legacy workspace execution is forbidden')
-  }
-  if (typedRequest && !typedDeliberationAdapterReady(profile, selectedAdapter)) {
-    throw new AgentProtocolError('TYPED_DELIBERATION_RUNTIME_UNAVAILABLE', 'Typed deliberation requires the initialized measured native output-schema adapter')
-  }
-  if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
-  const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
-  const developerInstructions = (typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}\nEmit the top-level kind field before text so user-facing replies can stream without exposing internal action instructions.` : FAST_CHAT_INSTRUCTIONS)
-    + (conversationToolSession ? `\n${conversationToolSession.instructions}` : '')
-  const typedContractBinding = typedRequest ? { contractDigest: outcomeContractDigest, dispatchFacts: typedRequest, outputSchema, developerInstructions } : null
-  // CHAT consumes the authorized envelope, not ancestor host maintenance docs.
-  // Bind this policy to thread identity so old injected instructions cannot survive resume.
-  const chatThreadConfig = { network: false, project_doc_max_bytes: 0 }
-  const baseEnginePolicyHash = enginePolicyHash
-    ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
-    : canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {}, ...(typedRequest ? { typedContractBinding } : {}) })
-  const effectiveEnginePolicyHash = canonicalSha256({ base: baseEnginePolicyHash, chatThreadConfig })
-  const effectiveToolPolicyHash = conversationToolSession ? canonicalSha256({ catalog: conversationToolSession.catalog, dispatchId: message.dispatchId }) : materials ? canonicalSha256({ profile: materialsRuntime.contractReadback, manifestDigest: materials.manifestDigest }) : toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
-  const effectiveInstructionSourceHash = instructionSourceHash
-    ? (typedRequest ? canonicalSha256({ base: instructionSourceHash, typedContractBinding }) : instructionSourceHash)
-    : canonicalSha256({ source: 'runtime-static', instructions: developerInstructions, ...(typedRequest ? { typedContractBinding } : {}) })
-  const effectiveModelConfigHash = modelConfigHash || canonicalSha256({ model: profile.chatModel || profile.codexModel || 'default', effort: profile.chatReasoningEffort || '', models: selectedAdapter.readback?.models || {}, config: selectedAdapter.readback?.config || {} })
-  const key = buildThreadKey({ tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId, mode: 'CHAT', workspaceScopeHash: 'none', cwd: chatWorkdir, enginePolicyHash: effectiveEnginePolicyHash, toolPolicyHash: effectiveToolPolicyHash, instructionSourceHash: effectiveInstructionSourceHash, modelConfigHash: effectiveModelConfigHash, conversationGeneration: String(message.conversationGeneration), taskAuthorityDigest: chatTaskAuthorityDigest(message) })
-  metrics.queueAt = Date.now()
-  const prior = materials ? null : bindingStore?.get(key)
-  if (prior?.state === 'RECOVERY_REQUIRED') throw Object.assign(new Error('THREAD_BINDING_RECOVERY_REQUIRED'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
-  const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: chatThreadConfig, developerInstructions })
-  bindingStore?.put(key, binding)
-  if (materials) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
-    inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft, threadKey: key, engineThreadId: binding.threadId })
-  metrics.engineStartAt = Date.now()
-  let acceptedTurn = null; let typedStreamError = null
-  const decoder = typedRequest ? new TypedUserReplyStreamDecoder() : null
+  let preparedMaterials = null, conversationKey = null, materialEngineBinding = null
+  let warmOpened = false, materialsOpened = false, turnAttempted = false, turnCompleted = false
   try {
-    const result = await selectedAdapter.runTurn({
-      threadId: binding.threadId, clientUserMessageId: message.messageId, input: preparedMaterials ? [{ type: 'text', text: JSON.stringify(envelope) }, ...preparedMaterials.nativeInputs] : JSON.stringify(envelope),
-      policy: { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, ...(typedRequest ? { outputSchema } : {}) },
-      onAccepted: accepted => { acceptedTurn = accepted; controls.markRunning(() => selectedAdapter.interrupt(accepted.threadId, accepted.turnId), accepted) },
-      onDelta: event => {
-        if (!profile.trueDeltaEnabled || !event.content || controls.isCancelled() || typedStreamError) return
-        let content = event.content
-        if (decoder) {
-          try { content = decoder.push(content) } catch (error) {
-            typedStreamError = error
-            if (acceptedTurn) void selectedAdapter.interrupt(acceptedTurn.threadId, acceptedTurn.turnId).catch(() => {})
-            return
+    if (materials) {
+      preparedMaterials = await prepareChatMaterials({ profile, message, materials, materializer: materialsMaterializer, profileRuntime: materialsRuntime, adapters: materialsInputAdapters })
+      conversationKey = chatConversationKey(profile, message)
+      materialEngineBinding = materialsEngineBinding(message, materials, materialsRuntime)
+      await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
+        conversationKey: conversationKey, engineStateBinding: materialEngineBinding,
+        inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft })
+      selectedAdapter = await materialsRuntime.openAdapter(preparedMaterials.inputDirectory, message.dedupeKey || message.messageId, materialEngineBinding, { conversationKey: conversationKey })
+      materialsOpened = true
+      chatWorkdir = selectedAdapter.typedInspectionEngineState?.chatWorkdir || '/inputs'
+    }
+    if (!selectedAdapter && adapterPromise) {
+      try { selectedAdapter = await adapterPromise }
+      catch (error) {
+        const code = error?.code === 'APP_SERVER_BINARY_UNTRUSTED' ? 'APP_SERVER_BINARY_UNTRUSTED' : 'APP_SERVER_UNAVAILABLE'
+        throw new AgentProtocolError(code, error?.message || code)
+      }
+    }
+    if (!selectedAdapter) {
+      const permanent = getAppServerFailure?.()
+      if (permanent) throw new AgentProtocolError(permanent.code || 'APP_SERVER_BINARY_UNTRUSTED', permanent.message || 'Permanent app-server trust failure')
+      throw new AgentProtocolError('APP_SERVER_UNAVAILABLE', 'Modern durable CHAT app-server is unavailable; legacy workspace execution is forbidden')
+    }
+    if (!materials && actionRequest && conversationRuntime?.canShareChatProvider(selectedAdapter.readback) && !conversationToolSession) {
+      conversationKey = chatConversationKey(profile, message)
+      selectedAdapter = await conversationRuntime.openWarmChatAdapter(conversationKey, message.dedupeKey || message.messageId, {
+        ...warmChatOptions, schemaMeasurement: selectedAdapter.readback?.schema })
+      warmOpened = true
+      chatWorkdir = selectedAdapter.typedInspectionEngineState.chatWorkdir
+    }
+    if (typedRequest && !typedDeliberationAdapterReady(profile, selectedAdapter)) {
+      throw new AgentProtocolError('TYPED_DELIBERATION_RUNTIME_UNAVAILABLE', 'Typed deliberation requires the initialized measured native output-schema adapter')
+    }
+    if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
+    const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
+    const developerInstructions = (typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}\nEmit the top-level kind field before text so user-facing replies can stream without exposing internal action instructions.` : FAST_CHAT_INSTRUCTIONS)
+      + (conversationToolSession ? `\n${conversationToolSession.instructions}` : '')
+    // Business facts and outputSchema belong to this turn (and final validation),
+    // not the persistent thread. Keep actual developer instructions in its identity.
+    const typedContractBinding = typedRequest ? { developerInstructions } : null
+    // CHAT consumes the authorized envelope, not ancestor host maintenance docs.
+    // Bind this policy to thread identity so old injected instructions cannot survive resume.
+    const chatThreadConfig = { network: false, project_doc_max_bytes: 0 }
+    const conversationState = selectedAdapter.typedInspectionEngineState?.conversationKey ? selectedAdapter.typedInspectionEngineState : null
+    const measuredSchema = selectedAdapter.readback?.schema || {}
+    // Process paths, startup replies and model catalogs do not define a new
+    // conversation. Both adapters use the same staged config and verified engine.
+    const engineIdentity = conversationState ? {
+      cliVersion: measuredSchema.cliVersion || null, binaryIdentityDigest: measuredSchema.binaryIdentityDigest || null,
+      schemaContractId: measuredSchema.schemaContractId || null, bundleSha256: measuredSchema.bundleSha256 || null,
+      configDigest: conversationState.configDigest
+    } : { initialize: selectedAdapter.readback?.initialize || {}, measuredSchema }
+    const baseEnginePolicyHash = enginePolicyHash
+      ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
+      : canonicalSha256({ engine: 'app-server', ...engineIdentity, accountType: readbackSummary.accountType, ...(typedRequest ? { typedContractBinding } : {}) })
+    const effectiveEnginePolicyHash = canonicalSha256({ base: baseEnginePolicyHash, chatThreadConfig })
+    const effectiveToolPolicyHash = conversationToolSession ? canonicalSha256({ catalog: conversationToolSession.catalog }) : materials && !conversationState ? canonicalSha256({ profile: materialsRuntime.contractReadback, conversationKey }) : toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
+    const effectiveInstructionSourceHash = instructionSourceHash
+      ? (typedRequest ? canonicalSha256({ base: instructionSourceHash, typedContractBinding }) : instructionSourceHash)
+      : canonicalSha256({ source: 'runtime-static', instructions: developerInstructions, ...(typedRequest ? { typedContractBinding } : {}) })
+    const effectiveModelConfigHash = modelConfigHash || canonicalSha256({ model: profile.chatModel || profile.codexModel || 'default', effort: profile.chatReasoningEffort || '', ...(conversationState ? { configDigest: conversationState.configDigest } : { models: selectedAdapter.readback?.models || {}, config: selectedAdapter.readback?.config || {} }) })
+    const key = buildThreadKey({ tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId, mode: 'CHAT', workspaceScopeHash: 'none', cwd: chatWorkdir, enginePolicyHash: effectiveEnginePolicyHash, toolPolicyHash: effectiveToolPolicyHash, instructionSourceHash: effectiveInstructionSourceHash, modelConfigHash: effectiveModelConfigHash, conversationGeneration: String(message.conversationGeneration), taskAuthorityDigest: chatTaskAuthorityDigest(message) })
+    metrics.queueAt = Date.now()
+    const prior = materials ? bindingStore?.get(key) || null : bindingStore?.get(key)
+    if (prior?.state === 'RECOVERY_REQUIRED') throw Object.assign(new Error('THREAD_BINDING_RECOVERY_REQUIRED'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+    const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: chatThreadConfig, developerInstructions })
+    bindingStore?.put(key, binding)
+    if (materials) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
+      conversationKey: conversationKey, engineStateBinding: materialEngineBinding,
+      inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft, threadKey: key, engineThreadId: binding.threadId })
+    if (warmOpened) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-action-chat-preparation-v1',
+      conversationKey, threadKey: key, engineThreadId: binding.threadId })
+    metrics.engineStartAt = Date.now()
+    let acceptedTurn = null; let typedStreamError = null
+    const decoder = typedRequest ? new TypedUserReplyStreamDecoder() : null
+    const recordRecovery = reason => (materials || warmOpened)
+      ? bindingStore?.put(key, { ...binding, state: 'RECOVERY_REQUIRED', recoveryReason: reason, recoveryMessageId: message.messageId, updatedAt: Date.now() })
+      : bindingStore?.markRecovery(key, reason)
+    try {
+      turnAttempted = true
+      const result = await selectedAdapter.runTurn({
+        threadId: binding.threadId, clientUserMessageId: message.messageId, input: preparedMaterials ? [{ type: 'text', text: JSON.stringify(envelope) }, ...preparedMaterials.nativeInputs] : JSON.stringify(envelope),
+        policy: { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, ...(typedRequest ? { outputSchema } : {}) },
+        onAccepted: accepted => { acceptedTurn = accepted; controls.markRunning(() => selectedAdapter.interrupt(accepted.threadId, accepted.turnId), accepted) },
+        onDelta: event => {
+          if (!profile.trueDeltaEnabled || !event.content || controls.isCancelled() || typedStreamError) return
+          let content = event.content
+          if (decoder) {
+            try { content = decoder.push(content) } catch (error) {
+              typedStreamError = error
+              if (acceptedTurn) void selectedAdapter.interrupt(acceptedTurn.threadId, acceptedTurn.turnId).catch(() => {})
+              return
+            }
           }
+          if (!content) return
+          metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', ...(decoder ? { streamOutcomeKind: decoder.kind } : {}) }, sendProtocolFn)
         }
-        if (!content) return
-        metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', ...(decoder ? { streamOutcomeKind: decoder.kind } : {}) }, sendProtocolFn)
-      }
-    })
-    if (typedStreamError) throw typedStreamError
-    if (materials && (result.finishReason !== 'completed' || result.threadId !== binding.threadId || !result.turnId || (acceptedTurn?.turnId && acceptedTurn.turnId !== result.turnId))) throw new AgentProtocolError('MATERIALS_NATIVE_RESULT_UNKNOWN', 'No exact completed native turn readback')
-    if (controls.isCancelled()) return { status: 'cancelled', turnId: result.turnId, routeUsed: 'CHAT_FAST', metrics }
-    metrics.finalAt = Date.now()
-    if (typedRequest) {
-      const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null) : validateTypedInteractionOutcome(result.content, typedRequest)
-      if (profile.trueDeltaEnabled) {
-        const suffix = decoder.finish(outcome.text, outcome.kind)
-        if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', streamOutcomeKind: decoder.kind }, sendProtocolFn) }
-      }
-      if (materials) {
-        const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
-        const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: outcome, receiptDraft: preparedMaterials.inspectionInputReceiptDraft,
-          engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key, validateOutcome })
+      })
+      turnCompleted = !materials || result.finishReason === 'completed'
+      if (typedStreamError) throw typedStreamError
+      if (materials && (result.finishReason !== 'completed' || result.threadId !== binding.threadId || !result.turnId || (acceptedTurn?.turnId && acceptedTurn.turnId !== result.turnId))) throw new AgentProtocolError('MATERIALS_NATIVE_RESULT_UNKNOWN', 'No exact completed native turn readback')
+      if (controls.isCancelled()) return { status: 'cancelled', turnId: result.turnId, routeUsed: 'CHAT_FAST', metrics }
+      metrics.finalAt = Date.now()
+      if (typedRequest) {
+        const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null) : validateTypedInteractionOutcome(result.content, typedRequest)
+        if (profile.trueDeltaEnabled) {
+          const suffix = decoder.finish(outcome.text, outcome.kind)
+          if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', streamOutcomeKind: decoder.kind }, sendProtocolFn) }
+        }
+        if (materials) {
+          const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
+          const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: outcome, receiptDraft: preparedMaterials.inspectionInputReceiptDraft,
+            engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key, validateOutcome })
+          await controls.markFinalPrepared(finalPrepared)
+          return await publishMaterialsChatFinal({ profile, message, materials, finalPrepared, validateOutcome, controls,
+            sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
+        }
+        if (typeof controls.markFinalPrepared !== 'function' || typeof controls.markFinalPublication !== 'function') throw new AgentProtocolError('CHAT_FINAL_DURABILITY_REQUIRED', 'Durable action CHAT final storage required')
+        const finalPrepared = buildActionChatFinal({ message, outcome, engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key })
         await controls.markFinalPrepared(finalPrepared)
-        return publishMaterialsChatFinal({ profile, message, materials, finalPrepared, validateOutcome, controls,
+        return recoverActionChat(profile, message, { finalPrepared }, { controls,
           sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
+      } else {
+        sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
       }
-      if (typeof controls.markFinalPrepared !== 'function' || typeof controls.markFinalPublication !== 'function') throw new AgentProtocolError('CHAT_FINAL_DURABILITY_REQUIRED', 'Durable action CHAT final storage required')
-      const finalPrepared = buildActionChatFinal({ message, outcome, engineThreadId: result.threadId, engineTurnId: result.turnId, threadKey: key })
-      await controls.markFinalPrepared(finalPrepared)
-      return recoverActionChat(profile, message, { finalPrepared }, { controls,
-        sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
-    } else {
-      sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
+      metrics.publishAt = Date.now(); bindingStore?.put(key, { ...binding, state: 'IDLE', lastAppliedContextHash: message.contextSnapshot.contextHash, updatedAt: Date.now() })
+      return { status: 'completed', turnId: result.turnId, threadKey: key, routeUsed: 'CHAT_FAST', metrics }
+    } catch (error) {
+      if (['TURN_FAILED', 'TURN_INTERRUPTED'].includes(error.code)) turnCompleted = true
+      if (materials && error.code === 'MATERIALS_NATIVE_RESULT_UNKNOWN') recordRecovery(error.message)
+      if (error.code === 'TURN_ACCEPTANCE_UNKNOWN') {
+        recordRecovery(error.message)
+        if (!error.reconciliation) await selectedAdapter.reconcileTurn(error.turn || acceptedTurn || { threadId: binding.threadId, clientUserMessageId: message.messageId }).catch(() => null)
+      }
+      if (typedStreamError && error.code !== 'TURN_ACCEPTANCE_UNKNOWN') throw typedStreamError
+      throw error
     }
-    metrics.publishAt = Date.now(); bindingStore?.put(key, { ...binding, state: 'IDLE', lastAppliedContextHash: message.contextSnapshot.contextHash, updatedAt: Date.now() })
-    return { status: 'completed', turnId: result.turnId, threadKey: key, routeUsed: 'CHAT_FAST', metrics }
-  } catch (error) {
-    if (error.code === 'TURN_ACCEPTANCE_UNKNOWN') {
-      bindingStore?.markRecovery(key, error.message)
-      if (!error.reconciliation) await selectedAdapter.reconcileTurn(error.turn || acceptedTurn || { threadId: binding.threadId, clientUserMessageId: message.messageId }).catch(() => null)
-    }
-    if (typedStreamError && error.code !== 'TURN_ACCEPTANCE_UNKNOWN') throw typedStreamError
-    throw error
+  } finally {
+    // Publish first: process teardown must not delay the user's final reply.
+    // Join it before this CHAT lane can hand the durable Home to another request.
+    if (materialsOpened && (!turnAttempted || turnCompleted)) await materialsRuntime.suspendAdapter(message.dedupeKey || message.messageId)
+    if (warmOpened && (!turnAttempted || turnCompleted)) await conversationRuntime.finishWarmChatAdapter(conversationKey, message.dedupeKey || message.messageId)
   }
 }
 
-export const recoverActionChat = async (profile, message, record, { controls, sendFinal } = {}) => {
+export const recoverActionChat = async (profile, message, record, {
+  controls, sendFinal, profileRuntime = null, adapter = null, bindingStore = null, warmChatOptions = {}
+} = {}) => {
   const facts = resolveActionChatRequest(profile, message)
   if (!facts || message.contextSnapshot?.facts?.materialsInput) throw new AgentProtocolError('CHAT_FINAL_BINDING_INVALID', 'Exact non-material action CHAT required')
   const validateOutcome = raw => validateActionOutcome(raw, facts, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
-  return publishActionChatFinal({ profile, message, finalPrepared: record.finalPrepared, validateOutcome, controls, sendFinal })
+  const publish = async finalPrepared => {
+    const result = await publishActionChatFinal({ profile, message, finalPrepared, validateOutcome, controls, sendFinal })
+    const key = finalPrepared.result.threadKey, prior = bindingStore?.get(key)
+    if (prior?.threadId === finalPrepared.result.threadId && prior.state === 'RECOVERY_REQUIRED' && prior.recoveryMessageId === message.messageId)
+      bindingStore.put(key, { ...prior, state: 'IDLE', recoveryReason: null, recoveryMessageId: null, updatedAt: Date.now() })
+    if (record.preparation?.conversationKey) await profileRuntime?.finishWarmChatAdapter(record.preparation.conversationKey, message.dedupeKey || message.messageId)
+    return result
+  }
+  if (record.finalPrepared) return publish(record.finalPrepared)
+  const preparation = record.preparation
+  if (preparation?.schemaVersion !== 1 || preparation.contract !== 'juyiting-action-chat-preparation-v1' || !preparation.threadKey)
+    throw new AgentProtocolError('CHAT_RECOVERY_BINDING_INVALID', 'Original conversation preparation required')
+  const engineThreadId = record.engine?.threadId || preparation.engineThreadId, expectedTurnId = record.engine?.turnId
+  if (!engineThreadId) return { status: 'recovery_required', reconciliationStatus: 'ACCEPTANCE_UNKNOWN' }
+  const selected = adapter || await profileRuntime.openWarmChatAdapter(preparation.conversationKey, message.dedupeKey || message.messageId,
+    { ...warmChatOptions, requireExistingState: true })
+  const readback = await selected.reconcileTurn({ threadId: engineThreadId, turnId: expectedTurnId || null, clientUserMessageId: message.messageId })
+  if (readback?.status !== 'TERMINAL') return { status: 'recovery_required', reconciliationStatus: readback?.status || 'RECOVERY_REQUIRED' }
+  const turnId = readback.turnId || readback.turn?.id
+  if (readback.terminalStatus !== 'completed' || (readback.result?.thread?.id && readback.result.thread.id !== engineThreadId) || !turnId || (expectedTurnId && turnId !== expectedTurnId))
+    throw new AgentProtocolError('CHAT_RECOVERY_TURN_INVALID', 'Readback is not the original completed turn')
+  const messages = (readback.turn?.items || []).filter(item => ['agentMessage', 'agent_message'].includes(item.type) && typeof item.text === 'string')
+  if (messages.length !== 1) throw new AgentProtocolError('CHAT_RECOVERY_FINAL_INVALID', 'One exact native final required')
+  const finalPrepared = buildActionChatFinal({ message, outcome: validateOutcome(messages[0].text), engineThreadId, engineTurnId: turnId, threadKey: preparation.threadKey })
+  await controls.markFinalPrepared(finalPrepared)
+  return publish(finalPrepared)
 }
 
-export const recoverMaterialsChat = async (profile, message, record, { profileRuntime = null, adapter = null, controls = {}, sendFinal } = {}) => {
+export const recoverMaterialsChat = async (profile, message, record, { profileRuntime = null, adapter = null, bindingStore = null, controls = {}, sendFinal } = {}) => {
   const materials = resolveChatMaterials(profile, message), facts = resolveActionChatRequest(profile, message)
   if (!materials || !facts || typeof sendFinal !== 'function') throw new AgentProtocolError('MATERIALS_RECOVERY_BINDING_INVALID', 'Exact CHAT material request required')
   const validateOutcome = raw => validateActionOutcome(raw, facts, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
-  if (record.finalPrepared) return publishMaterialsChatFinal({ profile, message, materials, finalPrepared: record.finalPrepared, validateOutcome, controls, sendFinal })
+  const publish = async finalPrepared => {
+    const result = await publishMaterialsChatFinal({ profile, message, materials, finalPrepared, validateOutcome, controls, sendFinal })
+    const key = finalPrepared.result.threadKey, prior = bindingStore?.get(key)
+    if (prior?.threadId === finalPrepared.result.threadId && prior.state === 'RECOVERY_REQUIRED' && prior.recoveryMessageId === message.messageId)
+      bindingStore.put(key, { ...prior, state: 'IDLE', recoveryReason: null, recoveryMessageId: null, updatedAt: Date.now() })
+    if (!adapter) await profileRuntime?.suspendAdapter(message.dedupeKey || message.messageId)
+    return result
+  }
+  if (record.finalPrepared) return publish(record.finalPrepared)
   const preparation = record.preparation
   if (preparation?.contract !== 'juyiting-materials-chat-v1' || preparation.authorizationId !== materials.authorizationId || preparation.manifestDigest !== materials.manifestDigest) throw new AgentProtocolError('MATERIALS_RECOVERY_BINDING_INVALID', 'Exact persisted preparation required')
   const engineThreadId = record.engine?.threadId || preparation.engineThreadId, expectedTurnId = record.engine?.turnId
   if (!engineThreadId) return { status: 'recovery_required', reconciliationStatus: 'ACCEPTANCE_UNKNOWN' }
-  const selected = adapter || await profileRuntime.openAdapter(preparation.inputDirectory, message.dedupeKey || message.messageId, materialsEngineBinding(message, materials, profileRuntime), { requireExistingState: true })
+  const selected = adapter || await profileRuntime.openAdapter(preparation.inputDirectory, message.dedupeKey || message.messageId, preparation.engineStateBinding || materialsEngineBinding(message, materials, profileRuntime), { requireExistingState: true, conversationKey: preparation.conversationKey ?? null })
   const readback = await selected.reconcileTurn({ threadId: engineThreadId, turnId: expectedTurnId || null, clientUserMessageId: message.messageId })
   if (readback?.status !== 'TERMINAL') return { status: 'recovery_required', reconciliationStatus: readback?.status || 'RECOVERY_REQUIRED' }
   const turnId = readback.turnId || readback.turn?.id
@@ -4822,7 +4896,7 @@ export const recoverMaterialsChat = async (profile, message, record, { profileRu
   const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: content, receiptDraft: preparation.inspectionInputReceiptDraft, engineThreadId, engineTurnId: turnId, threadKey: preparation.threadKey, validateOutcome })
   if (typeof controls.markFinalPrepared !== 'function') throw new AgentProtocolError('MATERIALS_DURABILITY_REQUIRED', 'Durable final storage required')
   await controls.markFinalPrepared(finalPrepared)
-  return publishMaterialsChatFinal({ profile, message, materials, finalPrepared, validateOutcome, controls, sendFinal })
+  return publish(finalPrepared)
 }
 
 export const runProfileChat = (profile, message, {
@@ -5991,13 +6065,34 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       }, delay)
       state.appServerRestartTimer.unref?.()
     }
+    const adapterLifecycle = {
+      onChange: () => {
+        if (profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
+        if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
+      },
+      onExit: () => { state.appServerRestartAttempt++; scheduleRestart() }
+    }
+    if (state.typedInspectionProfileRuntime) state.typedInspectionProfileRuntime.chatAdapterLifecycle = {
+      ready: async adapter => {
+        if (!state.chatProviderShared) return
+        adapter.readback.hostedWireContract = hostedWireContract
+        await bindProfileChatAdapter(state, adapter, adapterLifecycle)
+      },
+      closing: adapter => { unbindProfileChatAdapter(state, adapter) }
+    }
     state.ensureAppServer = () => {
       if (!isCurrent() || state.appServerPermanentFailure) return Promise.resolve(null)
       if (state.appServerAdapter && !state.appServerAdapter.closed) return Promise.resolve(state.appServerAdapter)
       if (state.appServerPromise) return state.appServerPromise
+      const runtime = state.typedInspectionProfileRuntime
+      const transitions = [...(runtime?.pendingWarmChats?.values() || []), ...(runtime?.pendingInspectionAdapters?.values() || []), ...(runtime?.closingAdapters?.values() || [])]
+      if (transitions.length) return Promise.allSettled(transitions).then(() => state.ensureAppServer())
       const delay = Math.max(0, state.appServerNotBefore - Date.now())
       state.appServerPromise = new Promise(resolvePromise => setTimeout(resolvePromise, delay)).then(async () => {
         if (shuttingDown || !isCurrent()) return null
+        const warm = await restoreProfileChatIdleAdapter(state, profile.runtimeIdentity ? buildRuntimeExecutionEnvironment(profile) : {})
+        if (warm) { state.appServerRestartAttempt = 0; state.appServerNotBefore = 0; return warm }
+        if (!isCurrent()) return null
         const schemaMeasurement = await measureCodexAppServerBinaryAsync(profile, profile.runtimeIdentity ? { environment: buildRuntimeExecutionEnvironment(profile) } : {})
         if (!isCurrent()) return null
         const adapter = await AppServerAdapter.spawnAsync(profile, { cwd: chatWorkdir, schemaMeasurement, shouldSpawn: () => !shuttingDown && isCurrent(),
@@ -6007,21 +6102,9 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
         adapter.readback.hostedWireContract = hostedWireContract
         if (!isCurrent()) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); return null }
         state.appServerStartingAdapter = null
-        const exitListener = () => {
-          if (state.appServerExitListener !== exitListener) return
-          state.appServerExitListener = null
-          if (state.appServerAdapter === adapter) state.appServerAdapter = null
-          state.appServerPromise = null
-          if (!isCurrent()) return
-          if (profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
-          if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
-          state.appServerRestartAttempt++; scheduleRestart()
-        }
-        state.appServerExitListener = exitListener
-        adapter.once('exit', exitListener)
-        state.appServerAdapter = adapter; state.appServerRestartAttempt = 0; state.appServerNotBefore = 0
-        if (profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
-        if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
+        state.chatProviderShared = state.typedInspectionProfileRuntime?.canShareChatProvider(adapter.readback) === true
+        await bindProfileChatAdapter(state, adapter, adapterLifecycle)
+        state.appServerRestartAttempt = 0; state.appServerNotBefore = 0
         return adapter
       }).catch(error => {
         state.appServerAdapter = null; state.appServerRestartAttempt++; state.appServerNotBefore = 0
@@ -6030,7 +6113,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
         console.warn(`app-server unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
         if (isCurrent() && !state.appServerPermanentFailure) scheduleRestart()
         return null
-      }).finally(() => { if (!state.appServerAdapter) state.appServerPromise = null })
+      }).finally(() => { state.appServerPromise = null })
       return state.appServerPromise
     }
     if (!deferNativeStartup) state.appServerPromise = state.ensureAppServer()
@@ -6082,22 +6165,35 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
         }
         return await runProfileChat(profile, message, {
           adapter: toolAdapter || state.appServerAdapter,
-          adapterPromise: toolAdapter ? null : state.ensureAppServer ? state.ensureAppServer() : state.appServerPromise,
+          adapterPromise: toolAdapter || message.contextSnapshot?.facts?.materialsInput ? null : state.ensureAppServer ? state.ensureAppServer() : state.appServerPromise,
           bindingStore: threadBindingStore, conversationToolSession,
           controls, chatWorkdir, legacyGate: legacyExecutionGate, getAppServerFailure: () => state.appServerPermanentFailure,
           materialsRuntime: message.contextSnapshot?.facts?.materialsInput ? await state.ensureTypedInspectionProfile() : null,
-          materialsMaterializer: typedInspectionMaterializer, materialsInputAdapters: typedInspectionNativeInputAdapters
+          materialsMaterializer: typedInspectionMaterializer, materialsInputAdapters: typedInspectionNativeInputAdapters,
+          conversationRuntime: state.typedInspectionProfileRuntime,
+          warmChatOptions: { environment: profile.runtimeIdentity ? buildRuntimeExecutionEnvironment(profile) : {} }
         })
+      } catch (error) {
+        if (error?.code === 'TURN_ACCEPTANCE_UNKNOWN' && state.appServerAdapter && !state.appServerAdapter.typedInspectionEngineState?.conversationKey) {
+          state.retainedChatAdapters ||= new Set(); state.retainedChatAdapters.add(state.appServerAdapter)
+        }
+        throw error
       } finally {
         if (toolAdapter) { await toolAdapter.shutdown({ timeoutMs: 1000 }); state.conversationToolAdapters.delete(toolAdapter) }
+        if (!state.disposed && !state.appServerAdapter) await state.ensureAppServer?.()
       }
     },
     recoverChat: async (message, record, controls = {}) => {
       const route = message.route || message.routing?.interactionMode
       if (route === 'CHAT' && message.contextSnapshot?.facts?.materialsInput) return recoverMaterialsChat(profile, message, record, {
-        profileRuntime: record.finalPrepared ? null : await state.ensureTypedInspectionProfile(), controls,
-        sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra) })
-      if (route === 'CHAT' && record.finalPrepared?.contract === 'juyiting-action-chat-final-v1') return recoverActionChat(profile, message, record, { controls,
+        profileRuntime: record.finalPrepared ? state.typedInspectionProfileRuntime : await state.ensureTypedInspectionProfile(), bindingStore: threadBindingStore, controls,
+        sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra) }).finally(async () => {
+          if (!state.disposed && !state.appServerAdapter) await state.ensureAppServer?.()
+        })
+      if (route === 'CHAT' && (record.finalPrepared?.contract === 'juyiting-action-chat-final-v1' || record.preparation?.contract === 'juyiting-action-chat-preparation-v1')) return recoverActionChat(profile, message, record, {
+        controls, profileRuntime: state.typedInspectionProfileRuntime, bindingStore: threadBindingStore,
+        warmChatOptions: { schemaMeasurement: state.appServerAdapter?.readback.schema,
+          environment: profile.runtimeIdentity ? buildRuntimeExecutionEnvironment(profile) : {} },
         sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra) })
       if (route !== 'INSPECT') return { status: 'recovery_required', reconciliationStatus: 'UNSUPPORTED_ROUTE' }
       const inspectionProfile = record.finalPrepared ? null : await state.ensureTypedInspectionProfile()
@@ -6115,7 +6211,8 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       const record = outcome.record
       if (record?.finalConfirmation?.serverPersistence !== 'confirmed' || record.finalPrepared?.contract !== 'juyiting-materials-chat-final-v1') return
       const message = record.message, materials = resolveChatMaterials(profile, message)
-      await state.typedInspectionProfileRuntime?.releaseAdapter(message.dedupeKey || message.messageId)
+      await state.typedInspectionProfileRuntime?.releaseAdapter(message.dedupeKey || message.messageId, record.preparation?.conversationKey ? {
+        requestBinding: record.preparation.engineStateBinding, conversationKey: record.preparation.conversationKey } : {})
       typedInspectionMaterializer?.cleanup({ message, typed: materials })
     },
     onTaskEvent: message => {
@@ -6198,6 +6295,54 @@ export const startBoundedSkillResultReplay = ({
   return () => { cancelled = true }
 }
 
+export const restoreProfileChatIdleAdapter = async (state, environment = {}) => {
+  const runtime = state.typedInspectionProfileRuntime, key = state.chatConversationKey
+  if (state.disposed || !state.chatProviderShared || !key || !runtime || runtime.disposed) return null
+  const active = runtime.warmChatAdapters?.get(key)
+  // A dead/unknown turn is for exact request recovery, not a fresh idle claim.
+  if (runtime.conversationOwners?.has(key) && !active?.idle) return null
+  const requestKey = 'profile-idle'
+  const adapter = await runtime.openWarmChatAdapter(key, requestKey, {
+    requireExistingState: true, schemaMeasurement: state.chatAppServerSchema, environment
+  })
+  await runtime.finishWarmChatAdapter(key, requestKey)
+  return adapter
+}
+
+// Registration and request dispatch share this actual live adapter. Conversation
+// Home ownership stays with TypedInspectionProfileRuntime, not a second pool.
+export const bindProfileChatAdapter = async (state, adapter, { onExit = () => {}, onChange = () => {} } = {}) => {
+  if (state.disposed || adapter.closed) return null
+  const previous = state.appServerAdapter
+  if (previous === adapter) return adapter
+  if (previous && state.appServerExitListener) previous.off('exit', state.appServerExitListener)
+  state.appServerExitListener = null
+  if (state.appServerRestartTimer) clearTimeout(state.appServerRestartTimer)
+  state.appServerRestartTimer = null; state.appServerRestartAttempt = 0; state.appServerNotBefore = 0
+  state.appServerAdapter = adapter
+  state.chatAppServerSchema = adapter.readback?.schema
+  if (adapter.typedInspectionEngineState?.conversationKey) state.chatConversationKey = adapter.typedInspectionEngineState.conversationKey
+  const exitListener = () => {
+    if (state.appServerAdapter !== adapter || state.appServerExitListener !== exitListener) return
+    state.appServerAdapter = null; state.appServerExitListener = null
+    if (!state.disposed) { onChange(); onExit() }
+  }
+  state.appServerExitListener = exitListener
+  adapter.once('exit', exitListener)
+  // Unknown baseline turns are retained, never interrupted merely to save a process.
+  // Conversation engines are already owned/closed by their runtime lifecycle.
+  if (previous && !previous.typedInspectionEngineState?.conversationKey && !state.retainedChatAdapters?.has(previous))
+    await previous.shutdown({ timeoutMs: 1000 })
+  if (!state.disposed) onChange()
+  return adapter
+}
+
+export const unbindProfileChatAdapter = (state, adapter) => {
+  if (state.appServerAdapter !== adapter) return
+  if (state.appServerExitListener) adapter.off('exit', state.appServerExitListener)
+  state.appServerExitListener = null; state.appServerAdapter = null
+}
+
 export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) => {
   if (!state || state.disposed) return
   state.e05CommandAbort?.abort()
@@ -6214,7 +6359,7 @@ export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) =>
   state.appServerAdapter = null
   state.appServerStartingAdapter = null
   state.appServerPromise = null
-  for (const candidate of new Set([adapter, startingAdapter, ...(state.conversationToolAdapters || [])].filter(Boolean))) await candidate.shutdown({ timeoutMs })
+  for (const candidate of new Set([adapter, startingAdapter, ...(state.conversationToolAdapters || []), ...(state.retainedChatAdapters || [])].filter(Boolean))) await candidate.shutdown({ timeoutMs })
   // Async integrity work must settle before releasing this subject lifecycle.
   await pendingStart?.catch(() => {})
 }

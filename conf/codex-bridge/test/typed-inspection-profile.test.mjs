@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
+import { AppServerAdapter } from '../app-server-adapter.mjs'
 import { buildTypedInspectionCodexConfig, buildTypedInspectionNativeAttestation, loadTypedInspectionCarrierEvidence, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
 import { RestrictedProviderEgress } from '../typed-inspection-network.mjs'
 
@@ -281,3 +282,254 @@ for (const failureStage of ['start', 'spawn']) test(`failed inspection ${failure
     assert.throws(()=>TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime,binding,options),{code:'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT'})
   } finally {rmSync(root,{recursive:true,force:true})}
  })
+
+function conversationStateFixture(t) {
+  const root = mkdtempSync(resolve(tmpdir(), 'inspection-conversation-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const source = resolve(root, 'source'); mkdirSync(source, { mode: 0o700 })
+  writeFileSync(resolve(source, 'auth.json'), '{"synthetic":true}', { mode: 0o600 })
+  const runtime = Object.assign(Object.create(TypedInspectionProfileRuntime.prototype), {
+    stateRoot: root, profile: { codexHome: source }, activeAdapters: new Map(), conversationOwners: new Map()
+  })
+  const binding = suffix => ({ schemaVersion: 1, requestKey: `key-${suffix}`, authorizationId: `auth-${suffix}`,
+    manifestDigest: `manifest-${suffix}`, requestId: `request-${suffix}`, turnId: `turn-${suffix}`, inputPolicyDigest: 'policy' })
+  return { root, runtime, binding, conversationKey: canonicalSha256({ conversation: 'A' }) }
+}
+
+test('material request cleanup and restart cleanup preserve only the separately owned conversation history', async t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  const first = runtime._prepareRequestState(binding('1'), { conversationKey })
+  const history = resolve(first.codexHome, 'synthetic-history'); writeFileSync(history, 'prior turn')
+  let stopped = false, disposed = false
+  runtime.conversationOwners.set(conversationKey, 'key-1')
+  runtime.activeAdapters.set('key-1', { engineState: first, adapter: { shutdown: async () => { stopped = true } }, egress: { dispose: async () => { disposed = true } } })
+  await runtime.suspendAdapter('key-1')
+  assert.ok(stopped && disposed); assert.equal(runtime.conversationOwners.size, 0)
+  assert.ok(existsSync(first.directory)); assert.equal(readFileSync(history, 'utf8'), 'prior turn')
+  const second = runtime._prepareRequestState(binding('2'), { conversationKey })
+  assert.notEqual(first.directory, second.directory); assert.equal(first.codexHome, second.codexHome)
+  // A late ACK for the previous request must not remove the current conversation.
+  await runtime.releaseAdapter('key-1', { requestBinding: binding('1'), conversationKey })
+  assert.equal(existsSync(first.directory), false); assert.ok(existsSync(second.directory)); assert.ok(existsSync(history))
+  const restarted = Object.assign(Object.create(TypedInspectionProfileRuntime.prototype), {
+    stateRoot: runtime.stateRoot, profile: {}, activeAdapters: new Map()
+  })
+  await restarted.releaseAdapter('key-2', { requestBinding: binding('2'), conversationKey })
+  assert.equal(existsSync(second.directory), false); assert.ok(existsSync(history))
+})
+
+test('conversation recovery requires the original mapping and Home; it cannot recreate or redirect missing history', t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  const first = runtime._prepareRequestState(binding('1'), { conversationKey })
+  assert.throws(() => runtime._prepareRequestState(binding('1'), { conversationKey: canonicalSha256('other'), requireExistingState: true }), /BINDING_CONFLICT/)
+  assert.throws(() => runtime._prepareRequestState(binding('1')), /BINDING_CONFLICT/)
+  rmSync(first.conversationDirectory, { recursive: true })
+  assert.throws(() => runtime._prepareRequestState(binding('1'), { conversationKey, requireExistingState: true }), /RECOVERY_STATE_MISSING/)
+  assert.equal(existsSync(first.conversationDirectory), false)
+})
+
+test('different conversations never share Home and native execution cannot opt into conversation storage', t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  const first = runtime._prepareRequestState(binding('1'), { conversationKey })
+  const second = runtime._prepareRequestState(binding('2'), { conversationKey: canonicalSha256('B') })
+  assert.notEqual(first.codexHome, second.codexHome)
+  writeFileSync(resolve(first.codexHome, 'private-history'), 'A')
+  assert.equal(existsSync(resolve(second.codexHome, 'private-history')), false)
+  assert.throws(() => runtime._prepareRequestState(binding('3'), { nativeExecution: true, conversationKey }), /BINDING_INVALID/)
+})
+
+test('a conversation has one engine owner until both shutdown and egress cleanup finish', async t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  const first = runtime._prepareRequestState(binding('1'), { conversationKey })
+  let finishShutdown, finishEgress
+  runtime.conversationOwners.set(conversationKey, 'key-1')
+  runtime.activeAdapters.set('key-1', { engineState: first,
+    adapter: { shutdown: () => new Promise(resolve => { finishShutdown = resolve }) },
+    egress: { dispose: () => new Promise(resolve => { finishEgress = resolve }) } })
+  const closed = runtime.suspendAdapter('key-1')
+  await assert.rejects(runtime.openAdapter(runtime.stateRoot, 'key-2', binding('2'), { conversationKey }), /CONVERSATION_IN_USE/)
+  finishShutdown(); await new Promise(resolve => setImmediate(resolve))
+  await assert.rejects(runtime.openAdapter(runtime.stateRoot, 'key-2', binding('2'), { conversationKey }), /CONVERSATION_IN_USE/)
+  finishEgress(); await closed
+  assert.equal(runtime.conversationOwners.has(conversationKey), false)
+})
+
+test('production inspection mount builder exposes only the selected conversation Home, not the shared state root', async t => {
+  const { runtime, binding, conversationKey, root } = conversationStateFixture(t)
+  const state = runtime._prepareRequestState(binding('1'), { conversationKey })
+  const input = resolve(root, 'inputs'); mkdirSync(input, { mode: 0o700 }); runtime.materializerRoot = input
+  const launcher = resolve(root, 'synthetic-launcher'); const bytes = Buffer.from('synthetic launcher; never executed')
+  writeFileSync(launcher, bytes, { mode: 0o700 })
+  const stat = statSync(launcher, { bigint: true })
+  runtime.bwrap = { path: launcher, dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size), sha256: evidenceDigest(bytes) }
+  let args
+  runtime.spawnFn = (_binary, actualArgs) => { args = actualArgs; return {} }
+  const original = AppServerAdapter.spawnAsync
+  AppServerAdapter.spawnAsync = async (_profile, options) => { options.spawnFn('unused', ['app-server'], {}); return {} }
+  try {
+    const adapter = await runtime._spawnAdapter({ inputDirectory: input, engineState: state,
+      schemaMeasurement: { snapshotPath: resolve(root, 'snapshot', 'bin', 'codex') } })
+    const bind = args.indexOf('--bind')
+    assert.deepEqual(args.slice(bind, bind + 3), ['--bind', state.conversationDirectory, state.conversationDirectory])
+    assert.equal(args.includes(state.directory), false)
+    assert.equal(args.includes(runtime.stateRoot), false)
+    assert.equal(args.includes(runtime.profile.codexHome), false)
+    assert.equal(adapter.typedInspectionEngineState, state)
+    assert.equal(args.includes('/state'), false, 'do not add a second alias for indexed native history')
+    const env = name => args[args.indexOf(name) + 1]
+    assert.equal(env('CODEX_HOME'), state.codexHome)
+    assert.equal(env('HOME'), resolve(state.conversationDirectory, 'home'))
+    assert.equal(args[args.indexOf('--chdir') + 1], state.chatWorkdir)
+    assert.equal(state.chatWorkdir, resolve(state.conversationDirectory, 'chat'))
+    assert.equal(existsSync(state.chatWorkdir), true)
+  } finally { AppServerAdapter.spawnAsync = original }
+})
+
+test('disposing during inspection startup joins preparation and never leaves a conversation engine owner', async t => {
+  const { runtime, binding, conversationKey, root } = conversationStateFixture(t)
+  let finishMeasurement
+  runtime.measure = () => new Promise(resolve => { finishMeasurement = resolve })
+  const opening = runtime.openAdapter(root, 'key-1', binding('1'), { conversationKey })
+  const rejected = assert.rejects(opening, /PROFILE_DISPOSED/)
+  const disposed = runtime.dispose()
+  finishMeasurement({ contractReady: true })
+  await rejected; await disposed
+  assert.equal(runtime.conversationOwners.size, 0); assert.equal(runtime.pendingInspectionAdapters.size, 0)
+  assert.equal(existsSync(resolve(root, 'requests')), false)
+})
+
+test('failed material adapter startup removes staged credentials but preserves previous conversation history', async t => {
+  const { runtime, binding, conversationKey, root } = conversationStateFixture(t)
+  const original = runtime._prepareRequestState(binding('1'), { conversationKey })
+  const history = resolve(original.codexHome, 'synthetic-history'); writeFileSync(history, 'completed earlier turn')
+  runtime.profile.typedInspectionProviderNetwork = 'restricted-proxy'
+  runtime.measure = async () => ({ contractReady: true })
+  runtime.egressFactory = () => ({ start: async () => { throw new Error('SYNTHETIC_START_FAILURE') }, dispose: async () => {} })
+  await assert.rejects(runtime.openAdapter(root, 'key-2', binding('2'), { conversationKey }), /SYNTHETIC_START_FAILURE/)
+  assert.equal(readFileSync(history, 'utf8'), 'completed earlier turn')
+  assert.equal(existsSync(resolve(original.codexHome, 'auth.json')), false)
+  assert.equal(existsSync(resolve(root, 'requests', canonicalSha256(binding('2')).slice(7))), false)
+  assert.equal(runtime.conversationOwners.size, 0)
+})
+
+test('read-only startup measurement uses the same canonical-path layout as conversation execution', t => {
+  const { runtime } = conversationStateFixture(t)
+  const state = runtime._prepareEphemeralState('canonical-layout')
+  assert.equal(state.sandboxStatePath, state.directory)
+  assert.equal(state.codexHome, resolve(state.sandboxStatePath, 'codex-home'))
+  assert.equal(state.chatWorkdir, resolve(state.sandboxStatePath, 'chat'))
+  assert.equal(existsSync(state.chatWorkdir), true)
+  assert.equal(existsSync(state.authPath), true)
+})
+
+function warmConversationFixture(t) {
+  const fixture = conversationStateFixture(t), { runtime } = fixture
+  const spawned = [], closed = [], environments = []
+  runtime.measure = () => { throw new Error('ordinary CHAT must not wait for material readiness') }
+  const original = AppServerAdapter.spawnAsync
+  AppServerAdapter.spawnAsync = async (profile, options) => {
+    options.spawnFn('synthetic-unused', [], { env: { CODEX_HOME: profile.codexHome } })
+    const adapter = { closed: false, readback: { tools: { data: [] }, processExecutable: { pid: process.pid } },
+      verifySpawnedExecutable: async () => {}, initialize: async () => {},
+      shutdown: async () => { adapter.closed = true; closed.push(adapter) } }
+    spawned.push(adapter); return adapter
+  }
+  t.after(async () => { await runtime.dispose(); AppServerAdapter.spawnAsync = original })
+  const options = { environment: { TEST_RUNTIME_IDENTITY: 'synthetic', CODEX_HOME: '/wrong-profile-home' },
+    spawnFn: (_binary, _args, options) => { environments.push(options.env) } }
+  return { ...fixture, spawned, closed, environments, options }
+}
+
+test('ordinary CHAT keeps one idle warm engine, seals auth and retains conversation history on switching', async t => {
+  const { runtime, conversationKey, spawned, closed, environments, options } = warmConversationFixture(t)
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'request-1', options)
+  const state = first.typedInspectionEngineState
+  assert.equal(environments[0].CODEX_HOME, state.codexHome)
+  assert.equal(environments[0].HOME, resolve(state.directory, 'home'))
+  assert.equal(environments[0].TEST_RUNTIME_IDENTITY, 'synthetic')
+  assert.equal(existsSync(state.authPath), false)
+  writeFileSync(resolve(state.codexHome, 'history'), 'retained')
+  await runtime.finishWarmChatAdapter(conversationKey, 'request-1')
+  assert.equal(await runtime.openWarmChatAdapter(conversationKey, 'request-2', options), first)
+  assert.equal(spawned.length, 1); assert.equal(existsSync(state.authPath), false)
+  await runtime.finishWarmChatAdapter(conversationKey, 'request-2')
+  const nextKey = canonicalSha256('other-conversation')
+  const second = await runtime.openWarmChatAdapter(nextKey, 'request-3', options)
+  assert.equal(closed.includes(first), true)
+  assert.equal(runtime.warmChatAdapters.size, 1)
+  assert.notEqual(second.typedInspectionEngineState.codexHome, state.codexHome)
+  assert.equal(readFileSync(resolve(state.codexHome, 'history'), 'utf8'), 'retained')
+})
+
+test('unknown ordinary turn is neither interrupted nor rebound, but does not block a different conversation', async t => {
+  const { runtime, conversationKey, options, closed, binding, root } = warmConversationFixture(t)
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'uncertain-request', options)
+  await assert.rejects(runtime.openWarmChatAdapter(conversationKey, 'new-request', options), /CONVERSATION_IN_USE/)
+  await assert.rejects(runtime.openAdapter(root, 'key-2', binding('2'), { conversationKey }), /CONVERSATION_IN_USE/)
+  await runtime.openWarmChatAdapter(canonicalSha256('different'), 'other-request', options)
+  assert.equal(closed.includes(first), false)
+  assert.equal(await runtime.finishWarmChatAdapter(conversationKey, 'late-other-request'), false)
+  assert.equal(runtime.warmChatAdapters.get(conversationKey).idle, false)
+  assert.equal(await runtime.openWarmChatAdapter(conversationKey, 'uncertain-request', { ...options, requireExistingState: true }), first)
+})
+
+test('ordinary recovery cannot recreate a missing Home or leave credentials after a failed startup', async t => {
+  const { runtime, conversationKey, options, spawned } = warmConversationFixture(t)
+  await assert.rejects(runtime.openWarmChatAdapter(conversationKey, 'recover', { ...options, requireExistingState: true }), /RECOVERY_STATE_MISSING/)
+  assert.equal(spawned.length, 0); assert.equal(runtime.conversationOwners.size, 0)
+  const original = AppServerAdapter.spawnAsync
+  AppServerAdapter.spawnAsync = async (...args) => { const adapter = await original(...args); adapter.initialize = async () => { throw new Error('synthetic-init-failure') }; return adapter }
+  await assert.rejects(runtime.openWarmChatAdapter(conversationKey, 'new', options), /synthetic-init-failure/)
+  assert.equal(existsSync(resolve(runtime._conversationDirectory(conversationKey), 'codex-home', 'auth.json')), false)
+  assert.equal(runtime.conversationOwners.size, 0); assert.equal(runtime.warmChatAdapters.size, 0)
+})
+
+test('warm CHAT does not silently change an existing provider route or credential mechanism', t => {
+  const { runtime } = conversationStateFixture(t)
+  Object.assign(runtime.profile, { typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'synthetic', typedInspectionProviderBaseUrl: 'https://provider.example/v1' })
+  const readback = { config: { config: { model_provider: 'synthetic', model_providers: { synthetic: {
+    base_url: 'https://provider.example/v1/', wire_api: 'responses', requires_openai_auth: true } } } } }
+  assert.equal(runtime.canShareChatProvider(readback), true)
+  const emptyMaps = structuredClone(readback)
+  Object.assign(emptyMaps.config.config.model_providers.synthetic, { http_headers: {}, env_http_headers: {}, query_params: {} })
+  assert.equal(runtime.canShareChatProvider(emptyMaps), true)
+  emptyMaps.config.config.model_providers.synthetic.http_headers.Authorization = 'synthetic-only'
+  assert.equal(runtime.canShareChatProvider(emptyMaps), false)
+  const other = structuredClone(readback); other.config.config.model_providers.synthetic.base_url = 'https://other.example/v1'
+  assert.equal(runtime.canShareChatProvider(other), false)
+  other.config.config.model_providers.synthetic = { ...readback.config.config.model_providers.synthetic, env_key: 'OTHER_AUTH' }
+  assert.equal(runtime.canShareChatProvider(other), false)
+  assert.equal(runtime.canShareChatProvider({}), false)
+})
+
+test('concurrent recovered turns retain only one idle warm engine', async t => {
+  const { runtime, conversationKey, options, closed } = warmConversationFixture(t)
+  const otherKey = canonicalSha256('concurrent-recovery')
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'first', options)
+  const second = await runtime.openWarmChatAdapter(otherKey, 'second', options)
+  await Promise.all([runtime.finishWarmChatAdapter(conversationKey, 'first'), runtime.finishWarmChatAdapter(otherKey, 'second')])
+  assert.equal(runtime.warmChatAdapters.size, 1)
+  assert.equal(runtime.idleWarmChatKey, otherKey)
+  assert.equal(closed.includes(first), true)
+  assert.equal(closed.includes(second), false)
+})
+
+test('warm Home handoff waits for shutdown and refuses acquisition after disposal', async t => {
+  const { runtime, conversationKey, options, spawned } = warmConversationFixture(t)
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'first', options)
+  await runtime.finishWarmChatAdapter(conversationKey, 'first')
+  let finishShutdown
+  const shutdown = first.shutdown
+  first.shutdown = () => new Promise(resolve => { finishShutdown = async () => { await shutdown(); resolve() } })
+  const closing = runtime._closeWarmChat(conversationKey)
+  const reopening = runtime.openWarmChatAdapter(conversationKey, 'next', options)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(spawned.length, 1)
+  const disposed = runtime.dispose()
+  // dispose joins the same shutdown; the adapter must not be shut down twice.
+  await finishShutdown()
+  await closing
+  await assert.rejects(reopening, /PROFILE_DISPOSED/)
+  await disposed
+  assert.equal(spawned.length, 1)
+})

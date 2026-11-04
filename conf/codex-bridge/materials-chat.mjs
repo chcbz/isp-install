@@ -1,7 +1,8 @@
 import { prepareImageDerivative } from './image-input-file.mjs'
 /** Authorized materials in the original CHAT turn. Reuses the existing byte
  * materializer, measured carrier isolation and durable CHAT inbox; no new lane. */
-import { canonicalSha256 } from './chat-runtime.mjs'
+import { buildTypedInspectionCodexConfig } from './typed-inspection-profile.mjs'
+import { canonicalSha256, chatTaskAuthorityDigest } from './chat-runtime.mjs'
 import { buildTypedInspectionNativeInputs, finalizeTypedInspectionInputReceipt } from './typed-inspection-input-carriers.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -48,6 +49,16 @@ export function resolveChatMaterials(profile, message) {
   if (canonicalSha256({ domain: 'juyiting.materials-input', binding, manifest }) !== value.manifestDigest
       || value.authorizationId !== `materials_${value.manifestDigest.slice(7, 47)}`) fail('MATERIALS_MANIFEST_DIGEST_MISMATCH')
   return freeze(structuredClone(value))
+}
+// Persistent memory follows the authorized conversation, not one attachment manifest.
+// Request/turn/manifest binding remains separate in the durable preparation receipt.
+export function chatConversationKey(profile, message) {
+  return canonicalSha256({ domain: 'juyiting.chat-conversation-v1',
+    tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn,
+    profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId,
+    conversationGeneration: String(message.conversationGeneration), taskAuthorityDigest: chatTaskAuthorityDigest(message),
+    policy: buildTypedInspectionCodexConfig(profile), model: profile.chatModel || profile.codexModel || 'default',
+    effort: profile.chatReasoningEffort || '' })
 }
 export function materialsEngineBinding(message, materials, profileRuntime) {
   return { schemaVersion: 1, requestKey: message.dedupeKey || message.messageId, authorizationId: materials.authorizationId,
