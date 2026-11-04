@@ -54,3 +54,27 @@ test('owned local probe can await completion without a deadline and still reject
   await rejected
   assert.equal(adapter.pending.size, 0)
 })
+
+test('sandbox initialize response precedes one executable check; business readbacks wait for verification', async () => {
+  const child = childWith(new PassThrough()); child.sandboxStartup = Promise.resolve({ pid: 123, netNamespaceIno: '456' })
+  const order = []
+  const adapter = new AppServerAdapter({ child, schemaMeasurement: { measured: true },
+    spawnedExecutableVerifier: async (_child, _measurement, options) => { assert.equal(options.protocolReady, true); order.push('verify'); return { measured: true, pid: 124 } },
+    send: frame => { order.push(frame.method); if (frame.id) queueMicrotask(() => child.stdout.write(JSON.stringify({ id: frame.id, result: {} }) + '\n')) }
+  })
+  try {
+    await adapter.initialize()
+    assert.deepEqual(order, ['initialize', 'verify', 'initialized', 'account/read', 'model/list', 'config/read', 'mcpServerStatus/list'])
+  } finally { adapter.close() }
+})
+
+test('failed sandbox executable readback cannot admit account/config/tool discovery', async () => {
+  const child = childWith(new PassThrough()); child.sandboxStartup = Promise.resolve({ pid: 123, netNamespaceIno: '456' })
+  const order = []
+  const adapter = new AppServerAdapter({ child, schemaMeasurement: { measured: true },
+    spawnedExecutableVerifier: async () => { throw new Error('synthetic-executable-mismatch') },
+    send: frame => { order.push(frame.method); if (frame.id) queueMicrotask(() => child.stdout.write(JSON.stringify({ id: frame.id, result: {} }) + '\n')) }
+  })
+  try { await assert.rejects(adapter.initialize(), /synthetic-executable-mismatch/); assert.deepEqual(order, ['initialize']) }
+  finally { adapter.close() }
+})

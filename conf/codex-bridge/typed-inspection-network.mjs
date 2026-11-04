@@ -1,3 +1,4 @@
+import { waitForSandboxStartup } from './sandbox-startup.mjs'
 import { spawn } from 'node:child_process'
 import { inspectExecutable, fileStamp } from './executable-integrity.mjs'
 import { createHash } from 'node:crypto'
@@ -34,13 +35,6 @@ const positiveInteger = value => Number.isSafeInteger(value) && value > 0
 const cancelled = signal => {
   if (signal?.aborted) fail('TYPED_INSPECTION_EGRESS_CANCELLED')
 }
-const poll = signal => new Promise((resolve, reject) => {
-  if (signal?.aborted) { const error = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); error.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; reject(error); return }
-  const timer = setTimeout(done, 10)
-  const aborted = () => { clearTimeout(timer); signal.removeEventListener('abort', aborted); const error = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); error.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; reject(error) }
-  function done() { signal?.removeEventListener('abort', aborted); resolve() }
-  signal?.addEventListener('abort', aborted, { once: true })
-})
 
 export const buildProviderTlsProbe = ({ timeoutSeconds, proxyPort, authority, host, caPath }) => String.raw`import socket,ssl,sys,json,hashlib
 t=${JSON.stringify(timeoutSeconds)};proxy=('10.0.2.2',${proxyPort});authority=${JSON.stringify(authority)};host=${JSON.stringify(host)};ca=${JSON.stringify(caPath)}
@@ -188,40 +182,29 @@ export class RestrictedProviderEgress {
     this.spawnFn = spawnFn; this.processInspector = processInspector; this.server = null; this.canaryServer = null; this.slirp = null; this.port = 0; this.canaryPort = 0; this.attestation = null; this.owner = null; this.hostCanary = null
     this.lifecycle = new AbortController()
   }
-  async bindOwner(child, expectedWrapperExecutable, expectedSandboxExecutable, { signal = this.lifecycle.signal } = {}) {
+  async bindOwner(child, expectedWrapperExecutable, { signal = this.lifecycle.signal } = {}) {
     const began = performance.now(), phases = {}, counts = { rounds: 0, pids: 0, descendants: 0 }; let ready = false
     const sync = (phase, fn) => { const at = performance.now(); try { return fn() } finally { phases[phase] = (phases[phase] || 0) + performance.now() - at } }
     const asyncPhase = async (phase, fn) => { const at = performance.now(); try { return await fn() } finally { phases[phase] = (phases[phase] || 0) + performance.now() - at } }
     try {
-      if (this.owner || !child || !Number.isInteger(child.pid) || child.pid <= 0 || !expectedWrapperExecutable?.sha256 || !expectedSandboxExecutable?.sha256) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+      if (this.owner || !child || !Number.isInteger(child.pid) || child.pid <= 0 || !expectedWrapperExecutable?.sha256) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
       cancelled(signal)
       const inspector = this.processInspector; const currentPid = inspector.currentPid(); const rootPid = child.pid; const hostNamespace = inspector.namespace(currentPid)
       const rootStat = inspector.stat(rootPid); const rootExecutable = await asyncPhase('rootExecutableMs', () => inspector.executable(rootPid))
       if (rootStat.ppid !== currentPid || child.exitCode !== null || !sameExecutable(rootExecutable, expectedWrapperExecutable)) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
-      let holder = null
-      while (!holder) {
-        cancelled(signal)
-        if (child.exitCode !== null) fail('TYPED_INSPECTION_EGRESS_OWNER_LOST')
-        counts.rounds++
-        const candidates = []
-        for (const pid of sync('pidScanMs', () => inspector.pids())) {
-          counts.pids++
-          if (pid === rootPid || !sync('ancestryMs', () => inspector.descendantOf(pid, rootPid))) continue
-          counts.descendants++
-          try {
-            const executable = await asyncPhase('candidateExecutableMs', () => inspector.executable(pid))
-            if (!sameExecutable(executable, expectedSandboxExecutable)) continue
-            const namespace = inspector.namespace(pid); const stat = inspector.stat(pid)
-            if (sameNamespace(namespace, hostNamespace)) fail('TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED')
-            candidates.push({ pid, startticks: stat.startticks, namespace, executable })
-          } catch (error) {
-            if (['TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED'].includes(error?.code)) throw error
-          }
-        }
-        if (candidates.length > 1) fail('TYPED_INSPECTION_EGRESS_OWNER_AMBIGUOUS')
-        holder = candidates[0] || null
-        if (!holder) await asyncPhase('pollWaitMs', () => poll(signal))
-      }
+      // bwrap reports its stable PID-namespace reaper. Bind the namespace owner,
+      // not an app executable which may not have reached exec/initialize yet.
+      const startup = await asyncPhase('startupInfoMs', () => waitForSandboxStartup(child, signal))
+      cancelled(signal)
+      const pid = startup.pid
+      if (child.exitCode !== null || pid === rootPid || !sync('ancestryMs', () => inspector.descendantOf(pid, rootPid))) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+      const stat = inspector.stat(pid); const namespace = inspector.namespace(pid)
+      if (sameNamespace(namespace, hostNamespace)) fail('TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED')
+      if (namespace.ino !== startup.netNamespaceIno) fail('TYPED_INSPECTION_EGRESS_OWNER_DRIFT')
+      const executable = await asyncPhase('holderExecutableMs', () => inspector.executable(pid))
+      if (!sameExecutable(executable, expectedWrapperExecutable)) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+      const holder = { pid, startticks: stat.startticks, namespace, executable }
+      counts.descendants = 1
       this.owner = Object.freeze({ child, rootPid, rootStartticks: rootStat.startticks, rootPpid: rootStat.ppid, rootExecutable: Object.freeze({ ...rootExecutable }), hostNamespace: Object.freeze({ ...hostNamespace }), holder: Object.freeze({ ...holder, namespace: Object.freeze({ ...holder.namespace }), executable: Object.freeze({ ...holder.executable }) }) })
       await asyncPhase('finalOwnerCheckMs', () => this._assertOwner())
       ready = true

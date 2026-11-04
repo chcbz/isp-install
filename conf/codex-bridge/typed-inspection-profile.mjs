@@ -1,3 +1,4 @@
+import { observeSandboxStartup } from './sandbox-startup.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE, initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -476,7 +477,7 @@ export class TypedInspectionProfileRuntime {
           if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
           adapter = await this._spawnAdapter({ inputDirectory: emptyInputs, engineState,
             schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
-          await egress.bindOwner(adapter.child, this.bwrap, this.nativeReadback.schema.snapshotIdentity)
+          await egress.bindOwner(adapter.child, this.bwrap)
           await egress.attach(); await this._initializeAndSeal(adapter)
         } else {
           adapter = await AppServerAdapter.spawnAsync({ ...this.profile, codexHome: engineState.codexHome }, {
@@ -562,7 +563,7 @@ export class TypedInspectionProfileRuntime {
         const current = prepareNativeExecutionLayout({ ...nativeView.layout, nativeExecution, toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
         if (current.digest !== nativeView.layout.digest) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
       }
-      return this.spawnFn(this.bwrap.path, [...args, ...commandArgs], { ...options, cwd: '/', env: { LANG: 'C.UTF-8' } }) }
+      return observeSandboxStartup(this.spawnFn(this.bwrap.path, ['--info-fd', '3', ...args, ...commandArgs], { ...options, stdio: ['pipe', 'pipe', 'pipe', 'pipe'], cwd: '/', env: { LANG: 'C.UTF-8' } })) }
     const adapter = await AppServerAdapter.spawnAsync(this.profile, { cwd: nativeView ? '/execution' : engineState.chatWorkdir || '/inputs', nativeExecution, schemaMeasurement, spawnFn: spawnWrapped, shouldSpawn: () => !this.disposed, spawnedExecutableVerifier: verifySpawnedAppServerExecutableTree })
     adapter.chatFileTools = !nativeView && usesChatFiles(this.profile)
     adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
@@ -608,7 +609,7 @@ export class TypedInspectionProfileRuntime {
         try {
           await egress.start()
           executionAdapter = await this._spawnAdapter({ inputDirectory: probeDirectory, engineState: executionState, schemaMeasurement, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
-          await egress.bindOwner(executionAdapter.child, this.bwrap, schemaMeasurement.snapshotIdentity); executionNetworkAttestation = await egress.attach()
+          await egress.bindOwner(executionAdapter.child, this.bwrap); executionNetworkAttestation = await egress.attach()
           executionReadback = await this._initializeAndSeal(executionAdapter)
           const providerTls = await egress.measureAllowedTls(executionReadback.providerCaTrust)
           executionNetworkAttestation = Object.freeze({ ...executionNetworkAttestation, providerTls })
@@ -683,7 +684,7 @@ export class TypedInspectionProfileRuntime {
     try {
       await egress.start(); checkActive()
       adapter = await this._spawnAdapter({ inputDirectory, engineState, schemaMeasurement: this.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
-      checkActive(); await egress.bindOwner(adapter.child, this.bwrap, this.nativeReadback.schema.snapshotIdentity); await egress.attach(); checkActive(); await this._initializeAndSeal(adapter); checkActive()
+      checkActive(); await egress.bindOwner(adapter.child, this.bwrap); await egress.attach(); checkActive(); await this._initializeAndSeal(adapter); checkActive()
       if (!emptyMcpCatalog(adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
       this.suspendedNativeStates?.delete(requestKey)
       this.activeAdapters.set(requestKey, { adapter, egress, engineState, inputDirectory: realpathSync(inputDirectory) })
@@ -767,7 +768,7 @@ export class TypedInspectionProfileRuntime {
       adapter = await this._spawnAdapter({ inputDirectory: layout.inputDirectory, engineState, schemaMeasurement: schema,
         networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl,
         nativeView: { layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory }, nativeExecution: { ...nativeExecution, checkActive } })
-      checkActive(); phase('egress-bind'); await egress.bindOwner(adapter.child, this.bwrap, schema.snapshotIdentity)
+      checkActive(); phase('egress-bind'); await egress.bindOwner(adapter.child, this.bwrap)
       phase('egress-attach')
       const network = await egress.attach(); checkActive()
       phase('initialize-and-seal')

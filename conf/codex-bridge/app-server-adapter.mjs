@@ -1,3 +1,4 @@
+import { waitForSandboxStartup } from './sandbox-startup.mjs'
 import { CHAT_FILE_PERMISSION_PROFILE, NATIVE_PERMISSION_PROFILE } from './native-execution-profile.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -257,7 +258,7 @@ const processTree = (rootPid, maxDepth = 4) => {
   const result = []; const queue = [{ pid: rootPid, depth: 0 }]; const seen = new Set()
   while (queue.length) {
     const item = queue.shift(); if (seen.has(item.pid)) continue; seen.add(item.pid); result.push(item)
-    if (item.depth < maxDepth) for (const pid of processChildren(item.pid)) queue.push({ pid, depth: item.depth + 1 })
+    if (item.depth < maxDepth) for (const pid of processChildren(item.pid)) queue.push({ pid, depth: item.depth })
   }
   return result
 }
@@ -271,19 +272,24 @@ const matchingSpawnedExecutable = async (pid, measurement) => {
   } catch { return null }
 }
 
-export async function verifySpawnedAppServerExecutableTree(child, measurement, { signal = null, maxDepth = 4 } = {}) {
+export async function verifySpawnedAppServerExecutableTree(child, measurement, { signal = null, maxDepth = 4, protocolReady = false } = {}) {
   const reject = message => {
     try { if (child?.exitCode === null && !child?.killed) child.kill('SIGKILL') } catch {}
     throw failTrust(message)
   }
   if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || !measurement?.snapshotIdentity || !id(measurement.snapshotPath)) return reject('CODEX_APP_SERVER_CHILD_IDENTITY_REQUIRED')
-  while (child.exitCode === null && !signal?.aborted) {
-    for (const item of processTree(child.pid, maxDepth)) {
+  if (!protocolReady) return reject('CODEX_APP_SERVER_PROTOCOL_NOT_READY')
+  const startup = await waitForSandboxStartup(child, signal)
+  const matches = []
+  if (child.exitCode === null && !signal?.aborted) {
+    const tree = processTree(child.pid, maxDepth)
+    if (!tree.some(item => item.pid === startup.pid)) return reject('CODEX_APP_SERVER_CHILD_EXECUTABLE_MISMATCH')
+    for (const item of tree) {
       const matched = await matchingSpawnedExecutable(item.pid, measurement)
-      if (matched && child.exitCode === null && !signal?.aborted) return { ...matched, wrapperPid: child.pid, depth: item.depth }
+      if (matched) matches.push({ ...matched, wrapperPid: child.pid, depth: item.depth })
     }
-    await new Promise(resolveWait => setTimeout(resolveWait, 10))
   }
+  if (matches.length === 1 && child.exitCode === null && !signal?.aborted) return matches[0]
   return reject(signal?.aborted ? 'CODEX_APP_SERVER_CHILD_IDENTITY_CANCELLED' : 'CODEX_APP_SERVER_CHILD_EXECUTABLE_MISMATCH')
 }
 
@@ -422,7 +428,7 @@ export class AppServerAdapter extends EventEmitter {
     return new AppServerAdapter({ child, requestTimeoutMs, schemaMeasurement, spawnedExecutableVerifier, nativeExecution, conversationTools })
   }
   async verifySpawnedExecutable(options = {}) {
-    const probe = await this.spawnedExecutableVerifier(this.child, this.readback.schema, options)
+    const probe = await this.spawnedExecutableVerifier(this.child, this.readback.schema, { ...options, protocolReady: Boolean(this.readback.initialize) })
     this.readback.processExecutable = probe; return probe
   }
   constructor({ child, send = null, now = Date.now, requestTimeoutMs = 15000, maxStderrBytes = 1024 * 1024, schemaMeasurement = null, spawnedExecutableVerifier = verifySpawnedAppServerExecutable, nativeExecution = null, conversationTools = null } = {}) {
@@ -473,8 +479,13 @@ export class AppServerAdapter extends EventEmitter {
       finally { timings.push({ phase, completed, durationMs: performance.now() - started }) }
     }
     try {
-      if (this.readback.schema?.measured === true && !this.readback.processExecutable) await measured('executable-readback', () => this.verifySpawnedExecutable())
+      const sandboxed = Boolean(this.child.sandboxStartup)
+      if (sandboxed) await measured('sandbox-info', () => waitForSandboxStartup(this.child))
+      if (!sandboxed && this.readback.schema?.measured === true && !this.readback.processExecutable) await measured('executable-readback', () => this.verifySpawnedExecutable())
       this.readback.initialize = await measured('initialize', () => this.request('initialize', { clientInfo: { name: 'cyf-juyiting-runtime', version: '2' }, ...(this.toolBinding || this.chatFileTools ? { capabilities: { experimentalApi: true } } : {}) }))
+      // Only the non-business initialize exchange precedes executable readback.
+      // No account/config/tool requests or turns are admitted before verification.
+      if (sandboxed && this.readback.schema?.measured === true && !this.readback.processExecutable) await measured('executable-readback', () => this.verifySpawnedExecutable())
       this.notify('initialized', {})
       this.readback.account = await measured('account/read', () => this.request('account/read', { refreshToken: false }))
       this.readback.models = await measured('model/list', () => this.request('model/list', {}))

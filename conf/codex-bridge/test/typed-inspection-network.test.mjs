@@ -20,7 +20,7 @@ const inspector = ({ wrapperStart = '30', holderStart = '31', holderNamespace = 
     [203, { ppid: 200, startticks: '33' }],
     [999, { ppid: 1, startticks: '99' }]
   ])
-  const executables = new Map([[200, wrapperExecutable], [201, measuredSandboxExecutable], [202, helperExecutable], [203, measuredSandboxExecutable], [999, helperExecutable]])
+  const executables = new Map([[200, wrapperExecutable], [201, wrapperExecutable], [202, helperExecutable], [203, measuredSandboxExecutable], [999, helperExecutable]])
   const namespaces = new Map([[100, hostNs], [200, hostNs], [201, holderNamespace], [202, holderNamespace], [203, privateNs], [999, privateNs]])
   const descendants = new Set([200, 201, 202, ...(duplicateHolder ? [203] : [])])
   return {
@@ -39,7 +39,7 @@ const egressFor = processInspector => new RestrictedProviderEgress({
   providerBaseUrl: 'https://provider.example', networkConnectTimeoutMs: 250, processInspector,
   spawnFn: () => { throw new Error('network command must not start during owner guard tests') }
 })
-const child = () => ({ pid: 200, exitCode: null })
+const child = (info = { pid: 201, netNamespaceIno: '20' }) => ({ pid: 200, exitCode: null, sandboxStartup: Promise.resolve(info) })
 
 test('generated provider TLS probe preserves escaped CRLF and parses as Python before any network execution', () => {
   const probe = buildProviderTlsProbe({ timeoutSeconds: 15, proxyPort: 43210, authority: 'provider.example:443', host: 'provider.example', caPath: '/proc/123/root/trust/ca-bundle.pem' })
@@ -76,21 +76,21 @@ test('nft readback requires default-drop chains and only loopback, established t
 
 test('network owner binds a direct bwrap child in the host namespace to one immutable private descendant holder', async () => {
   const processInspector = inspector(); const egress = egressFor(processInspector)
-  const bound = await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  const bound = await egress.bindOwner(child(), wrapperExecutable)
   assert.deepEqual(bound, { rootPid: 200, rootStartticks: '30', pid: 201, startticks: '31', namespace: privateNs })
 })
 
-test('network owner rejects a sandbox executable still in the host namespace and ambiguous or foreign private holders before network commands', async () => {
-  await assert.rejects(() => egressFor(inspector({ holderNamespace: hostNs })).bindOwner(child(), wrapperExecutable, sandboxExecutable), error => error.code === 'TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED')
-  await assert.rejects(() => egressFor(inspector({ duplicateHolder: true })).bindOwner(child(), wrapperExecutable, sandboxExecutable), error => error.code === 'TYPED_INSPECTION_EGRESS_OWNER_AMBIGUOUS')
-  await assert.rejects(() => egressFor(inspector({ foreign: true })).bindOwner(child(), wrapperExecutable, sandboxExecutable), error => error.code === 'TYPED_INSPECTION_EGRESS_NAMESPACE_FOREIGN_PROCESS')
+test('network owner rejects a namespace holder still in the host namespace, a forged PID or foreign namespace members before network commands', async () => {
+  await assert.rejects(() => egressFor(inspector({ holderNamespace: hostNs })).bindOwner(child(), wrapperExecutable), error => error.code === 'TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED')
+  await assert.rejects(() => egressFor(inspector()).bindOwner(child({ pid: 999, netNamespaceIno: '20' }), wrapperExecutable), error => error.code === 'TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+  await assert.rejects(() => egressFor(inspector({ foreign: true })).bindOwner(child(), wrapperExecutable), error => error.code === 'TYPED_INSPECTION_EGRESS_NAMESPACE_FOREIGN_PROCESS')
 })
 
 test('owner bind emits one aggregate on success and failure without changing rejection', async t => {
   const events = []
   t.mock.method(console, 'info', line => events.push(JSON.parse(line)))
-  await egressFor(inspector()).bindOwner(child(), wrapperExecutable, sandboxExecutable)
-  await assert.rejects(() => egressFor(inspector({ foreign: true })).bindOwner(child(), wrapperExecutable, sandboxExecutable),
+  await egressFor(inspector()).bindOwner(child(), wrapperExecutable)
+  await assert.rejects(() => egressFor(inspector({ foreign: true })).bindOwner(child(), wrapperExecutable),
     error => error.code === 'TYPED_INSPECTION_EGRESS_NAMESPACE_FOREIGN_PROCESS')
   assert.equal(events.length, 2)
   assert.deepEqual(events.map(event => event.ready), [true, false])
@@ -98,9 +98,10 @@ test('owner bind emits one aggregate on success and failure without changing rej
     assert.equal(event.event, 'egress-owner-bind-timing')
     assert.ok(Number.isFinite(event.durationMs) && event.durationMs >= 0)
     assert.ok(Number.isFinite(event.atMs))
-    assert.equal(event.counts.rounds, 1)
-    assert.equal(event.counts.descendants, 2)
-    for (const phase of ['rootExecutableMs', 'pidScanMs', 'ancestryMs', 'candidateExecutableMs', 'finalOwnerCheckMs']) {
+    assert.equal(event.counts.rounds, 0)
+    assert.equal(event.counts.pids, 0)
+    assert.equal(event.counts.descendants, 1)
+    for (const phase of ['rootExecutableMs', 'startupInfoMs', 'ancestryMs', 'holderExecutableMs', 'finalOwnerCheckMs']) {
       assert.ok(Number.isFinite(event.phases[phase]) && event.phases[phase] >= 0, phase)
     }
     assert.equal(JSON.stringify(event).includes('provider.example'), false)
@@ -110,13 +111,13 @@ test('owner bind emits one aggregate on success and failure without changing rej
 test('network owner cancellation replaces an arbitrary bind deadline when no sandbox holder has appeared', async () => {
   const processInspector = inspector(); processInspector.executables.set(201, helperExecutable)
   const controller = new AbortController(); controller.abort()
-  await assert.rejects(() => egressFor(processInspector).bindOwner(child(), wrapperExecutable, sandboxExecutable, { signal: controller.signal }), error => error.code === 'TYPED_INSPECTION_EGRESS_CANCELLED')
+  await assert.rejects(() => egressFor(processInspector).bindOwner(child(), wrapperExecutable, { signal: controller.signal }), error => error.code === 'TYPED_INSPECTION_EGRESS_CANCELLED')
 })
 
 test('root and holder startticks plus both executable identities are revalidated before any network command', async () => {
   for (const drift of ['root-start', 'holder-start', 'root-executable', 'holder-executable']) {
     const processInspector = inspector(); const egress = egressFor(processInspector); const ownedChild = child()
-    await egress.bindOwner(ownedChild, wrapperExecutable, sandboxExecutable)
+    await egress.bindOwner(ownedChild, wrapperExecutable)
     if (drift === 'root-start') processInspector.stats.set(200, { ppid: 100, startticks: 'changed' })
     if (drift === 'holder-start') processInspector.stats.set(201, { ppid: 200, startticks: 'changed' })
     if (drift === 'root-executable') processInspector.executables.set(200, helperExecutable)
@@ -140,7 +141,7 @@ test('slirp sandbox runs only after recursive private mount isolation and preser
 test('mount isolation failure fails closed without a direct-slirp retry', async () => {
   const { EventEmitter } = await import('node:events')
   const calls = []; const egress = egressFor(inspector())
-  await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  await egress.bindOwner(child(), wrapperExecutable)
   await egress.start()
   const readback = `table inet cyf_typed_inspection {
  chain input {
@@ -183,7 +184,7 @@ test('mount isolation failure fails closed without a direct-slirp retry', async 
 test('namespace command drains stdout and stderr through close after process exit', async () => {
   const { EventEmitter } = await import('node:events')
   const egress = egressFor(inspector())
-  await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  await egress.bindOwner(child(), wrapperExecutable)
   egress.spawnFn = () => {
     const process = new EventEmitter(); process.exitCode = null
     process.stdout = new EventEmitter(); process.stderr = new EventEmitter(); process.stdin = { end() {} }
@@ -204,7 +205,7 @@ test('namespace command drains stdout and stderr through close after process exi
 
 test('owner PID drift while async executable measurement yields fails before namespace command', async () => {
   const processInspector = inspector(); const egress = egressFor(processInspector)
-  await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  await egress.bindOwner(child(), wrapperExecutable)
   const executable = processInspector.executable
   processInspector.executable = async pid => {
     if (pid === 201) { await new Promise(resolve => setImmediate(resolve)); processInspector.stats.set(200, { ppid: 100, startticks: 'reused' }) }
@@ -216,7 +217,7 @@ test('owner PID drift while async executable measurement yields fails before nam
 
 test('cancellation during async owner check never launches namespace command', async () => {
   const processInspector = inspector(); const egress = egressFor(processInspector); const controller = new AbortController()
-  await egress.bindOwner(child(), wrapperExecutable, sandboxExecutable)
+  await egress.bindOwner(child(), wrapperExecutable)
   const executable = processInspector.executable
   processInspector.executable = async pid => { await new Promise(resolve => setImmediate(resolve)); controller.abort(); return executable(pid) }
   try { await assert.rejects(egress._nsenter(201, ['must-not-run'], { signal: controller.signal }), error => error.code === 'TYPED_INSPECTION_EGRESS_CANCELLED') }
@@ -255,4 +256,22 @@ test('CONNECT proxy accepts configured skill destination and refuses an unconfig
     assert.match(await request(`127.0.0.1:${upstream.address().port}`), /200 Connection Established[\s\S]*authorized-synthetic-endpoint/)
     assert.match(await request('unconfigured.invalid:443'), /403 Forbidden/)
   } finally { await egress.dispose(); await new Promise(resolve => upstream.close(resolve)) }
+})
+
+test('startup namespace inode and reaper executable must match before networking', async () => {
+  await assert.rejects(egressFor(inspector()).bindOwner(child({ pid: 201, netNamespaceIno: 'wrong' }), wrapperExecutable), { code: 'TYPED_INSPECTION_EGRESS_OWNER_DRIFT' })
+  const wrong = inspector(); wrong.executables.set(201, measuredSandboxExecutable)
+  await assert.rejects(egressFor(wrong).bindOwner(child(), wrapperExecutable), { code: 'TYPED_INSPECTION_EGRESS_OWNER_INVALID' })
+})
+
+test('network owner waits for startup events without repeatedly listing system processes', async () => {
+  const processInspector = inspector(); let scans = 0
+  const pids = processInspector.pids; processInspector.pids = () => { scans++; return pids() }
+  const ownedChild = child(); let release
+  ownedChild.sandboxStartup = new Promise(resolve => { release = resolve })
+  const egress = egressFor(processInspector), waiting = egress.bindOwner(ownedChild, wrapperExecutable)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(scans, 0, 'waiting for bwrap must not scan /proc')
+  release({ pid: 201, netNamespaceIno: '20' }); await waiting
+  assert.equal(scans, 1, 'retain the single namespace foreign-member check, not a discovery loop')
 })

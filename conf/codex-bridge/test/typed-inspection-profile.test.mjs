@@ -1,3 +1,5 @@
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -224,7 +226,7 @@ test('real bwrap profile performs a non-paid native app-server handshake with pr
     const egress = new RestrictedProviderEgress({ providerBaseUrl: `https://127.0.0.1:${target.address().port}`, networkConnectTimeoutMs: profile.typedInspectionNetworkConnectTimeoutMs }); await egress.start()
     const allowedState = runtime._prepareEphemeralState('allowed-connect')
     const allowedAdapter = await runtime._spawnAdapter({ inputDirectory: allowedDirectory, engineState: allowedState, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
-    try { await egress.bindOwner(allowedAdapter.child, runtime.bwrap, runtime.nativeReadback.schema.snapshotIdentity); await egress.attach(); await runtime._initializeAndSeal(allowedAdapter); const allowed = await egress.measureAllowedConnect(); assert.equal(allowed.connectEstablished, true) }
+    try { await egress.bindOwner(allowedAdapter.child, runtime.bwrap); await egress.attach(); await runtime._initializeAndSeal(allowedAdapter); const allowed = await egress.measureAllowedConnect(); assert.equal(allowed.connectEstablished, true) }
     finally { await allowedAdapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose(); rmSync(allowedState.directory, { recursive: true, force: true }); await new Promise(resolveClose => target.close(() => resolveClose())) }
   } finally { await runtime.dispose(); await secondRuntime.dispose(); rmSync(root, { recursive: true, force: true }) }
 })
@@ -363,7 +365,14 @@ test('production inspection mount builder exposes only the selected conversation
   const stat = statSync(launcher, { bigint: true })
   runtime.bwrap = { path: launcher, dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size), sha256: evidenceDigest(bytes) }
   let args
-  runtime.spawnFn = (_binary, actualArgs) => { args = actualArgs; return {} }
+  runtime.spawnFn = (_binary, actualArgs, options) => {
+    args = actualArgs
+    assert.deepEqual(options.stdio, ['pipe', 'pipe', 'pipe', 'pipe'])
+    assert.deepEqual(args.slice(0, 2), ['--info-fd', '3'])
+    const pipe = new PassThrough(), child = Object.assign(new EventEmitter(), { exitCode: null, stdio: [null, null, null, pipe] })
+    queueMicrotask(() => pipe.end(JSON.stringify({ 'child-pid': 123, 'net-namespace': 456 })))
+    return child
+  }
   const original = AppServerAdapter.spawnAsync
   AppServerAdapter.spawnAsync = async (_profile, options) => { options.spawnFn('unused', ['app-server'], {}); return {} }
   try {

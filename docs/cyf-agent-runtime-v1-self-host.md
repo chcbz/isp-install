@@ -475,3 +475,11 @@ safe diagnostic metadata, never proof of task completion/revocation.
 - 正常完成后每个profile保留一个可复用idle聊天引擎。相同Provider/认证机制下，真实会话引擎接管后关闭启动引擎；文字连续轮不重启，材料完成后恢复同Home的host引擎。就绪状态引用实际活进程；主动交接不触发旧启动引擎重启。未知接纳保留原Owner并查询原turn，不强行中断或重放；真实不同工具/Provider边界和未知在途不受“任何时候只能有一个进程”的虚假限制。
 - API历史输入当前最多24条recent message，authorizedContext整体8,192字节；不是完整历史复制。继续保留当前权威摘要/消息/引用，不增加历史同步表、缓存服务或逐轮额外持久写。删除整个历史块会漏掉其他入口产生的消息；更细增量只有测得净收益并证明原thread已接纳对应内容后再做。
 - 证据及发布状态以CYF协调仓`docs/implementation/handoffs/JUYITING-POLLING-20261102.md`和固定Flow Run为准。上述源码版本不代表当前运行版本。
+
+### 沙箱启动身份与应用就绪（2026-11-04，候选1.3.52/bridge1.1.42）
+
+仅调整bridge本机启动职责（CYF RB-03），不改变API/Web合同、会话Home、成果或最终回复持久化。`_spawnAdapter`为bwrap创建独立fd3，`--info-fd 3`回传child-pid/net-namespace；`--unshare-all`下该PID是稳定的bwrap PID-namespace reaper，不是app-server。网络层校验直接子进程、reaper归属/可执行文件/PID-startticks/私有netns后绑定网络；原全系统反复发现app-server的循环删除，不留定时扫描fallback。现有网络允许列表与命名空间外来进程核验不变。
+
+沙箱启动信息不是应用就绪。适配器等待现有initialize响应，再单次遍历本次启动的有限子树核对固定app-server可执行文件；成功后才发送initialized及account/config/tools等后续请求。非沙箱适配器保持原先的验证顺序。启动管道失败/子进程退出/取消仍失败并由既有拥有者清理；没有新增服务、就绪文件轮询或强制性能deadline。
+
+回归：`test/sandbox-startup.test.mjs`、`test/typed-inspection-network.test.mjs`、`test/app-server-stream.test.mjs`、`test/typed-inspection-profile.test.mjs`。`CYF_SANDBOX_STARTUP_PROBE=1`只在具备bwrap/slirp4netns/nft及配置CLI的隔离验证主机运行：覆盖真实reaper、受限网络＋模拟协议、空Home真实app-server无模型初始化；不是生产请求耗时验收。源码候选/Flow制品/实际部署分别记录，候选版本号不代表已上线。
