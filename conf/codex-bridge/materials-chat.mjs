@@ -27,15 +27,15 @@ export function resolveChatMaterials(profile, message) {
   const formats = new Map()
   for (const format of manifest.profile.supportedInputs) {
     if (!exact(format, ['mediaKind', 'mimeType', 'carrier', 'carrierContractDigest'])
-        || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT'].includes(format.carrier)
-        || ({ DIRECT_TEXT: 'text', LOCAL_IMAGE: 'image', LOCAL_AUDIO: 'audio', PARSED_TEXT: 'file' })[format.carrier] !== format.mediaKind
-        || typeof format.mimeType !== 'string' || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(format.mimeType)
+        || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT', 'LOCAL_FILE'].includes(format.carrier)
+        || ({ DIRECT_TEXT: 'text', LOCAL_IMAGE: 'image', LOCAL_AUDIO: 'audio', PARSED_TEXT: 'file', LOCAL_FILE: 'file' })[format.carrier] !== format.mediaKind
+        || typeof format.mimeType !== 'string' || (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(format.mimeType) && !(format.carrier === 'LOCAL_FILE' && format.mimeType === '*/*'))
         || !digest(format.carrierContractDigest) || formats.has(format.mimeType)) fail('MATERIALS_PROFILE_INVALID')
     formats.set(format.mimeType, format)
   }
   let previous = null
   for (const source of manifest.sources) {
-    const format = formats.get(source.mimeType)
+    const format = formats.get(source.mimeType) || formats.get('*/*')
     if (!exact(source, ['sourceRefId', 'sourceKind', 'sha256', 'byteLength', 'mimeType', 'carrier', 'carrierContractDigest', 'downloadUrl'])
         || !id(source.sourceRefId) || (previous !== null && source.sourceRefId <= previous)
         || !['TASK_WORKSPACE_FILE', 'TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'].includes(source.sourceKind)
@@ -77,7 +77,7 @@ export async function prepareChatMaterials({ profile, message, materials, materi
     const base = { sourceRefId: source.sourceRefId, sha256: source.sha256, byteLength: source.byteLength,
       mimeType: source.mimeType, carrier: source.carrier, carrierContractDigest: source.carrierContractDigest, bytes: source.bytes }
     if (source.carrier === 'LOCAL_IMAGE' && source.mimeType !== 'image/png') return { ...base, path: profileRuntime.mapInputPath(source.path, materialized.directory), derivative: prepareImageDerivative(source, path => profileRuntime.mapInputPath(path, materialized.directory)) }
-    return source.carrier === 'LOCAL_IMAGE' || source.carrier === 'LOCAL_AUDIO'
+    return source.carrier === 'LOCAL_IMAGE' || source.carrier === 'LOCAL_AUDIO' || source.carrier === 'LOCAL_FILE'
       ? { ...base, path: profileRuntime.mapInputPath(source.path, materialized.directory) }
       : source.carrier === 'PARSED_TEXT' ? { ...base, parser: source.parser, parsedText: source.parsedText } : base
   })

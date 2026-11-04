@@ -83,3 +83,25 @@ test('PARSED_TEXT requires explicit scalar parser provenance and LOCAL adapters 
   assert.throws(() => buildTypedInspectionNativeInputs(args(input, badPath)), code('TYPED_INSPECTION_LOCAL_AUDIO_UNSUPPORTED'))
   assert.throws(() => buildTypedInspectionNativeInputs(args(input, {})), code('TYPED_INSPECTION_LOCAL_IMAGE_UNSUPPORTED'))
 })
+
+test('LOCAL_FILE delivers a bound descriptor without parsing or embedding arbitrary bytes', () => {
+  for (const mimeType of ['text/plain', 'application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/x-custom']) {
+    const bytes = Buffer.from([0xff, 0x00, 0x81, 0x22])
+    const source = { sourceRefId: 'file-1', sha256: hash(bytes), byteLength: String(bytes.length), mimeType,
+      carrier: 'LOCAL_FILE', carrierContractDigest: `sha256:${'1'.repeat(64)}`, bytes, path: '/inputs/0000-file.input' }
+    const built = buildTypedInspectionNativeInputs(args([source], {}))
+    assert.equal(built.nativeInputs[0].type, 'text')
+    assert.match(built.nativeInputs[0].text, /body is not embedded/)
+    assert.deepEqual(JSON.parse(built.nativeInputs[0].text.split('\n')[1]), {
+      sourceRefId: source.sourceRefId, path: source.path, mimeType, sha256: source.sha256, byteLength: source.byteLength
+    })
+    const receipt = finalizeTypedInspectionInputReceipt({ receiptDraft: built.inspectionInputReceiptDraft,
+      engineThreadId: 'same-conversation', engineTurnId: 'current-turn' })
+    assert.equal(receipt.sources[0].carrier, 'LOCAL_FILE')
+    assert.notEqual(buildTypedInspectionNativeInputs(args([{ ...source, path: '/inputs/different.input' }], {})).inputDigest, built.inputDigest)
+    assert.throws(() => buildTypedInspectionNativeInputs(args([{ ...source, bytes: Buffer.from('changed') }], {})), code('TYPED_INSPECTION_SOURCE_BYTES_INVALID'))
+    for (const path of ['relative.txt', '/inputs/../other', '/inputs/./file', '/inputs/a\0b']) {
+      assert.throws(() => buildTypedInspectionNativeInputs(args([{ ...source, path }], {})), code('TYPED_INSPECTION_SOURCE_INVALID'))
+    }
+  }
+})

@@ -83,7 +83,7 @@ const exactSupportedInputs = value => {
   const result = []; const seen = new Set()
   for (const item of value) {
     if (!object(item) || Object.keys(item).sort().join(',') !== 'carrier,carrierContractDigest,mediaKind,mimeType' ||
-        !nonblank(item.mediaKind) || !nonblank(item.mimeType) || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT'].includes(item.carrier) || !DIGEST.test(item.carrierContractDigest)) fail('TYPED_INSPECTION_SUPPORTED_INPUT_INVALID')
+        !nonblank(item.mediaKind) || !nonblank(item.mimeType) || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT', 'LOCAL_FILE'].includes(item.carrier) || !DIGEST.test(item.carrierContractDigest)) fail('TYPED_INSPECTION_SUPPORTED_INPUT_INVALID')
     const key = [item.mediaKind, item.mimeType, item.carrier, item.carrierContractDigest].join('\u001f')
     if (seen.has(key)) fail('TYPED_INSPECTION_SUPPORTED_INPUT_DUPLICATE'); seen.add(key); result.push(Object.freeze({ ...item }))
   }
@@ -245,7 +245,7 @@ export const loadTypedInspectionCarrierEvidence = ({ path, expectedDigest, bindi
   const caseKeys = ['mediaKind', 'mimeType', 'carrier', 'carrierContractDigest', 'status', 'sourceSha256', 'inputDigest', 'resultDigest', 'terminalStatus', 'semanticPass']
   for (const item of evidence.cases) {
     if (!object(item) || Object.keys(item).sort().join(',') !== caseKeys.sort().join(',') || item.status !== 'PASS' || item.terminalStatus !== 'completed' || item.semanticPass !== true ||
-        !nonblank(item.mediaKind) || !nonblank(item.mimeType) || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT'].includes(item.carrier) ||
+        !nonblank(item.mediaKind) || !nonblank(item.mimeType) || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT', 'LOCAL_FILE'].includes(item.carrier) ||
         !DIGEST.test(item.carrierContractDigest || '') || !HASH.test(item.sourceSha256 || '') || !DIGEST.test(item.inputDigest || '') || !DIGEST.test(item.resultDigest || '')) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
     const key = [item.mediaKind, item.mimeType, item.carrier, item.carrierContractDigest].join('\u001f')
     if (passed.has(key)) fail('TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')

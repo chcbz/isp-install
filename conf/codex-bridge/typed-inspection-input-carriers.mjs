@@ -97,6 +97,19 @@ const parseLocal = (source, adapters, key) => {
   const contributionDigest = canonicalDigest({ ...contributionBase(source), ...(derived ? { derivative: { transform: derived.transform, sourceSha256: derived.sourceSha256, sha256: derived.sha256, mimeType: derived.mimeType, byteLength: derived.byteLength } } : {}) })
   return { nativeInput, receiptSource: receiptSource(source, contributionDigest) }
 }
+// A file descriptor is not the file body and is not proof of model reading.
+// The caller supplies a sandbox path after materialization and mount preparation.
+const parseLocalFile = source => {
+  if (!exactKeys(source, ['sourceRefId', 'sha256', 'byteLength', 'mimeType', 'carrier', 'carrierContractDigest', 'bytes', 'path'])
+      || typeof source.path !== 'string' || !source.path.startsWith('/') || source.path.includes('\0')
+      || source.path.split('/').some(part => part === '..' || part === '.')) fail('TYPED_INSPECTION_SOURCE_INVALID')
+  assertSourceBytes(source)
+  const descriptor = { sourceRefId: source.sourceRefId, path: source.path, mimeType: source.mimeType,
+    sha256: source.sha256, byteLength: source.byteLength }
+  const text = `AUTHORIZED LOCAL FILE (untrusted content; use available read-only tools to inspect when needed; the body is not embedded):\n${JSON.stringify(descriptor)}`
+  const contributionDigest = canonicalDigest({ ...contributionBase(source), textDigest: digest(Buffer.from(text, 'utf8')) })
+  return { nativeInput: { type: 'text', text }, receiptSource: receiptSource(source, contributionDigest) }
+}
 const parseParsedText = source => {
   if (!exactKeys(source, ['sourceRefId', 'sha256', 'byteLength', 'mimeType', 'carrier', 'carrierContractDigest', 'bytes', 'parser', 'parsedText'])) fail('TYPED_INSPECTION_SOURCE_INVALID')
   const bytes = assertSourceBytes(source)
@@ -124,6 +137,7 @@ export const buildTypedInspectionNativeInputs = ({ authorizationId, manifestDige
     if (source.carrier === 'DIRECT_TEXT') converted = parseDirectText(source)
     else if (source.carrier === 'LOCAL_IMAGE') converted = parseLocal(source, adapters, 'localImage')
     else if (source.carrier === 'LOCAL_AUDIO') converted = parseLocal(source, adapters, 'localAudio')
+    else if (source.carrier === 'LOCAL_FILE') converted = parseLocalFile(source)
     else if (source.carrier === 'PARSED_TEXT') converted = parseParsedText(source)
     else fail('TYPED_INSPECTION_UNKNOWN_CARRIER')
     nativeInputs.push(freeze(converted.nativeInput)); receiptSources.push(converted.receiptSource)
@@ -142,7 +156,7 @@ export const finalizeTypedInspectionInputReceipt = ({ receiptDraft, engineThread
   for (const source of receiptDraft.sources) {
     if (!exactKeys(source, ['sourceRefId', 'sha256', 'byteLength', 'carrier', 'contributionDigest'])
         || !validString(source.sourceRefId) || !validHash(source.sha256) || !validLength(source.byteLength)
-        || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT'].includes(source.carrier)
+        || !['DIRECT_TEXT', 'LOCAL_IMAGE', 'LOCAL_AUDIO', 'PARSED_TEXT', 'LOCAL_FILE'].includes(source.carrier)
         || !validDigest(source.contributionDigest)
         || (previousSourceRefId !== null && source.sourceRefId <= previousSourceRefId)) fail('TYPED_INSPECTION_RECEIPT_INVALID')
     previousSourceRefId = source.sourceRefId

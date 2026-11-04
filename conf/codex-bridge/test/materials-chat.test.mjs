@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { bindProfileChatAdapter, unbindProfileChatAdapter, restoreProfileChatIdleAdapter, normalizeInboundMessage, runFastChat, recoverMaterialsChat, buildAgentRegistrationPayload, buildAgentPresencePayload, publishTypedInspectionReadiness, MESSAGE_TYPES } from '../agent-client.mjs'
 import { canonicalSha256, validateChatDispatch, PersistentChatInbox } from '../chat-runtime.mjs'
-import { resolveChatMaterials, chatConversationKey } from '../materials-chat.mjs'
+import { resolveChatMaterials, chatConversationKey, prepareChatMaterials } from '../materials-chat.mjs'
 import { TypedInspectionMaterializer } from '../typed-inspection-runtime.mjs'
 import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from './fixtures/recorded-app-server-schemas.mjs'
 import { materialsChatHttpScope } from '../../cyf-agent-runtime-v1/lib/runtime-client.mjs'
@@ -383,4 +383,30 @@ test('production CHAT wiring retains one thread across warm text, material sandb
   live.closed = true; live.emit('exit')
   assert.equal(state.appServerAdapter, null); assert.equal(restarts, 1)
   assert.equal(buildAgentRegistrationPayload(selectedProfile, null, true, state.appServerAdapter).typedDeliberation.state, 'UNAVAILABLE')
+})
+
+test('generic file manifest keeps real MIME and prepares a path descriptor, not decoded content', async () => {
+  const message = structuredClone(messageFixture()), data = Buffer.from([0xff, 0x00, 0x22])
+  const original = message.contextSnapshot.facts.materialsInput.manifest.sources[0]
+  const format = { mediaKind: 'file', mimeType: '*/*', carrier: 'LOCAL_FILE', carrierContractDigest: `sha256:${'d'.repeat(64)}` }
+  const source = { ...original, mimeType: 'application/x-custom', carrier: 'LOCAL_FILE',
+    carrierContractDigest: format.carrierContractDigest, byteLength: String(data.length), sha256: sha(data) }
+  const manifest = { schemaVersion: 1, profile: { schemaVersion: 1, supportedInputs: [format] }, sources: [source] }
+  const binding = Object.fromEntries(['tenantId','ownerJiacn','clientId','conversationId','conversationGeneration','taskId','requestId','turnId','targetAgentId'].map(key => [key, String(message[key])]))
+  const manifestDigest = canonicalSha256({ domain: 'juyiting.materials-input', binding, manifest })
+  message.contextSnapshot.facts.materialsInput = { schemaVersion: 1, manifestDigest, authorizationId: `materials_${manifestDigest.slice(7,47)}`, manifest }
+  const materials = resolveChatMaterials(profile, reseal(message))
+  assert.equal(materials.manifest.sources[0].mimeType, 'application/x-custom')
+  let fetched = 0
+  const result = await prepareChatMaterials({ profile, message, materials,
+    materializer: { materialize: async options => {
+      fetched++; assert.equal(options.contract, 'materials')
+      return { directory: '/private/current', sources: [{ ...source, bytes: data, path: '/private/current/0000.input' }] }
+    } },
+    profileRuntime: { contractReadback: { measured: true, toolPolicy: 'MANIFEST_READ_ONLY', recovery: 'durable-inbox-turn-readback-v1', supportedInputs: [format] },
+      mapInputPath: (path, directory) => { assert.equal(directory, '/private/current'); assert.equal(path, '/private/current/0000.input'); return '/inputs/0000.input' } }
+  })
+  assert.equal(fetched, 1)
+  assert.equal(JSON.parse(result.nativeInputs[0].text.split('\n')[1]).path, '/inputs/0000.input')
+  assert.equal(result.inspectionInputReceiptDraft.sources[0].carrier, 'LOCAL_FILE')
 })
