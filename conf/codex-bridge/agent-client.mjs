@@ -1,3 +1,4 @@
+import { CHAT_FILE_TOOL_INSTRUCTIONS } from './native-execution-profile.mjs'
 import { prepareConversationTools } from './conversation-tools.mjs'
 import { NativeConversationWakeup } from './native-conversation-wakeup.mjs'
 import { ArchiveJobReconciler } from './archive-job-reconciler.mjs'
@@ -4726,6 +4727,7 @@ export const runFastChat = async (profile, message, {
     const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
     const developerInstructions = (typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}\nEmit the top-level kind field before text so user-facing replies can stream without exposing internal action instructions.` : FAST_CHAT_INSTRUCTIONS)
       + (conversationToolSession ? `\n${conversationToolSession.instructions}` : '')
+      + (selectedAdapter.chatFileTools ? `\n${CHAT_FILE_TOOL_INSTRUCTIONS}` : '')
     // Business facts and outputSchema belong to this turn (and final validation),
     // not the persistent thread. Keep actual developer instructions in its identity.
     const typedContractBinding = typedRequest ? { developerInstructions } : null

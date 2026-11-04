@@ -282,3 +282,9 @@ test('v5 clarification preserves an empty facts list without granting revision o
   assert.throws(() => validateActionOutcome({ ...value, clarification: { ...value.clarification, question: '' } }, shared.facts))
   assert.throws(() => validateActionOutcome({ ...value, action: {} }, shared.facts))
 })
+
+test('planning permits explicitly provided read-only file tools but not business execution', () => {
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /use them only to inspect authorized LOCAL_FILE carriers/)
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /Do not execute requested business actions/)
+  assert.doesNotMatch(ACTION_OUTCOME_INSTRUCTIONS, /Do not call tools or scripts in this planning turn/)
+})

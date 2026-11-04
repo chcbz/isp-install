@@ -225,6 +225,7 @@ export const buildNativeExecutionCodexConfig = (readOnlyConfig, { webSearch = 'd
 // Keep the same procfs placeholder workaround as native permissions above;
 // regular file writes are restricted to the dedicated temporary directory.
 export const CHAT_FILE_PERMISSION_PROFILE = 'chat-files'
+export const CHAT_FILE_TOOL_INSTRUCTIONS = 'For authorized LOCAL_FILE carriers, read the supplied paths directly with the available shell and /usr/bin/python3 -I -B. Python already provides docx, openpyxl and pypdf; do not install or discover packages. Use docx.Document, openpyxl.load_workbook(read_only=True), or pypdf.PdfReader as appropriate; extract_text() reads text PDF pages, not scanned images. Inspect multiple needed files in one command when practical. Inputs and conversation state are read-only; temporary files belong under TMPDIR. Do not create deliverables, submit artifacts or execute business actions in CHAT. Report unreadable/encrypted/scanned material limitations instead of inventing content.'
 export const buildChatFileCodexConfig = readOnlyConfig =>
   readOnlyConfig.replace('sandbox_mode = "read-only"', `default_permissions = "${CHAT_FILE_PERMISSION_PROFILE}"`)
   + `\n[permissions.${CHAT_FILE_PERMISSION_PROFILE}]\nfilesystem = { "/" = "read", "/tmp/chat-files" = "write", "/proc" = "write", "/proc/.git" = "write", "/proc/.agents" = "write", "/proc/.codex" = "write", "/proc/.aws" = "write" }\n[permissions.${CHAT_FILE_PERMISSION_PROFILE}.network]\nenabled = false\n`

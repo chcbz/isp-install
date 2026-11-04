@@ -302,7 +302,7 @@ test('material CHAT uses its canonical conversation cwd for thread resume and tu
   assert.equal(c.preparations.at(-1).engineThreadId, 'materials-thread')
 })
 
-test('production CHAT wiring retains one thread across warm text, material sandbox, and warm text', async t => {
+for (const fileTools of [false, true]) test(`production CHAT wiring retains one thread across warm text, material sandbox, and warm text (file tools=${fileTools})`, async t => {
   const c = context(t), root = mkdtempSync(resolve(tmpdir(), 'chat-continuity-wiring-'))
   const source = resolve(root, 'source'); mkdirSync(source, { mode: 0o700 }); writeFileSync(resolve(source, 'auth.json'), '{}', { mode: 0o600 })
   const selectedProfile = { ...profile, codexHome: source, typedInspectionProviderNetwork: 'restricted-proxy',
@@ -311,9 +311,9 @@ test('production CHAT wiring retains one thread across warm text, material sandb
     config: { config: { model_provider: 'synthetic', model_providers: { synthetic: { base_url: 'https://provider.example/v1', wire_api: 'responses', requires_openai_auth: true } } } } }
   const spawned = [], priors = [], turns = [], stopped = []
   const createAdapter = kind => {
-    const adapter = Object.assign(new EventEmitter(), { closed: false, readback: structuredClone(readback),
+    const adapter = Object.assign(new EventEmitter(), { closed: false, chatFileTools: fileTools, readback: structuredClone(readback),
       verifySpawnedExecutable: async () => {}, initialize: async () => {},
-      startOrResumeThread: async (prior, policy) => { priors.push(prior); assert.equal(policy.cwd, adapter.typedInspectionEngineState.chatWorkdir); return prior || { threadId: 'one-continuous-thread' } },
+      startOrResumeThread: async (prior, policy) => { priors.push(prior); assert.equal(policy.developerInstructions.includes('Python already provides docx, openpyxl and pypdf'), fileTools); assert.equal(policy.cwd, adapter.typedInspectionEngineState.chatWorkdir); return prior || { threadId: 'one-continuous-thread' } },
       runTurn: async options => {
         turns.push(options); const turnId = `native-turn-${turns.length}`
         options.onAccepted({ threadId: options.threadId, turnId })
