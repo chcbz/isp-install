@@ -17,6 +17,19 @@ import {
   typedDeliberationAdapterReady, parseStrictTypedOutcomeJson
 } from './juyiting-typed-outcome.mjs'
 
+// Filename hints only, not a capability allowlist or a content parser. Unknown
+// MIME types remain deliverable; native image/audio/text carriers keep their names.
+const LOCAL_FILE_EXTENSIONS = new Map([
+  ['text/plain', 'txt'], ['text/markdown', 'md'], ['text/csv', 'csv'],
+  ['application/json', 'json'], ['application/pdf', 'pdf'],
+  ['application/octet-stream', 'bin'],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx'],
+  ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'pptx'],
+  ['application/msword', 'doc'], ['application/vnd.ms-excel', 'xls'],
+  ['application/vnd.ms-powerpoint', 'ppt']
+])
+
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const HASH = /^[a-f0-9]{64}$/
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/
@@ -272,7 +285,8 @@ export class TypedInspectionMaterializer {
         const bytes = await responseBytes(response)
         if (String(bytes.length) !== source.byteLength) fail('TYPED_INSPECTION_CONTENT_LENGTH_MISMATCH')
         if (sha256(bytes) !== source.sha256) fail('TYPED_INSPECTION_CONTENT_DIGEST_MISMATCH')
-        const fileName = `${String(index).padStart(4, '0')}-${sha256(Buffer.from(source.sourceRefId)).slice(0, 24)}.input`
+        const extension = source.carrier === 'LOCAL_FILE' ? (LOCAL_FILE_EXTENSIONS.get(source.mimeType.toLowerCase()) || 'input') : 'input'
+        const fileName = `${String(index).padStart(4, '0')}-${sha256(Buffer.from(source.sourceRefId)).slice(0, 24)}.${extension}`
         const output = resolve(temporary, fileName)
         const fd = openSync(output, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o400)
         try { writeFileSync(fd, bytes); fsyncSync(fd); const stat = fstatSync(fd, { bigint: true }); if (!stat.isFile() || stat.size !== BigInt(bytes.length)) fail('TYPED_INSPECTION_OUTPUT_FILE_INVALID') } finally { closeSync(fd) }

@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, unlinkSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
 import { AppServerAdapter } from '../app-server-adapter.mjs'
@@ -409,4 +410,67 @@ test('generic file manifest keeps real MIME and prepares a path descriptor, not 
   assert.equal(fetched, 1)
   assert.equal(JSON.parse(result.nativeInputs[0].text.split('\n')[1]).path, '/inputs/0000.input')
   assert.equal(result.inspectionInputReceiptDraft.sources[0].carrier, 'LOCAL_FILE')
+})
+
+// Use the real CHAT manifest resolution, download, integrity checks and final
+// material directory. Do not rename a fixture to bypass the delivery filename.
+async function materializeFile(t, mimeType, data, carrier = 'LOCAL_FILE') {
+  const message = structuredClone(messageFixture())
+  const original = message.contextSnapshot.facts.materialsInput.manifest.sources[0]
+  const format = { mediaKind: carrier === 'DIRECT_TEXT' ? 'text' : 'file', mimeType: carrier === 'LOCAL_FILE' ? '*/*' : mimeType,
+    carrier, carrierContractDigest: `sha256:${'d'.repeat(64)}` }
+  const source = { ...original, mimeType, carrier, carrierContractDigest: format.carrierContractDigest,
+    byteLength: String(data.length), sha256: sha(data) }
+  const manifest = { schemaVersion: 1, profile: { schemaVersion: 1, supportedInputs: [format] }, sources: [source] }
+  const binding = Object.fromEntries(['tenantId','ownerJiacn','clientId','conversationId','conversationGeneration','taskId','requestId','turnId','targetAgentId'].map(key => [key, String(message[key])]))
+  const manifestDigest = canonicalSha256({ domain: 'juyiting.materials-input', binding, manifest })
+  message.contextSnapshot.facts.materialsInput = { schemaVersion: 1, manifestDigest, authorizationId: `materials_${manifestDigest.slice(7,47)}`, manifest }
+  const materials = resolveChatMaterials(profile, reseal(message))
+  const root = mkdtempSync(resolve(tmpdir(), 'chat-material-extension-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  let downloads = 0
+  const materializer = new TypedInspectionMaterializer({ apiOrigin: 'https://platform.example', rootDir: root,
+    agentId: profile.agentId, runtimeInstanceId: 'runtime1', getRuntimeHeaders: () => ({ Authorization: `AgentRuntime rts1_${'b'.repeat(64)}`,
+      'X-Agent-Id': profile.agentId, 'X-Agent-Runtime-Id': 'runtime1', 'X-Agent-Installation-Id': 'install1', 'X-Agent-Host-Id': 'host1', 'X-Agent-Session-Generation': '1' }),
+    fetchFn: async url => {
+      downloads++; assert.equal(url, `https://platform.example${source.downloadUrl}`)
+      return { status: 200, redirected: false, url, headers: new Headers({ 'content-type': mimeType, 'content-length': String(data.length) }), arrayBuffer: async () => data }
+    } })
+  const result = await materializer.materialize({ message, typed: materials, contract: 'materials' })
+  assert.equal(downloads, 1)
+  const file = result.sources[0]
+  assert.deepEqual(readFileSync(file.path), data)
+  assert.equal(statSync(file.path).mode & 0o777, 0o400)
+  assert.equal(file.sha256, sha(data))
+  assert.ok(file.path.startsWith(`${result.directory}/`))
+  return file.path
+}
+
+test('LOCAL_FILE MIME suffixes preserve bytes and readonly paths; unknown MIME is not rejected', async t => {
+  const cases = [
+    ['text/plain', 'txt'], ['text/markdown', 'md'], ['text/csv', 'csv'], ['application/json', 'json'],
+    ['application/pdf', 'pdf'], ['application/octet-stream', 'bin'],
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx'],
+    ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx'],
+    ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'pptx'],
+    ['application/msword', 'doc'], ['application/vnd.ms-excel', 'xls'], ['application/vnd.ms-powerpoint', 'ppt'],
+    ['application/x-custom', 'input']
+  ]
+  for (const [mime, suffix] of cases) {
+    const path = await materializeFile(t, mime, Buffer.from('original bytes'))
+    assert.match(path, new RegExp(`/0000-[a-f0-9]{24}\\.${suffix}$`))
+  }
+  assert.match(await materializeFile(t, 'text/plain', Buffer.from('text'), 'DIRECT_TEXT'), /\.input$/)
+})
+
+test('real materialized XLSX opens directly with openpyxl on the first attempt', {
+  skip: !process.env.CYF_CHAT_FILE_PROBE_PYTHON && 'requires installed document toolchain (enabled in Flow)'
+}, async t => {
+  const python = process.env.CYF_CHAT_FILE_PROBE_PYTHON
+  const workbook = execFileSync(python, ['-I', '-B', '-c',
+    'import io,sys,openpyxl; w=openpyxl.Workbook(); w.active["A1"]="materialized-first-read"; b=io.BytesIO(); w.save(b); sys.stdout.buffer.write(b.getvalue())'])
+  const path = await materializeFile(t, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', workbook)
+  const output = execFileSync(python, ['-I', '-B', '-c',
+    'import sys,openpyxl; w=openpyxl.load_workbook(sys.argv[1],read_only=True,data_only=True); print(w.active["A1"].value); w.close()', path], { encoding: 'utf8' })
+  assert.equal(output.trim(), 'materialized-first-read')
 })
