@@ -7,7 +7,7 @@ import { SkillInstallManager } from '../skill-install-manager.mjs'
 import { SkillRegistry } from '../skill-registry.mjs'
 import { zip, hash, binding, profile, headers, command, activate } from './fixtures/skill-management-fixture.mjs'
 
-for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'text-file', 'analysis']) {
+for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'skill-management', 'text-file', 'analysis']) {
   test(`${skillKey}: same ordinary package installs independently for two agents and resolves only its authorized binding`, async t => {
     const version = ['text-file', 'analysis'].includes(skillKey) ? '1.1.0' : '1.0.0'
     const source = new URL(`../../skills/${skillKey}/`, import.meta.url), entries = []

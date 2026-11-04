@@ -939,3 +939,29 @@ test('version is optional telemetry and runtime never generates or compares prot
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('Fast CHAT includes installed maintenance guidance and isolates tool binding by dispatch', async () => {
+  const keys = []; const instructions = []
+  const adapter = {
+    readback: { initialize: {}, account: {}, models: {}, config: {}, tools: {} },
+    startOrResumeThread: async (prior, options) => { assert.equal(prior, undefined); instructions.push(options.developerInstructions); return { threadId: 'maintenance-thread', state: 'HOT' } },
+    runTurn: async () => ({ threadId: 'maintenance-thread', turnId: 'engine-turn', content: '已根据回执读回' })
+  }
+  const options = { adapter, chatWorkdir: '/empty-chat', sendProtocolFn: () => {},
+    bindingStore: { get: key => { keys.push(key) }, put: () => {} },
+    conversationToolSession: { catalog: { tools: [{ name: 'maintenance' }], skills: [{ skillKey: 'some-position-skill' }] }, instructions: 'Verified installed maintenance guidance' } }
+  for (const dispatchId of ['dispatch-a', 'dispatch-b']) {
+    const message = normalizedWire({ route: 'CHAT', dispatchId })
+    await runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, message, options)
+  }
+  assert.notEqual(keys[0], keys[1]); assert.equal(instructions.length, 2)
+  assert.ok(instructions.every(text => text.includes('Verified installed maintenance guidance')))
+})
+
+test('disposing profile also closes its dedicated conversation tool adapters', async () => {
+  let closed = 0
+  const tool = { shutdown: async () => { closed++ } }
+  const state = { appServerAdapter: null, conversationToolAdapters: new Set([tool]), disposed: false }
+  await disposeAppServerState(state, { timeoutMs: 5 })
+  assert.equal(closed, 1); assert.equal(state.disposed, true)
+})

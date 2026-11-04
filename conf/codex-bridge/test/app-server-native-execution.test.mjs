@@ -5,12 +5,12 @@ import { PassThrough } from 'node:stream'
 import { AppServerAdapter } from '../app-server-adapter.mjs'
 
 const tool = { type: 'function', name: 'artifact_stage', description: 'Snapshot a draft', inputSchema: { type: 'object' } }
-function fixture(nativeExecution = null) {
+function fixture(nativeExecution = null, conversationTools = null) {
   const child = new EventEmitter()
   Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, killed: false })
   child.kill = () => { child.killed = true }
   const sent = []; let onRequest = () => {}
-  const adapter = new AppServerAdapter({ child, nativeExecution, send: frame => {
+  const adapter = new AppServerAdapter({ child, nativeExecution, conversationTools, send: frame => {
     sent.push(frame)
     if (frame.method) queueMicrotask(() => {
       if (onRequest(frame) === false) return
@@ -126,4 +126,90 @@ test('native turn network follows its trusted execution binding, never model tur
       completed(f); await running
     } finally { f.adapter.close() }
   }
+})
+
+const conversation = (callTool = async () => ({ disposition: 'UPDATED' })) => ({
+  bindingId: 'dispatch1', messageId: 'message1', tools: [tool], checkActive() {}, callTool
+})
+
+test('conversation callbacks do not grant native filesystem permissions or network', async () => {
+  const f = fixture(null, conversation())
+  try {
+    await f.adapter.startOrResumeThread(null, { cwd: '/chat', sandbox: 'workspace-write', config: { network: true } })
+    const params = f.sent[0].params
+    assert.equal(params.sandbox, 'read-only'); assert.equal(params.permissions, undefined)
+    assert.equal(params.config.network, false); assert.deepEqual(params.dynamicTools, [tool])
+    const running = start(f); await tick(); call(f); await tick(); completed(f)
+    assert.equal((await running).finishReason, 'completed')
+    const turn = f.sent.find(x => x.method === 'turn/start').params
+    assert.deepEqual(turn.sandboxPolicy, { type: 'readOnly', networkAccess: false })
+    assert.equal(turn.permissions, undefined)
+  } finally { f.adapter.close() }
+})
+
+test('conversation callbacks receive trusted message binding and deduplicate calls', async () => {
+  let calls = 0
+  const f = fixture(null, conversation(async ctx => {
+    calls++; assert.equal(ctx.bindingId, 'dispatch1'); assert.equal(ctx.messageId, 'message1')
+    assert.equal(ctx.executionId, undefined); return { disposition: 'UPDATED' }
+  }))
+  try {
+    await assert.rejects(f.adapter.runTurn({ threadId: 'thread1', clientUserMessageId: 'other', input: 'wrong' }), /MESSAGE_MISMATCH/)
+    const running = start(f); await tick(); call(f); call(f, 'rpc2'); await tick(); completed(f); await running
+    assert.equal(calls, 1)
+    assert.equal(f.sent.find(x => x.id === 'rpc1').result.success, true)
+    call(f, 'late'); assert.equal(f.sent.find(x => x.id === 'late').error.code, -32001)
+  } finally { f.adapter.close() }
+})
+
+test('conversation callbacks deny unadvertised tools and shell approval', async () => {
+  for (const method of ['item/tool/call', 'item/commandExecution/requestApproval']) {
+    const f = fixture(null, conversation(() => assert.fail('not authorized')))
+    try {
+      const running = start(f); await tick()
+      const rejected = assert.rejects(running, /CONVERSATION_TOOL_POLICY_VIOLATION/)
+      f.adapter._frame({ id: 'forbidden', method, params: { threadId: 'thread1', turnId: 'turn1', callId: 'call2', tool: 'unknown', arguments: {} } })
+      await rejected; assert.equal(f.sent.find(x => x.id === 'forbidden').error.code, -32001)
+    } finally { f.adapter.close() }
+  }
+})
+
+test('revoking a conversation binding prevents its next tool callback', async () => {
+  let active = true; let calls = 0
+  const f = fixture(null, { ...conversation(async () => { calls++; return {} }), checkActive() { if (!active) throw new Error('REVOKED') } })
+  try {
+    const running = start(f); await tick(); active = false
+    const rejected = assert.rejects(running, /REVOKED/); call(f); await rejected
+    assert.equal(calls, 0); assert.equal(f.sent.find(x => x.id === 'rpc1').result.success, false)
+  } finally { f.adapter.close() }
+})
+
+
+test('conversation completion waits for the authoritative tool receipt', async () => {
+  let finish
+  const f = fixture(null, conversation(() => new Promise(resolve => { finish = resolve })))
+  try {
+    const running = start(f); await tick(); call(f); await tick(); completed(f)
+    let done = false; running.then(() => { done = true }); await tick(); assert.equal(done, false)
+    finish({ disposition: 'UPDATED' }); await running
+    assert.equal(f.sent.find(x => x.id === 'rpc1').result.contentItems[0].text, '{"disposition":"UPDATED"}')
+  } finally { f.adapter.close() }
+})
+
+test('conversation duplicate call ids cannot silently change their arguments', async () => {
+  let calls = 0
+  const f = fixture(null, conversation(async () => { calls++; return {} }))
+  try {
+    const running = start(f); await tick(); call(f); await tick()
+    const rejected = assert.rejects(running, /CONVERSATION_TOOL_POLICY_VIOLATION/)
+    call(f, 'conflict', { arguments: { path: '/outputs/another.txt' } }); await rejected
+    assert.equal(calls, 1); assert.equal(f.sent.find(x => x.id === 'conflict').error.code, -32001)
+  } finally { f.adapter.close() }
+})
+
+test('conversation binding requires one trusted message and cannot combine execution policies', () => {
+  for (const binding of [{ ...conversation(), messageId: '' }, { ...conversation(), tools: [tool, tool] }]) {
+    assert.throws(() => fixture(null, binding), /CONVERSATION_TOOL_BINDING_INVALID/)
+  }
+  assert.throws(() => fixture(execution(), conversation()), /CONVERSATION_TOOL_BINDING_INVALID/)
 })

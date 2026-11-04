@@ -1,3 +1,4 @@
+import { prepareConversationTools } from './conversation-tools.mjs'
 import { NativeConversationWakeup } from './native-conversation-wakeup.mjs'
 import { ArchiveJobReconciler } from './archive-job-reconciler.mjs'
 import { PositionSkillReconciler } from './position-skill-reconciler.mjs'
@@ -4657,7 +4658,7 @@ export const runFastChat = async (profile, message, {
   adapter = null, adapterPromise = null, bindingStore = null, controls = { markRunning: () => {}, isCancelled: () => false },
   fallback = null, sendProtocolFn = sendProtocol, chatWorkdir = profile.chatWorkdir, getAppServerFailure = () => null,
   enginePolicyHash = '', instructionSourceHash = '', modelConfigHash = '', toolPolicyHash = '',
-  materialsRuntime = null, materialsMaterializer = null, materialsInputAdapters = {}
+  materialsRuntime = null, materialsMaterializer = null, materialsInputAdapters = {}, conversationToolSession = null
 } = {}) => {
   const modern = message?.durable === true || (message?.ackRequired === true && message?.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED')
   const legacy = (reason, secureBoundaryRequired = false) => {
@@ -4711,12 +4712,13 @@ export const runFastChat = async (profile, message, {
   }
   if (!chatWorkdir) throw new AgentProtocolError('FAST_CHAT_WORKDIR_REQUIRED', 'Modern durable CHAT requires the dedicated empty CHAT workdir')
   const envelope = buildContextEnvelope(message); const metrics = timing(); const readbackSummary = appServerReadbackSummary(selectedAdapter)
-  const developerInstructions = typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}\nEmit the top-level kind field before text so user-facing replies can stream without exposing internal action instructions.` : FAST_CHAT_INSTRUCTIONS
+  const developerInstructions = (typedRequest ? `${FAST_CHAT_INSTRUCTIONS}\n${outcomeInstructions}\nEmit the top-level kind field before text so user-facing replies can stream without exposing internal action instructions.` : FAST_CHAT_INSTRUCTIONS)
+    + (conversationToolSession ? `\n${conversationToolSession.instructions}` : '')
   const typedContractBinding = typedRequest ? { contractDigest: outcomeContractDigest, dispatchFacts: typedRequest, outputSchema, developerInstructions } : null
   const effectiveEnginePolicyHash = enginePolicyHash
     ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
     : canonicalSha256({ engine: 'app-server', initialize: selectedAdapter.readback?.initialize || {}, accountType: readbackSummary.accountType, measuredSchema: selectedAdapter.readback?.schema || {}, ...(typedRequest ? { typedContractBinding } : {}) })
-  const effectiveToolPolicyHash = materials ? canonicalSha256({ profile: materialsRuntime.contractReadback, manifestDigest: materials.manifestDigest }) : toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
+  const effectiveToolPolicyHash = conversationToolSession ? canonicalSha256({ catalog: conversationToolSession.catalog, dispatchId: message.dispatchId }) : materials ? canonicalSha256({ profile: materialsRuntime.contractReadback, manifestDigest: materials.manifestDigest }) : toolPolicyHash || canonicalSha256({ policy: 'read-only-constrained', network: false, approval: 'never', tools: selectedAdapter.readback?.tools || {} })
   const effectiveInstructionSourceHash = instructionSourceHash
     ? (typedRequest ? canonicalSha256({ base: instructionSourceHash, typedContractBinding }) : instructionSourceHash)
     : canonicalSha256({ source: 'runtime-static', instructions: developerInstructions, ...(typedRequest ? { typedContractBinding } : {}) })
@@ -5929,6 +5931,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     managedEngine: null,
     appServerAdapter: null,
     appServerStartingAdapter: null,
+    conversationToolAdapters: new Set(),
     appServerPromise: null,
     appServerRestartTimer: null,
     appServerRestartAttempt: 0,
@@ -6051,12 +6054,39 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       if (profile.runtimeIdentity && !state.runtimeTransport?.ready?.()) throw new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Runtime execution requires its current installation session')
       if (profile.managedGeneration && (!state.managedRegistered || !state.managedEngine?.ready)) throw new Error('Managed engine is not ready')
       if (isTypedInspectionDispatch(message)) throw new AgentProtocolError('INSPECT_ROUTE_RETIRED', 'Materials belong to the original CHAT turn; independent INSPECT execution is retired')
-      return runProfileChat(profile, message, {
-        adapter: state.appServerAdapter, adapterPromise: state.ensureAppServer ? state.ensureAppServer() : state.appServerPromise, bindingStore: threadBindingStore,
-        controls, chatWorkdir, legacyGate: legacyExecutionGate, getAppServerFailure: () => state.appServerPermanentFailure,
-        materialsRuntime: message.contextSnapshot?.facts?.materialsInput ? await state.ensureTypedInspectionProfile() : null,
-        materialsMaterializer: typedInspectionMaterializer, materialsInputAdapters: typedInspectionNativeInputAdapters
-      })
+      const transport = state.runtimeTransport
+      const generation = transport?.ready?.() ? transport.headers()['X-Agent-Session-Generation'] : null
+      const current = () => !state.disposed && !controls.isCancelled() && state.runtimeTransport === transport
+        && transport?.ready?.() && transport.headers()['X-Agent-Session-Generation'] === generation
+      // Attached-material sessions already have their own isolated adapter. They do not
+      // inherit maintenance callbacks; the catalog does not grant a new filesystem view.
+      const conversationToolSession = transport && !message.contextSnapshot?.facts?.materialsInput
+        ? await prepareConversationTools({ message, apiOrigin: profile.runtimeApiOrigin, nativeFetch: transport.nativeFetch,
+          loadInstalled: () => state.skillInstallManager.listInstalledSkills(), current }) : null
+      let toolAdapter = null
+      try {
+        if (conversationToolSession) {
+          const base = await state.ensureAppServer()
+          conversationToolSession.binding.checkActive()
+          toolAdapter = await AppServerAdapter.spawnAsync(profile, { cwd: chatWorkdir, schemaMeasurement: base?.readback.schema,
+            conversationTools: conversationToolSession.binding, shouldSpawn: current,
+            ...(profile.runtimeIdentity ? { spawnFn: (binary, args, options) => spawn(binary, args, { ...options,
+              env: { ...buildRuntimeExecutionEnvironment(profile), NO_PROXY: '*', no_proxy: '*' } }) } : {}) })
+          state.conversationToolAdapters.add(toolAdapter)
+          await toolAdapter.verifySpawnedExecutable(); await toolAdapter.initialize()
+          toolAdapter.readback.hostedWireContract = hostedWireContract
+        }
+        return await runProfileChat(profile, message, {
+          adapter: toolAdapter || state.appServerAdapter,
+          adapterPromise: toolAdapter ? null : state.ensureAppServer ? state.ensureAppServer() : state.appServerPromise,
+          bindingStore: threadBindingStore, conversationToolSession,
+          controls, chatWorkdir, legacyGate: legacyExecutionGate, getAppServerFailure: () => state.appServerPermanentFailure,
+          materialsRuntime: message.contextSnapshot?.facts?.materialsInput ? await state.ensureTypedInspectionProfile() : null,
+          materialsMaterializer: typedInspectionMaterializer, materialsInputAdapters: typedInspectionNativeInputAdapters
+        })
+      } finally {
+        if (toolAdapter) { await toolAdapter.shutdown({ timeoutMs: 1000 }); state.conversationToolAdapters.delete(toolAdapter) }
+      }
     },
     recoverChat: async (message, record, controls = {}) => {
       const route = message.route || message.routing?.interactionMode
@@ -6180,7 +6210,7 @@ export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) =>
   state.appServerAdapter = null
   state.appServerStartingAdapter = null
   state.appServerPromise = null
-  for (const candidate of new Set([adapter, startingAdapter].filter(Boolean))) await candidate.shutdown({ timeoutMs })
+  for (const candidate of new Set([adapter, startingAdapter, ...(state.conversationToolAdapters || [])].filter(Boolean))) await candidate.shutdown({ timeoutMs })
   // Async integrity work must settle before releasing this subject lifecycle.
   await pendingStart?.catch(() => {})
 }
