@@ -270,3 +270,15 @@ test('native action cannot downgrade to facts v5 or inject malformed skill, poli
   f.schemaVersion = 5
   assert.throws(() => validateActionFacts(f), /ACTION_CAPABILITIES_INVALID/)
 })
+
+// Shared native/API/Web vector: an actionable question needs no invented fact labels.
+test('v5 clarification preserves an empty facts list without granting revision or execution', () => {
+  const shared = JSON.parse(readFileSync(new URL('./fixtures/message-review-v5.json', import.meta.url), 'utf8'))
+  const value = shared.clarificationWithoutFacts
+  assert.deepEqual(validateActionOutcome(value, shared.facts), value)
+  for (const requiredFacts of [null, '', [''], ['x', 'x'], [1]]) {
+    assert.throws(() => validateActionOutcome({ ...value, clarification: { ...value.clarification, requiredFacts } }, shared.facts))
+  }
+  assert.throws(() => validateActionOutcome({ ...value, clarification: { ...value.clarification, question: '' } }, shared.facts))
+  assert.throws(() => validateActionOutcome({ ...value, action: {} }, shared.facts))
+})

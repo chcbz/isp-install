@@ -243,7 +243,7 @@ export const validateActionOutcome = (raw, dispatchFacts, deliveryParent = null,
     if (value.clarification !== null || value.action !== null) fail('ACTION_OUTCOME_UNION_INVALID')
   } else if (value.kind === 'CLARIFY') {
     if (value.action !== null || !exact(value.clarification, ['question', 'requiredFacts']) || !scalar(value.clarification.question) ||
-        !uniqueStrings(value.clarification.requiredFacts, item => scalar(item)) || value.clarification.requiredFacts.length === 0) fail('ACTION_OUTCOME_UNION_INVALID')
+        !uniqueStrings(value.clarification.requiredFacts, item => scalar(item))) fail('ACTION_OUTCOME_UNION_INVALID')
     clarification = { question: value.clarification.question, requiredFacts: [...value.clarification.requiredFacts] }
   } else if (value.kind === 'ACTION_REQUEST') {
     if (value.clarification !== null || !exact(value.action, ['actionId', 'instruction', 'sourceRefIds', 'parameters']) || !scalar(value.action.instruction)) fail('ACTION_OUTCOME_UNION_INVALID')
