@@ -261,6 +261,7 @@ test('unified library catalog closes actual engine imports without retired provi
   }
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('skill-manifest.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('conversation-tools.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('chat-context-delivery.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('juyiting-review-basis.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('schemas/skill-manifest-v1.schema.json'), true);
   const target = resolve(f.root, 'codex-bridge');

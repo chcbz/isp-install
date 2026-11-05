@@ -362,6 +362,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "app-server-integrity-worker.mjs",
   "executable-integrity.mjs",
   "chat-runtime.mjs",
+  "chat-context-delivery.mjs",
   "conversation-tools.mjs",
   "codex-home.example.toml",
   "contracts/api-hosted-wire-v1.json",
