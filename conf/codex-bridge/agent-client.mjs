@@ -4479,7 +4479,6 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     } catch (error) {
       const errorMessage = `${error.code || 'WORKSPACE_ERROR'}: ${error.message}`
       const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
-      sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
       resolveRun({ ...payload, workspaceErrorCode: error.code || 'WORKSPACE_ERROR' })
       return
@@ -4511,7 +4510,6 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     if (mode === 'chat') sendChatFinal(profile, message, `无法继续会话：${errorMessage}`, { status: 'failed' }, sendProtocolFn)
     else {
       const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
-      sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
     }
     resolveRun({ status: 'failed', errorMessage, sessionErrorCode: code, ...(leaseError ? { workspaceErrorCode: 'WORKSPACE_LOCK_ERROR' } : {}) })
@@ -4537,7 +4535,6 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     if (mode === 'chat') sendChatFinal(profile, message, `执行失败：${errorMessage}`, { status: 'failed' }, sendProtocolFn)
     else {
       const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
-      sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
     }
     if (mode === 'command') sendStatusFn(profile, 'online')
@@ -4637,7 +4634,6 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
       await streamQueue
       if (!controls.isCancelled()) sendChatFinal(profile, message, replyContent, { status }, sendProtocolFn)
     } else {
-      sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
     }
     if (mode === 'command') sendStatusFn(profile, 'online')
