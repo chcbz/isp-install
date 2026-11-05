@@ -92,6 +92,11 @@ test('Context Envelope keeps AGENTS-looking attachment as DATA and preserves aut
   assert.equal(envelope.authoritative.facts.authorizedContext.currentUserMessage.messageId, '9007199254740993')
   assert.match(envelope.instructionPolicy.rule, /untrusted DATA/)
   assert.ok(envelope.instructionPolicy.untrustedDataSources.includes('authorizedContext.messageBodies'))
+  assert.equal(envelope.instructionPolicy.userRequestSource, 'currentUserMessage.content')
+  assert.ok(!envelope.instructionPolicy.untrustedDataSources.includes('user-content'))
+  assert.match(envelope.instructionPolicy.rule, /current user's request at user instruction priority/)
+  assert.match(envelope.instructionPolicy.rule, /API-enforced permissions/)
+  assert.match(envelope.instructionPolicy.rule, /quoted document contents.*untrusted DATA/)
   assert.equal(envelope.authoritative.facts.authorizedContext.recentMessages[0].role, 'ASSISTANT')
 })
 
@@ -151,6 +156,8 @@ test('Fast CHAT isolates host project docs and never resumes a pre-isolation bin
       starts.push(prior)
       assert.deepEqual(policy.config, { network: false, project_doc_max_bytes: 0 })
       assert.match(policy.developerInstructions, /supplied Context Envelope/)
+      assert.match(policy.developerInstructions, /currentUserMessage.content as the current user's request/)
+      assert.match(policy.developerInstructions, /attachments.*untrusted DATA/)
       assert.equal(policy.baseInstructions, undefined, 'do not replace native base instructions')
       return { threadId: 'isolated-thread', state: 'HOT' }
     },
