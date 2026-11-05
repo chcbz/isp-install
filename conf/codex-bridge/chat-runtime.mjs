@@ -1,3 +1,4 @@
+import { contextDeliveryPlan, contextBootstrapRejection } from './chat-context-delivery.mjs'
 /** Durable, version-1 additive CHAT protocol primitives for Juyi Hall. */
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -139,10 +140,12 @@ export function buildContextEnvelope(message) {
   if (typeof message.content !== 'string' || Buffer.byteLength(message.content) > MAX_CHAT_CONTENT_BYTES) throw new Error('CHAT_CONTENT_INVALID')
   const currentUserMessage = { content: message.content }
   for (const key of ['attachments', 'inputRefs', 'files']) if (message[key] !== undefined) currentUserMessage[key] = message[key]
+  // Delivery control remains covered by the original snapshot digest, but is not model history.
+  const { contextDelivery, ...modelFacts } = snapshot.facts
   const envelope = {
     schemaVersion: CHAT_CONTEXT_ENVELOPE_VERSION,
     kind: 'juyiting.context-envelope',
-    authoritative: { sourceVector: snapshot.sourceVector, facts: snapshot.facts },
+    authoritative: { sourceVector: snapshot.sourceVector, facts: modelFacts },
     currentUserMessage,
     instructionPolicy: {
       trustedInstructionSources: ['runtime-static-policy', 'api-authoritative-metadata'],
@@ -499,6 +502,7 @@ export class PersistentChatInbox {
     }
     const marker = {
       fingerprint: record.fingerprint, state: record.state, terminalAt: record.completedAt || record.cancelledAt || Date.now(),
+      ...(contextBootstrapRejection(record) ? { contextRejection: record.contextRejection } : {}),
       message: this._compactMessage(record.message)
     }
     const markerBytes = Buffer.byteLength(`${JSON.stringify(marker)}\n`)
@@ -542,6 +546,9 @@ export class PersistentChatInbox {
         const path = resolve(this.processing, name); const record = JSON.parse(readFileSync(path, 'utf8')); const key = name.slice(0, -5)
         if (['COMPLETED', 'CANCELLED'].includes(record.state)) {
           this._recordTerminal(key, record); durableRename(path, this.path('archive', key)); settled++; continue
+        }
+        if (contextBootstrapRejection(record)) {
+          durableRename(path, resolve(this.recovery, name)); recovered++; continue
         }
         const finalPrepared = object(record.finalPrepared)
         atomicJson(path, { ...record, state: finalPrepared ? 'RECOVERY_REQUIRED' : 'ACCEPTANCE_UNKNOWN',
@@ -648,15 +655,38 @@ export class PersistentChatInbox {
     return completed
   }) }
   cancelProcessing(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'processing') return false; return this._withLock(() => { this._finalizeTerminal(item, { ...item.record, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
-  recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED') { return this._withLock(() => {
+  recoveryRequired(item, reason, state = 'RECOVERY_REQUIRED', unexecutedContext = false) { return this._withLock(() => {
     const latest = item?.key ? this.findByKey(item.key) : null
     if (latest?.record?.state === 'COMPLETED' && latest.record.finalConfirmation?.serverPersistence === 'confirmed') return latest.record
     if (!latest || !['processing', 'recovery'].includes(latest.state)) throw new Error('CHAT_RECOVERY_TRANSITION_STALE')
-    const record = { ...latest.record, state, recoveryReason: reason, recoveredAt: Date.now() }
+    if (unexecutedContext && (state !== 'RECOVERY_REQUIRED' || latest.record.state !== 'STARTING'
+        || reason !== 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED' || contextDeliveryPlan(latest.record.message)?.mode !== 'DELTA'
+        || (latest.record.message.route || latest.record.message.routing?.interactionMode) !== 'CHAT'
+        || ['preparation', 'preparedAt', 'engine', 'runningAt', 'finalPrepared', 'finalPublication', 'finalConfirmation']
+          .some(key => Object.hasOwn(latest.record, key)))) throw new Error('CHAT_CONTEXT_REJECTION_NOT_PRE_EXECUTION')
+    const record = { ...latest.record, state, recoveryReason: reason, recoveredAt: Date.now(),
+      ...(unexecutedContext ? { contextRejection: { schemaVersion: 1, code: reason, executionStarted: false } } : {}) }
     const target = this.path('recovery', item.key); atomicJson(latest.path, record)
     if (latest.path !== target) durableRename(latest.path, target)
     item.path = target; item.record = record; item.state = 'recovery'; return record
   }) }
+  retireReplacedContext(message) {
+    const plan = contextDeliveryPlan(message)
+    if (!plan?.replacesDispatchId) return
+    return this._withLock(() => {
+      const previousKey = durableChatKey({ dedupeKey: `${message.tenantId}:${message.ownerJiacn}:${message.clientId}:${plan.replacesDispatchId}` })
+      const previous = this.findByKey(previousKey)
+      // A different/new Runtime may have no local copy. API owns attempt admission.
+      if (!previous) return
+      const old = previous.record.message
+      if (!contextBootstrapRejection(previous.record)
+          || ['tenantId', 'ownerJiacn', 'clientId', 'requestId', 'requestRevision', 'turnId', 'targetAgentId', 'conversationId', 'conversationGeneration']
+            .some(key => old[key] !== message[key])) throw new Error('CHAT_CONTEXT_REPLACEMENT_CONFLICT')
+      if (previous.state !== 'recovery') return // Already archived/deduplicated.
+      this._finalizeTerminal(previous, { ...previous.record, state: 'CANCELLED', cancelledAt: Date.now(),
+        cancelReason: 'CHAT_CONTEXT_REPLACED_BEFORE_EXECUTION' })
+    })
+  }
   cancelPending(item, reason = 'USER_CANCELLED') { if (!item || item.state !== 'pending') return false; return this._withLock(() => { const current = existsSync(item.path) ? JSON.parse(readFileSync(item.path, 'utf8')) : item.record; this._finalizeTerminal(item, { ...current, state: 'CANCELLED', cancelReason: reason, cancelledAt: Date.now() }); return true }) }
   findExactTurn(stop) {
     const optionalMatch = (actual, expected) => expected === undefined || expected === null || expected === '' || String(actual) === String(expected)
@@ -712,7 +742,7 @@ export class PersistentChatInbox {
         next.set(path, entry)
         if (entry.turnId === turnId) {
           if (!record) { record = JSON.parse(readFileSync(path, 'utf8')); parsedFiles++ }
-          if (record.message?.turnId === turnId) matches.push({ key, state, path, record })
+          if (record.message?.turnId === turnId && !contextBootstrapRejection(record)) matches.push({ key, state, path, record })
         }
       }
     }

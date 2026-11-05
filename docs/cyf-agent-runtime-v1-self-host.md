@@ -502,3 +502,15 @@ safe diagnostic metadata, never proof of task completion/revocation.
 - 不对现用app原地做去重：创建链接会改变ctime，故只在全新stage验证前生成，升级沿原stage→app rename；不通过链接写文件或chmod源文件。失败仅unlink本次新目录，源文件保留。后续整个程序归档/恢复使用同设备rename或保留hardlink的工具，不能用逐文件普通copy重新膨胀体积。Python依赖原始Flow压缩包在链接前校验/展开，协议及提取规则不变。
 - 备份清理真实依赖：旧helper拒绝nlink>1，新CYF源码仅允许全部链接都位于同一old-program的完整闭包，仍保护当前pin/新近恢复/占用/异常及外部链接；逐次unlink更新自身造成的nlink/ctime并只计一次释放空间。候选上线前需同步部署该定向维护修复；文档及源码变化不代表主机helper已更新。
 - 最早回归：native-toolchain-mounts新增同inode、外部独立、整体迁移、源别名篡改、失败回收及安装根范围；CYF ops/maintenance/tests/test_runtime_backup_cleanup.py新增闭包链接/外部链接/跨chunk删除/重规划/占用及一次计量。源码/正式CI/安装分别记录在CYF既有JUYITING-POLLING-20261102 handoff。
+
+### 2026-11-05 候选：后端增量上下文投递（尚未启用/发布）
+
+基于 develop `54c47019aa9ff7bd6e53181cfa9c6c9a073ea710` 的候选新增 `contextSnapshot.facts.contextDelivery` 和最终回复 `contextReceipt`。API负责历史选择；bridge不缓存/筛选历史。DELTA必须命中实际原生thread，缺失时在turn/start前拒绝；成功回执随原最终回复发送，包含真实thread/turn和原输入边界。控制字段不进入模型，但不修改源snapshot及摘要。无计划的旧snapshot沿用原行为。
+
+合同及实现边界见API `docs/interface-catalog/chat-context-delivery.md`，共享fixture在 `conf/codex-bridge/contracts/chat-context-delivery-v1.json`。API任务分支已接通准入草稿、首次派发准备、排队顺序与明确未执行的重新准备；尚未通过整批Flow验证、合入或部署，不能将源码接线当作恢复链路验收。未知完成结果沿现有恢复路径处理，不能为了得到回执重跑模型/工具。本文不证明正式测试、安装或提速。
+
+#### 2026-11-05 增量上下文未执行补全候选（未发布）
+
+`CHAT_CONTEXT_BOOTSTRAP_REQUIRED` 仅在 native turn/start 前成立。候选沿既有 inbox recovery 和 chat.dispatch.ack 保存/重传 `executionStarted:false` 证明；开始执行、未知接受或完成后异常不能使用该证明。重连/重复消息不重跑模型。API 的新 BOOTSTRAP `contextDelivery.replacesDispatchId` 只替换已明确拒绝的旧派发；Runtime 将同 request/turn 的旧未执行恢复项归档，保留去重证明并从最终结果确认候选中排除，防止误确认旧派发。无新轮询、新历史缓存或独立ACK。
+
+当前为API worktree 5b96cd8基线、Runtime worktree54c4701基线上的候选；Runtime候选1.3.56 / bridge1.1.45，不代表运行版本。API准入端已在候选激活，仍需整批Flow验证及受控迁移两项attempt唯一索引；不能单独部署此候选。详见CYF `docs/implementation/handoffs/JUYITING-POLLING-20261102.md` 2026-11-05接续记录。

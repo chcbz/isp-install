@@ -1,3 +1,4 @@
+import { completedContextReceipt } from './chat-context-delivery.mjs'
 import { prepareImageDerivative } from './image-input-file.mjs'
 /** Authorized materials in the original CHAT turn. Reuses the existing byte
  * materializer, measured carrier isolation and durable CHAT inbox; no new lane. */
@@ -91,10 +92,11 @@ export function buildMaterialsChatFinal({ message, materials, rawOutcome, receip
   const receipt = finalizeTypedInspectionInputReceipt({ receiptDraft, engineThreadId, engineTurnId })
   const outboundMessageId = `materials_final_${canonicalSha256({ requestId: message.requestId, turnId: message.turnId,
     dispatchId: message.dispatchId, outcome, receipt }).slice(7)}`
+  const contextReceipt = completedContextReceipt(message, engineThreadId, engineTurnId)
   const prepared = { schemaVersion: 1, contract: 'juyiting-materials-chat-final-v1', authorizationId: materials.authorizationId,
     manifestDigest: materials.manifestDigest, requestId: message.requestId, turnId: message.turnId, dispatchId: message.dispatchId,
     outboundMessageId, content: outcome.text,
-    extra: { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'fixed-materials-read-only', threadGeneration: threadKey,
+    extra: { ...(contextReceipt ? { contextReceipt } : {}), status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'fixed-materials-read-only', threadGeneration: threadKey,
       finalSeq, outcomeContractVersion: outcome.schemaVersion, interactionOutcome: outcome, inspectionInputReceipt: receipt, outboundMessageId },
     result: { status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed', threadId: engineThreadId,
       turnId: engineTurnId, threadKey, inputDigest: receipt.inputDigest, outboundMessageId } }

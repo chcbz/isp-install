@@ -1031,3 +1031,65 @@ test('disposing profile also closes its dedicated conversation tool adapters', a
   await disposeAppServerState(state, { timeoutMs: 5 })
   assert.equal(closed, 1); assert.equal(state.disposed, true)
 })
+
+test('delta context requires its native binding before resume and before turn/start', async () => {
+  const m = normalizedWire({ route: 'CHAT' })
+  m.contextSnapshot = structuredClone(m.contextSnapshot)
+  m.contextSnapshot.facts.contextDelivery = { schemaVersion: 1, mode: 'DELTA',
+    baseTurnId: 'previous-turn', engineThreadId: 'native-A', afterMessageId: '1', throughMessageId: '2' }
+  m.contextSnapshot.contextHash = canonicalSha256({ sourceVector: m.contextSnapshot.sourceVector, facts: m.contextSnapshot.facts })
+  let resumeCalls = 0; let modelCalls = 0
+  const adapter = {
+    readback: { initialize: {}, account: {}, models: {}, config: {}, tools: {} },
+    startOrResumeThread: async () => { resumeCalls++; return { threadId: 'native-B', state: 'HOT' } },
+    runTurn: async () => { modelCalls++; throw new Error('must not execute') }
+  }
+  const options = { adapter, chatWorkdir: '/runtime-owned-empty-chat',
+    bindingStore: { get: () => null, put: () => assert.fail('no changed binding'), markRecovery: () => {} },
+    sendProtocolFn: () => assert.fail('no final or delta before execution') }
+  const ready = { ...profile, fastChatEnabled: true, appServerEnabled: true }
+  await assert.rejects(runFastChat(ready, m, options), { code: 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED' })
+  assert.equal(resumeCalls, 0); assert.equal(modelCalls, 0)
+  options.bindingStore.get = () => ({ threadId: 'native-A', state: 'HOT' })
+  await assert.rejects(runFastChat(ready, m, options), { code: 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED' })
+  assert.equal(resumeCalls, 1); assert.equal(modelCalls, 0)
+})
+
+
+test('delta context plain final carries actual native receipt but incomplete native results cannot advance it', async () => {
+  const makeMessage = () => {
+    const m = normalizedWire({ route: 'CHAT' })
+    m.contextSnapshot = structuredClone(m.contextSnapshot)
+    m.contextSnapshot.facts.contextDelivery = { schemaVersion: 1, mode: 'DELTA',
+      baseTurnId: 'prior-turn', engineThreadId: 'native-A', afterMessageId: '1', throughMessageId: '2' }
+    m.contextSnapshot.contextHash = canonicalSha256({ sourceVector: m.contextSnapshot.sourceVector, facts: m.contextSnapshot.facts })
+    return m
+  }
+  for (const patch of [{}, { finishReason: 'failed' }, { threadId: 'native-B' }, { turnId: 'wrong-turn' }]) {
+    const frames = []; let calls = 0
+    const adapter = {
+      readback: {},
+      startOrResumeThread: async () => ({ threadId: 'native-A', state: 'HOT' }),
+      runTurn: async options => {
+        calls++
+        options.onAccepted({ threadId: 'native-A', turnId: 'native-turn-2' })
+        return { threadId: 'native-A', turnId: 'native-turn-2', finishReason: 'completed', content: 'answer', ...patch }
+      },
+      reconcileTurn: async () => ({ status: 'RECOVERY_REQUIRED' })
+    }
+    const options = { adapter, chatWorkdir: '/runtime-owned-empty-chat',
+      bindingStore: { get: () => ({ threadId: 'native-A', state: 'HOT' }), put: () => {}, markRecovery: () => {} },
+      sendProtocolFn: (type, payload) => frames.push({ type, payload }) }
+    const call = runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, makeMessage(), options)
+    if (Object.keys(patch).length) {
+      await assert.rejects(call, { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+      assert.equal(frames.length, 0)
+    } else {
+      await call
+      assert.equal(frames.length, 1)
+      assert.deepEqual(frames[0].payload.contextReceipt, { schemaVersion: 1, mode: 'DELTA',
+        engineThreadId: 'native-A', engineTurnId: 'native-turn-2', throughMessageId: '2' })
+    }
+    assert.equal(calls, 1) // Never retry the model to obtain a receipt.
+  }
+})

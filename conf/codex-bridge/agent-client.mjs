@@ -1,3 +1,4 @@
+import { contextDeliveryPlan, requireContextThread, completedContextReceipt, contextBootstrapRejection } from './chat-context-delivery.mjs'
 import { CHAT_FILE_TOOL_INSTRUCTIONS } from './native-execution-profile.mjs'
 import { prepareConversationTools } from './conversation-tools.mjs'
 import { NativeConversationWakeup } from './native-conversation-wakeup.mjs'
@@ -2933,7 +2934,12 @@ export class AgentMessageProcessor {
   _scheduleRecoveryChats() {
     if (!this.chatInbox || this.paused || this.stopped) return
     for (const item of this.chatInbox.listRecovery()) {
-      if (canResumePreEngineInspection(item.record)) {
+      const contextRejection = contextBootstrapRejection(item.record)
+      if (contextRejection) {
+        // Reconnect/startup already walks recovery. Replay the original rejection, never the model.
+        try { this._emitChatAck(item.record.message, contextRejection) }
+        catch (error) { this._retryChatAck(item.record.message, contextRejection, error) }
+      } else if (canResumePreEngineInspection(item.record)) {
         if (!this.preEngineRecoveryAttempts.has(item.key)) this._scheduleChat(item, true)
       } else if (this.recoverChat && ((item.record.message?.route || item.record.message?.routing?.interactionMode) === 'INSPECT' || item.record.message?.contextSnapshot?.facts?.materialsInput || item.record.finalPrepared?.contract === 'juyiting-action-chat-final-v1') && (item.record.preparation || item.record.finalPrepared)) this._scheduleChatRecovery(item)
     }
@@ -3029,6 +3035,8 @@ export class AgentMessageProcessor {
       }
       let reconcileInspection = false; let retryInspectionFinal = false
       try {
+        if (claimed.record.message.contextSnapshot?.facts?.contextDelivery?.replacesDispatchId)
+          this.chatInbox.retireReplacedContext(claimed.record.message)
         const result = await this.runChat(claimed.record.message, controls)
         if (this._chatFinalPersistenceConfirmed(claimed.key)) this._clearChatRecoveryRetry(claimed.key)
         else if (active.cancelRequested || result?.status === 'cancelled') this.chatInbox.cancelProcessing(claimed)
@@ -3044,10 +3052,13 @@ export class AgentMessageProcessor {
       } catch (error) {
         if (!this._chatFinalPersistenceConfirmed(claimed.key)) {
           const unknown = error?.code === 'TURN_ACCEPTANCE_UNKNOWN'
-          const recovered = this.chatInbox.recoveryRequired(claimed, `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`, unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED')
+          const unexecutedContext = error?.code === 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED' && active.state === 'STARTING'
+          const recovered = this.chatInbox.recoveryRequired(claimed,
+            unexecutedContext ? 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED' : `${unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : 'CHAT_FAILURE'}: ${error.message}`,
+            unknown ? 'ACCEPTANCE_UNKNOWN' : 'RECOVERY_REQUIRED', unexecutedContext)
           if (!(recovered.state === 'COMPLETED' && recovered.finalConfirmation?.serverPersistence === 'confirmed')) {
             reconcileInspection = unknown && ((claimed.record.message?.route || claimed.record.message?.routing?.interactionMode) === 'INSPECT' || claimed.record.message?.contextSnapshot?.facts?.materialsInput || claimed.record.preparation?.contract === 'juyiting-action-chat-preparation-v1')
-            const recoveryAck = { status: 'recovery_required', errorCode: error?.code || 'CHAT_RUNTIME_ERROR', reason: String(error.message || 'CHAT runtime failure').slice(0, 512) }
+            const recoveryAck = contextBootstrapRejection(recovered) || { status: 'recovery_required', errorCode: error?.code || 'CHAT_RUNTIME_ERROR', reason: String(error.message || 'CHAT runtime failure').slice(0, 512) }
             try { this._emitChatAck(claimed.record.message, recoveryAck) } catch (ackError) { this._retryChatAck(claimed.record.message, recoveryAck, ackError) }
             this.onReject(new AgentProtocolError(unknown ? 'TURN_ACCEPTANCE_UNKNOWN' : (error?.code || 'CHAT_RUNTIME_ERROR'), error.message), claimed.record.message.rawPayload)
           }
@@ -3193,7 +3204,7 @@ export class AgentMessageProcessor {
           let accepted
           try { accepted = await this.chatInbox.accept(message) }
           catch (error) { const protocolError = new AgentProtocolError(error.code || 'CHAT_INBOX_ERROR', error.message); this.onReject(protocolError, raw); return { kind: 'rejected', error: protocolError } }
-          const ack = { status: accepted.accepted ? 'received' : 'duplicate' }
+          const ack = contextBootstrapRejection(accepted.item?.record) || { status: accepted.accepted ? 'received' : 'duplicate' }
           try { this._emitChatAck(message, ack) } catch (error) { this._retryChatAck(message, ack, error) }
           if (!accepted.accepted) return { kind: 'chat-duplicate', dispatchId: message.dispatchId }
           this._scheduleChat(accepted.item)
@@ -4756,7 +4767,10 @@ export const runFastChat = async (profile, message, {
     metrics.queueAt = Date.now()
     const prior = materials ? bindingStore?.get(key) || null : bindingStore?.get(key)
     if (prior?.state === 'RECOVERY_REQUIRED') throw Object.assign(new Error('THREAD_BINDING_RECOVERY_REQUIRED'), { code: 'TURN_ACCEPTANCE_UNKNOWN' })
+    const deliveryPlan = contextDeliveryPlan(message)
+    requireContextThread(deliveryPlan, prior)
     const binding = await selectedAdapter.startOrResumeThread(prior, { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, config: chatThreadConfig, developerInstructions })
+    requireContextThread(deliveryPlan, binding)
     bindingStore?.put(key, binding)
     if (materials) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
       conversationKey: conversationKey, engineStateBinding: materialEngineBinding,
@@ -4791,7 +4805,7 @@ export const runFastChat = async (profile, message, {
       })
       turnCompleted = !materials || result.finishReason === 'completed'
       if (typedStreamError) throw typedStreamError
-      if (materials && (result.finishReason !== 'completed' || result.threadId !== binding.threadId || !result.turnId || (acceptedTurn?.turnId && acceptedTurn.turnId !== result.turnId))) throw new AgentProtocolError('MATERIALS_NATIVE_RESULT_UNKNOWN', 'No exact completed native turn readback')
+      if ((materials || deliveryPlan) && (result.finishReason !== 'completed' || result.threadId !== binding.threadId || !result.turnId || (acceptedTurn?.turnId && acceptedTurn.turnId !== result.turnId))) throw new AgentProtocolError(materials ? 'MATERIALS_NATIVE_RESULT_UNKNOWN' : 'TURN_ACCEPTANCE_UNKNOWN', 'No exact completed native turn readback')
       if (controls.isCancelled()) return { status: 'cancelled', turnId: result.turnId, routeUsed: 'CHAT_FAST', metrics }
       metrics.finalAt = Date.now()
       if (typedRequest) {
@@ -4814,11 +4828,16 @@ export const runFastChat = async (profile, message, {
         return recoverActionChat(profile, message, { finalPrepared }, { controls,
           sendFinal: (p, m, content, extra) => sendChatFinal(p, m, content, extra, sendProtocolFn) })
       } else {
-        sendChatFinal(profile, message, result.content, { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
+        const contextReceipt = completedContextReceipt(message, result.threadId, result.turnId)
+        sendChatFinal(profile, message, result.content, { ...(contextReceipt ? { contextReceipt } : {}), status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: key, resourceReadback: readbackSummary }, sendProtocolFn)
       }
       metrics.publishAt = Date.now(); bindingStore?.put(key, { ...binding, state: 'IDLE', lastAppliedContextHash: message.contextSnapshot.contextHash, updatedAt: Date.now() })
       return { status: 'completed', turnId: result.turnId, threadKey: key, routeUsed: 'CHAT_FAST', metrics }
     } catch (error) {
+      // An error returned after runTurn was attempted cannot certify non-execution,
+      // even if a native/adapter failure happens to use the pre-start error code.
+      if (error.code === 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED')
+        error = new AgentProtocolError('TURN_ACCEPTANCE_UNKNOWN', 'Native turn was attempted; reconcile without bootstrap replay')
       if (['TURN_FAILED', 'TURN_INTERRUPTED'].includes(error.code)) turnCompleted = true
       if (materials && error.code === 'MATERIALS_NATIVE_RESULT_UNKNOWN') recordRecovery(error.message)
       if (error.code === 'TURN_ACCEPTANCE_UNKNOWN') {

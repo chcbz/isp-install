@@ -1,3 +1,4 @@
+import { completedContextReceipt } from './chat-context-delivery.mjs'
 /** Durable publication of an already computed action CHAT final. Never reruns the model. */
 import { canonicalSha256 } from './chat-runtime.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
@@ -6,9 +7,10 @@ export function buildActionChatFinal({ message, outcome, engineThreadId, engineT
   const binding = Object.fromEntries(['tenantId', 'ownerJiacn', 'clientId', 'conversationId', 'conversationGeneration', 'taskId', 'requestId', 'turnId', 'dispatchId', 'targetAgentId'].map(key => [key, message[key]]))
   const bindingDigest = canonicalSha256({ binding, contextHash: message.contextSnapshot.contextHash })
   const outboundMessageId = `action_final_${canonicalSha256({ bindingDigest, outcome }).slice(7)}`
+  const contextReceipt = completedContextReceipt(message, engineThreadId, engineTurnId)
   const prepared = { schemaVersion: 1, contract: 'juyiting-action-chat-final-v1', bindingDigest,
     requestId: message.requestId, turnId: message.turnId, dispatchId: message.dispatchId, outboundMessageId, content: outcome.text,
-    extra: { status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: threadKey,
+    extra: { ...(contextReceipt ? { contextReceipt } : {}), status: 'completed', routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', threadGeneration: threadKey,
       finalSeq, outcomeContractVersion: outcome.schemaVersion, interactionOutcome: outcome, outboundMessageId },
     result: { status: 'final_computed', computationStatus: 'completed', serverPersistence: 'unconfirmed',
       threadId: engineThreadId, turnId: engineTurnId, threadKey, outboundMessageId } }
