@@ -1682,14 +1682,14 @@ for (const legacyFlag of [undefined, false, true]) test(`SM-C1 real host first-i
   assert.equal(downloads, 1); assert.ok(logs.every(row => !JSON.stringify(row).includes('rts1_')));
 });
 
-test('archive reconciliation waits for native registration, installs before jobs and isolates failure by Agent', async t => {
+test('position reconciliation waits for native registration and never invokes retired archive jobs', async t => {
   const c=await channelFixture(t,{reconcileSkills:true});
   await c.adapters.heartbeat();await c.tick();assert.ok(c.states().every(s=>!s.reconciliation));
   await Promise.all(c.executors.map(e=>e.activate()));await c.adapters.heartbeat();await c.tick();
-  assert.ok(c.states().every(s=>JSON.stringify(s.reconciliation)===JSON.stringify(['positions','archive'])));
+  assert.ok(c.states().every(s=>JSON.stringify(s.reconciliation)===JSON.stringify(['positions'])));
   c.states()[0].reconciliation=[];c.states()[1].reconciliation=[];c.states()[0].reconcileFailure=true;
   await c.adapters.heartbeat();await c.tick();
-  assert.deepEqual(c.states()[0].reconciliation,['positions']);assert.deepEqual(c.states()[1].reconciliation,['positions','archive']);
+  assert.deepEqual(c.states()[0].reconciliation,['positions']);assert.deepEqual(c.states()[1].reconciliation,['positions']);
   assert.equal(c.logs.filter(l=>l.event==='position-skill-reconciliation-deferred').length,1);
   assert.ok(!JSON.stringify(c.logs).includes('private'));
   await c.executors[0].close();c.states()[0].reconciliation=[];
@@ -1887,7 +1887,7 @@ test('API shared file work fixture preserves the existing wire envelope and proo
 });
 
 
-test('explicit archive disable suppresses only archive discovery and correlated re-registration can enable it', async t => {
+test('legacy archive discovery flags never revive retired jobs on re-registration', async t => {
   const c=await channelFixture(t,{ackRegistration:false,reconcileSkills:true});
   const activation=c.executors[0].activate();await c.opened();
   const socket=c.sockets[0], state=c.states()[0];
@@ -1899,7 +1899,7 @@ test('explicit archive disable suppresses only archive discovery and correlated 
   socket.receive({...registrationReceipt(registration),messageId:'unrelated',archiveJobDiscovery:1});await c.tick();
   await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,[]);
   socket.receive({...registrationReceipt(registration),archiveJobDiscovery:1});await c.tick();
-  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions','archive']);
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions']);
 });
 
 test('invalid archive service declaration cannot silently disable or enable discovery', async t => {

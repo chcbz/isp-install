@@ -1,10 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { buildArchive } from '../../skills/archive-maintenance-1.1.1/scripts/build-archive.mjs'
-import { ArchiveJobReconciler, executeArchiveScript } from '../archive-job-reconciler.mjs'
+import { buildArchive } from '../../skills/archive-maintenance/scripts/build-archive.mjs'
 import { PositionSkillReconciler } from '../position-skill-reconciler.mjs'
-import { fileURLToPath } from 'node:url'
 const hash=s=>createHash('sha256').update(s).digest('hex')
 const source=(text,id='external-new-work')=>({workId:id,editionId:`edition-${id}`,title:'外部新底本',author:'测试作者',sourceName:'outside.txt',sourceRights:'owned-test-fixture',sourceText:text,sourceSha256:hash(text)})
 const response=data=>({ok:true,status:200,json:async()=>({protocolVersion:1,requestId:'test-request',code:'E0',msg:'',data})})
@@ -21,30 +19,6 @@ test('arbitrary external titles and chapter counts, optional preface, exact hash
 test('reject source mismatch and empty chapters; never fabricate missing original text',()=>{
   assert.throws(()=>buildArchive({...source('正文'),sourceSha256:'a'.repeat(64)}),/MISMATCH/)
   assert.throws(()=>buildArchive(source('第一回 开始\n第二回 无正文')),/EMPTY_CHAPTER/)
-})
-test('actual installed script protocol consumes stdin and emits a verified deterministic manifest',async()=>{
-  const packageRoot=fileURLToPath(new URL('../../skills/archive-maintenance-1.1.1/',import.meta.url))
-  const input=source('第一回 见面\n你好，世界。')
-  const result=await executeArchiveScript({packageRoot,manifest:{entrypoint:'scripts/build-archive.mjs'}},input)
-  assert.deepEqual(result,buildArchive(input))
-})
-test('native archive job uses the explicit Agent and exact installed digest, not another installed skill',async()=>{
-  const job={jobId:'job1',agentId:'agent1',state:'WAITING',installationId:'grant1-1',packageDigest:'sha256:'+'a'.repeat(64),manifestSha256:'b'.repeat(64),skillKey:'archive-maintenance',mode:'DRAFT_ONLY'}
-  const sourceData=source('正文'),result=buildArchive(sourceData);const calls=[]
-  const manager={listInstalledSkills:()=>[{skillInstallationId:'grant1-1',active:true,enabled:true,kind:'EXECUTABLE',packageSha256:'a'.repeat(64),manifestSha256:'b'.repeat(64),manifest:{skillKey:'archive-maintenance',runner:'local-script'}}]}
-  const runner=new ArchiveJobReconciler({manager,apiOrigin:'https://api.test',agentId:'agent1',execute:async()=>result,nativeFetch:async(url,options)=>{
-    calls.push([url.pathname,options?.method||'GET'])
-    if(url.pathname==='/internal/archive/v1/jobs')return response([job])
-    if(url.pathname.endsWith('/source'))return response(sourceData)
-    return response(options?.method==='POST'?{jobId:'job1',state:'DRAFT',resultDigest:result.manifestFileSha256}:{jobId:'job1',state:'WAITING'})
-  }})
-  assert.deepEqual(await runner.poll(),{processed:1});assert.equal(calls.filter(c=>c[1]==='POST').length,1)
-  const installed=manager.listInstalledSkills()[0];manager.listInstalledSkills=()=>[installed]
-  installed.enabled=false;await assert.rejects(runner.poll(),/NOT_READY/)
-  installed.enabled=true;installed.active=false;await assert.rejects(runner.poll(),/NOT_READY/)
-  installed.active=true
-  job.packageDigest='sha256:'+'c'.repeat(64);await assert.rejects(runner.poll(),/NOT_READY/)
-  job.agentId='other';await assert.rejects(runner.poll(),/JOB_INVALID/)
 })
 test('position installation uses the real shared PREPARE/ACTIVATE journal and only server receipts retire results',async t=>{
   const {mkdtempSync,mkdirSync,rmSync}=await import('node:fs');const {tmpdir}=await import('node:os');const {join}=await import('node:path')
@@ -78,34 +52,4 @@ test('position recovery does not steal market results or invent receipt acknowle
 test('chapter heading without subtitle is structural, not a paragraph',()=>{
   const m=JSON.parse(buildArchive(source('第一回\n旧版本正文。\n第二回\n后一章正文。')).manifestJson)
   assert.equal(m.chapterCount,2);assert.equal(m.chapters[0].paragraphs[0].text,'旧版本正文。')
-})
-
-test('parser failure gets a durable safe receipt and does not starve the next book',async()=>{
-  const base={agentId:'agent1',state:'WAITING',installationId:'g1-1',packageDigest:'sha256:'+'a'.repeat(64),manifestSha256:'b'.repeat(64),skillKey:'archive-maintenance',mode:'DRAFT_ONLY'}
-  const jobs=[{...base,jobId:'bad'},{...base,jobId:'good'}],results=[]
-  const manager={listInstalledSkills:()=>[{skillInstallationId:'g1-1',active:true,enabled:true,kind:'EXECUTABLE',packageSha256:'a'.repeat(64),manifestSha256:'b'.repeat(64),manifest:{skillKey:'archive-maintenance',runner:'local-script'}}]}
-  const runner=new ArchiveJobReconciler({manager,apiOrigin:'https://api.test',agentId:'agent1',execute:async(_installed,data)=>{if(data.workId==='bad')throw Object.assign(new Error('private details'),{code:'ARCHIVE_SCRIPT_FAILED'});return buildArchive(data)},nativeFetch:async(url,options)=>{
-    if(url.pathname==='/internal/archive/v1/jobs')return response(jobs)
-    const id=url.pathname.split('/').at(-2)
-    if(url.pathname.endsWith('/source'))return response(source('正文',id))
-    if(options.method!=='POST')return response({state:'WAITING'})
-    const body=JSON.parse(options.body);results.push(body)
-    return response(body.errorCode?{jobId:id,state:'FAILED',errorCode:body.errorCode}:{jobId:id,state:'DRAFT',resultDigest:body.manifestFileSha256})
-  }})
-  assert.deepEqual(await runner.poll(),{processed:2});assert.equal(results[0].errorCode,'ARCHIVE_SCRIPT_FAILED');assert.ok(!JSON.stringify(results).includes('private details'));assert.ok(results[1].manifestJson)
-})
-
-test('a durable publication CAS conflict does not starve the next book and cannot masquerade as published',async()=>{
-  const base={agentId:'agent1',state:'WAITING',installationId:'g1-1',packageDigest:'sha256:'+'a'.repeat(64),manifestSha256:'b'.repeat(64),skillKey:'archive-maintenance',mode:'AUTO'}
-  const jobs=[{...base,jobId:'stale'},{...base,jobId:'good'}],states=[]
-  const manager={listInstalledSkills:()=>[{skillInstallationId:'g1-1',active:true,enabled:true,kind:'EXECUTABLE',packageSha256:'a'.repeat(64),manifestSha256:'b'.repeat(64),manifest:{skillKey:'archive-maintenance',runner:'local-script'}}]}
-  const runner=new ArchiveJobReconciler({manager,apiOrigin:'https://api.test',agentId:'agent1',execute:async(_i,s)=>buildArchive(s),nativeFetch:async(url,options)=>{
-    if(url.pathname==='/internal/archive/v1/jobs')return response(jobs)
-    const id=url.pathname.split('/').at(-2)
-    if(url.pathname.endsWith('/source'))return response(source('正文',id))
-    if(options.method!=='POST')return response({state:'WAITING'})
-    const result=JSON.parse(options.body),state=id==='stale'?'FAILED':'PUBLISHED';states.push(state)
-    return response({jobId:id,state,errorCode:id==='stale'?'ARCHIVE_EDITION_CONFLICT':null,resultDigest:result.manifestFileSha256})
-  }})
-  assert.deepEqual(await runner.poll(),{processed:2});assert.deepEqual(states,['FAILED','PUBLISHED'])
 })

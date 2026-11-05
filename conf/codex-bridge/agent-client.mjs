@@ -2,7 +2,6 @@ import { contextDeliveryPlan, requireContextThread, completedContextReceipt, con
 import { CHAT_FILE_TOOL_INSTRUCTIONS } from './native-execution-profile.mjs'
 import { prepareConversationTools } from './conversation-tools.mjs'
 import { NativeConversationWakeup } from './native-conversation-wakeup.mjs'
-import { ArchiveJobReconciler } from './archive-job-reconciler.mjs'
 import { PositionSkillReconciler } from './position-skill-reconciler.mjs'
 import { nativePollDiagnostic } from './native-poll-diagnostic.mjs'
 import { fromAgentWire } from './agent-message-wire.mjs'
@@ -6569,17 +6568,6 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
               changed: phase => { if (phase === 'changing') state.skillRegistry?.invalidate(); else void refreshMeasuredSkills(state) } })
           }
           return state.positionSkillReconciler.poll()
-        },
-        reconcileArchiveJobs: async () => {
-          const state=entry.state, transport=state?.runtimeTransport
-          if(!state || entry.closed || !transport?.ready?.())return
-          if(!state.archiveJobReconciler || state.archiveJobTransport!==transport){
-            state.archiveJobTransport=transport
-            state.archiveJobReconciler=new ArchiveJobReconciler({manager:state.skillInstallManager,
-              nativeFetch:(url,opts)=>transport.nativeFetch(url,opts),apiOrigin:state.skillInstallManager.wsUrl.replace(/^ws/,'http'),
-              agentId:state.profile.agentId,current:()=>!entry.closed && !state.disposed && state.runtimeTransport===transport && transport.ready()})
-          }
-          return state.archiveJobReconciler.poll()
         },
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
         bindWorkNotifications: version => { entry.state.nativeWorkNotifications = version === 1 ? 1 : null },
