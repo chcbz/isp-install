@@ -30,7 +30,8 @@ test('generic installed skill and API catalog provide bounded conversation callb
 
 test('empty installations or an older API do not grant tools or fail ordinary chat', async () => {
   const f = fixture(); f.uninstall()
-  assert.equal(await prepareConversationTools(f.options), null); assert.equal(f.calls.length, 0)
+  f.options.nativeFetch = async () => json({ schemaVersion: '1', skills: [], tools: [] })
+  assert.equal(await prepareConversationTools(f.options), null)
   const g = fixture(); g.options.nativeFetch = async () => new Response('', { status: 404 })
   assert.equal(await prepareConversationTools(g.options), null)
 })
@@ -94,4 +95,29 @@ test('archive and skill-management catalogs compose without granting shell or re
   assert.equal(result.state, 'DRAFT'); assert.equal(result.active, false)
   assert.deepEqual(called.body, arguments_); assert.ok(!Object.hasOwn(called.body, 'sourceText'))
   await assert.rejects(session.binding.callTool({ bindingId: 'dispatch1', messageId: 'message1', tool: 'shell', arguments: {} }), /BINDING_CHANGED/)
+})
+
+
+test('instruction-only skills are loaded without adding a domain tool or skill-name branch', async () => {
+  const f = fixture()
+  const arbitrary = { ...skill, skillKey: 'new-writing-guide' }
+  let enabled = true
+  f.options.loadInstalled = () => enabled ? [{ ...arbitrary, active: true, enabled: true, kind: 'INSTRUCTION' }] : []
+  f.options.nativeFetch = async () => json({ schemaVersion: '1', skills: [arbitrary], tools: [] })
+  const session = await prepareConversationTools(f.options)
+  assert.match(session.instructions, /new-writing-guide@1.0.0/)
+  assert.deepEqual(session.binding.tools, [])
+  await assert.rejects(invoke(session), /BINDING_CHANGED/)
+  enabled = false
+  assert.throws(() => session.binding.checkActive(), /INSTALLATION_CHANGED/)
+})
+
+test('business tools and installed instructions are independent, never inferred from each other', async () => {
+  const f = fixture(); f.uninstall()
+  f.options.nativeFetch = async (url, options) => options?.method === 'POST'
+    ? json({ disposition: 'UPDATED' }) : json({ schemaVersion: '1', skills: [], tools: [tool] })
+  const session = await prepareConversationTools(f.options)
+  assert.deepEqual(session.binding.tools, [tool])
+  assert.deepEqual(await invoke(session), { disposition: 'UPDATED' })
+  assert.doesNotMatch(session.instructions, /Installed skill [^ \n]+@/)
 })
