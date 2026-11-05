@@ -275,3 +275,32 @@ test('network owner waits for startup events without repeatedly listing system p
   release({ pid: 201, netNamespaceIno: '20' }); await waiting
   assert.equal(scans, 1, 'retain the single namespace foreign-member check, not a discovery loop')
 })
+
+
+test('dispose closes upgraded CONNECT tunnels even when upstream stays half-open', { timeout: 3000 }, async () => {
+  const { createServer, connect } = await import('node:net')
+  const sockets = new Set()
+  const upstream = createServer({ allowHalfOpen: true }, socket => { sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket)) })
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  const authority = `127.0.0.1:${upstream.address().port}`
+  const egress = new RestrictedProviderEgress({ providerBaseUrl: `https://${authority}`, networkConnectTimeoutMs: 1000 })
+  let client
+  try {
+    await egress.start()
+    client = connect(egress.port, '127.0.0.1')
+    await new Promise((resolve, reject) => {
+      client.once('error', reject)
+      client.once('connect', () => client.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`))
+      client.once('data', bytes => { try { assert.match(bytes.toString(), /200 Connection Established/); resolve() } catch (e) { reject(e) } })
+    })
+    assert.ok(egress.sockets.size >= 2)
+    await egress.dispose()
+    assert.equal(egress.sockets.size, 0)
+    await egress.dispose()
+  } finally {
+    client?.destroy()
+    for (const socket of sockets) socket.destroy()
+    await egress.dispose()
+    await new Promise(resolve => upstream.close(resolve))
+  }
+})

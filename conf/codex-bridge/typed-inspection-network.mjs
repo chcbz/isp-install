@@ -181,6 +181,7 @@ export class RestrictedProviderEgress {
     this.slirpBin = slirpBin; this.nftBin = nftBin; this.nsenterBin = nsenterBin; this.pythonBin = pythonBin
     this.spawnFn = spawnFn; this.processInspector = processInspector; this.server = null; this.canaryServer = null; this.slirp = null; this.port = 0; this.canaryPort = 0; this.attestation = null; this.owner = null; this.hostCanary = null
     this.lifecycle = new AbortController()
+    this.sockets = new Set()
   }
   async bindOwner(child, expectedWrapperExecutable, { signal = this.lifecycle.signal } = {}) {
     const began = performance.now(), phases = {}, counts = { rounds: 0, pids: 0, descendants: 0 }; let ready = false
@@ -239,12 +240,21 @@ export class RestrictedProviderEgress {
   }
   async start() {
     if (this.server) return this
+    // CONNECT sockets are detached from HTTP ownership: closeAllConnections
+    // does not close them. Keep only live transport resources until disposal.
+    const track = socket => {
+      this.sockets.add(socket)
+      socket.once('close', () => this.sockets.delete(socket))
+      socket.on('error', () => socket.destroy())
+      return socket
+    }
     const server = createHttpServer((_request, response) => { response.writeHead(405, { Connection: 'close' }); response.end() })
+    server.on('connection', track)
     server.on('connect', (request, client, head) => {
       const authority = String(request.url || '').toLowerCase()
       const destination = [this.policy.providerOrigin, ...(this.policy.additionalOrigins || [])].find(origin => exactAuthority(new URL(origin)) === authority)
       if (!destination) { client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
-      const provider = new URL(destination); const upstream = connect(Number(provider.port || 443), provider.hostname)
+      const provider = new URL(destination); const upstream = track(connect(Number(provider.port || 443), provider.hostname))
       const abort = () => { try { client.destroy() } catch {}; try { upstream.destroy() } catch {} }
       upstream.setTimeout(this.networkConnectTimeoutMs, abort); upstream.once('error', abort); client.once('error', abort)
       upstream.once('connect', () => {
@@ -252,13 +262,15 @@ export class RestrictedProviderEgress {
         if (head?.length) upstream.write(head); client.pipe(upstream); upstream.pipe(client)
       })
     })
-    const canaryServer = createNetServer(socket => socket.end('cyf-typed-inspection-host-canary\n'))
+    const canaryServer = createNetServer(socket => track(socket).end('cyf-typed-inspection-host-canary\n'))
     try {
       const address = await listen(server); const canaryAddress = await listen(canaryServer)
       this.server = server; this.port = address.port; this.canaryServer = canaryServer; this.canaryPort = canaryAddress.port
       this.hostCanary = await hostCanaryControl(this.canaryPort, this.networkConnectTimeoutMs)
       return this
     } catch (error) {
+      for (const socket of this.sockets) socket.destroy()
+      this.sockets.clear()
       await closeServer(server).catch(() => {}); await closeServer(canaryServer).catch(() => {}); throw error
     }
   }
@@ -320,6 +332,9 @@ export class RestrictedProviderEgress {
     try { if (this.slirp?.exitCode === null) this.slirp.kill('SIGTERM') } catch {}
     this.slirp = null
     const servers = [this.server, this.canaryServer].filter(Boolean); this.server = null; this.canaryServer = null
-    await Promise.all(servers.map(server => closeServer(server).catch(() => {})))
+    const closing = servers.map(server => closeServer(server).catch(() => {}))
+    for (const socket of this.sockets) socket.destroy()
+    this.sockets.clear()
+    await Promise.all(closing)
   }
 }
