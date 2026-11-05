@@ -1916,7 +1916,7 @@ test('shared archive registration fixture carries explicit server capability wit
  assert.equal(decoded.archiveJobDiscovery,0);assert.deepEqual(decoded.readyCommandTypes,[]);
 });
 
-test('old position discovery completion cannot run archive discovery after re-registration', async t => {
+test('position discovery completion and subsequent heartbeat never revive retired archive discovery', async t => {
  const c=await channelFixture(t,{ackRegistration:false,reconcileSkills:true});
  const activation=c.executors[0].activate();await c.opened();const socket=c.sockets[0],state=c.states()[0];
  socket.receive({...registrationReceipt(socket.sent[0]),archiveJobDiscovery:1});await activation;
@@ -1924,5 +1924,5 @@ test('old position discovery completion cannot run archive discovery after re-re
  state.transport.refreshCapabilities();await c.tick();const registration=socket.sent.filter(f=>f.messageType==='agent.register').at(-1);
  socket.receive({...registrationReceipt(registration),archiveJobDiscovery:1});await c.tick();release();await c.tick();
  assert.deepEqual(state.reconciliation,['positions']);state.positionGate=null;
- await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions','positions','archive']);
+ await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions','positions']);
 });
