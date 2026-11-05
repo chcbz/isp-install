@@ -493,3 +493,12 @@ safe diagnostic metadata, never proof of task completion/revocation.
 - 启动worker仅读取固定image manifest，再由既有完整性责任层核对副本、目录闭包；不运行Python/ldd/浏览器发现。冻结manifest复用原文件/祖先元数据漂移检测。未准备或损坏的image不降级到旧宿主发现/动态分组，明确初始化失败，不伪称工具READY。显式逐文件manifest仅供安装/诊断，不是生产fallback。
 - 同1682文件在当前主机可用3个工具链目录挂载（不含状态/输入/引擎挂载）；实际数量来自文件顶层路径，不硬编码成资源门槛。初始化探针不含初始image完整性核验，不等同线上首字延迟。新目录有一次磁盘副本成本，发布前按实际空间核对，不用请求级缓存掩盖。
 - 回归：`native-toolchain-mounts.test.mjs`覆盖闭包、重命名、迁移、篡改/额外文件/软链及禁止覆盖；原integrity/single-flight和安装入口回归保持。真实无凭据bwrap/app-server验证全部文件SHA/集合、只读、DOCX/XLSX/PDF、原生Chromium，不放宽CHAT网络限制。代码/Flow与上线证据分别记录。
+
+
+### 单份工具链实体（2026-11-05，候选Runtime1.3.55，未部署）
+
+- 覆盖上节“所有文件一次复制”的布局实现：安装helper对同一候选根内已核验的Node/Python/Chromium及脚本文件使用硬链接（不同目录入口、同一inode/字节实体）；仍保留精确允许文件视图及3个只读顶层挂载。不增大沙箱可见范围，不改调用路径、manifest schema、首次完整性及请求复用机制。硬链接不是软链接，不要求沙箱能访问原宿主目录。
+- 系统shell/ELF库位于候选根之外，仍一次复制以固定版本，不与宿主包管理器或历史版本共享。helper返回sharedFiles/sharedBytes/copiedFiles/copiedBytes供实际安装报告，不声称额外空间绝对为零。候选必须在同一文件系统布局，link失败明确退出，不静默复制掩盖空间回退。
+- 不对现用app原地做去重：创建链接会改变ctime，故只在全新stage验证前生成，升级沿原stage→app rename；不通过链接写文件或chmod源文件。失败仅unlink本次新目录，源文件保留。后续整个程序归档/恢复使用同设备rename或保留hardlink的工具，不能用逐文件普通copy重新膨胀体积。Python依赖原始Flow压缩包在链接前校验/展开，协议及提取规则不变。
+- 备份清理真实依赖：旧helper拒绝nlink>1，新CYF源码仅允许全部链接都位于同一old-program的完整闭包，仍保护当前pin/新近恢复/占用/异常及外部链接；逐次unlink更新自身造成的nlink/ctime并只计一次释放空间。候选上线前需同步部署该定向维护修复；文档及源码变化不代表主机helper已更新。
+- 最早回归：native-toolchain-mounts新增同inode、外部独立、整体迁移、源别名篡改、失败回收及安装根范围；CYF ops/maintenance/tests/test_runtime_backup_cleanup.py新增闭包链接/外部链接/跨chunk删除/重规划/占用及一次计量。源码/正式CI/安装分别记录在CYF既有JUYITING-POLLING-20261102 handoff。
