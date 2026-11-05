@@ -4169,8 +4169,12 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
   const typedInspection = typedInspectionProfileRuntime?.declaration?.() || null
   const nativeExecution = online && profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
     ? typedInspectionProfileRuntime?.nativeExecutionDeclaration?.() : null
+  // Reuse the existing measured config readback; no filesystem read or model call on publication.
+  // chatModel is a deliberation override, not the default execution model.
+  const executionModel = profile.codexModel || appServerAdapter?.readback?.config?.config?.model
   return {
     endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
+    executionModel: typeof executionModel === 'string' && executionModel.trim() ? executionModel.trim() : null,
     runtimeCapabilities: buildRuntimeCapabilities(profile),
     ...(typedDeliberation ? { typedDeliberation: { ...typedDeliberation,
       ...(online && typedInspection ? { materialsInput: { schemaVersion: 1, supportedInputs: typedInspection.supportedInputs } } : {}),
