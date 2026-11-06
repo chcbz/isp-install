@@ -175,7 +175,7 @@ export class SkillConversationLane {
         const usage = pendingNativeUsage(store)
         if (usage) { this.pendingUsage.push({ command, store, ...usage }); unresolved.add(id) }
       } catch (error) {
-        if (error?.code !== 'NATIVE_USAGE_RECEIPT_CONFLICT') throw error
+        if (!['NATIVE_USAGE_RECEIPT_CONFLICT', 'NATIVE_USAGE_SOURCE_MISSING'].includes(error?.code)) throw error
         this.pendingUsageErrors.push({ executionId: id, code: error.code }); unresolved.add(id)
       }
       if (store.read('attempt') && !store.read('receipt') && !store.read('failure-receipt')) {

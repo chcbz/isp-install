@@ -212,3 +212,26 @@ test('aborted failed turn durably retains costs without a business failure recei
   assert.equal(f.store.read('engine-failure'), null)
   assert.equal(f.store.loadResult(), null)
 })
+
+for (const terminalStatus of ['completed', 'failed', 'interrupted']) test(`recovered ${terminalStatus} retains unknown cost without a second invocation`, async t => {
+  const f = fixture(t); f.setMode('terminal-lost')
+  await assert.rejects(runNativeExecution(f.request), /SKILL_RESULT_UNKNOWN/)
+  f.request.model = 'changed-after-call'
+  f.adapter.reconcileTurn = async () => ({ status: 'TERMINAL', terminalStatus, turnId: 'turn1' })
+  if (terminalStatus === 'completed') await runNativeExecution(f.request)
+  else await assert.rejects(runNativeExecution(f.request), /NATIVE_EXECUTION_TURN_/)
+  assert.deepEqual(f.store.read('native-usage-recovered'), { requestedModel: 'fixture-model', usageEvidence: null })
+  assert.equal(f.runs(), 1)
+})
+test('recovered evidence preserves source data and does not overwrite an earlier cost observation', async t => {
+  const f = fixture(t); f.setMode('terminal-lost')
+  await assert.rejects(runNativeExecution(f.request), /SKILL_RESULT_UNKNOWN/)
+  const usageEvidence = { status: 'UNVERIFIED', tokenUsage: { last: { inputTokens: 5 } } }
+  f.adapter.reconcileTurn = async () => ({ status: 'TERMINAL', terminalStatus: 'completed', turnId: 'turn1', usageEvidence })
+  await runNativeExecution(f.request)
+  assert.deepEqual(f.store.read('native-usage-recovered').usageEvidence, usageEvidence)
+  f.adapter.reconcileTurn = async () => ({ status: 'TERMINAL', terminalStatus: 'completed', turnId: 'turn1' })
+  await runNativeExecution(f.request)
+  assert.deepEqual(f.store.read('native-usage-recovered').usageEvidence, usageEvidence)
+  assert.equal(f.runs(), 1)
+})

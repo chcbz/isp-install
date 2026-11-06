@@ -41,6 +41,14 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
       const turn = store.read('native-turn')
       const recovered = await adapter.reconcileTurn({ threadId: thread.threadId, turnId: turn?.turnId, clientUserMessageId: command.messageId })
       if (recovered.status !== 'TERMINAL') fail('SKILL_RESULT_UNKNOWN')
+      // A recovered terminal also needs independent cost delivery, even when the
+      // engine no longer exposes usage. Do not invent usage or replay the turn.
+      // Preserve an earlier terminal observation rather than replacing its evidence.
+      if (['completed', 'failed', 'interrupted'].includes(recovered.terminalStatus)
+          && !store.read('native-final-message') && !store.read('native-usage-failure')
+          && !store.read('native-usage-recovered')) store.write('native-usage-recovered', {
+        requestedModel: attempted.requestedModel ?? null, usageEvidence: recovered.usageEvidence ?? null
+      })
       if (recovered.terminalStatus === 'failed') fail('TURN_FAILED')
       if (recovered.terminalStatus === 'interrupted') fail('TURN_INTERRUPTED')
       if (recovered.terminalStatus !== 'completed') fail('SKILL_RESULT_UNKNOWN')
@@ -51,7 +59,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
       files: inputs.map(item => ({ inputRef: item.inputRef, path: `/inputs/${item.inputRef}`, contentMimeType: item.contentMimeType })), outputs: command.outputs }) }]
     // Native visual carriers are original files, not inferred from file names.
     for (const item of inputs) if (['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(item.contentMimeType)) input.push({ type: 'localImage', path: `/inputs/${item.inputRef}` })
-    store.write('native-start-attempt', { threadId: thread.threadId, clientUserMessageId: command.messageId })
+    store.write('native-start-attempt', { threadId: thread.threadId, clientUserMessageId: command.messageId, requestedModel: model || null })
     const result = await adapter.runTurn({ threadId: thread.threadId, clientUserMessageId: command.messageId, input, policy,
       onAccepted: turn => session.bindTurn(turn),
       onToolEvent: event => {
