@@ -1108,6 +1108,7 @@ for (const outcome of ['completed', 'cancelled', 'TURN_FAILED', 'TURN_INTERRUPTE
     const adapter = {
       readback: { initialize: {}, account: {}, models: {}, config: {}, tools: {} },
       startOrResumeThread: async () => ({ threadId: 'usage-thread' }),
+      reconcileTurn: async () => ({ status: 'ACCEPTANCE_UNKNOWN' }),
       runTurn: async () => {
         assert.equal(observations[0].phase, 'STARTED'); events.push('engine')
         if (outcome.startsWith('TURN_')) throw Object.assign(new Error(outcome), { code: outcome, usageEvidence: evidence })
