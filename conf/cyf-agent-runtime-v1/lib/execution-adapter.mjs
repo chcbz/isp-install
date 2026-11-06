@@ -86,13 +86,14 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       };
       const register = () => {
         if (!client.currentSession || socket?.readyState !== 1) return false;
-        const healthy = durable(); declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
+        const healthy = durable(); const retainConfirmed = channelConfirmed && declaredHealthy && healthy;
+        declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
         const envelope = module.buildProtocolEnvelope('agent.register', { ...executor.registrationPayload(),
           messageId: randomUUID(), durableStateHealthy: healthy, readyCommandTypes: requestTypes }, executor.state().profile, instanceId);
         // Updating the capability catalog is not a new authenticated connection.
         // Initial registration/disconnect/rejection still withdraw authority; health
         // and actual executor capabilities remain part of ready() while ACK is pending.
-        registrationEpoch++; observer.begin(envelope.messageId);
+        registrationEpoch++; observer.begin(envelope.messageId); channelConfirmed = retainConfirmed;
         if (!channelConfirmed) { nativeWorkEnabled = false; fileWorkEnabled = false; registeredAt = null; serviceReadyAt = null; }
         if (!send(envelope)) observer.sendFailed(envelope.messageId);
         return true;

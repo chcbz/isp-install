@@ -1763,6 +1763,10 @@ test('catalog re-registration heartbeat cannot revoke the pending server binding
   assert.equal(socket.sent.at(-1).durableStateHealthy, false);
   assert.equal(state.paused, true); // Real health loss must still revoke admission.
   assert.equal(c.executors[0].ready(), false);
+  state.healthy = true; state.transport.refreshCapabilities();
+  assert.equal(c.executors[0].ready(), false, 'real health recovery needs a new readiness ACK');
+  socket.receive(registrationReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.register'))); await c.tick();
+  assert.equal(c.executors[0].ready(), true);
 });
 
 const receiptSchedulingFixture = async t => {
