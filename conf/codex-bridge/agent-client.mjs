@@ -6044,7 +6044,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     if (!state.typedInspectionProfileRuntime || state.typedInspectionProfileFailure) return state.typedInspectionProfileRuntime
     if (!state.typedInspectionProfilePromise) state.typedInspectionProfilePromise = state.typedInspectionProfileRuntime.measure().then(() => {
       if (!state.disposed && getProfileState(profile) === state) publishTypedInspectionReadiness(profile, state)
-      // Native measurement is once per startup, never a presence-side IO or a
+      // Native measurement is single-flight at startup, never presence-side IO or a
       // prerequisite for the independently measured read-only material lane.
       if (!state.disposed && profile.workspaceFileApiOrigin && profile.workspaceFileRootDir && !state.nativeExecutionProfilePromise) {
         state.nativeExecutionProfilePromise = Promise.resolve().then(async () => {
@@ -6547,6 +6547,9 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           profileStates.set(profileStateKey(entry.profile), entry.state)
           if (entry.state.processor.failClosedError) throw entry.state.processor.failClosedError
           await observeRuntimePhase(logger, subjectKey, 'input-carriers-measure', () => entry.state.ensureTypedInspectionProfile?.())
+          // Keep the entire native probe inside the existing boot gate. Otherwise
+          // the next subject's synchronous measurement can starve its pending RPC.
+          await observeRuntimePhase(logger, subjectKey, 'native-execution-measure', () => entry.state.nativeExecutionProfilePromise)
           await observeRuntimePhase(logger, subjectKey, 'app-server-initialize', () => entry.state.ensureAppServer?.())
           return { initialized: true, authenticated: false }
         }),

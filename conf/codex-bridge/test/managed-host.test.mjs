@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { main } from '../agent-client.mjs'
+import { main, SerialExecutionGate } from '../agent-client.mjs'
 import { EXECUTION_PAYLOAD_FILES } from '../../cyf-agent-runtime-v1/lib/execution-adapter.mjs'
 
 const engine = resolve(import.meta.dirname, '..')
@@ -40,4 +40,24 @@ test('old API-key/profiles/socket environment cannot make the retired engine CLI
     assert.equal(readFileSync(credential, 'utf8'), '{"apiKey":"legacy-secret"}\n')
     assert.deepEqual(readdirSync(home), ['credential.json'])
   }
+})
+
+
+test('executor boot gate holds the full native declaration before initializing another subject', async () => {
+  const source = readFileSync(resolve(engine, 'agent-client.mjs'), 'utf8')
+  const begin = source.indexOf('initialize: () => nativeInitializationGate.run(async () => {')
+  const end = source.indexOf('return { initialized: true, authenticated: false }', begin)
+  assert.ok(begin >= 0 && end > begin)
+  const boot = source.slice(begin, end)
+  assert.match(boot, /await observeRuntimePhase\(logger, subjectKey, 'native-execution-measure', \(\) => entry.state.nativeExecutionProfilePromise\)/)
+  assert.ok(boot.indexOf("'native-execution-measure'") < boot.indexOf("'app-server-initialize'"))
+  const gate = new SerialExecutionGate(), order = []
+  let release
+  const probe = new Promise(resolve => { release = resolve })
+  const first = gate.run(async () => { order.push('first-start'); await probe; order.push('first-ready') })
+  const second = gate.run(async () => { order.push('second-start') })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(order, ['first-start'])
+  release(); await Promise.all([first, second])
+  assert.deepEqual(order, ['first-start', 'first-ready', 'second-start'])
 })
