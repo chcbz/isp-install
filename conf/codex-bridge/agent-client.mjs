@@ -5717,6 +5717,10 @@ export const startNativeConversationPoller = (profile, state) => {
       } finally { state.conversationNativePollInFlight = false }
     },
     onReport: report => {
+      if (report?.usageErrors?.length) {
+        const errors = report.usageErrors.map(({ executionId, code }) => ({ executionId, code }))
+        console.warn(`native usage evidence delivery pending | profile=${profile.profileId} | errors=${JSON.stringify(errors)}`)
+      }
       if (report?.status === 'PARTIAL') {
         const errors = report.executionErrors.map(({ executionId, code }) => ({ executionId, code }))
         console.warn(`native conversation poll partial | profile=${profile.profileId} | processed=${report.processed} | deferred=${report.deferred} | errors=${JSON.stringify(errors)}`)

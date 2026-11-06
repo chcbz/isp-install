@@ -1,3 +1,4 @@
+import { pendingNativeUsage, acknowledgeNativeUsage } from './native-usage-receipts.mjs'
 import { readNativeJson } from './native-json.mjs'
 /** Protocol5 shares the existing conversation inbox/session/lease/output transport.
  * This lane never consumes or resumes v1/v2/v3/v4 commands or grants authority from model prose. */
@@ -100,6 +101,7 @@ export class SkillConversationLane {
     this.runNative = runNative; this.now = now; this.random = random; this.unknownRetries = new Map()
     // Discovery index only: commands, attempts and receipts remain authoritative on disk.
     this.pendingExecutionIds = null
+    this.pendingUsage = []; this.usageRetries = new Map()
   }
   headers() { return nativeSessionHeaders(this.auth(), this.agentId, this.instanceId) }
   async request(path, method, body, statuses = [200]) {
@@ -141,6 +143,7 @@ export class SkillConversationLane {
 
   pendingCommands() {
     this.pendingCommandErrors = []
+    this.pendingUsage = []; this.pendingUsageErrors = []
     const subject = resolve(this.root, skillDigest({ ...this.scope, apiOrigin: this.origin }))
     if (!existsSync(subject)) {
       if (this.pendingExecutionIds?.size) fail('SKILL_STORE_UNSAFE')
@@ -168,6 +171,13 @@ export class SkillConversationLane {
       } finally { closeSync(fd) }
       if (command.executionId !== id) fail('SKILL_STORE_IDENTITY_CONFLICT')
       const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
+      try {
+        const usage = pendingNativeUsage(store)
+        if (usage) { this.pendingUsage.push({ command, store, ...usage }); unresolved.add(id) }
+      } catch (error) {
+        if (error?.code !== 'NATIVE_USAGE_RECEIPT_CONFLICT') throw error
+        this.pendingUsageErrors.push({ executionId: id, code: error.code }); unresolved.add(id)
+      }
       if (store.read('attempt') && !store.read('receipt') && !store.read('failure-receipt')) {
         pending.push(command)
         unresolved.add(id)
@@ -182,7 +192,32 @@ export class SkillConversationLane {
     for (const command of this.pendingCommands()) {
       at = Math.min(at, this.unknownRetries.get(command.executionId)?.nextAt ?? this.now() + 3000)
     }
+    for (const item of this.pendingUsage) at = Math.min(at,
+      this.usageRetries.get(item.command.executionId)?.nextAt ?? this.now() + 3000)
     return at
+  }
+
+  async deliverPendingUsage() {
+    const errors = [...(this.pendingUsageErrors || [])]
+    for (const item of this.pendingUsage) {
+      const { command, store } = item
+      const retry = this.usageRetries.get(command.executionId)
+      if (retry && this.now() < retry.nextAt) continue
+      try {
+        const receipt = await this.request(`${BASE}/${command.taskId}/runs/${command.runId}/conversation/usage`, 'POST', item.payload)
+        acknowledgeNativeUsage(store, item, receipt)
+        this.usageRetries.delete(command.executionId)
+      } catch (error) {
+        if (/^SKILL_(?:SESSION|STORE|SCOPE)_/.test(error?.code || '')) throw error
+        // Only delivery retries; this path never calls process(), resumes a lease,
+        // or invokes a model. A failed write/unknown HTTP reply remains on disk.
+        const attempt = Math.min((retry?.attempt ?? 0) + 1, 6)
+        const delay = Math.floor(Math.min(300000, 15000 * 2 ** (attempt - 1)) * (0.8 + 0.2 * this.random()))
+        this.usageRetries.set(command.executionId, { attempt, nextAt: this.now() + delay })
+        errors.push({ executionId: command.executionId, code: error?.code || 'NATIVE_USAGE_DELIVERY_FAILED' })
+      }
+    }
+    return errors
   }
 
   async poll({ discover = true } = {}) {
@@ -239,7 +274,8 @@ export class SkillConversationLane {
       // Shared/session/store and unknown exceptions still escape above with their original cause.
       this.discoveryHasMore = discover && page.items.length === 16 && processed > 0
       const status = executionErrors.length ? 'PARTIAL' : processed ? 'PROGRESSED' : deferred ? 'DEFERRED' : 'IDLE'
-      return { status, processed, deferred, executionErrors }
+      const usageErrors = await this.deliverPendingUsage()
+      return { status, processed, deferred, executionErrors, ...(usageErrors.length ? { usageErrors } : {}) }
     } finally { this.active = false }
   }
   async process(command) {

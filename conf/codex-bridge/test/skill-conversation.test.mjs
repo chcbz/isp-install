@@ -605,3 +605,40 @@ test('business failure recovery does not copy source-owned usage or replay the n
   assert.equal(saved.usageEvidence, undefined); assert.deepEqual(saved.fence, nextFence)
   assert.equal(runs, 1); assert.equal(reports, 2)
 })
+
+test('completed business receipt does not hide pending cost evidence; lost ack retries only costs after restart', async t => {
+  const f = fixture(t)
+  await f.lane.poll(); f.emptyInbox()
+  const store = new SkillExecutionStore({ rootDirectory: resolve(f.options.rootDir, 'skill-runs'),
+    scope: { ...scope, apiOrigin: f.options.apiOrigin }, command: f.c })
+  store.write('native-final-message', { requestedModel: 'requested-only', usageEvidence: { status: 'UNVERIFIED', tokenUsage: { last: { inputTokens: 5 } } } })
+  let calls = 0, now = 1000
+  const payloads = []
+  const options = { ...f.options, now: () => now, random: () => 1, fetchFn: async (url, opts) => {
+    if (!url.pathname.endsWith('/usage')) return f.options.fetchFn(url, opts)
+    assert.equal(skillConversationHttpScope(url, opts), true)
+    calls++; payloads.push(JSON.parse(opts.body))
+    if (calls === 1) throw new Error('cost ack lost after durable server acceptance')
+    return response(url, { executionId: f.c.executionId, attemptId: 'b'.repeat(64), revision: '1', status: 'PENDING_USAGE', costYuan: null })
+  } }
+  const first = new SkillConversationLane(options)
+  const result = await first.poll()
+  assert.equal(result.status, 'IDLE'); assert.equal(result.executionErrors.length, 0)
+  assert.equal(result.usageErrors[0].code, 'SKILL_TRANSPORT_UNKNOWN')
+  assert.equal(store.read('native-usage-receipt'), null)
+  assert.equal(first.nextRecoveryAt(), now + 15000)
+  await first.poll({ discover: false }); assert.equal(calls, 1)
+  const restarted = new SkillConversationLane(options)
+  await restarted.poll({ discover: false })
+  assert.deepEqual(payloads[0], payloads[1])
+  assert.equal(store.read('native-usage-receipt').status, 'PENDING_USAGE')
+  assert.equal(f.modelCalls(), 1)
+  assert.equal(restarted.nextRecoveryAt(), Infinity)
+})
+
+test('cost route is native POST-only and rejects query or encoded path aliases', () => {
+  const url = new URL('https://api.example.test/internal/agent/tasks/task/runs/run/conversation/usage')
+  assert.equal(skillConversationHttpScope(url, { method: 'POST' }), true)
+  assert.equal(skillConversationHttpScope(url, { method: 'GET' }), false)
+  url.search = '?owner=other'; assert.equal(skillConversationHttpScope(url, { method: 'POST' }), false)
+})
