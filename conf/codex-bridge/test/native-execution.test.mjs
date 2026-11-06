@@ -31,7 +31,7 @@ function fixture(t) {
   }
   const profileRuntime = { openNativeExecutionAdapter: async (_inputs, _key, _binding, options) => { policy = options.nativeExecution; return adapter }, suspendAdapter: async () => { events.push('suspend') } }
   const request = { command, inputs: [], entries: [], store, checkActive() {}, profileRuntime, model: 'fixture-model' }
-  return { command, store, request, events, runs: () => runs, setMode: value => { mode = value } }
+  return { command, store, request, adapter, events, runs: () => runs, setMode: value => { mode = value } }
 }
 test('native owner collects actual drafts and suspends engine before returning durable result', async t => {
   const f = fixture(t); const result = await runNativeExecution(f.request)
@@ -162,4 +162,38 @@ test('preview-only task still returns proposed candidates without an acceptance 
   const result = await runNativeExecution(f.request);
   assert.equal(result.result.artifacts.length, 1); assert.equal(f.runs(), 1);
   assert.equal(f.store.read('native-selection').artifacts.length, 1);
+})
+
+
+test('native terminal checkpoint retains unverified usage without substituting requested model for actual model', async t => {
+  const f = fixture(t); const run = f.adapter.runTurn
+  const evidence = { source: 'codex-app-server/thread/tokenUsage/updated', status: 'UNVERIFIED', threadId: 'thread1', turnId: 'turn1', tokenUsage: { last: { inputTokens: 10 }, total: { inputTokens: 100 } } }
+  f.adapter.runTurn = async options => ({ ...await run(options), usageEvidence: evidence })
+  await runNativeExecution(f.request)
+  const checkpoint = f.store.read('native-final-message')
+  assert.deepEqual(checkpoint.usageEvidence, evidence)
+  assert.equal(checkpoint.requestedModel, 'fixture-model')
+  assert.equal(checkpoint.usageEvidence.actualModel, undefined)
+})
+
+test('native failure normalization preserves available usage evidence for the durable receipt owner', async t => {
+  const f = fixture(t)
+  const evidence = { source: 'codex-app-server/thread/tokenUsage/updated', status: 'UNVERIFIED', threadId: 'thread1', turnId: 'turn1', tokenUsage: { last: { outputTokens: 3 } } }
+  f.adapter.runTurn = async () => { throw Object.assign(new Error('failed'), { code: 'TURN_FAILED', usageEvidence: evidence }) }
+  await assert.rejects(runNativeExecution(f.request), error => error.code === 'NATIVE_EXECUTION_TURN_FAILED' && error.usageEvidence === evidence)
+  assert.equal(f.store.read('native-final-message'), null)
+})
+
+
+test('late successful turn keeps usage history but cannot finalize after cancellation', async t => {
+  const f = fixture(t); const run = f.adapter.runTurn; let cancelled = false
+  const evidence = { source: 'codex-app-server/thread/tokenUsage/updated', status: 'UNVERIFIED', threadId: 'thread1', turnId: 'turn1', tokenUsage: { last: { inputTokens: 7 } } }
+  f.adapter.runTurn = async options => {
+    const result = await run(options); cancelled = true
+    return { ...result, usageEvidence: evidence }
+  }
+  const checkActive = () => { if (cancelled) throw Object.assign(new Error('cancelled'), { code: 'SKILL_LEASE_UNCERTAIN' }) }
+  await assert.rejects(runNativeExecution({ ...f.request, checkActive }), { code: 'SKILL_LEASE_UNCERTAIN' })
+  assert.deepEqual(f.store.read('native-final-message').usageEvidence, evidence)
+  assert.equal(f.store.loadResult(), null)
 })

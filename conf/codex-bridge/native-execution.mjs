@@ -59,8 +59,12 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
         // Keep only source association, not tool stdout, hidden reasoning or secrets.
         store.write(`native-tool-${skillDigest({ threadId: event.threadId, turnId: event.turnId, itemId: event.itemId })}`, { threadId: event.threadId, turnId: event.turnId, itemId: event.itemId, method: event.method, type: event.type || null, status: event.status || null })
       } })
+    // Reuse the existing durable terminal checkpoint; no per-token writes or second fsync.
+    // requestedModel is configuration evidence, not a claim about the provider's actual model.
+    store.write('native-final-message', { threadId: result.threadId, turnId: result.turnId, content: result.content,
+      ...(result.usageEvidence ? { usageEvidence: result.usageEvidence, requestedModel: model || null } : {}) })
+    // A late terminal observation is history, not permission to commit a cancelled task.
     checkActive()
-    store.write('native-final-message', { threadId: result.threadId, turnId: result.turnId, content: result.content })
     return session.finalize(result, receipts)
   } catch (cause) {
     // Engine uncertainty belongs to this execution, not to the whole inbox.
@@ -73,7 +77,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
         : cause?.code === 'NATIVE_PROPOSAL_REQUIRED' ? 'NATIVE_EXECUTION_TURN_FAILED'
           : ['TURN_FAILED', 'TURN_INTERRUPTED'].includes(cause?.code) ? `NATIVE_EXECUTION_${cause.code}`
           : cause?.code === 'APP_SERVER_RPC_TIMEOUT' ? 'NATIVE_EXECUTION_ENGINE_UNAVAILABLE' : null
-    if (code) throw Object.assign(new Error(code), { code, cause })
+    if (code) throw Object.assign(new Error(code), { code, cause, ...(cause?.usageEvidence ? { usageEvidence: cause.usageEvidence } : {}) })
     throw cause
   } finally {
     signal?.removeEventListener('abort', abort)
