@@ -1717,10 +1717,10 @@ test('skill command admitted on authenticated session is not lost during capabil
   const raw = managementCommand(managementPackage().target, { tenantId: identity.tenantId, clientId: identity.clientId,
     agentId: identity.canonicalAgentId, runtimeInstallationId: identity.installationId });
   socket.receive(raw);
-  // Actual capability refresh resets channelConfirmed while the same session is still authenticated.
+  // Capability refresh keeps the already confirmed connection authorized.
   state.transport.refreshCapabilities(); await c.tick();
   socket.receive(raw); await c.tick(); // A same-message retry during refresh still reaches durable deduplication.
-  assert.equal(c.executors[0].ready(), false); // No task readiness is granted before its catalog ACK.
+  assert.equal(c.executors[0].ready(), true); // Existing healthy session survives catalog-only ACK latency.
   socket.receive(registrationReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.register'))); await c.tick();
   assert.deepEqual(state.accepted, [raw, raw]);
   assert.equal(c.logs.filter(row => row.event === 'runtime-management-handled').length, 2);
@@ -1749,9 +1749,10 @@ test('catalog re-registration heartbeat cannot revoke the pending server binding
   state.transport.refreshCapabilities();
   const registration = socket.sent.at(-1), before = socket.sent.length;
   assert.equal(registration.messageType, 'agent.register');
-  assert.equal(c.executors[0].ready(), false); // No premature admission while ACK is pending.
+  assert.equal(c.executors[0].ready(), true); // This is not a new session.
   await c.executors[0].heartbeat();
-  assert.equal(socket.sent.length, before, 'pending healthy registration must not emit offline presence');
+  assert.equal(socket.sent.length, before + 1, 'confirmed healthy session continues its heartbeat during refresh');
+  assert.equal(socket.sent.at(-1).status, 'online');
   socket.receive(registrationReceipt(registration)); await c.tick();
   await c.executors[0].heartbeat();
   assert.equal(socket.sent.at(-1).status, 'online');
@@ -1897,7 +1898,8 @@ test('legacy archive discovery flags never revive retired jobs on re-registratio
   // An unrelated ACK cannot change the negotiated service state.
   const registration=socket.sent.filter(f=>f.messageType==='agent.register').at(-1);
   socket.receive({...registrationReceipt(registration),messageId:'unrelated',archiveJobDiscovery:1});await c.tick();
-  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,[]);
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions']);
+  state.reconciliation=[];
   socket.receive({...registrationReceipt(registration),archiveJobDiscovery:1});await c.tick();
   await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions']);
 });

@@ -648,6 +648,19 @@ export class TypedInspectionProfileRuntime {
     if (this.activeAdapters.get(requestKey)?.adapter.closed) await this.releaseAdapter(requestKey, { preserveState: true })
     if (this.disposed || this.pendingInspectionKeys.has(requestKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     const conversationKey = options.conversationKey ?? null
+    // Recovery must locate its durable state before disturbing a healthy idle
+    // chat. This read-only preflight does not stage credentials or create state.
+    // _prepareRequestState remains the owner of safe staging/binding validation.
+    if (options.requireExistingState) {
+      const binding = engineStateBinding(requestBinding)
+      if (binding.requestKey !== requestKey) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+      const directory = resolve(this.stateRoot, 'requests', canonicalSha256(binding).slice('sha256:'.length))
+      const required = [resolve(directory, 'binding.json')]
+      if (conversationKey !== null) required.push(resolve(directory, 'conversation-binding.json'),
+        resolve(this._conversationDirectory(conversationKey), 'binding.json'), resolve(this._conversationDirectory(conversationKey), 'codex-home'))
+      else required.push(resolve(directory, 'codex-home'))
+      if (required.some(path => !existsSync(path))) fail('TYPED_INSPECTION_RECOVERY_STATE_MISSING')
+    }
     if (conversationKey && this.warmChatAdapters?.has(conversationKey)) await this._closeWarmChat(conversationKey)
     if (this.idleWarmChatKey) await this._closeIdleWarmChat()
     if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED')
