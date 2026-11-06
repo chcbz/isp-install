@@ -578,3 +578,30 @@ test('unconfirmed HTTP response cancels its body, records status and preserves p
   assert.equal(f.modelCalls(),0);assert.deepEqual([...f.lane.pendingExecutionIds],[f.c.executionId])
   assert.equal((await f.lane.poll({discover:false})).status,'DEFERRED');assert.equal(cancelled,1)
 })
+
+test('failed-turn usage survives durable failure checkpoint and lease-rebound recovery without entering business failure payload', async t => {
+  const f = fixture(t); let runs = 0; let reports = 0
+  const usageEvidence = { source: 'codex-app-server/thread/tokenUsage/updated', status: 'UNVERIFIED', threadId: 'thread', turnId: 'turn', tokenUsage: { last: { inputTokens: 12 }, total: { inputTokens: 100 } } }
+  const nextFence = { version: '9007199254740994', token: '00000000-0000-0000-0000-000000000002' }
+  const options = { ...f.options,
+    runNative: async () => { runs++; throw Object.assign(new Error('failed'), { code: 'NATIVE_EXECUTION_TURN_FAILED', usageEvidence }) },
+    fetchFn: async (url, opts) => {
+      if (url.pathname.endsWith('/resume')) return response(url, { phase: 'RESULT_UNKNOWN', allowedWork: ['QUERY_EFFECT'], resultManifest: null,
+        turnFailureCode: 'NATIVE_EXECUTION_TURN_FAILED', lease: { executionId: f.c.executionId, ...nextFence, expiresAt: Date.now() + 600000 } })
+      if (url.pathname.endsWith('/failure')) {
+        reports++; const body = JSON.parse(opts.body)
+        assert.deepEqual(Object.keys(body).sort(), ['code', 'fence'])
+        if (reports === 1) throw new Error('lost transport response')
+        assert.deepEqual(body.fence, nextFence)
+        return response(url, { executionId: f.c.executionId, taskId: f.c.taskId, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
+      }
+      return f.options.fetchFn(url, opts)
+    } }
+  const checkpoint = resolve(f.options.rootDir, 'skill-runs', skillDigest({ ...scope, apiOrigin: 'https://api.example.test' }), f.c.executionId, 'engine-failure.json')
+  await partial(new SkillConversationLane(options).poll(), 'SKILL_TRANSPORT_UNKNOWN')
+  assert.deepEqual(JSON.parse(readFileSync(checkpoint, 'utf8')).usageEvidence, usageEvidence)
+  assert.equal((await new SkillConversationLane(options).poll()).status, 'PROGRESSED')
+  const saved = JSON.parse(readFileSync(checkpoint, 'utf8'))
+  assert.deepEqual(saved.usageEvidence, usageEvidence); assert.deepEqual(saved.fence, nextFence)
+  assert.equal(runs, 1); assert.equal(reports, 2)
+})
