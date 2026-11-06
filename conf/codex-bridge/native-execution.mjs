@@ -41,6 +41,14 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
       const turn = store.read('native-turn')
       const recovered = await adapter.reconcileTurn({ threadId: thread.threadId, turnId: turn?.turnId, clientUserMessageId: command.messageId })
       if (recovered.status !== 'TERMINAL') fail('SKILL_RESULT_UNKNOWN')
+      // A recovered terminal also needs independent cost delivery, even when the
+      // engine no longer exposes usage. Do not invent usage or replay the turn.
+      // Preserve an earlier terminal observation rather than replacing its evidence.
+      if (['completed', 'failed', 'interrupted'].includes(recovered.terminalStatus)
+          && !store.read('native-final-message') && !store.read('native-usage-failure')
+          && !store.read('native-usage-recovered')) store.write('native-usage-recovered', {
+        requestedModel: attempted.requestedModel ?? null, usageEvidence: recovered.usageEvidence ?? null
+      })
       if (recovered.terminalStatus === 'failed') fail('TURN_FAILED')
       if (recovered.terminalStatus === 'interrupted') fail('TURN_INTERRUPTED')
       if (recovered.terminalStatus !== 'completed') fail('SKILL_RESULT_UNKNOWN')
@@ -51,7 +59,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
       files: inputs.map(item => ({ inputRef: item.inputRef, path: `/inputs/${item.inputRef}`, contentMimeType: item.contentMimeType })), outputs: command.outputs }) }]
     // Native visual carriers are original files, not inferred from file names.
     for (const item of inputs) if (['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(item.contentMimeType)) input.push({ type: 'localImage', path: `/inputs/${item.inputRef}` })
-    store.write('native-start-attempt', { threadId: thread.threadId, clientUserMessageId: command.messageId })
+    store.write('native-start-attempt', { threadId: thread.threadId, clientUserMessageId: command.messageId, requestedModel: model || null })
     const result = await adapter.runTurn({ threadId: thread.threadId, clientUserMessageId: command.messageId, input, policy,
       onAccepted: turn => session.bindTurn(turn),
       onToolEvent: event => {
@@ -59,10 +67,20 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
         // Keep only source association, not tool stdout, hidden reasoning or secrets.
         store.write(`native-tool-${skillDigest({ threadId: event.threadId, turnId: event.turnId, itemId: event.itemId })}`, { threadId: event.threadId, turnId: event.turnId, itemId: event.itemId, method: event.method, type: event.type || null, status: event.status || null })
       } })
+    // Reuse the existing durable terminal checkpoint; no per-token writes or second fsync.
+    // requestedModel is configuration evidence, not a claim about the provider's actual model.
+    store.write('native-final-message', { threadId: result.threadId, turnId: result.turnId, content: result.content,
+      ...(result.usageEvidence ? { usageEvidence: result.usageEvidence, requestedModel: model || null } : {}) })
+    // A late terminal observation is history, not permission to commit a cancelled task.
     checkActive()
-    store.write('native-final-message', { threadId: result.threadId, turnId: result.turnId, content: result.content })
     return session.finalize(result, receipts)
   } catch (cause) {
+    // Persist source evidence before cancellation/error normalization. A cancelled
+    // turn never reaches the business failure-receipt owner; cost recovery must
+    // not depend on that path, its lease, or a successful failure report.
+    if (cause?.usageEvidence) store.write('native-usage-failure', {
+      usageEvidence: cause.usageEvidence, requestedModel: model || null
+    })
     // Engine uncertainty belongs to this execution, not to the whole inbox.
     // Keep the original checkpoint; normalization never starts another turn.
     // A confirmed completed turn without its required proposal failed the
@@ -73,7 +91,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
         : cause?.code === 'NATIVE_PROPOSAL_REQUIRED' ? 'NATIVE_EXECUTION_TURN_FAILED'
           : ['TURN_FAILED', 'TURN_INTERRUPTED'].includes(cause?.code) ? `NATIVE_EXECUTION_${cause.code}`
           : cause?.code === 'APP_SERVER_RPC_TIMEOUT' ? 'NATIVE_EXECUTION_ENGINE_UNAVAILABLE' : null
-    if (code) throw Object.assign(new Error(code), { code, cause })
+    if (code) throw Object.assign(new Error(code), { code, cause, ...(cause?.usageEvidence ? { usageEvidence: cause.usageEvidence } : {}) })
     throw cause
   } finally {
     signal?.removeEventListener('abort', abort)

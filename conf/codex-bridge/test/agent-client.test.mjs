@@ -5287,3 +5287,24 @@ test('profile restores the same idle Home but never claims an unknown request as
   assert.equal(await restoreProfileChatIdleAdapter(state), null)
   assert.equal(calls.length, 2)
 })
+
+
+test('retired task reporting never emits task completion from executor success or failure', async () => {
+  for (const scenario of ['success', 'failure', 'spawn-error', 'workspace-error']) {
+    const messages = []
+    const outcome = await runCodex({ ...profile, codexTimeoutMs: 0 }, { taskId: 'task-retired-report', instruction: 'fixture' }, 'command', {
+      requireWorkspace: scenario === 'workspace-error',
+      sendLegacyFn: (type, payload) => messages.push({ type, payload }), sendStatusFn: () => {},
+      spawnFn: () => {
+        if (scenario === 'spawn-error') throw new Error('synthetic spawn failure')
+        const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+        child.exitCode = null; child.killed = false
+        queueMicrotask(() => { child.exitCode = scenario === 'success' ? 0 : 1; child.emit('close', child.exitCode) })
+        return child
+      }
+    })
+    assert.equal(outcome.status, scenario === 'success' ? 'completed' : 'failed')
+    assert.deepEqual(messages.map(m => m.type), ['codex.result'])
+    assert.equal(messages[0].payload.taskId, 'task-retired-report')
+  }
+})

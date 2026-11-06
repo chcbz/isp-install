@@ -1,3 +1,4 @@
+import { usageEvidenceFromNotification } from './app-server-usage.mjs'
 import { waitForSandboxStartup } from './sandbox-startup.mjs'
 import { CHAT_FILE_PERMISSION_PROFILE, NATIVE_PERMISSION_PROFILE } from './native-execution-profile.mjs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -534,12 +535,12 @@ export class AppServerAdapter extends EventEmitter {
     const turn = { threadId, clientUserMessageId, state: 'STARTING', startedAt: this.now(), turnId: null }
     this.turns.set(provisional, turn)
 
-    let finalContent = ''; let settled = false; let terminalSeen = false; const buffered = []; const toolCalls = new Map()
+    let usageEvidence; let finalContent = ''; let settled = false; let terminalSeen = false; const buffered = []; const toolCalls = new Map()
     let resolveTerminal; let rejectTerminal
     const terminalPromise = new Promise((resolve, reject) => { resolveTerminal = resolve; rejectTerminal = reject })
     void terminalPromise.catch(() => {})
     const cleanup = () => {
-      this.off('delta', delta); this.off('final', final); this.off('terminal', terminal)
+      this.off('usage', usage); this.off('delta', delta); this.off('final', final); this.off('terminal', terminal)
       this.off('native_tool_call', toolCall); this.off('tool', toolEvent)
       this.off('clarification', clarification); this.off('policy_violation', violation); this.off('exit', exited)
       this.turns.delete(provisional)
@@ -549,13 +550,18 @@ export class AppServerAdapter extends EventEmitter {
     const settle = (error, value) => {
       if (settled) return
       settled = true; cleanup()
+      if (usageEvidence) {
+        if (error) error.usageEvidence = usageEvidence
+        else value.usageEvidence = usageEvidence
+      }
       if (error) rejectTerminal(error); else resolveTerminal(value)
     }
     const consume = (kind, event) => {
       if (event.threadId !== threadId) return
       if (!turn.turnId) { buffered.push([kind, event]); return }
       if (!matches(event)) return
-      if (kind === 'delta') onDelta(event)
+      if (kind === 'usage') usageEvidence = event
+      else if (kind === 'delta') onDelta(event)
       else if (kind === 'final') finalContent = event.content
       else if (kind === 'clarification') onClarification(event)
       else if (kind === 'tool') { try { onToolEvent(event) } catch (error) { settle(error); void this.interrupt(threadId, turn.turnId).catch(() => {}) } }
@@ -607,13 +613,14 @@ export class AppServerAdapter extends EventEmitter {
     }
     const toolCall = event => consume('toolCall', event)
     const toolEvent = event => consume('tool', event)
+    const usage = event => consume('usage', event)
     const delta = event => consume('delta', event)
     const final = event => consume('final', event)
     const terminal = event => consume('terminal', event)
     const clarification = event => consume('clarification', event)
     const violation = event => consume('violation', event)
     const exited = () => { if (turn.turnId) settle(Object.assign(new Error('APP_SERVER_EXITED_DURING_TURN'), { code: 'TURN_ACCEPTANCE_UNKNOWN', turn: { ...turn } })) }
-    this.on('delta', delta); this.on('final', final); this.on('terminal', terminal)
+    this.on('usage', usage); this.on('delta', delta); this.on('final', final); this.on('terminal', terminal)
     this.on('native_tool_call', toolCall); this.on('tool', toolEvent)
     this.on('clarification', clarification); this.on('policy_violation', violation); this.on('exit', exited)
 
@@ -705,6 +712,11 @@ export class AppServerAdapter extends EventEmitter {
     }
     if (frame.id != null || deniedMethods.test(frame.method) && !toolNotification) { this._denyServerRequest(frame); return }
     const params = frame.params || {}; const threadId = params.threadId || params.thread_id; const turnId = params.turnId || params.turn_id || params.turn?.id
+    if (frame.method === 'thread/tokenUsage/updated') {
+      const evidence = usageEvidenceFromNotification(params)
+      if (evidence) this.emit('usage', evidence)
+      return
+    }
     if (frame.method === 'item/agentMessage/delta') { const content = params.delta || params.text || params.content; if (typeof content === 'string' && content) this.emit('delta', { threadId, turnId, content }); return }
     if (frame.method === 'item/agentMessage') { const content = params.text || params.content || params.item?.text; if (typeof content === 'string') this.emit('final', { threadId, turnId, content }); return }
     if (frame.method === 'item/completed') { const item = params.item || {}; if (['agentMessage', 'agent_message'].includes(item.type) && typeof item.text === 'string') this.emit('final', { threadId, turnId, content: item.text }); return }

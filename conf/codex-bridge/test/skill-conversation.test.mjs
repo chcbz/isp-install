@@ -578,3 +578,71 @@ test('unconfirmed HTTP response cancels its body, records status and preserves p
   assert.equal(f.modelCalls(),0);assert.deepEqual([...f.lane.pendingExecutionIds],[f.c.executionId])
   assert.equal((await f.lane.poll({discover:false})).status,'DEFERRED');assert.equal(cancelled,1)
 })
+
+test('business failure recovery does not copy source-owned usage or replay the native turn', async t => {
+  const f = fixture(t); let runs = 0; let reports = 0
+  const usageEvidence = { source: 'codex-app-server/thread/tokenUsage/updated', status: 'UNVERIFIED', threadId: 'thread', turnId: 'turn', tokenUsage: { last: { inputTokens: 12 }, total: { inputTokens: 100 } } }
+  const nextFence = { version: '9007199254740994', token: '00000000-0000-0000-0000-000000000002' }
+  const options = { ...f.options,
+    runNative: async () => { runs++; throw Object.assign(new Error('failed'), { code: 'NATIVE_EXECUTION_TURN_FAILED', usageEvidence }) },
+    fetchFn: async (url, opts) => {
+      if (url.pathname.endsWith('/resume')) return response(url, { phase: 'RESULT_UNKNOWN', allowedWork: ['QUERY_EFFECT'], resultManifest: null,
+        turnFailureCode: 'NATIVE_EXECUTION_TURN_FAILED', lease: { executionId: f.c.executionId, ...nextFence, expiresAt: Date.now() + 600000 } })
+      if (url.pathname.endsWith('/failure')) {
+        reports++; const body = JSON.parse(opts.body)
+        assert.deepEqual(Object.keys(body).sort(), ['code', 'fence'])
+        if (reports === 1) throw new Error('lost transport response')
+        assert.deepEqual(body.fence, nextFence)
+        return response(url, { executionId: f.c.executionId, taskId: f.c.taskId, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
+      }
+      return f.options.fetchFn(url, opts)
+    } }
+  const checkpoint = resolve(f.options.rootDir, 'skill-runs', skillDigest({ ...scope, apiOrigin: 'https://api.example.test' }), f.c.executionId, 'engine-failure.json')
+  await partial(new SkillConversationLane(options).poll(), 'SKILL_TRANSPORT_UNKNOWN')
+  assert.equal(JSON.parse(readFileSync(checkpoint, 'utf8')).usageEvidence, undefined)
+  assert.equal((await new SkillConversationLane(options).poll()).status, 'PROGRESSED')
+  const saved = JSON.parse(readFileSync(checkpoint, 'utf8'))
+  assert.equal(saved.usageEvidence, undefined); assert.deepEqual(saved.fence, nextFence)
+  assert.equal(runs, 1); assert.equal(reports, 2)
+})
+
+test('completed business receipt does not hide pending cost evidence; lost ack retries only costs after restart', async t => {
+  const f = fixture(t)
+  await f.lane.poll(); f.emptyInbox()
+  const store = new SkillExecutionStore({ rootDirectory: resolve(f.options.rootDir, 'skill-runs'),
+    scope: { ...scope, apiOrigin: f.options.apiOrigin }, command: f.c })
+  store.write('native-start-attempt', { requestedModel: 'requested-only' })
+  store.write('native-final-message', { requestedModel: 'requested-only', usageEvidence: { status: 'UNVERIFIED', tokenUsage: { last: { inputTokens: 5 } } } })
+  let calls = 0, now = 1000
+  const payloads = []
+  const options = { ...f.options, now: () => now, random: () => 1, fetchFn: async (url, opts) => {
+    if (!url.pathname.endsWith('/usage')) return f.options.fetchFn(url, opts)
+    assert.equal(skillConversationHttpScope(url, opts), true)
+    calls++; payloads.push(JSON.parse(opts.body))
+    if (calls === 1) throw new Error('cost ack lost after durable server acceptance')
+    return response(url, { executionId: f.c.executionId, attemptId: 'b'.repeat(64), revision: JSON.parse(opts.body).phase === 'STARTED' ? '1' : '2', status: 'PENDING_USAGE', costYuan: null })
+  } }
+  const first = new SkillConversationLane(options)
+  const result = await first.poll()
+  assert.equal(result.status, 'IDLE'); assert.equal(result.executionErrors.length, 0)
+  assert.equal(result.usageErrors[0].code, 'SKILL_TRANSPORT_UNKNOWN')
+  assert.equal(store.read('native-usage-receipt'), null)
+  assert.equal(first.nextRecoveryAt(), now + 15000)
+  await first.poll({ discover: false }); assert.equal(calls, 1)
+  const restarted = new SkillConversationLane(options)
+  await restarted.poll({ discover: false })
+  assert.deepEqual(payloads[0], payloads[1])
+  assert.equal(store.read('native-usage-start-receipt').status, 'PENDING_USAGE')
+  assert.equal(store.read('native-usage-receipt'), null)
+  await restarted.poll({ discover: false })
+  assert.equal(store.read('native-usage-receipt').status, 'PENDING_USAGE')
+  assert.equal(f.modelCalls(), 1)
+  assert.equal(restarted.nextRecoveryAt(), Infinity)
+})
+
+test('cost route is native POST-only and rejects query or encoded path aliases', () => {
+  const url = new URL('https://api.example.test/internal/agent/tasks/task/runs/run/conversation/usage')
+  assert.equal(skillConversationHttpScope(url, { method: 'POST' }), true)
+  assert.equal(skillConversationHttpScope(url, { method: 'GET' }), false)
+  url.search = '?owner=other'; assert.equal(skillConversationHttpScope(url, { method: 'POST' }), false)
+})

@@ -140,3 +140,14 @@ test('real Runtime task-readiness projection never advertises taskless managemen
   assert.deepEqual(runtimeReadyCommandTypes(current), [])
   assert.deepEqual(runtimeReadyCommandTypes(null), [])
 })
+
+test('registration reports only default execution model, not chat override or credentials', () => {
+  const profile = { agentId: 'model-fixture', chatModel: 'chat-only' }
+  const adapter = { readback: { config: { config: { model: 'home-default', model_provider: 'private-route', secret: 'never-project' } } } }
+  assert.equal(buildAgentRegistrationPayload(profile).executionModel, null)
+  const payload = buildAgentRegistrationPayload(profile, null, true, adapter)
+  assert.equal(payload.executionModel, 'home-default')
+  assert.equal(JSON.stringify(payload).includes('never-project'), false)
+  assert.equal(buildAgentRegistrationPayload({ ...profile, codexModel: 'explicit-execution' }, null, true, adapter).executionModel, 'explicit-execution')
+  assert.equal(buildAgentRegistrationPayload(profile, null, true, { readback: { config: { config: { model: {} } } } }).executionModel, null)
+})
