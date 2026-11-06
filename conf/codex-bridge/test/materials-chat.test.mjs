@@ -474,3 +474,14 @@ test('real materialized XLSX opens directly with openpyxl on the first attempt',
     'import sys,openpyxl; w=openpyxl.load_workbook(sys.argv[1],read_only=True,data_only=True); print(w.active["A1"].value); w.close()', path], { encoding: 'utf8' })
   assert.equal(output.trim(), 'materialized-first-read')
 })
+
+test('invalid business output cannot discard terminal CHAT cost evidence', async t => {
+  const c = context(t), usage = []
+  const run = c.adapter.runTurn
+  c.adapter.runTurn = async options => ({ ...await run(options), content: 'invalid business output', usageEvidence: { status: 'UNVERIFIED' } })
+  c.options.controls.recordUsage = (phase, model, evidence) => usage.push({ phase, model, evidence })
+  await assert.rejects(runFastChat(profile, c.message, c.options))
+  assert.deepEqual(usage.map(item => item.phase), ['STARTED', 'TERMINAL'])
+  assert.deepEqual(usage[1].evidence, { status: 'UNVERIFIED' })
+  assert.equal(c.frames.length, 0)
+})

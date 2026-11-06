@@ -1100,3 +1100,31 @@ test('delta context plain final carries actual native receipt but incomplete nat
     assert.equal(calls, 1) // Never retry the model to obtain a receipt.
   }
 })
+
+for (const outcome of ['completed', 'cancelled', 'TURN_FAILED', 'TURN_INTERRUPTED', 'TURN_ACCEPTANCE_UNKNOWN']) {
+  test(`CHAT usage is independently preserved before business ${outcome}`, async () => {
+    const message = normalizedWire({ route: 'CHAT' }), observations = [], events = []
+    const evidence = { status: 'UNVERIFIED', last: { inputTokens: 12 } }
+    const adapter = {
+      readback: { initialize: {}, account: {}, models: {}, config: {}, tools: {} },
+      startOrResumeThread: async () => ({ threadId: 'usage-thread' }),
+      runTurn: async () => {
+        assert.equal(observations[0].phase, 'STARTED'); events.push('engine')
+        if (outcome.startsWith('TURN_')) throw Object.assign(new Error(outcome), { code: outcome, usageEvidence: evidence })
+        return { threadId: 'usage-thread', turnId: 'usage-turn', content: 'fixture', finishReason: 'completed', usageEvidence: evidence }
+      }
+    }
+    const call = runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true, chatModel: 'requested' }, message, {
+      adapter, chatWorkdir: '/runtime-owned-empty-chat',
+      controls: { markRunning() {}, isCancelled: () => outcome === 'cancelled',
+        recordUsage: (phase, model, usageEvidence) => { observations.push({ phase, model, usageEvidence }); events.push(phase) } },
+      sendProtocolFn: () => { assert.equal(observations.at(-1).phase, 'TERMINAL'); events.push('publish') }
+    })
+    if (outcome.startsWith('TURN_')) await assert.rejects(call, { code: outcome })
+    else await call
+    assert.equal(observations[0].model, 'requested')
+    assert.deepEqual(events.slice(0, 2), ['STARTED', 'engine'])
+    if (outcome === 'TURN_ACCEPTANCE_UNKNOWN') assert.equal(observations.length, 1)
+    else { assert.equal(observations.length, 2); assert.deepEqual(observations[1].usageEvidence, evidence) }
+  })
+}

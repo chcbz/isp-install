@@ -247,6 +247,7 @@ export class PersistentChatInbox {
     this.dedupeDir = resolve(this.dir, 'dedupe-ledger'); this.dedupeUsagePath = resolve(this.dir, 'dedupe-ledger-usage.json')
     this.turnIndexDir = resolve(this.dir, 'turn-index'); this.turnIndexVersionPath = resolve(this.dir, 'turn-index-version.json')
     this.legacyDedupePath = resolve(this.dir, 'dedupe-index.json'); this.lockPath = resolve(this.dir, '.profile.lock')
+    this.usagePending = resolve(this.dir, 'usage-pending'); this.usageAcknowledged = resolve(this.dir, 'usage-acknowledged')
     this.finalSavedLookupCache = new Map()
   }
   _processStartTime(pid) {
@@ -541,7 +542,7 @@ export class PersistentChatInbox {
     }
   }
   initialize() {
-    for (const dir of [this.pending, this.processing, this.recovery, this.archive, this.dedupeDir, this.turnIndexDir]) ensureDirectory(dir)
+    for (const dir of [this.pending, this.processing, this.recovery, this.archive, this.dedupeDir, this.turnIndexDir, this.usagePending, this.usageAcknowledged]) ensureDirectory(dir)
     return this._withLock(() => {
       this._migrateLegacyDedupe(); this._upgradeDedupeUsageAndTurnIndex(); this._gcDedupe({ force: true })
       let recovered = 0; let settled = 0
@@ -624,6 +625,56 @@ export class PersistentChatInbox {
       return { key, state: 'processing', path: target, record }
     })
   }
+  // Cost evidence is independent of business archive retention, cancellation and final ACKs.
+  recordUsage(item, phase, requestedModel, usageEvidence = null) { return this._withLock(() => {
+    if (!['STARTED', 'TERMINAL'].includes(phase)) throw new Error('CHAT_USAGE_PHASE_INVALID')
+    const key = item.key
+    if (!/^[0-9a-f]{64}$/.test(key)) throw new Error('CHAT_USAGE_BINDING_INVALID')
+    const pending = resolve(this.usagePending, `${key}.json`), acknowledged = resolve(this.usageAcknowledged, `${key}.json`)
+    const path = existsSync(acknowledged) ? acknowledged : pending
+    const record = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : { dispatchId: item.record.message.dispatchId, observations: {}, receipts: {} }
+    if (record.dispatchId !== item.record.message.dispatchId) throw new Error('CHAT_USAGE_BINDING_INVALID')
+    if (phase === 'TERMINAL' && !record.observations.STARTED) return false // Historical run: do not fabricate a start.
+    const payload = { phase, requestedModel: phase === 'STARTED' ? requestedModel ?? null : record.observations.STARTED.requestedModel,
+      usageEvidence: phase === 'STARTED' ? null : usageEvidence ?? null }
+    if (record.observations[phase]) {
+      // Native recovery can see a different cumulative snapshot; retain the first terminal evidence.
+      if (phase === 'STARTED' && canonical(record.observations[phase]) !== canonical(payload)) throw new Error('CHAT_USAGE_SOURCE_CONFLICT')
+      return false
+    }
+    record.observations[phase] = payload
+    atomicJson(path, record); return true
+  }) }
+  pendingUsage() {
+    const pending = []
+    for (const name of readdirSync(this.usagePending).sort()) {
+      if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
+      const record = JSON.parse(readFileSync(resolve(this.usagePending, name), 'utf8'))
+      for (const phase of ['STARTED', 'TERMINAL']) {
+        const payload = record.observations[phase]
+        if (payload && !record.receipts[phase]) {
+          pending.push({ key: name.slice(0, -5), dispatchId: record.dispatchId, payload, evidenceSha256: canonicalSha256(payload) }); break
+        }
+      }
+    }
+    return pending
+  }
+  acknowledgeUsage(pending, receipt) { return this._withLock(() => {
+    if (!/^[0-9a-f]{64}$/.test(pending.key)) throw new Error('CHAT_USAGE_BINDING_INVALID')
+    if (!receipt || receipt.dispatchId !== pending.dispatchId || !/^[0-9a-f]{64}$/.test(receipt.attemptId || '')
+        || receipt.revision !== (pending.payload.phase === 'STARTED' ? '1' : '2')
+        || !['PENDING_USAGE', 'PENDING_PRICE', 'PRICED'].includes(receipt.status)
+        || (receipt.status === 'PRICED' ? !/^[0-9]+\.[0-9]{6}$/.test(receipt.costYuan || '') : receipt.costYuan !== null))
+      throw new Error('CHAT_USAGE_RECEIPT_UNCONFIRMED')
+    const pendingPath = resolve(this.usagePending, `${pending.key}.json`), donePath = resolve(this.usageAcknowledged, `${pending.key}.json`)
+    const path = existsSync(donePath) ? donePath : pendingPath
+    const record = JSON.parse(readFileSync(path, 'utf8')), phase = pending.payload.phase
+    if (record.dispatchId !== pending.dispatchId || canonicalSha256(record.observations[phase]) !== pending.evidenceSha256
+        || (record.receipts.STARTED && record.receipts.STARTED.attemptId !== receipt.attemptId)) throw new Error('CHAT_USAGE_RECEIPT_CONFLICT')
+    record.receipts[phase] = { ...receipt, evidenceSha256: pending.evidenceSha256 }
+    atomicJson(path, record)
+    if (record.receipts.TERMINAL && path === pendingPath) durableRename(pendingPath, donePath)
+  }) }
   markPrepared(item, preparation) { return this._withLock(() => {
     if (!item || item.state !== 'processing' || !object(preparation)) throw new Error('CHAT_PREPARATION_INVALID')
     const record = { ...item.record, state: 'PREPARED', preparation, preparedAt: Date.now() }; atomicJson(item.path, record); item.record = record; return item
