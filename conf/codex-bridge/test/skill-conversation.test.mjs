@@ -579,7 +579,7 @@ test('unconfirmed HTTP response cancels its body, records status and preserves p
   assert.equal((await f.lane.poll({discover:false})).status,'DEFERRED');assert.equal(cancelled,1)
 })
 
-test('failed-turn usage survives durable failure checkpoint and lease-rebound recovery without entering business failure payload', async t => {
+test('business failure recovery does not copy source-owned usage or replay the native turn', async t => {
   const f = fixture(t); let runs = 0; let reports = 0
   const usageEvidence = { source: 'codex-app-server/thread/tokenUsage/updated', status: 'UNVERIFIED', threadId: 'thread', turnId: 'turn', tokenUsage: { last: { inputTokens: 12 }, total: { inputTokens: 100 } } }
   const nextFence = { version: '9007199254740994', token: '00000000-0000-0000-0000-000000000002' }
@@ -599,9 +599,9 @@ test('failed-turn usage survives durable failure checkpoint and lease-rebound re
     } }
   const checkpoint = resolve(f.options.rootDir, 'skill-runs', skillDigest({ ...scope, apiOrigin: 'https://api.example.test' }), f.c.executionId, 'engine-failure.json')
   await partial(new SkillConversationLane(options).poll(), 'SKILL_TRANSPORT_UNKNOWN')
-  assert.deepEqual(JSON.parse(readFileSync(checkpoint, 'utf8')).usageEvidence, usageEvidence)
+  assert.equal(JSON.parse(readFileSync(checkpoint, 'utf8')).usageEvidence, undefined)
   assert.equal((await new SkillConversationLane(options).poll()).status, 'PROGRESSED')
   const saved = JSON.parse(readFileSync(checkpoint, 'utf8'))
-  assert.deepEqual(saved.usageEvidence, usageEvidence); assert.deepEqual(saved.fence, nextFence)
+  assert.equal(saved.usageEvidence, undefined); assert.deepEqual(saved.fence, nextFence)
   assert.equal(runs, 1); assert.equal(reports, 2)
 })

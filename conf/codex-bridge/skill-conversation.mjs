@@ -294,8 +294,7 @@ export class SkillConversationLane {
         timer = setTimeout(() => { renewalPromise = renew() }, Math.max(1, Math.floor((expiry - Date.now()) / 2)))
         if (resume?.turnFailureCode) {
           if (resume.phase !== 'RESULT_UNKNOWN' || resume.resultManifest != null || resume.allowedWork.some(work => work !== 'QUERY_EFFECT')) fail('SKILL_RESUME_INVALID')
-          store.write('engine-failure', { code: resume.turnFailureCode, fence: { ...fence },
-            ...(knownTerminal?.usageEvidence ? { usageEvidence: knownTerminal.usageEvidence } : {}) })
+          store.write('engine-failure', { code: resume.turnFailureCode, fence: { ...fence } })
           return { failureReceipt: await reportEngineTerminal(store.read('engine-failure')) }
         }
         return { resultManifest: resume?.resultManifest || null }
@@ -399,8 +398,7 @@ export class SkillConversationLane {
       }
       try { return await executeSkill(command, ctx) } catch (error) {
         if (!engineTerminalCodes.has(error?.code) || !fence) throw error
-        const terminal = { code: error.code, fence: { ...fence },
-          ...(error.usageEvidence ? { usageEvidence: error.usageEvidence } : {}) }
+        const terminal = { code: error.code, fence: { ...fence } }
         store.write('engine-failure', terminal)
         checkLease()
         return await reportEngineTerminal(terminal)

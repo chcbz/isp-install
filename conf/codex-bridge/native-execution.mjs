@@ -67,6 +67,12 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     checkActive()
     return session.finalize(result, receipts)
   } catch (cause) {
+    // Persist source evidence before cancellation/error normalization. A cancelled
+    // turn never reaches the business failure-receipt owner; cost recovery must
+    // not depend on that path, its lease, or a successful failure report.
+    if (cause?.usageEvidence) store.write('native-usage-failure', {
+      usageEvidence: cause.usageEvidence, requestedModel: model || null
+    })
     // Engine uncertainty belongs to this execution, not to the whole inbox.
     // Keep the original checkpoint; normalization never starts another turn.
     // A confirmed completed turn without its required proposal failed the

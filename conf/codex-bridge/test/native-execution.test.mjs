@@ -176,12 +176,13 @@ test('native terminal checkpoint retains unverified usage without substituting r
   assert.equal(checkpoint.usageEvidence.actualModel, undefined)
 })
 
-test('native failure normalization preserves available usage evidence for the durable receipt owner', async t => {
+test('native source persists failed-turn usage before business error normalization', async t => {
   const f = fixture(t)
   const evidence = { source: 'codex-app-server/thread/tokenUsage/updated', status: 'UNVERIFIED', threadId: 'thread1', turnId: 'turn1', tokenUsage: { last: { outputTokens: 3 } } }
   f.adapter.runTurn = async () => { throw Object.assign(new Error('failed'), { code: 'TURN_FAILED', usageEvidence: evidence }) }
   await assert.rejects(runNativeExecution(f.request), error => error.code === 'NATIVE_EXECUTION_TURN_FAILED' && error.usageEvidence === evidence)
   assert.equal(f.store.read('native-final-message'), null)
+  assert.deepEqual(f.store.read('native-usage-failure').usageEvidence, evidence)
 })
 
 
@@ -195,5 +196,19 @@ test('late successful turn keeps usage history but cannot finalize after cancell
   const checkActive = () => { if (cancelled) throw Object.assign(new Error('cancelled'), { code: 'SKILL_LEASE_UNCERTAIN' }) }
   await assert.rejects(runNativeExecution({ ...f.request, checkActive }), { code: 'SKILL_LEASE_UNCERTAIN' })
   assert.deepEqual(f.store.read('native-final-message').usageEvidence, evidence)
+  assert.equal(f.store.loadResult(), null)
+})
+
+
+test('aborted failed turn durably retains costs without a business failure receipt', async t => {
+  const f = fixture(t); const abort = new AbortController()
+  const evidence = { source: 'codex-app-server/thread/tokenUsage/updated', status: 'UNVERIFIED', threadId: 'thread1', turnId: 'turn1', tokenUsage: { last: { outputTokens: 3 } } }
+  f.adapter.runTurn = async () => {
+    abort.abort()
+    throw Object.assign(new Error('interrupted'), { code: 'TURN_INTERRUPTED', usageEvidence: evidence })
+  }
+  await assert.rejects(runNativeExecution({ ...f.request, signal: abort.signal, model: 'requested-only' }), { code: 'SKILL_LEASE_UNCERTAIN' })
+  assert.deepEqual(f.store.read('native-usage-failure'), { usageEvidence: evidence, requestedModel: 'requested-only' })
+  assert.equal(f.store.read('engine-failure'), null)
   assert.equal(f.store.loadResult(), null)
 })
