@@ -46,7 +46,8 @@ function context(t, message = messageFixture(), outcome = { revision: null, sche
   const fetched = [], frames = [], events = [], preparations = []; let finalPrepared = null, starts = 0
   const readback = { initialize: {}, account: {}, models: {}, config: {}, tools: {}, schema: { ...schema, schemaContractId: schema.contractId, measured: true } }
   const adapter = { closed: false, readback, startOrResumeThread: async (prior, policy) => {
-    assert.match(policy.developerInstructions, /Context Envelope and the authorized material carriers actually attached/);
+    assert.match(policy.developerInstructions, /Context Envelope, the conversation history already present in this same native thread/);
+    assert.match(policy.developerInstructions, /authorized material carriers attached to this turn/);
     assert.match(policy.developerInstructions, /inputMimeTypes list restricts that skill execution, not native reading/);
     assert.match(policy.developerInstructions, /if a carrier is absent or genuinely unreadable/);
     assert.equal(prior, null); assert.equal(policy.cwd, '/inputs'); assert.deepEqual(policy.config, { network: false, project_doc_max_bytes: 0 }); return { threadId: 'materials-thread' }
