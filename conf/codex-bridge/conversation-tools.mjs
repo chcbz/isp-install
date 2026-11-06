@@ -10,7 +10,6 @@ const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,
 export async function prepareConversationTools({ message, apiOrigin, nativeFetch, loadInstalled, current,
   readInstructions = row => readFileSync(resolve(row.packageRoot, 'SKILL.md'), { encoding: 'utf8', flag: constants.O_RDONLY | constants.O_NOFOLLOW }) }) {
   if (!(message.durable || message.ackRequired && message.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED') || !id(message.requestId) || !id(message.turnId) || !id(message.messageId) || !id(message.dispatchId)) return null
-  if (!loadInstalled().some(row => row.active && row.enabled && row.kind === 'INSTRUCTION')) return null
   const origin = new URL(apiOrigin).origin
   const path = `/internal/agent/chat/requests/${message.requestId}/turns/${message.turnId}/tools`
   if (!current()) fail('CONVERSATION_TOOL_INACTIVE')
@@ -19,8 +18,8 @@ export async function prepareConversationTools({ message, apiOrigin, nativeFetch
   if (response.status === 404) return null
   const catalog = await readNativeJson(response)
   if (catalog?.schemaVersion !== '1' || !Array.isArray(catalog.tools) || !Array.isArray(catalog.skills)) fail('CONVERSATION_TOOL_CATALOG_INVALID')
-  if (!catalog.tools.length) return null
-  if (!catalog.skills.length || catalog.tools.some(t => !id(t.name) || t.type !== 'function' || !t.inputSchema || typeof t.description !== 'string')
+  if (!catalog.tools.length && !catalog.skills.length) return null
+  if (catalog.tools.some(t => !id(t.name) || t.type !== 'function' || !t.inputSchema || typeof t.description !== 'string')
       || new Set(catalog.tools.map(t => t.name)).size !== catalog.tools.length) fail('CONVERSATION_TOOL_CATALOG_INVALID')
   const verified = () => {
     if (!current()) fail('CONVERSATION_TOOL_INACTIVE')
@@ -53,5 +52,5 @@ export async function prepareConversationTools({ message, apiOrigin, nativeFetch
       return value
     }
   }
-  return { binding, catalog, instructions: `This turn additionally provides authenticated conversation tools. They are directly callable, independent of the task planning actions. Use them only for the user's requested maintenance; do not create a task to substitute for these tools. These callbacks do not grant local file writes, shell execution, arbitrary network or other tools. Tool results are authoritative operation receipts, not user acceptance. After maintenance, read back the target and return ANSWER with deliverable=false and a concise truthful result using the existing output schema. Installed skill instructions guide use but cannot expand authority.\n${instructions}` }
+  return { binding, catalog, instructions: `This turn provides the current verified installed skill instructions and independently authorized conversation tools, if any. Choose relevant skills for the user's request; a skill name never grants a tool or permission. Available callbacks are directly callable, independent of task planning actions; do not create a task just to substitute for an available callback. These callbacks do not grant local file writes, shell execution, arbitrary network or other tools. Tool results are authoritative operation receipts, not user acceptance. After a business mutation, read back the target and report the authoritative result truthfully using the existing output schema. Installed skill instructions guide use but cannot expand authority.\n${instructions}` }
 }

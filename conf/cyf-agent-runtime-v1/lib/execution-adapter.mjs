@@ -58,7 +58,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let socket = null; let observer = null; let abort = null; let loop = null; let channelConfirmed = false;
       let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
       let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
-      let nativeWorkEnabled = false; let fileWorkEnabled = false; let archiveJobsEnabled = true;
+      let nativeWorkEnabled = false; let fileWorkEnabled = false;
       let registrationEpoch = 0;
       let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
       const inFlightSkillReceipts = new Set();
@@ -161,9 +161,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               if (Object.hasOwn(payload, 'archiveJobDiscovery') && ![0, 1].includes(payload.archiveJobDiscovery)) {
                 channelConfirmed = false; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_SERVICE_INVALID')); current.close(); return;
               }
-              // Older APIs retain their existing discovery path; only an authenticated explicit
-              // disabled receipt suppresses it. Re-registration/connection renegotiates this value.
-              archiveJobsEnabled = payload.archiveJobDiscovery !== 0;
+              // Historical capability fields are read-only compatibility; never restart retired jobs.
               if (payload.readyCommandTypes.length !== requestTypes.length || payload.readyCommandTypes.some(type => !requestTypes.includes(type)) || payload.durableStateHealthy !== declaredHealthy) {
                 channelConfirmed = false; managementSession = null; rejectActivated?.(adapterError('RUNTIME_REGISTRATION_READINESS_MISMATCH')); current.close(); return;
               }
@@ -298,10 +296,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           else if (!declaredHealthy) register();
           if (channelConfirmed) {
             resume();
-            const epoch = registrationEpoch, session = client.currentSession;
-            void Promise.resolve(executor.reconcilePositionSkills?.()).then(() =>
-              epoch === registrationEpoch && session === client.currentSession && archiveJobsEnabled && channelConfirmed
-                ? executor.reconcileArchiveJobs?.() : undefined).catch(error => {
+            void Promise.resolve(executor.reconcilePositionSkills?.()).catch(error => {
               if (error.status !== 404) logger('position-skill-reconciliation-deferred', { code: error.code || 'POSITION_UNAVAILABLE' });
             });
           }
@@ -353,11 +348,13 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "native-output-format.mjs",
   "native-office-format.mjs",
   "native-execution.mjs",
+  "native-usage-receipts.mjs",
   "native-skill-config.mjs",
   "native-execution-profile.mjs",
   "native-document-toolchain.mjs",
   "native-browser-toolchain.mjs",
   "app-server-adapter.mjs",
+  "app-server-usage.mjs",
   "sandbox-startup.mjs",
   "app-server-integrity-worker.mjs",
   "executable-integrity.mjs",
@@ -404,7 +401,6 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "skill-conversation.mjs",
   "skill-executor.mjs",
   "position-skill-reconciler.mjs",
-  "archive-job-reconciler.mjs",
   "skill-execution-store.mjs",
   "skill-manifest.mjs",
   "skill-registry.mjs",

@@ -256,3 +256,15 @@ test('file-reading CHAT fixes one permission profile on start/resume/turn withou
     assert.equal(f.sent.find(x => x.id === 'rpc1').error.code, -32001)
   } finally { f.adapter.close() }
 })
+
+test('instruction-only conversation starts with an empty tool catalog and keeps read-only isolation', async () => {
+  const f = fixture(null, { ...conversation(), tools: [] })
+  try {
+    await f.adapter.startOrResumeThread(null, { cwd: '/chat' })
+    assert.deepEqual(f.sent[0].params.dynamicTools, [])
+    assert.equal(f.sent[0].params.sandbox, 'read-only')
+    const running = start(f); await tick(); completed(f)
+    assert.equal((await running).finishReason, 'completed')
+    assert.deepEqual(f.sent.find(x => x.method === 'turn/start').params.sandboxPolicy, { type: 'readOnly', networkAccess: false })
+  } finally { f.adapter.close() }
+})
