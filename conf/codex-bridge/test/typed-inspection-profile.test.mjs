@@ -573,3 +573,18 @@ test('file-enabled ordinary CHAT reuses warm engine, canonical Home and joins eg
   assert.equal(existsSync(first.typedInspectionEngineState.codexHome), true)
   assert.equal(runtime.conversationOwners.size, 0)
 })
+
+
+test('missing recovery state never evicts a healthy idle chat process', async t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  let closed = 0
+  runtime.warmChatAdapters = new Map([[conversationKey, { idle: true, adapter: { closed: false, shutdown: async () => { closed++ } }, owner: 'idle' }]])
+  runtime.idleWarmChatKey = conversationKey
+  for (const options of [{ requireExistingState: true }, { requireExistingState: true, conversationKey }]) {
+    await assert.rejects(runtime.openAdapter(runtime.stateRoot, 'key-missing', binding('missing'), options),
+      { code: 'TYPED_INSPECTION_RECOVERY_STATE_MISSING' })
+    assert.equal(closed, 0); assert.ok(runtime.warmChatAdapters.has(conversationKey))
+    assert.equal(runtime.idleWarmChatKey, conversationKey)
+    assert.equal(runtime.pendingInspectionKeys.size, 0)
+  }
+})

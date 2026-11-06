@@ -3024,7 +3024,7 @@ export class AgentMessageProcessor {
     const message = item.record.message; const active = { key: item.key, state: 'QUEUED', message, cancelRequested: false, cancel: null }
     this.activeChats.set(item.key, active)
     const task = async () => {
-      if (active.cancelRequested) { this.activeChats.delete(item.key); return }
+      if (active.cancelRequested || this.stopped || this.paused || this.failClosedError) { this.activeChats.delete(item.key); return }
       if (preEngineRecovery) this.preEngineRecoveryAttempts.add(item.key)
       const claimed = preEngineRecovery ? this.chatInbox.claimPreEngineInspection(item.key) : this.chatInbox.claim(item.key); if (!claimed) { this.activeChats.delete(item.key); return }
       active.state = 'STARTING'; active.item = claimed; this.chatActive = true

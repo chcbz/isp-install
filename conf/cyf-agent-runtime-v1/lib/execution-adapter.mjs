@@ -86,10 +86,15 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       };
       const register = () => {
         if (!client.currentSession || socket?.readyState !== 1) return false;
-        const healthy = durable(); declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
+        const healthy = durable(); const retainConfirmed = channelConfirmed && declaredHealthy && healthy;
+        declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
         const envelope = module.buildProtocolEnvelope('agent.register', { ...executor.registrationPayload(),
           messageId: randomUUID(), durableStateHealthy: healthy, readyCommandTypes: requestTypes }, executor.state().profile, instanceId);
-        registrationEpoch++; observer.begin(envelope.messageId); nativeWorkEnabled = false; fileWorkEnabled = false; channelConfirmed = false; registeredAt = null; serviceReadyAt = null;
+        // Updating the capability catalog is not a new authenticated connection.
+        // Initial registration/disconnect/rejection still withdraw authority; health
+        // and actual executor capabilities remain part of ready() while ACK is pending.
+        registrationEpoch++; observer.begin(envelope.messageId); channelConfirmed = retainConfirmed;
+        if (!channelConfirmed) { nativeWorkEnabled = false; fileWorkEnabled = false; registeredAt = null; serviceReadyAt = null; }
         if (!send(envelope)) observer.sendFailed(envelope.messageId);
         return true;
       };
@@ -285,10 +290,9 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         heartbeat: async () => {
           if (!client.currentSession || socket?.readyState !== 1) return;
           const healthy = durable();
-          // A catalog refresh temporarily awaits its exact registration ACK; it is
-          // not a disconnect. An offline presence here would revoke the server's
-          // just-created binding after registration, leaving local readiness stale.
-          // Still report actual health loss/pause and keep admission ACK-gated.
+          // Before the first connection ACK, silence is not an offline declaration.
+          // Catalog-only refresh keeps the confirmed session online; actual health
+          // loss/pause still withdraws readiness and is reported immediately.
           if (healthy && declaredHealthy && admitted && usable() && !channelConfirmed) return;
           if (send(module.buildProtocolEnvelope('agent.presence', { messageId: randomUUID(), status: readyWithHealth(healthy) ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId))) lastPresenceSentAt = Date.now();
           // Health revocation never removes authorization to report known outcomes.
