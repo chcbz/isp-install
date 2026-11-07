@@ -384,9 +384,11 @@ test('inspection full dispatch and envelope preserve catalogues beyond 32 items 
   extra.manifestDigest = canonicalSha256(extra.manifest)
   // The general-file contract removed the arbitrary 32-source ceiling.
   assert.equal(resolveTypedInspectionRequest(profile, excess).manifest.sources.length, 33)
-  extra.manifest.sources.push(structuredClone(extra.manifest.sources[32]))
-  extra.manifestDigest = canonicalSha256(extra.manifest)
-  assert.throws(() => resolveTypedInspectionRequest(profile, excess), error => error.code === 'TYPED_INSPECTION_SOURCE_ORDER_INVALID')
+  const duplicate = structuredClone(excess)
+  const duplicateTyped = duplicate.contextSnapshot.facts.typedInspection
+  duplicateTyped.manifest.sources.push(structuredClone(duplicateTyped.manifest.sources[32]))
+  duplicateTyped.manifestDigest = canonicalSha256(duplicateTyped.manifest)
+  assert.throws(() => resolveTypedInspectionRequest(profile, duplicate), error => error.code === 'TYPED_INSPECTION_SOURCE_ORDER_INVALID')
 })
 
 
