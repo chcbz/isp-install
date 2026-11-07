@@ -358,7 +358,7 @@ test('inspection resolves exact INPUT and REFERENCE selectors and neutral conver
   }
 })
 
-test('inspection full dispatch and envelope preserve the complete 32-item catalogue and long action without truncation', () => {
+test('inspection full dispatch and envelope preserve catalogues beyond 32 items and long actions without truncation', () => {
   const message = structuredClone(messageFor()); const typed = message.contextSnapshot.facts.typedInspection
   typed.manifest.sources = Array.from({ length: 32 }, (_, index) => sourceFor(undefined, {
     sourceRefId: `source-${String(index).padStart(2, '0')}`,
@@ -382,7 +382,11 @@ test('inspection full dispatch and envelope preserve the complete 32-item catalo
   const excess = structuredClone(message); const extra = excess.contextSnapshot.facts.typedInspection
   extra.manifest.sources.push(sourceFor(undefined, { sourceRefId: 'source-32' }))
   extra.manifestDigest = canonicalSha256(extra.manifest)
-  assert.throws(() => resolveTypedInspectionRequest(profile, excess), error => error.code === 'TYPED_INSPECTION_MANIFEST_INVALID')
+  // The general-file contract removed the arbitrary 32-source ceiling.
+  assert.equal(resolveTypedInspectionRequest(profile, excess).manifest.sources.length, 33)
+  extra.manifest.sources.push(structuredClone(extra.manifest.sources[32]))
+  extra.manifestDigest = canonicalSha256(extra.manifest)
+  assert.throws(() => resolveTypedInspectionRequest(profile, excess), error => error.code === 'TYPED_INSPECTION_SOURCE_ORDER_INVALID')
 })
 
 
