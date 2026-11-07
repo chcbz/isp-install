@@ -718,3 +718,52 @@ test('native model catalog path survives the actual agent profile normalization'
   assert.equal(normalizeProfile({ nativeModelCatalogPath: '/private/models.json' }, {}, 0, { isolated: true }).nativeModelCatalogPath, '/private/models.json')
   assert.equal(normalizeProfile({}, {}, 0, { isolated: true }).nativeModelCatalogPath, '')
 })
+
+
+test('native startup retries only a cleaned engine-open RPC timeout, once and single-flight', async () => {
+  const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+  let calls = 0, release
+  const cleaned = new Promise(resolve => { release = resolve })
+  const declaration = Object.freeze({ executionProtocolVersion: 5 })
+  runtime._measureNativeExecution = async () => {
+    calls++
+    if (calls === 1) {
+      runtime.nativeExecutionMeasurementFailure = { stage: 'engine-open', code: 'APP_SERVER_RPC_TIMEOUT' }
+      await cleaned
+      return null
+    }
+    return declaration
+  }
+  const first = runtime.measureNativeExecution()
+  assert.equal(first, runtime.measureNativeExecution())
+  assert.equal(calls, 1)
+  release()
+  assert.equal(await first, declaration)
+  assert.equal(calls, 2)
+  assert.equal(runtime.nativeExecutionDeclaration(), declaration)
+  assert.equal(runtime.nativeExecutionMeasurementPending, null)
+})
+
+test('native startup does not loop or retry permanent, cleanup, execution or disposed failures', async () => {
+  for (const [stage, code, disposed, expected] of [
+    ['engine-open', 'APP_SERVER_RPC_TIMEOUT', false, 2],
+    ['engine-open', 'CODEX_APP_SERVER_BINARY_UNTRUSTED', false, 1],
+    ['cleanup', 'NATIVE_EXECUTION_CLEANUP_FAILED', false, 1],
+    ['shell', 'APP_SERVER_RPC_TIMEOUT', false, 1],
+    ['engine-open', 'APP_SERVER_RPC_TIMEOUT', true, 1]
+  ]) {
+    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    let calls = 0
+    runtime._measureNativeExecution = async () => {
+      calls++
+      runtime.nativeExecutionMeasurementFailure = { stage, code }
+      runtime.disposed = disposed
+      return null
+    }
+    assert.equal(await runtime.measureNativeExecution(), null)
+    assert.equal(calls, expected)
+    assert.equal(runtime.nativeExecutionDeclaration(), null)
+    assert.equal(runtime.nativeExecutionMeasurementPending, null)
+    assert.deepEqual(runtime.nativeExecutionMeasurementFailure, { stage, code })
+  }
+})

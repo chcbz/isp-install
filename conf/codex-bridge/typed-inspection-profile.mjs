@@ -929,7 +929,17 @@ export class TypedInspectionProfileRuntime {
     if (this.nativeExecutionMeasurementPending) return this.nativeExecutionMeasurementPending
     this.nativeExecutionReadback = null
     this.nativeExecutionMeasurementFailure = null
-    const pending = this._measureNativeExecution().then(result => {
+    const measure = async () => {
+      const result = await this._measureNativeExecution()
+      // A startup RPC timeout before any model turn is safe to retry only after
+      // _measureNativeExecution has finished disposing its isolated probe.
+      const failure = this.nativeExecutionMeasurementFailure
+      if (result || this.disposed || failure?.stage !== 'engine-open' || failure.code !== 'APP_SERVER_RPC_TIMEOUT') return result
+      console.warn('native execution startup RPC timed out; retrying cleaned probe once')
+      this.nativeExecutionMeasurementFailure = null
+      return this._measureNativeExecution()
+    }
+    const pending = measure().then(result => {
       this.nativeExecutionReadback = this.disposed ? null : result
       return this.nativeExecutionReadback
     }, () => { this.nativeExecutionReadback = null; return null }).finally(() => {
@@ -1007,8 +1017,8 @@ export class TypedInspectionProfileRuntime {
     } catch (error) { ready = false; this.nativeExecutionMeasurementFailure = { stage, code: error.code || 'NATIVE_EXECUTION_MEASUREMENT_FAILED' } }
     finally {
       phase('cleanup')
-      try { await this.releaseAdapter(id, { requestBinding: binding }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
-      try { if (directory) rmSync(directory, { recursive: true, force: true }) } catch { ready = false; this.nativeExecutionMeasurementFailure ||= { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
+      try { await this.releaseAdapter(id, { requestBinding: binding }) } catch { ready = false; this.nativeExecutionMeasurementFailure = { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
+      try { if (directory) rmSync(directory, { recursive: true, force: true }) } catch { ready = false; this.nativeExecutionMeasurementFailure = { stage: 'cleanup', code: 'NATIVE_EXECUTION_CLEANUP_FAILED' } }
     }
     phase('finished')
     console.info(JSON.stringify({ event: 'native-execution-startup-timing', profileKey: createHash('sha256').update(this.profile.profileId || '').digest('hex'), ready, timings }))
