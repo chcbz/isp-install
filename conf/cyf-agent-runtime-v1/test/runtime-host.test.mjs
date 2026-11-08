@@ -262,7 +262,15 @@ for (const materialsFailure of [false, true]) test(`native owner survives absent
   Object.assign(subject.profile, { workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: resolve(f.root, 'files'),
     nativeExecutionRootDir: resolve(f.root, 'native-inputs'), nativeExecutionStateRoot: resolve(f.root, 'native-state') })
   if (materialsFailure) Object.assign(subject.profile, { inputCarriers: {}, typedInspectionRootDir: resolve(f.root, 'material-inputs'), typedInspectionStateRoot: subject.profile.codexHome })
-  const { createRuntimeExecutionHost } = await import(resolve(engineSource, 'agent-client.mjs'))
+  // Source-only checkout has no prepared delivery venv. Create an isolated
+  // copied library with a never-invoked interpreter fixture; do not alter source
+  // or weaken the release-local toolchain prerequisite.
+  const library = resolve(f.root, 'test-engine')
+  await collateExecutionPayload(engineSource, library)
+  await symlink(resolve(engineSource, 'node_modules'), resolve(library, 'node_modules'))
+  await mkdir(resolve(library, '.toolchain/bin'), { recursive: true })
+  await symlink('/usr/bin/python3', resolve(library, '.toolchain/bin/python'))
+  const { createRuntimeExecutionHost } = await import(resolve(library, 'agent-client.mjs'))
   const engine = createRuntimeExecutionHost({ agents: [subject], runtimeInstanceId: 'native-owner-test', apiOrigin: 'https://api.example.test' })
   f.cleanup(() => engine.close())
   const executor = engine.createExecutor({ subjectKey: subject.subjectKey })
