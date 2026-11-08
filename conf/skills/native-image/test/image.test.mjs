@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, symlinkSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { createServer } from 'node:http'
@@ -150,4 +150,32 @@ test('CLI uses CONNECT despite NO_PROXY and verifies TLS using configured CA', a
   assert.equal(JSON.parse(rejected.stderr).transportCode, 'DEPTH_ZERO_SELF_SIGNED_CERT')
   assert.equal(existsSync(resolve(root, 'untrusted.png')), false)
   assert.deepEqual(tunnels, [`localhost:${target.address().port}`, `localhost:${target.address().port}`])
+})
+
+
+test('actual usage survives invalid image and local resize failure without another provider call', async t => {
+  for (const resize of [false, true]) {
+    const root = fixture(t), journal = resolve(root, 'usage'), out = resolve(root, 'result.png')
+    const usage = { input_tokens: 12, output_tokens: 100, input_tokens_details: { text_tokens: 10, image_tokens: 2 } }
+    let calls = 0
+    await assert.rejects(run([...gen(out), ...(resize ? ['--size','2x2'] : [])], {
+      env: { ...env, CYF_PROVIDER_USAGE_DIR: journal }, fetchFn: async url => {
+        calls++; return answer(url,png,{ json: async () => ({ usage, data: [{b64_json: resize ? png.subarray(0,8).toString('base64') : 'invalid'}] }) })
+      }
+    }))
+    assert.equal(calls,1)
+    const records=readdirSync(journal).filter(n=>n.endsWith('.json')).map(n=>JSON.parse(readFileSync(resolve(journal,n))))
+    assert.equal(records.length,2);assert.deepEqual(records.find(x=>x.phase==='TERMINAL').evidence.usage,usage)
+    assert.equal(JSON.stringify(records).includes(env.IMAGE_API_KEY),false)
+  }
+})
+
+test('transport loss remains a pending observation and resize alone creates no billable call', async t => {
+ const root=fixture(t),journal=resolve(root,'usage'),out=resolve(root,'result.png')
+ await assert.rejects(run(gen(out),{env:{...env,CYF_PROVIDER_USAGE_DIR:journal},fetchFn:async()=>{throw Error('network')}}))
+ const records=readdirSync(journal).map(n=>JSON.parse(readFileSync(resolve(journal,n))))
+ assert.equal(records.find(x=>x.phase==='TERMINAL').evidence.usage,null)
+ const input=resolve(root,'input.png');writeFileSync(input,png)
+ await run(['resize','--input',input,'--output',out,'--size','2x2'],{env:{...env,CYF_PROVIDER_USAGE_DIR:journal},fetchFn:()=>{throw Error('paid call forbidden')}})
+ assert.equal(readdirSync(journal).length,2)
 })

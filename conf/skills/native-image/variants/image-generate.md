@@ -2,7 +2,7 @@
 name: image-generate
 description: 根据用户描述生成图片，可指定画布尺寸；使用本技能单独配置的图片服务。
 metadata:
-  version: "1.3.1"
+  version: "1.3.2"
 ---
 # 图片生成
 
@@ -24,3 +24,7 @@ node <本技能目录>/scripts/image.mjs resize --input /outputs/image.png.provi
 图片服务可能超过一次工具等待窗口。调用 `exec_command` 时保留完整返回对象（在 code 模式中可用 `console.log(JSON.stringify(result))`），不要只输出 `output` 或 `exit_code`。返回 `session_id` 表示命令仍在执行：使用 `write_stdin` 轮询同一会话直到终态；一次 yield 结束或暂时没有退出码不是失败，不重新调用生成/编辑服务。
 
 CYF 原生隔离环境只提供有限工具链，不假定存在 `ls`、`file` 或 Python。需要检查文件时可用已提供的 Node.js `node:fs`；命令完成后核对脚本返回的路径、字节数及实际文件。使用本次执行提供的 `artifact_stage` 暂存图片，再用 `result_propose` 提交包含暂存文件引用的结果（仅文件成果的 `data` 为 `null`）。草稿存在或文字回复不等于已提交；提交失败如实报告，不重发已成功的图片服务调用。
+
+## 实际用量回执
+
+宿主通过 `CYF_PROVIDER_USAGE_DIR` 提供本次执行的私有用量目录；generate/edit 在请求前记录开始，收到响应后先保存原始usage，再校验图片和缩放。缺usage保留待补，不以图片大小估算。该目录及回执不属于成果，勿删除、修改或作为附件提交。失败或重连不得重新生图以补账；本地resize不调用模型、不增加模型消耗。配置可带usageChannel、usageTier和usagePriceVersion，由平台维护；技能只采集，不计算费用、不扣款。

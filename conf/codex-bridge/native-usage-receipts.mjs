@@ -29,7 +29,7 @@ export function pendingNativeUsage(store) {
 export function acknowledgeNativeUsage(store, pending, receipt) {
   if (!receipt || receipt.executionId !== store.command.executionId
       || !/^[a-f0-9]{64}$/.test(receipt.attemptId || '')
-      || receipt.revision !== (pending.payload.phase === 'STARTED' ? '1' : '2')
+      || receipt.revision !== ((pending.payload.phase ?? pending.payload.observation?.phase) === 'STARTED' ? '1' : '2')
       || !['PENDING_USAGE', 'PENDING_PRICE', 'PRICED'].includes(receipt.status)
       || (receipt.status === 'PRICED' ? !/^[0-9]+\.[0-9]{6}$/.test(receipt.costYuan || '') : receipt.costYuan !== null))
     fail('NATIVE_USAGE_RECEIPT_UNCONFIRMED')

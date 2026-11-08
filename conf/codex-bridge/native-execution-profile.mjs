@@ -316,7 +316,7 @@ export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory
   if (layout.toolchain.files.some(file => file.sandboxPath === '/usr/bin/python3')) {
     args.push('--setenv', 'LD_LIBRARY_PATH', '/usr/lib:/usr/lib64:/lib:/lib64', '--setenv', 'PYTHONDONTWRITEBYTECODE', '1')
   }
-  args.push('--setenv', 'TMPDIR', '/workspace', '--setenv', 'PATH', '/runtime/bin:/usr/bin:/bin', '--setenv', 'SHELL', layout.toolchain.shell, '--remount-ro', '/')
+  args.push('--setenv', 'CYF_PROVIDER_USAGE_DIR', '/workspace/.provider-usage', '--setenv', 'TMPDIR', '/workspace', '--setenv', 'PATH', '/runtime/bin:/usr/bin:/bin', '--setenv', 'SHELL', layout.toolchain.shell, '--remount-ro', '/')
   return args
 }
 

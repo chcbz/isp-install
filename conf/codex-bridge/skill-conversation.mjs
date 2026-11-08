@@ -1,3 +1,4 @@
+import { pendingProviderUsage } from './provider-usage-receipts.mjs'
 import { pendingNativeUsage, acknowledgeNativeUsage } from './native-usage-receipts.mjs'
 import { readNativeJson } from './native-json.mjs'
 /** Protocol5 shares the existing conversation inbox/session/lease/output transport.
@@ -173,9 +174,9 @@ export class SkillConversationLane {
       const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
       try {
         const usage = pendingNativeUsage(store)
-        if (usage) { this.pendingUsage.push({ command, store, ...usage }); unresolved.add(id) }
+        for (const item of [...(usage ? [usage] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
       } catch (error) {
-        if (!['NATIVE_USAGE_RECEIPT_CONFLICT', 'NATIVE_USAGE_SOURCE_MISSING'].includes(error?.code)) throw error
+        if (!['NATIVE_USAGE_RECEIPT_CONFLICT', 'NATIVE_USAGE_SOURCE_MISSING', 'PROVIDER_USAGE_SOURCE_INVALID'].includes(error?.code)) throw error
         this.pendingUsageErrors.push({ executionId: id, code: error.code }); unresolved.add(id)
       }
       if (store.read('attempt') && !store.read('receipt') && !store.read('failure-receipt')) {
@@ -204,7 +205,7 @@ export class SkillConversationLane {
       const retry = this.usageRetries.get(command.executionId)
       if (retry && this.now() < retry.nextAt) continue
       try {
-        const receipt = await this.request(`${BASE}/${command.taskId}/runs/${command.runId}/conversation/usage`, 'POST', item.payload)
+        const receipt = await this.request(`${BASE}/${command.taskId}/runs/${command.runId}/conversation/${item.endpoint || 'usage'}`, 'POST', item.payload)
         acknowledgeNativeUsage(store, item, receipt)
         this.usageRetries.delete(command.executionId)
       } catch (error) {

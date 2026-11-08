@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import * as http from 'node:http'
 import { normalizeImageInput, parseImageOutputSize, resizeImageOutput } from './image-input.mjs'
 import { responsePng } from './image-http-codec.mjs'
+import { beginProviderUsage } from './provider-usage.mjs'
 
 const fail = (code, message, extra = {}) => { throw Object.assign(new Error(message), { code, ...extra }) }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -82,7 +83,7 @@ export async function run(argv, { env = process.env, fetchFn = globalThis.fetch 
   const httpProxy = env.http_proxy || env.HTTP_PROXY, httpsProxy = env.https_proxy || env.HTTPS_PROXY
   const proxy = endpoint.protocol === 'https:' ? httpsProxy : httpProxy
   if ((httpProxy || httpsProxy) && !proxy) fail('IMAGE_PROXY_CONFIG_INVALID', 'Proxy for endpoint scheme is missing')
-  let output, original, marker, gotBytes = false, restoreProxy
+  let usage, output, original, marker, gotBytes = false, restoreProxy
   try {
     if (proxy) {
       if (typeof http.setGlobalProxyFromEnv !== 'function') fail('IMAGE_PROXY_UNAVAILABLE', 'Node runtime does not support configured proxy')
@@ -102,6 +103,7 @@ export async function run(argv, { env = process.env, fetchFn = globalThis.fetch 
     save(marker, Buffer.from('REQUEST_STARTED\n'))
     const directoryFd = openSync(dirname(args.output), constants.O_RDONLY | constants.O_DIRECTORY)
     try { fsyncSync(directoryFd) } finally { closeSync(directoryFd) }
+    usage = beginProviderUsage({ directory: env.CYF_PROVIDER_USAGE_DIR, config, mode: args.mode });
     let response
     try {
       response = await fetchFn(endpoint, { method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${credential}`, Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -109,13 +111,14 @@ export async function run(argv, { env = process.env, fetchFn = globalThis.fetch 
       const transportCode = error?.cause?.code || error?.code
       fail('IMAGE_OUTCOME_UNKNOWN', 'Provider request failed; outcome is unknown; do not automatically resend', { outcome: 'UNKNOWN', ...(TRANSPORT_CODES.has(transportCode) ? { transportCode } : {}) })
     }
-    const bytes = await responsePng(response, endpoint)
+    const bytes = await responsePng(response, endpoint, evidence => usage?.complete(evidence))
     gotBytes = true
     if (original) save(original, bytes)
     const transformed = resizeImageOutput(bytes, args.outputSize)
     save(output, transformed)
     return result(args.output, transformed, original?.path)
   } catch (error) {
+    usage?.complete({ usage: null, responseModel: null, providerRequestId: null });
     if (gotBytes) {
       error.outcome = 'RESPONSE_RECEIVED'
       if (original?.keep) error.providerImagePath = original.path

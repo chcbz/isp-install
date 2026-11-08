@@ -9,12 +9,16 @@ export function decodeCanonicalPng(value) {
   if (bytes.toString('base64') !== value || bytes.length < PNG_SIGNATURE.length || bytes.length > MAX_OUTPUT_BYTES || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) fail('IMAGE_RESPONSE_INVALID', 'Provider response is not one bounded PNG', { outcome: 'UNKNOWN' })
   return bytes
 }
-export async function responsePng(response, endpoint) {
+export async function responsePng(response, endpoint, observe = () => {}) {
   if (!response || response.status !== 200 || response.redirected === true || response.url !== endpoint.href) fail('IMAGE_PROVIDER_REJECTED', 'Provider did not return a direct 200 response', { outcome: 'UNKNOWN', ...(Number.isInteger(response?.status) ? { httpStatus: response.status } : {}) })
   const contentType = response.headers?.get?.('content-type')
   if (contentType && !/^application\/json(?:\s*;|$)/i.test(contentType)) fail('IMAGE_RESPONSE_INVALID', 'Provider response is not JSON', { outcome: 'UNKNOWN' })
   let payload
   try { payload = await response.json() } catch { fail('IMAGE_OUTCOME_UNKNOWN', 'Provider response could not be read', { outcome: 'UNKNOWN' }) }
+  // Preserve returned usage before validating/decoding the image: bad output can still be billed.
+  await observe({ usage: object(payload) ? payload.usage ?? null : null,
+    responseModel: object(payload) && typeof payload.model === 'string' ? payload.model : null,
+    providerRequestId: response.headers?.get?.('x-request-id') ?? null });
   if (!object(payload) || !Array.isArray(payload.data) || payload.data.length !== 1 || !object(payload.data[0]) || !['b64_json', 'b64_json,generation_id'].includes(Object.keys(payload.data[0]).sort().join(',')) || (Object.hasOwn(payload.data[0], 'generation_id') && (typeof payload.data[0].generation_id !== 'string' || !payload.data[0].generation_id))) fail('IMAGE_RESPONSE_INVALID', 'Provider response must contain exactly one base64 image', { outcome: 'UNKNOWN' })
   return decodeCanonicalPng(payload.data[0].b64_json)
 }
