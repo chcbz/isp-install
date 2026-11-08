@@ -80,6 +80,12 @@ test('three complete subjects initialize immutable config without writing any st
   assert.deepEqual(await Promise.all(f.entries.map(entry => readdir(entry.stateRoot))), before);
 });
 
+for (const field of ['nativeExecutionRootDir', 'nativeExecutionStateRoot']) test(`reject cross-subject ${field} overlap`, async t => {
+  const f = await fixture(t)
+  await f.profile(1, { [field]: resolve(f.profiles[0].codexHome, 'native') })
+  await assert.rejects(f.config(), code('RUNTIME_AGENT_ROOTS_OVERLAP'))
+})
+
 test('duplicate complete subjects and installation authorization are rejected independently', async t => {
   const f = await fixture(t);
   await f.manifest(1, { tenantId: f.manifests[0].tenantId, clientId: f.manifests[0].clientId, canonicalAgentId: f.manifests[0].canonicalAgentId });

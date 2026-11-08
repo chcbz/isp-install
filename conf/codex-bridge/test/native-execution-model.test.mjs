@@ -1,10 +1,10 @@
+import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
 import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { SkillExecutionStore } from '../skill-execution-store.mjs'
@@ -44,7 +44,7 @@ test(withSkill ? 'real isolated model discovers and executes a fixed ordinary sk
   const input = { inputRef: 'input1', sha256, contentMimeType: 'text/plain', byteLength: bytes.length }
   writeFileSync(resolve(store.directory, 'inputs/input1'), bytes, { mode: 0o600 })
   store.write('inputs-snapshot', { inputs: [input] })
-  const runtime = new TypedInspectionProfileRuntime({ profile: { profileId: 'native-model-probe', agentId: 'native-probe', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: sourceHome,
+  const runtime = new NativeExecutionProfileRuntime({ profile: { profileId: 'native-model-probe', agentId: 'native-probe', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: sourceHome,
     typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'native-probe', typedInspectionProviderBaseUrl: baseUrl, typedInspectionNetworkConnectTimeoutMs: 10000 },
     materializerRoot: directory('materializer'), stateRoot: directory('state'), nativeToolchain: measureMinimalNativeExecutionToolchain() })
   // Preserve only visible fixture diagnostics, never reasoning or auth/config.

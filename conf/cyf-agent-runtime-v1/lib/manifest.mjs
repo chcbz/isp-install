@@ -49,6 +49,7 @@ export function runtimeSubjectKey(manifest) {
 
 const mutableProfilePaths = ['codexHome', 'codexWorkdir', 'chatWorkdir', 'workspaceFallbackWorkdir',
   'workspaceFileRootDir', 'typedInspectionRootDir', 'typedInspectionStateRoot',
+  'nativeExecutionRootDir', 'nativeExecutionStateRoot',
   'controlledImageHttpLedgerRoot'];
 const configError = code => Object.assign(new Error(code), { code });
 const exact = value => typeof value === 'string' && value.length > 0 && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value);

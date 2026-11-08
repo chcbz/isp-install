@@ -233,3 +233,24 @@ this as display metadata, not per-call billing authority. Roll out the nullable 
 consumer changes together; do not backfill a target model as a reported fact. Versions here
 are source candidates, not installation evidence. CYF AGENTS/RB-1 and the 600-second Flow rule
 apply; Flow must not call/wait for production hosts.
+
+## 独立原生执行环境（1.1.57）
+
+原生技能由 `NativeExecutionProfileRuntime` 独立探测、声明和执行，不以资料读取的 `inputCarriers`、materializer 或证据就绪为前置。资料与原生执行共享 `IsolatedEngineProfileRuntime` 的文件/进程/网络隔离，不共享能力结果。注册与提交/失败清理使用同一原生对象；关闭期间停止能力刷新。
+
+仅原生执行的本地主体配置示例（值为占位符，不含凭据）：
+```json
+{
+  "workspaceFileApiOrigin": "https://api.example.invalid",
+  "workspaceFileRootDir": "/private/subject/workspace-files",
+  "nativeExecutionProviderId": "operator-provider",
+  "nativeExecutionProviderBaseUrl": "https://provider.example.invalid/v1",
+  "nativeExecutionProviderWireApi": "responses",
+  "nativeExecutionNetworkConnectTimeoutMs": 3000
+}
+```
+还须保留该主体已有 `codexBin`、`codexHome`、身份与可信 Provider 授权。不得复制其他主体 HOME/凭据。显式原生 Provider 配置必须完整，不与旧配置拼接；未配置上述 Provider 字段时，兼容使用同主体已有 `typedInspectionProvider*`（restricted-proxy）配置，而不要求资料读取开启。缺配置/探测失败不声明就绪，不影响资料读取或普通聊天。
+
+默认私有输入/状态根位于 `workspaceFileRootDir/.native-runtime/<主体目录>/{probes,state}`。可由本地静态配置指定 `nativeExecutionRootDir`/`nativeExecutionStateRoot`；旧资料根已配置时保留原生请求原有路径，防止破坏绑定恢复。跨主体可写根仍由现有 manifest 统一检查；托管模板只允许 Provider 标量，不继承私有根。传输连接超时不是业务请求/流的强制 deadline。
+
+代码修复不替代生产配置或发布：缺少该主体可信 Provider 时，须在获授权后单独配置并部署验证。聊天能回复不证明安装技能已执行。
