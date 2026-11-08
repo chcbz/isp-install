@@ -11,7 +11,9 @@ export const nativeExecutionRequestBinding = command => ({ schemaVersion: 1,
 export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [] }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')
   if (skillConfiguration.length && command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) fail('NATIVE_SKILL_CONFIG_POLICY_MISMATCH')
-  const networkAccess = skillConfiguration.some(item => item.networkOrigins.length > 0)
+  // Native task execution may browse public websites without per-site installation configuration.
+  // The egress proxy still isolates private/metadata addresses; credentials stay installation-bound.
+  const networkAccess = true
   const session = new NativeArtifactSession({ store, checkActive, validateSnapshot: validateNativeOutputSnapshot })
   const requestKey = `native:${command.executionId}:${command.snapshotDigest}`
   const policy = { cwd: '/execution', model, effort, developerInstructions:

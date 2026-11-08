@@ -771,7 +771,7 @@ export class TypedInspectionProfileRuntime {
         if (readdirSync(mountpoint).length) fail('NATIVE_EXECUTION_DISCOVERY_ROOT_UNSAFE')
       }
       phase('egress-start')
-      egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins })
+      egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins, publicWeb: layout.binding.networkAccess })
       await egress.start(); checkActive()
       // Recheck bytes/identities after asynchronous setup, immediately before bind.
       phase('layout-recheck')

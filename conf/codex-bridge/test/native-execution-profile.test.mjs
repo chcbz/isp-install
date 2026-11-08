@@ -34,15 +34,15 @@ const fixture = () => {
 const discovery = layout => ({ data: [{ cwd: '/execution', skills: layout.skills.map(skill => ({ name: skill.skillKey, path: `/state/codex-home/skills/${skill.skillKey}/SKILL.md`, enabled: true, scope: 'user' })), errors: [] }] })
 const stubRuntime = f => {
   const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
-  let spawns = 0, disposals = 0, shutdowns = 0
+  let spawns = 0, disposals = 0, shutdowns = 0; const egressCalls = []
   Object.assign(runtime, { profile: { codexHome: f.options.sourceHome, typedInspectionProviderNetwork: 'restricted-proxy' },
     stateRoot: f.options.stateRoot, nativeToolchain: f.options.toolchain, activeAdapters: new Map(), pendingNativeAdapters: new Map(), pendingInspectionKeys: new Set(),
     measureBinary: async () => ({ snapshotIdentity: {} }),
-    egressFactory: () => ({ proxyUrl: 'http://10.0.2.2:1', start: async () => {}, bindOwner: async () => {}, attach: async () => ({ measured: true }), dispose: async () => { disposals++ } }),
+    egressFactory: options => { egressCalls.push(options); return { proxyUrl: 'http://10.0.2.2:1', start: async () => {}, bindOwner: async () => {}, attach: async () => ({ measured: true }), dispose: async () => { disposals++ } } },
     _spawnAdapter: async args => { spawns++; const adapter = new EventEmitter(); adapter.child = {}; adapter.closed = false; adapter.readback = { tools: { data: [] } }; adapter.request = async () => discovery(args.nativeView.layout); adapter.shutdown = async () => { shutdowns++; adapter.closed = true }; adapter.spawnArgs = args; adapter.startOrResumeThread = async () => 'thread-started'; adapter.runTurn = async () => 'turn-started'; return adapter },
     _initializeAndSeal: async adapter => { rmSync(adapter.spawnArgs.engineState.authPath, { force: true }); return { config: { config: { model_catalog_json: adapter.spawnArgs.engineState.modelCatalogPath ? '/state/codex-home/model-catalog.json' : null, web_search: adapter.spawnArgs.nativeView.layout.binding.webSearch || 'disabled', default_permissions: 'native-execution', approval_policy: 'never', permissions: { 'native-execution': { filesystem: nativeFilesystemPermissions, network: { enabled: true } } } } } } }
   })
-  return { runtime, counts: () => ({ spawns, disposals, shutdowns }) }
+  return { runtime, egressCalls, counts: () => ({ spawns, disposals, shutdowns }) }
 }
 const open = (runtime, f, overrides = {}) => runtime.openNativeExecutionAdapter(f.options.inputDirectory, f.binding.requestKey, f.binding, { ...f.options, ...overrides })
 
@@ -454,6 +454,28 @@ test('selected skill configuration is read-only and binds network and configurat
     const changed = prepareNativeExecutionLayout({ ...f.options, nativeExecution, skillConfiguration: [{ ...skillConfiguration[0], configuration: { apiKey: 'rotated' } }] })
     assert.notEqual(layout.digest, changed.digest)
   } finally { f.cleanup() }
+})
+
+test('public website access is not contingent on any selected skill configuration', () => {
+  const f = fixture()
+  try {
+    const layout = prepareNativeExecutionLayout({ ...f.options,
+      nativeExecution: { ...f.options.nativeExecution, networkAccess: true }, skillConfiguration: [] })
+    assert.equal(layout.binding.networkAccess, true)
+    assert.deepEqual(layout.binding.networkOrigins, [])
+    assert.deepEqual(layout.binding.skillConfiguration, [])
+    assert.notEqual(layout.digest, prepareNativeExecutionLayout(f.options).digest)
+  } finally { f.cleanup() }
+})
+
+test('native adapter forwards public routing to egress without per-site or per-skill config', async () => {
+  const f = fixture(); const { runtime, egressCalls } = stubRuntime(f)
+  try {
+    await open(runtime, f, { nativeExecution: { ...f.options.nativeExecution, networkAccess: true } })
+    assert.equal(egressCalls.length, 1)
+    assert.equal(egressCalls[0].publicWeb, true)
+    assert.deepEqual(egressCalls[0].additionalOrigins, [])
+  } finally { await runtime.dispose(); f.cleanup() }
 })
 
 test('native skill configuration is removed on suspend, process exit and profile disposal', async () => {

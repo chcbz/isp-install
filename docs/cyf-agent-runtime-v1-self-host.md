@@ -514,3 +514,10 @@ safe diagnostic metadata, never proof of task completion/revocation.
 `CHAT_CONTEXT_BOOTSTRAP_REQUIRED` 仅在 native turn/start 前成立。候选沿既有 inbox recovery 和 chat.dispatch.ack 保存/重传 `executionStarted:false` 证明；开始执行、未知接受或完成后异常不能使用该证明。重连/重复消息不重跑模型。API 的新 BOOTSTRAP `contextDelivery.replacesDispatchId` 只替换已明确拒绝的旧派发；Runtime 将同 request/turn 的旧未执行恢复项归档，保留去重证明并从最终结果确认候选中排除，防止误确认旧派发。无新轮询、新历史缓存或独立ACK。
 
 当前为API worktree 5b96cd8基线、Runtime worktree54c4701基线上的候选；Runtime候选1.3.56 / bridge1.1.45，不代表运行版本。API准入端已在候选激活，仍需整批Flow验证及受控迁移两项attempt唯一索引；不能单独部署此候选。详见CYF `docs/implementation/handoffs/JUYITING-POLLING-20261102.md` 2026-11-05接续记录。
+
+### 2026-11-08 CYF：普通公网浏览取消逐站白名单（源码变更，未发布）
+
+- 用户明确取消普通网页/检索的逐目标网站出口配置。原生任务执行默认可通过既有隔离代理访问公网HTTP/HTTPS，不要求为每个技能安装实例填写网站`networkOrigins`，也不按技能名称分支。`skillExecutionConfigFile`继续只管理选中安装实例的凭据等配置；配置缺省不再导致普通公网浏览被禁止。Provider侧`webSearch`功能不是逐站白名单，本次未改其启用方式或费用语义。
+- 保留沙箱、身份/任务授权、私密配置只读挂载、进程与文件隔离。普通议事/材料阅读不获得任务执行工具或公网浏览权限，沿用原Provider通道。宿主机内网、回环、链路本地/云元数据、保留/组播及IPv6过渡地址不作为普通公网目标；原显式可信Provider/集成通道不扩权。
+- 公网域名由代理解析，检查全部返回地址并连接已检查的IP（不再二次DNS解析），阻止混合私网回答和DNS rebinding。HTTP/HTTPS每次连接（包括浏览器重定向后的连接）都走同一地址隔离；不关闭nft默认拒绝、不直连宿主网络、不挂载宿主凭据。HTTP代理不向目标转发Proxy-Authorization等逐跳头。
+- 验证入口：`conf/codex-bridge/test/public-web-network.test.mjs`、`typed-inspection-network.test.mjs`、`native-execution.test.mjs`及`native-execution-profile.test.mjs`。本地socket/受控DNS fixture不代表线上技能通过；发布仍需固定源码/制品、受控安装、检查在途执行和隔离会话实际验收，不能热改正在运行的目录或回放已取消事项。

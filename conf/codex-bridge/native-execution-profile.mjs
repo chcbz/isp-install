@@ -238,7 +238,7 @@ export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory,
   }).sort((a, b) => a.skillKey.localeCompare(b.skillKey))
   const networkOrigins = nativeSkillOrigins(configurations.flatMap(item => item.networkOrigins))
   const networkAccess = nativeExecution.networkAccess === true
-  if (networkAccess !== (networkOrigins.length > 0)) fail('NATIVE_SKILL_NETWORK_BINDING_INVALID')
+  if (!networkAccess && networkOrigins.length > 0) fail('NATIVE_SKILL_NETWORK_BINDING_INVALID')
   const binding = Object.freeze({ schemaVersion: 1, executionId: nativeExecution.executionId,
     sandboxUser: { uid: 65534, gid: 65534 }, neutralMountTargets: NATIVE_NEUTRAL_MOUNT_TARGETS,
     input: directoryIdentity(input), scratch: directoryIdentity(scratch), drafts: directoryIdentity(drafts),

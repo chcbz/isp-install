@@ -105,7 +105,7 @@ for (const terminalStatus of ['failed', 'interrupted']) test(`confirmed ${termin
   assert.equal(f.store.loadResult(), null)
 })
 
-test('native owner forwards selected configuration and derives script network only from approved origins', async t => {
+test('native owner forwards selected configuration and keeps credential configuration independent of public browsing', async t => {
   const f = fixture(t)
   f.command.toolPolicyRef = 'NATIVE_SKILL_SCRIPT_V1'
   const skillConfiguration = [{ skillKey: 'example', configuration: { apiKey: 'fixture-only' }, networkOrigins: ['https://service.example'] }]
@@ -118,13 +118,13 @@ test('native owner forwards selected configuration and derives script network on
   await runNativeExecution({ ...f.request, skillConfiguration })
 })
 
-test('local files policy cannot receive script credentials or acquire network', async t => {
+test('local files policy cannot receive script credentials but can browse public websites', async t => {
   const f = fixture(t)
   await assert.rejects(runNativeExecution({ ...f.request, skillConfiguration: [{ networkOrigins: ['https://service.example'] }] }), /NATIVE_SKILL_CONFIG_POLICY_MISMATCH/)
   assert.equal(f.runs(), 0)
   const original = f.request.profileRuntime.openNativeExecutionAdapter
   f.request.profileRuntime.openNativeExecutionAdapter = async (...args) => {
-    assert.equal(args[3].nativeExecution.networkAccess, false)
+    assert.equal(args[3].nativeExecution.networkAccess, true)
     assert.deepEqual(args[3].skillConfiguration, [])
     return original(...args)
   }

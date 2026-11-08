@@ -3,7 +3,9 @@ import { spawn } from 'node:child_process'
 import { inspectExecutable, fileStamp } from './executable-integrity.mjs'
 import { createHash } from 'node:crypto'
 import { readFileSync, readlinkSync, readdirSync, statSync } from 'node:fs'
-import { createServer as createHttpServer } from 'node:http'
+import { createServer as createHttpServer, request as httpRequest } from 'node:http'
+import { lookup } from 'node:dns/promises'
+import { resolvePublicWebDestination } from './public-web-network.mjs'
 import { connect, createServer as createNetServer } from 'node:net'
 
 const fail = (code, message = code) => { const error = new Error(message); error.code = code; throw error }
@@ -47,7 +49,7 @@ if b' 200 ' not in d.split(b'\r\n',1)[0]:print(d[:128].decode('ascii','replace')
 ctx=ssl.create_default_context(cafile=ca);tls=ctx.wrap_socket(s,server_hostname=host);cert=tls.getpeercert(binary_form=True);print(json.dumps({'protocol':tls.version(),'peerCertificateSha256':'sha256:'+hashlib.sha256(cert).hexdigest()}));tls.close()
 `
 
-export const buildRestrictedNetworkProbe = ({ timeoutSeconds, proxyPort, canaryPort }) => String.raw`import socket,sys
+export const buildRestrictedNetworkProbe = ({ timeoutSeconds, proxyPort, canaryPort, publicWeb = false }) => String.raw`import socket,sys
 t=${JSON.stringify(timeoutSeconds)};p=${proxyPort};cport=${canaryPort}
 def c(host,port,payload=b''):
  s=socket.socket();s.settimeout(t)
@@ -67,14 +69,14 @@ def c(host,port,payload=b''):
   except Exception as exc:sys.stderr.write('phase=recv error='+type(exc).__name__+'\n')
   return ('connected',d)
  finally:s.close()
-a=c('10.0.2.2',p,b'CONNECT forbidden.invalid:443 HTTP/1.1\r\nHost: forbidden.invalid:443\r\n\r\n')
+a=c('10.0.2.2',p,b'CONNECT ${publicWeb ? '169.254.169.254' : 'forbidden.invalid'}:443 HTTP/1.1\r\nHost: ${publicWeb ? '169.254.169.254' : 'forbidden.invalid'}:443\r\n\r\n')
 b=c('10.0.2.2',cport)
 c=c('1.1.1.1',443)
 print(a[0],a[1].split(b'\r\n',1)[0].decode('ascii','replace'),b[0],c[0])
 sys.exit(0 if a[0]=='connected' and b' 403 ' in a[1].split(b'\r\n',1)[0] and b[0]=='blocked' and c[0]=='blocked' else 7)
 `
 
-export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs, additionalOrigins = [] } = {}) => {
+export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs, additionalOrigins = [], publicWeb = false } = {}) => {
   let url
   try { url = new URL(baseUrl) } catch { fail('TYPED_INSPECTION_PROVIDER_ORIGIN_REQUIRED') }
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) fail('TYPED_INSPECTION_PROVIDER_ORIGIN_REQUIRED')
@@ -90,7 +92,8 @@ export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs, add
     providerOrigin: url.origin,
     providerAuthority: exactAuthority(url),
     ...(origins.length ? { additionalOrigins: Object.freeze(origins) } : {}),
-    transport: 'fixed-connect-proxy-v1',
+    ...(publicWeb ? { publicWeb: 'public-addresses-dns-pinned-v1' } : {}),
+    transport: publicWeb ? 'public-web-proxy-v1' : 'fixed-connect-proxy-v1',
     connectTimeoutMs: String(connectTimeoutMs),
     namespace: 'private-slirp4netns-v1',
     slirpMountIsolation: 'unshare-mount-recursive-private-v1',
@@ -175,8 +178,9 @@ export const isolatedSlirpCommand = (slirpBin, pid) => ({
 })
 
 export class RestrictedProviderEgress {
-  constructor({ providerBaseUrl, networkConnectTimeoutMs, additionalOrigins = [], slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector() } = {}) {
-    this.policy = restrictedProviderNetworkPolicy(providerBaseUrl, { connectTimeoutMs: networkConnectTimeoutMs, additionalOrigins })
+  constructor({ providerBaseUrl, networkConnectTimeoutMs, additionalOrigins = [], publicWeb = false, lookupFn = lookup, connectFn = connect, httpRequestFn = httpRequest, slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector() } = {}) {
+    this.policy = restrictedProviderNetworkPolicy(providerBaseUrl, { connectTimeoutMs: networkConnectTimeoutMs, additionalOrigins, publicWeb })
+    this.lookupFn = lookupFn; this.connectFn = connectFn; this.httpRequestFn = httpRequestFn
     this.networkConnectTimeoutMs = networkConnectTimeoutMs
     this.slirpBin = slirpBin; this.nftBin = nftBin; this.nsenterBin = nsenterBin; this.pythonBin = pythonBin
     this.spawnFn = spawnFn; this.processInspector = processInspector; this.server = null; this.canaryServer = null; this.slirp = null; this.port = 0; this.canaryPort = 0; this.attestation = null; this.owner = null; this.hostCanary = null
@@ -248,19 +252,60 @@ export class RestrictedProviderEgress {
       socket.on('error', () => socket.destroy())
       return socket
     }
-    const server = createHttpServer((_request, response) => { response.writeHead(405, { Connection: 'close' }); response.end() })
+    const destinationFor = async (url, allowConfigured = false) => {
+      const configured = allowConfigured && [this.policy.providerOrigin, ...(this.policy.additionalOrigins || [])]
+        .find(origin => exactAuthority(new URL(origin)) === exactAuthority(url))
+      if (configured) return { host: new URL(configured).hostname, port: Number(url.port || 443) }
+      if (!this.policy.publicWeb) fail('PUBLIC_WEB_DESTINATION_DENIED')
+      const checked = await resolvePublicWebDestination(url.hostname, { lookupFn: this.lookupFn, timeoutMs: this.networkConnectTimeoutMs })
+      return { host: checked.address, family: checked.family, port: Number(url.port || (url.protocol === 'http:' ? 80 : 443)) }
+    }
+    const live = socket => !this.lifecycle.signal.aborted && !socket.destroyed && this.server === server
+    const server = createHttpServer((request, response) => {
+      void (async () => {
+        let url
+        try { url = new URL(request.url) } catch { fail('PUBLIC_WEB_DESTINATION_DENIED') }
+        if (url.protocol !== 'http:' || url.username || url.password || url.hash || url.port === '0') fail('PUBLIC_WEB_DESTINATION_DENIED')
+        const destination = await destinationFor(url)
+        if (!live(request.socket)) return
+        const headers = { ...request.headers, host: url.host }
+        const hopHeaders = ['connection', 'proxy-connection', 'proxy-authorization', 'keep-alive', 'te', 'trailer', 'transfer-encoding', 'upgrade',
+          ...String(request.headers.connection || '').split(',').map(value => value.trim().toLowerCase())]
+        for (const key of hopHeaders) delete headers[key]
+        const upstream = this.httpRequestFn({ ...destination, method: request.method, path: url.pathname + url.search, headers, agent: false }, incoming => {
+          const responseHeaders = { ...incoming.headers }
+          for (const key of ['connection', 'proxy-authenticate', 'keep-alive', 'te', 'trailer', 'transfer-encoding', 'upgrade',
+            ...String(incoming.headers.connection || '').split(',').map(value => value.trim().toLowerCase())]) delete responseHeaders[key]
+          incoming.on('error', () => response.destroy())
+          response.writeHead(incoming.statusCode, responseHeaders); incoming.pipe(response)
+        })
+        upstream.on('socket', track)
+        upstream.setTimeout(this.networkConnectTimeoutMs, () => upstream.destroy())
+        upstream.on('error', () => { if (!response.headersSent) response.writeHead(502); response.end() })
+        response.on('close', () => upstream.destroy())
+        request.on('aborted', () => upstream.destroy())
+        request.pipe(upstream)
+      })().catch(() => { if (!response.headersSent) response.writeHead(403, { Connection: 'close' }); response.end() })
+    })
     server.on('connection', track)
     server.on('connect', (request, client, head) => {
-      const authority = String(request.url || '').toLowerCase()
-      const destination = [this.policy.providerOrigin, ...(this.policy.additionalOrigins || [])].find(origin => exactAuthority(new URL(origin)) === authority)
-      if (!destination) { client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
-      const provider = new URL(destination); const upstream = track(connect(Number(provider.port || 443), provider.hostname))
-      const abort = () => { try { client.destroy() } catch {}; try { upstream.destroy() } catch {} }
-      upstream.setTimeout(this.networkConnectTimeoutMs, abort); upstream.once('error', abort); client.once('error', abort)
-      upstream.once('connect', () => {
-        upstream.setTimeout(0); client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
-        if (head?.length) upstream.write(head); client.pipe(upstream); upstream.pipe(client)
-      })
+      void (async () => {
+        const authority = String(request.url || '').toLowerCase()
+        if (!/^(?:\[[0-9a-f:.]+\]|[a-z0-9.-]+):[0-9]+$/.test(authority)) fail('PUBLIC_WEB_DESTINATION_DENIED')
+        let url
+        try { url = new URL(`https://${authority}`) } catch { fail('PUBLIC_WEB_DESTINATION_DENIED') }
+        if (url.port === '0') fail('PUBLIC_WEB_DESTINATION_DENIED')
+        const destination = await destinationFor(url, true)
+        if (!live(client)) return
+        const upstream = track(this.connectFn(destination))
+        const abort = () => { client.destroy(); upstream.destroy() }
+        upstream.setTimeout(this.networkConnectTimeoutMs, abort); upstream.once('error', abort); client.once('error', abort)
+        client.once('close', () => upstream.destroy())
+        upstream.once('connect', () => {
+          upstream.setTimeout(0); client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+          if (head?.length) upstream.write(head); client.pipe(upstream); upstream.pipe(client)
+        })
+      })().catch(() => { if (!client.destroyed) client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n') })
     })
     const canaryServer = createNetServer(socket => track(socket).end('cyf-typed-inspection-host-canary\n'))
     try {
@@ -302,7 +347,7 @@ export class RestrictedProviderEgress {
     const routes = readFileSync(`/proc/${pid}/net/route`, 'utf8')
     if (!/\btap0\b/.test(routes)) fail('TYPED_INSPECTION_EGRESS_SLIRP_ROUTE_MISSING')
     const timeoutSeconds = this.networkConnectTimeoutMs / 1000
-    const probe = buildRestrictedNetworkProbe({ timeoutSeconds, proxyPort: this.port, canaryPort: this.canaryPort })
+    const probe = buildRestrictedNetworkProbe({ timeoutSeconds, proxyPort: this.port, canaryPort: this.canaryPort, publicWeb: Boolean(this.policy.publicWeb) })
     const tested = await this._nsenter(pid, [this.pythonBin, '-c', probe], { signal })
     if (tested.status !== 0) fail('TYPED_INSPECTION_EGRESS_CANARY_FAILED', `${tested.stdout || ''}${tested.stderr || ''}`.trim())
     this.attestation = Object.freeze({ schemaVersion: 1, measured: true, policy: this.policy, hostCanaryReachableControl: true, forbiddenConnectRejected: true, otherHostPortBlocked: true, sandboxCanaryBlocked: true, nftDefaultDropReadback: true, nftRulesDigest: ruleReadback.digest, directInternetProbeBlocked: true, directInternetBlocked: true })
