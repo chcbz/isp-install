@@ -1,3 +1,4 @@
+import { beginProviderUsage } from '../../skills/native-image/scripts/provider-usage.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
@@ -645,4 +646,30 @@ test('cost route is native POST-only and rejects query or encoded path aliases',
   assert.equal(skillConversationHttpScope(url, { method: 'POST' }), true)
   assert.equal(skillConversationHttpScope(url, { method: 'GET' }), false)
   url.search = '?owner=other'; assert.equal(skillConversationHttpScope(url, { method: 'POST' }), false)
+})
+
+
+test('provider child calls use authenticated cost route and survive ACK loss without another model turn', async t => {
+  const f=fixture(t);await f.lane.poll()
+  const store=new SkillExecutionStore({rootDirectory:resolve(f.options.rootDir,'skill-runs'),scope:{...scope,apiOrigin:'https://api.example.test'},command:f.c})
+  const call=beginProviderUsage({directory:resolve(store.directory,'scratch/.provider-usage'),config:{model:'gpt-image-2.5-flare',usageChannel:'gpt',usageTier:'standard',usagePriceVersion:'v1'},mode:'generate'})
+  call.complete({usage:{input_tokens:1,output_tokens:2},responseModel:null,providerRequestId:'request'})
+  let calls=0;const payloads=[]
+  const options={...f.options,fetchFn:async(url,opts)=>{
+    if(!url.pathname.endsWith('/provider-usage')) return f.options.fetchFn(url,opts)
+    assert.equal(skillConversationHttpScope(url,opts),true)
+    const payload=JSON.parse(opts.body);payloads.push(payload);calls++
+    if(calls===1)throw Error('ACK lost')
+    return response(url,{executionId:f.c.executionId,attemptId:'c'.repeat(64),revision:payload.observation.phase==='STARTED'?'1':'2',status:'PENDING_USAGE',costYuan:null})
+  }}
+  const first=new SkillConversationLane(options);await first.poll({discover:false})
+  const restarted=new SkillConversationLane(options);await restarted.poll({discover:false});await restarted.poll({discover:false})
+  assert.equal(calls,3);assert.deepEqual(payloads[0],payloads[1]);assert.equal(payloads[2].observation.phase,'TERMINAL');assert.equal(f.modelCalls(),1)
+  assert.equal(restarted.nextRecoveryAt(),Infinity)
+})
+for(const path of ['usage','provider-usage']) test(`cost ${path} route permits only native POST without aliases`,()=>{
+ const url=new URL(`https://api.example.test/internal/agent/tasks/task/runs/run/conversation/${path}`)
+ assert.equal(skillConversationHttpScope(url,{method:'POST'}),true)
+ assert.equal(skillConversationHttpScope(url,{method:'GET'}),false)
+ url.search='?owner=another';assert.equal(skillConversationHttpScope(url,{method:'POST'}),false)
 })
