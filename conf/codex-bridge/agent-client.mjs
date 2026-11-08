@@ -6000,7 +6000,9 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     rootDir: resolve(profileConfig.commandInboxDir, 'chat-workdirs'), profile,
     forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
   })
-  const typedInspectionMaterializer = profile.workspaceFileApiOrigin && profile.typedInspectionRootDir
+  let typedInspectionMaterializer = null, typedInspectionProfileRuntime = null, typedInspectionProfileFailure = null
+  try {
+    typedInspectionMaterializer = profile.workspaceFileApiOrigin && profile.typedInspectionRootDir
     ? new TypedInspectionMaterializer({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
@@ -6011,13 +6013,17 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
     })
     : null
-  const typedInspectionProfileRuntime = profile.inputCarriers && typedInspectionMaterializer
+    typedInspectionProfileRuntime = profile.inputCarriers && typedInspectionMaterializer
     ? new TypedInspectionProfileRuntime({
       profile, materializerRoot: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
       stateRoot: resolve(profile.typedInspectionStateRoot, safeProfileDirectory(profile)), bwrapBin: profile.typedInspectionBwrapBin,
       forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
     })
     : null
+  } catch (error) {
+    typedInspectionProfileFailure = { code: error.code || 'TYPED_INSPECTION_PROFILE_UNAVAILABLE' }
+    console.warn(`materials profile unavailable | profile=${profile.profileId} | code=${typedInspectionProfileFailure.code}`)
+  }
   let nativeExecutionProfileRuntime = null, nativeExecutionProfileFailure = null
   try { nativeExecutionProfileRuntime = createNativeExecutionRuntime(profile, {
     scopeDirectory: safeProfileDirectory(profile),
@@ -6091,7 +6097,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     nativeExecutionProfileRuntime,
     nativeExecutionProfileFailure,
     typedInspectionProfilePromise: null,
-    typedInspectionProfileFailure: null,
+    typedInspectionProfileFailure,
     typedInspectionNativeInputAdapters,
     lanes,
     legacyExecutionGate,

@@ -255,6 +255,27 @@ test('mature executor retains isolated subjects/session namespaces and allowlist
   for (const [i, state] of states.entries()) assert.equal(state.sessionStore.get(state.profile, { conversationId: 'conversation' }), `session-${config.agents[i].subjectKey}`);
 });
 
+for (const materialsFailure of [false, true]) test(`native owner survives absent/failed materials initialization (${materialsFailure}) without claiming readiness`, async t => {
+  const f = await fixture(t, { count: 1 })
+  const config = await f.config()
+  const subject = structuredClone(config.agents[0])
+  Object.assign(subject.profile, { workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: resolve(f.root, 'files'),
+    nativeExecutionRootDir: resolve(f.root, 'native-inputs'), nativeExecutionStateRoot: resolve(f.root, 'native-state') })
+  if (materialsFailure) Object.assign(subject.profile, { inputCarriers: {}, typedInspectionRootDir: resolve(f.root, 'material-inputs'), typedInspectionStateRoot: subject.profile.codexHome })
+  const { createRuntimeExecutionHost } = await import(resolve(engineSource, 'agent-client.mjs'))
+  const engine = createRuntimeExecutionHost({ agents: [subject], runtimeInstanceId: 'native-owner-test', apiOrigin: 'https://api.example.test' })
+  f.cleanup(() => engine.close())
+  const executor = engine.createExecutor({ subjectKey: subject.subjectKey })
+  await executor.initialize()
+  const state = executor.state()
+  assert.equal(state.typedInspectionProfileRuntime, null)
+  assert.ok(state.nativeExecutionProfileRuntime)
+  assert.equal(state.nativeExecutionProfileRuntime.nativeExecutionDeclaration(), null)
+  assert.equal(state.nativeExecutionProfileFailure.code, 'NATIVE_EXECUTION_PROVIDER_CONFIG_REQUIRED')
+  assert.equal(Boolean(state.typedInspectionProfileFailure), materialsFailure)
+  assert.equal(executor.registrationPayload().typedDeliberation?.nativeExecution, undefined)
+})
+
 test('unified library catalog closes actual engine imports without retired provisioning or host state', async t => {
   const f = await fixture(t, { count: 1 });
   for (const path of RETIRED_EXECUTION_PAYLOAD_PATHS) {
@@ -265,6 +286,7 @@ test('unified library catalog closes actual engine imports without retired provi
     'toolchain/browser/package.json', 'toolchain/browser/package-lock.json']) {
     assert.ok(EXECUTION_PAYLOAD_FILES.includes(path), path);
   }
+  for (const name of ['isolated-engine-profile.mjs', 'native-execution-runtime.mjs']) assert.equal(EXECUTION_PAYLOAD_FILES.includes(name), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('app-server-usage.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('native-usage-receipts.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('chat-usage-delivery.mjs'), true);
