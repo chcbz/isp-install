@@ -8,7 +8,9 @@ export function nativeBrowserLaunchOptions(proxy = process.env.HTTPS_PROXY) {
   return {
     executablePath: '/usr/lib/cyf-browser/chromium/chrome-headless-shell',
     headless: true,
-    env: { ...process.env, FONTCONFIG_FILE: '/usr/lib/cyf-browser/browser-fonts.conf' },
+    // Chromium/NSS needs writable HOME; never use the read-only engine credential home.
+    // TMPDIR is already private to this execution and is removed with its scratch tree.
+    env: { ...process.env, HOME: process.env.TMPDIR || '/workspace', FONTCONFIG_FILE: '/usr/lib/cyf-browser/browser-fonts.conf' },
     chromiumSandbox: true,
     ...(proxy ? { proxy: { server: proxy, bypass: '<-loopback>' } } : {}),
     // No debugging TCP listener or host profile is exposed. Playwright uses pipes.

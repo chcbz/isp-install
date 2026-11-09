@@ -257,10 +257,10 @@ export const nativeFilesystemPermissions = Object.freeze({
   // Codex 0.164's implicit placeholder mounts here; real Home stays read-only.
   '/proc/.git': 'write', '/proc/.agents': 'write', '/proc/.codex': 'write', '/proc/.aws': 'write'
 })
-// Native processes already run behind the measured namespace/nft + exact-origin
+// Native processes already run behind the measured namespace/nft + public-address
 // proxy boundary. Keep local socket syscalls available: Codex's network=false
 // seccomp also rejects shutdown(AF_UNIX), preventing Chromium's own sandbox.
-// This setting grants no destinations; layout.networkOrigins remains authoritative.
+// This setting grants no direct destinations; the measured egress policy is authoritative.
 export const buildNativeExecutionCodexConfig = (readOnlyConfig, { webSearch = 'disabled' } = {}) =>
   readOnlyConfig.replace('web_search = "disabled"', `web_search = "${nativeSkillWebSearch(webSearch)}"`).replace('sandbox_mode = "read-only"', `default_permissions = "${NATIVE_PERMISSION_PROFILE}"`)
   + `\n[permissions.${NATIVE_PERMISSION_PROFILE}]\nfilesystem = { ${Object.entries(nativeFilesystemPermissions).map(([path, mode]) => `${JSON.stringify(path)} = ${JSON.stringify(mode)}`).join(', ')} }\n[permissions.${NATIVE_PERMISSION_PROFILE}.network]\nenabled = true\n`

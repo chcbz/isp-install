@@ -87,7 +87,7 @@ test('real app-server ordinary browser script preserves TLS, origins and read-on
   assert.equal(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback, true)
   console.log('diagnostic: isolated app-server ready')
   const code = `import assert from 'node:assert/strict';
-import {existsSync,writeFileSync,readdirSync,readFileSync,unlinkSync} from 'node:fs';
+import {existsSync,writeFileSync,readdirSync,readFileSync,unlinkSync,mkdirSync} from 'node:fs';
 console.error('proc mounts:',readFileSync('/proc/self/mountinfo','utf8').split('\\n').filter(line=>line.includes(' /proc ')).join(' | '));
 assert.throws(()=>writeFileSync('/state/codex-home/writable-probe','bad'), /EROFS|EACCES|EPERM/);
 assert.throws(()=>writeFileSync('/inputs/readonly.txt','changed'), /EROFS|EACCES|EPERM/);
@@ -100,7 +100,7 @@ for (const pid of readdirSync('/proc').filter(name=>/^[0-9]+$/.test(name))) {
 
 import {withBrowser} from '/usr/lib/cyf-browser/browser-session.mjs';
 process.env.DEBUG = 'pw:browser';
-process.env.HOME = '/workspace/fixture-home'; process.env.TMPDIR = '/workspace';
+process.env.HOME = '/state/codex-home'; process.env.TMPDIR = '/workspace/fixture-home';
 await withBrowser(async ({page}) => {
  const failed = [];
  page.on('requestfailed', request => failed.push(request.url()));
@@ -117,7 +117,7 @@ await withBrowser(async ({page}) => {
  await assert.rejects(page.goto(${JSON.stringify(origin + '/redirect')}), /ERR_TUNNEL_CONNECTION_FAILED/);
 });
 // Same authorized origin without the fixture CA must still fail TLS.
-process.env.HOME = '/workspace/untrusted-home';
+mkdirSync('/workspace/untrusted-home',{recursive:true}); process.env.TMPDIR = '/workspace/untrusted-home';
 await withBrowser(async ({page}) => { await assert.rejects(page.goto(${JSON.stringify(origin)}), /ERR_CERT_AUTHORITY_INVALID/); });
 console.log('native-browser-network-ready');`
   // The model-side command still uses the unmodified workspace-write policy.
@@ -265,9 +265,9 @@ await withBrowser(async ({page}) => {
   console.log(JSON.stringify({url,status:response.status(),title}));
  }
  await page.screenshot({path:'/outputs/public-web.png'});
- for (const url of ['http://169.254.169.254/latest/meta-data/', 'https://127.0.0.1/']) {
-  await assert.rejects(page.goto(url,{timeout:5000}));
- }
+ const denied = await page.goto('http://169.254.169.254/latest/meta-data/',{timeout:5000});
+ assert.equal(denied.status(),403);
+ await assert.rejects(page.goto('https://127.0.0.1/',{timeout:5000}));
 });console.log('public-web-isolated-ready');`
   const response = await adapter.request('command/exec', { command: ['/usr/bin/node', '--input-type=module', '-e', code],
     cwd: '/execution', permissionProfile: 'native-execution', timeoutMs: 120000 }, 150000)

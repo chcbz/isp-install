@@ -6,6 +6,7 @@ test('browser uses fixed binary, pipe transport, sandbox and existing proxy with
   const options = nativeBrowserLaunchOptions('http://10.0.2.2:1234')
   assert.equal(options.executablePath, '/usr/lib/cyf-browser/chromium/chrome-headless-shell')
   assert.equal(options.chromiumSandbox, true)
+  assert.equal(options.env.HOME, process.env.TMPDIR || '/workspace')
   assert.equal(options.env.FONTCONFIG_FILE, '/usr/lib/cyf-browser/browser-fonts.conf')
   assert.deepEqual(options.proxy, { server: 'http://10.0.2.2:1234', bypass: '<-loopback>' })
   assert.ok(!options.args.some(value => /remote-debugging-port|ignore-certificate|no-sandbox/.test(value)))
