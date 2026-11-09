@@ -373,6 +373,18 @@ Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺
 关键回归复用 `conf/codex-bridge/test/skill-runners.test.mjs` 的既有图片broker用例：旧参数、800×600、非同比例透明边、持久effect恢复不重复调用、错误尺寸不调用Provider。Flow同Run测试/打包，新技能包通过维护发布→报价→INSTALL/UPGRADE→目录READY，不以直接写权益替代管理流程。线上尺寸和多轮识图/生图/改图仍须实际图片验收，不以测试通过代替上线。
 
 
+### 原生图片技能尺寸处理（2026-11-09，源码候选；未发布）
+
+本节描述原生技能脚本，前文1.3.5图片runner段落仅为历史，不是当前调用入口。`native-image`包/说明升为1.1.0，`image-generate`、`image-edit`说明升为1.4.0；只改技能脚本和说明，不改API wire、codex-app-server或bridge通用执行逻辑。
+
+- 包内 `scripts/image.mjs` 的 generate/edit/resize 支持 `--size 宽x高 --fit contain|cover|stretch --background transparent|white|black|'#RRGGBB'`。contain等比居中补边，cover等比铺满居中裁切，stretch显式拉伸。实色背景同时合成原图透明像素，不是抠图或语义背景替换。
+- 模型按用户意图显式选择参数：白底写入提示词，同时在尺寸处理时传 `--background white`；不在脚本解析提示词。用户未允许裁切/变形时用contain。fit/background必须和size一起传，错误在付费请求前拒绝，避免未知选项静默回退。
+- 旧命令省略新参数时仍为contain/transparent；无size仍保存原始返回。参数仅作本地处理，不向未核实能力的服务商添加字段。生成/编辑保留原图、一次请求及失败不重发的边界不变。
+- 已收到原图后只修尺寸/背景，使用 `resize` 离线生成新文件；保留原图，不覆盖历史成果，不触发图片服务、用量或结算。
+- 定向回归入口：`node --test conf/skills/native-image/test/*.test.mjs`，以及 `conf/codex-bridge/test/skill-install-manager.test.mjs` 的原生图片技能安装回归。覆盖三种fit、透明/实色/半透明像素、原图保留、原命令兼容和非法参数不调用服务商。
+- 新技能payload必须走既有发布/安装升级通道并绑定新版本与摘要，不能覆盖线上已安装目录。源码验证与离线验收不证明线上技能升级或模型已选择新参数。
+
+
 ### 9.5 系统Codex直连与历史快照回收（2026-10-25，1.3.8候选）
 
 核对范围：基线0425c11之后的 `app-server-adapter.mjs` 测量/spawn与typed inspection调用链；完整源码、受测及安装事实见CYF `docs/implementation/handoffs/RUNTIME-DISK-GROWTH-20261025.md`，本节不是线上启用证明。用户最终要求直接使用系统Codex，覆盖此前公共目录迁移方案及1.3.3/1.3.7的程序复制描述。

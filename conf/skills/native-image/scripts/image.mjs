@@ -5,7 +5,7 @@ import { constants, openSync, closeSync, readFileSync, writeFileSync, fsyncSync,
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import * as http from 'node:http'
-import { normalizeImageInput, parseImageOutputSize, resizeImageOutput } from './image-input.mjs'
+import { normalizeImageInput, parseImageOutputSize, parseImageOutputOptions, resizeImageOutput } from './image-input.mjs'
 import { responsePng } from './image-http-codec.mjs'
 import { beginProviderUsage } from './provider-usage.mjs'
 
@@ -20,7 +20,7 @@ function argumentsOf(argv) {
   const args = { mode, inputs: [] }
   for (let i = 0; i < rest.length; i += 2) {
     const key = rest[i], value = rest[i + 1]
-    if (!['--prompt', '--output', '--size', '--input', '--config'].includes(key) || value === undefined || value.startsWith('--')) fail('IMAGE_ARGUMENT_INVALID', 'Invalid CLI arguments')
+    if (!['--prompt', '--output', '--size', '--fit', '--background', '--input', '--config'].includes(key) || value === undefined || value.startsWith('--')) fail('IMAGE_ARGUMENT_INVALID', 'Invalid CLI arguments')
     if (key === '--input') args.inputs.push(value)
     else {
       const name = key.slice(2)
@@ -31,6 +31,7 @@ function argumentsOf(argv) {
   if (!args.output || (mode !== 'resize' && !args.prompt?.trim()) || (mode === 'resize' && (args.prompt !== undefined || args.config !== undefined || args.size === undefined)) || (mode === 'generate' && args.inputs.length) || (mode === 'edit' && (!args.inputs.length || args.inputs.length > 16)) || (mode === 'resize' && args.inputs.length !== 1)) fail('IMAGE_ARGUMENT_INVALID', 'Required or incompatible CLI arguments')
   args.output = resolve(args.output)
   args.outputSize = parseImageOutputSize(args.size)
+  args.outputOptions = parseImageOutputOptions(args.size, args.fit, args.background)
   return args
 }
 
@@ -54,7 +55,7 @@ export async function run(argv, { env = process.env, fetchFn = globalThis.fetch 
   const args = argumentsOf(argv)
   if (args.mode === 'resize') {
     const bytes = readFileSync(args.inputs[0])
-    const resized = resizeImageOutput(bytes, args.outputSize)
+    const resized = resizeImageOutput(bytes, args.outputSize, args.outputOptions)
     let output
     try { output = reserve(args.output); save(output, resized); return result(args.output, resized) } finally { release(output) }
   }
@@ -114,7 +115,7 @@ export async function run(argv, { env = process.env, fetchFn = globalThis.fetch 
     const bytes = await responsePng(response, endpoint, evidence => usage?.complete(evidence))
     gotBytes = true
     if (original) save(original, bytes)
-    const transformed = resizeImageOutput(bytes, args.outputSize)
+    const transformed = resizeImageOutput(bytes, args.outputSize, args.outputOptions)
     save(output, transformed)
     return result(args.output, transformed, original?.path)
   } catch (error) {
@@ -130,6 +131,8 @@ export async function run(argv, { env = process.env, fetchFn = globalThis.fetch 
 // Diagnostics deliberately exclude provider body, URL, prompt, credentials and exception text.
 const messages = {
   IMAGE_ARGUMENT_INVALID: 'Invalid CLI arguments', SKILL_IMAGE_SIZE_INVALID: 'Invalid image size',
+  SKILL_IMAGE_FIT_INVALID: 'Invalid image fit; use contain, cover or stretch',
+  SKILL_IMAGE_BACKGROUND_INVALID: 'Invalid image background; use transparent, white, black or #RRGGBB',
   IMAGE_CONFIG_MISSING: 'Image service configuration is unavailable', IMAGE_CONFIG_INVALID: 'Image service configuration is invalid',
   IMAGE_PROXY_UNAVAILABLE: 'Node runtime does not support configured proxy', IMAGE_PROXY_CONFIG_INVALID: 'Proxy configuration is invalid', IMAGE_TLS_INSECURE: 'TLS verification must be enabled',
   IMAGE_REQUEST_EXISTS: 'Request already started; do not automatically resend',

@@ -2,7 +2,7 @@
  * document formats. Original bytes remain the authority; PNG is a derivative. */
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { ImageMagick, MagickFormat, MagickGeometry, MagickColors, Gravity, initializeImageMagick } from '../vendor/magick.mjs'
+import { ImageMagick, MagickFormat, MagickGeometry, MagickColors, MagickColor, AlphaAction, Gravity, initializeImageMagick } from '../vendor/magick.mjs'
 
 await initializeImageMagick(readFileSync(new URL('../vendor/magick.wasm', import.meta.url)))
 export const IMAGE_INPUT_EXTENSIONS = Object.freeze({
@@ -73,7 +73,7 @@ export function normalizeImageInput(bytes, declaredMime) {
 }
 
 // Output-only normalization: preserve the source/effect PNG and input identities.
-export const IMAGE_OUTPUT_TRANSFORM_ID = 'magick-wasm-0.0.45-contain-transparent-png-v1'
+export const IMAGE_OUTPUT_TRANSFORM_ID = 'magick-wasm-0.0.45-explicit-fit-background-png-v2'
 export function parseImageOutputSize(size) {
   if (size === undefined) return null
   if (typeof size !== 'string' || !/^[1-9][0-9]*x[1-9][0-9]*(?![\s\S])/.test(size))
@@ -83,13 +83,35 @@ export function parseImageOutputSize(size) {
     fail('SKILL_IMAGE_SIZE_INVALID', '图片尺寸超出可准确表示的整数范围')
   return { width, height }
 }
-export function resizeImageOutput(bytes, size) {
+// Validate before a potentially paid request; never infer these choices from prompt text.
+export function parseImageOutputOptions(size, fit, background) {
+  if (size === undefined && (fit !== undefined || background !== undefined))
+    fail('IMAGE_ARGUMENT_INVALID', '尺寸处理方式和背景须与 --size 一起使用')
+  fit ??= 'contain'
+  background ??= 'transparent'
+  if (!['contain', 'cover', 'stretch'].includes(fit))
+    fail('SKILL_IMAGE_FIT_INVALID', '尺寸处理方式须为 contain、cover 或 stretch')
+  background = ({ white: '#ffffff', black: '#000000' })[background] || background
+  if (background !== 'transparent' && !/^#[0-9a-fA-F]{6}(?![\s\S])/.test(background))
+    fail('SKILL_IMAGE_BACKGROUND_INVALID', '背景须为 transparent、white、black 或 #RRGGBB')
+  return { fit, background }
+}
+export function resizeImageOutput(bytes, size, { fit = 'contain', background = 'transparent' } = {}) {
   if (!size) return bytes
   try {
     return ImageMagick.read(bytes, MagickFormat.Png, image => {
       image.autoOrient()
-      image.resize(size.width, size.height)
-      image.extent(new MagickGeometry(size.width, size.height), Gravity.Center, MagickColors.Transparent)
+      const geometry = new MagickGeometry(size.width, size.height)
+      geometry.fillArea = fit === 'cover'
+      geometry.ignoreAspectRatio = fit === 'stretch'
+      image.resize(geometry)
+      const color = background === 'transparent' ? MagickColors.Transparent : new MagickColor(background)
+      image.extent(new MagickGeometry(size.width, size.height), Gravity.Center, color)
+      // A requested solid background covers both padding and existing transparent pixels.
+      if (background !== 'transparent') {
+        image.backgroundColor = color
+        image.alpha(AlphaAction.Remove)
+      }
       for (const name of ['date:create', 'date:modify', 'date:timestamp']) image.removeAttribute(name)
       image.settings.setDefine(MagickFormat.Png, 'exclude-chunks', 'date,time')
       return image.write(MagickFormat.Png, data => Buffer.from(data))
