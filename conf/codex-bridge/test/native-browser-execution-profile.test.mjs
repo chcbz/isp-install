@@ -87,7 +87,7 @@ test('real app-server ordinary browser script preserves TLS, origins and read-on
   assert.equal(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback, true)
   console.log('diagnostic: isolated app-server ready')
   const code = `import assert from 'node:assert/strict';
-import {existsSync,writeFileSync,readdirSync,readFileSync,unlinkSync,mkdirSync} from 'node:fs';
+import {existsSync,writeFileSync,readdirSync,readFileSync,unlinkSync} from 'node:fs';
 console.error('proc mounts:',readFileSync('/proc/self/mountinfo','utf8').split('\\n').filter(line=>line.includes(' /proc ')).join(' | '));
 assert.throws(()=>writeFileSync('/state/codex-home/writable-probe','bad'), /EROFS|EACCES|EPERM/);
 assert.throws(()=>writeFileSync('/inputs/readonly.txt','changed'), /EROFS|EACCES|EPERM/);
@@ -100,7 +100,7 @@ for (const pid of readdirSync('/proc').filter(name=>/^[0-9]+$/.test(name))) {
 
 import {withBrowser} from '/usr/lib/cyf-browser/browser-session.mjs';
 process.env.DEBUG = 'pw:browser';
-process.env.HOME = '/state/codex-home'; process.env.TMPDIR = '/workspace/fixture-home';
+process.env.HOME = '/workspace/fixture-home'; process.env.TMPDIR = '/workspace';
 await withBrowser(async ({page}) => {
  const failed = [];
  page.on('requestfailed', request => failed.push(request.url()));
@@ -117,7 +117,7 @@ await withBrowser(async ({page}) => {
  await assert.rejects(page.goto(${JSON.stringify(origin + '/redirect')}), /ERR_TUNNEL_CONNECTION_FAILED/);
 });
 // Same authorized origin without the fixture CA must still fail TLS.
-mkdirSync('/workspace/untrusted-home',{recursive:true}); process.env.TMPDIR = '/workspace/untrusted-home';
+process.env.HOME = '/workspace/untrusted-home';
 await withBrowser(async ({page}) => { await assert.rejects(page.goto(${JSON.stringify(origin)}), /ERR_CERT_AUTHORITY_INVALID/); });
 console.log('native-browser-network-ready');`
   // The model-side command still uses the unmodified workspace-write policy.
