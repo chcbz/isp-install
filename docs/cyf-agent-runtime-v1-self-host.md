@@ -373,9 +373,9 @@ Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺
 关键回归复用 `conf/codex-bridge/test/skill-runners.test.mjs` 的既有图片broker用例：旧参数、800×600、非同比例透明边、持久effect恢复不重复调用、错误尺寸不调用Provider。Flow同Run测试/打包，新技能包通过维护发布→报价→INSTALL/UPGRADE→目录READY，不以直接写权益替代管理流程。线上尺寸和多轮识图/生图/改图仍须实际图片验收，不以测试通过代替上线。
 
 
-### 原生图片技能尺寸处理（2026-11-09，源码候选；未发布）
+### 原生图片技能尺寸处理（2026-11-09，1.4.0已发布并限定验收）
 
-本节描述原生技能脚本，前文1.3.5图片runner段落仅为历史，不是当前调用入口。`native-image`包/说明升为1.1.0，`image-generate`、`image-edit`说明升为1.4.0；只改技能脚本和说明，不改API wire、codex-app-server或bridge通用执行逻辑。
+本节描述原生技能脚本，前文1.3.5图片runner段落仅为历史，不是当前调用入口。`native-image`工具源码包/说明升为1.1.0，实际分发的`image-generate`、`image-edit`包/说明升为1.4.0；只改技能脚本和说明，不改API wire、codex-app-server或bridge通用执行逻辑。
 
 - 包内 `scripts/image.mjs` 的 generate/edit/resize 支持 `--size 宽x高 --fit contain|cover|stretch --background transparent|white|black|'#RRGGBB'`。contain等比居中补边，cover等比铺满居中裁切，stretch显式拉伸。实色背景同时合成原图透明像素，不是抠图或语义背景替换。
 - 模型按用户意图显式选择参数：白底写入提示词，同时在尺寸处理时传 `--background white`；不在脚本解析提示词。用户未允许裁切/变形时用contain。fit/background必须和size一起传，错误在付费请求前拒绝，避免未知选项静默回退。
@@ -383,6 +383,8 @@ Provider原始PNG通过原SkillEffects先持久保存成功，再执行本地尺
 - 已收到原图后只修尺寸/背景，使用 `resize` 离线生成新文件；保留原图，不覆盖历史成果，不触发图片服务、用量或结算。
 - 定向回归入口：`node --test conf/skills/native-image/test/*.test.mjs`，以及 `conf/codex-bridge/test/skill-install-manager.test.mjs` 的原生图片技能安装回归。覆盖三种fit、透明/实色/半透明像素、原图保留、原命令兼容和非法参数不调用服务商。
 - 新技能payload必须走既有发布/安装升级通道并绑定新版本与摘要，不能覆盖线上已安装目录。源码验证与离线验收不证明线上技能升级或模型已选择新参数。
+
+2026-11-09限定发布验收：固定源码`2d112ecf67f4479142f8348e2420d9a41891dbba`的146项定向测试通过；通过既有维护发布与0文报价UPGRADE，吴用图片生成/编辑及林冲已安装的图片生成共三处升为1.4.0，变更SUCCEEDED/runtimeSynced且profile安装核验及RUNTIME_READY、真实页面均确认。新安装ID仅继承原配置，旧条目保留并备份。逐文件摘要匹配发布ZIP；实际已安装脚本的12个离线用例验证尺寸/白底不透明/透明保留，原图未改。未新增付费生成或模型端到端改稿，不重启Runtime，不直接覆盖技能目录。包外证据：`/home/isp/state/cyf-local-build/evidence/native-image-options-20261109/upgrade/installed-acceptance.json`。
 
 
 ### 9.5 系统Codex直连与历史快照回收（2026-10-25，1.3.8候选）
