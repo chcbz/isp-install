@@ -232,8 +232,12 @@ test('real app-server browses unconfigured public sites and still blocks host me
   const inputs = mkdir(resolve(root, 'inputs')), scratch = mkdir(resolve(root, 'scratch')), drafts = mkdir(resolve(root, 'drafts'))
   const sourceHome = mkdir(resolve(root, 'home')), stateRoot = mkdir(resolve(root, 'state'))
   const toolchainRoot = resolve(process.env.CYF_NATIVE_BROWSER_PROFILE_PROBE_ROOT)
+  const scriptsRoot = mkdir(resolve(root, 'scripts'))
+  for (const name of ['browser-session.mjs', 'browser-probe.mjs', 'browser-fonts.conf']) copyFileSync(new URL(`../toolchain/${name}`, import.meta.url), resolve(scriptsRoot, name))
+  mkdir(resolve(scriptsRoot, 'browser'))
+  copyFileSync(new URL('../toolchain/browser/README.md', import.meta.url), resolve(scriptsRoot, 'browser/README.md'))
   const base = measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath })
-  const nativeToolchain = measureNativeBrowserToolchain({ base, scriptsRoot: mkdir(resolve(root, 'scripts')),
+  const nativeToolchain = measureNativeBrowserToolchain({ base, scriptsRoot,
     browserRoot: resolve(toolchainRoot, 'chromium'), playwrightRoot: resolve(toolchainRoot, 'node_modules/playwright-core'), fontsRoot: resolve(toolchainRoot, 'fonts') })
   writeFileSync(resolve(sourceHome, 'auth.json'), '{"OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
   writeFileSync(resolve(inputs, 'readonly.txt'), 'public-web-readonly', { mode: 0o600 })
