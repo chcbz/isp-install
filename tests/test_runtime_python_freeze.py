@@ -119,5 +119,68 @@ class FlowBuildEntryTest(unittest.TestCase):
         self.assertTrue(pin['url'].startswith('https://github.com/astral-sh/python-build-standalone/releases/download/'))
 
 
+class SlimPythonTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='cyf-python-slim-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.stage = self.root / 'stage/codex-bridge/.toolchain'
+        (self.stage / 'bin').mkdir(parents=True)
+        (self.stage / 'lib').mkdir()
+
+    def put(self, name, data=b'identical fixture', mode=0o755):
+        p = self.stage / name; p.write_bytes(data); p.chmod(mode); return p
+
+    def test_identical_aliases_share_inode_and_different_bytes_or_modes_do_not(self):
+        a = self.put('bin/python'); b = self.put('bin/python3'); c = self.put('bin/python3.11')
+        lib = self.put('lib/libpython3.so',b'libfixture',0o644)
+        alias = self.put('lib/libpython3.so.1',b'libfixture',0o644)
+        different = self.put('bin/python-other',b'other fixture')
+        mode = self.put('bin/python-mode',mode=0o700)
+        result = module.slim_staged_python(self.stage)
+        self.assertEqual(a.stat().st_ino,b.stat().st_ino); self.assertEqual(a.stat().st_ino,c.stat().st_ino)
+        self.assertEqual(lib.stat().st_ino,alias.stat().st_ino)
+        self.assertNotEqual(a.stat().st_ino,different.stat().st_ino)
+        self.assertNotEqual(a.stat().st_ino,mode.stat().st_ino)
+        self.assertGreater(result['savedAllocatedBytes'],0)
+        self.assertEqual(module.slim_staged_python(self.stage)['savedAllocatedBytes'],0)
+
+    def test_existing_installer_private_stage_is_allowed_but_live_and_backups_are_not(self):
+        self.assertTrue(module.private_stage_location('/home/isp/apps/cyf-agent-runtime-v1/.cyf-agent-runtime.stage.Ab1234/codex-bridge/.toolchain'))
+        self.assertFalse(module.private_stage_location('/home/isp/apps/cyf-agent-runtime-v1/app/codex-bridge/.toolchain'))
+        self.assertFalse(module.private_stage_location('/home/isp/baks/cyf-agent-runtime-v1/20261109-old/old-program/codex-bridge/.toolchain'))
+
+    def test_external_hardlink_is_rejected_without_mutation(self):
+        p = self.put('bin/python'); os.link(str(p),str(self.root/'outside'))
+        with self.assertRaisesRegex(ValueError,'EXTERNAL_HARDLINK'): module.slim_staged_python(self.stage)
+        self.assertEqual(p.read_bytes(),b'identical fixture')
+
+    def test_external_symlink_and_installed_paths_rejected(self):
+        (self.stage/'bin/python').symlink_to('/usr/bin/python3')
+        with self.assertRaisesRegex(ValueError,'EXTERNAL_ALIAS'): module.slim_staged_python(self.stage)
+        with self.assertRaisesRegex(ValueError,'REFUSES_INSTALLED'): module.slim_staged_python(Path('/home/isp/apps/example'))
+
+    def test_debug_output_not_inside_stage_and_never_overwritten(self):
+        self.put('bin/python')
+        with self.assertRaisesRegex(ValueError,'OUTSIDE_STAGE'): module.slim_staged_python(self.stage,self.stage/'symbols')
+        existing=self.root/'symbols'; existing.mkdir()
+        with self.assertRaises(FileExistsError): module.slim_staged_python(self.stage,existing)
+
+    @unittest.skipUnless(shutil.which('cc') and shutil.which('strip') and shutil.which('objcopy'),'ELF toolchain required')
+    def test_real_elf_strip_symbols_saved_outside_stage_and_execution_still_works(self):
+        src=self.root/'main.c'; src.write_text('int main(void) { return 0; }\n')
+        exe=self.stage/'bin/python'
+        subprocess.check_call(['cc','-g','-o',str(exe),str(src)])
+        shutil.copy2(str(exe),str(self.stage/'bin/python3'))
+        symbols=self.root/'debug-symbols'
+        result=module.slim_staged_python(self.stage,symbols)
+        subprocess.check_call([str(exe)])
+        self.assertEqual(exe.stat().st_ino,(self.stage/'bin/python3').stat().st_ino)
+        self.assertTrue((symbols/'symbols.json').exists())
+        self.assertEqual(len(list(symbols.glob('*.debug'))),1)
+        self.assertTrue(result['groups'][0]['debugSha256'])
+        sections=subprocess.check_output(['readelf','-S',str(exe)]).decode()
+        self.assertNotIn('.debug_info',sections)
+
 if __name__ == '__main__':
     unittest.main()

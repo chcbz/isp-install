@@ -77,6 +77,7 @@ def extract(archive, manifest, target):
         members = stream.getmembers()
         if len(members) != len(entries) or {member.name for member in members} != set(entries):
             raise ValueError('PYTHON_ARTIFACT_MEMBER_MISMATCH')
+        by_name = {member.name: member for member in members}
         for member in members:
             path = PurePosixPath(member.name)
             if path.is_absolute() or '..' in path.parts or str(path) != member.name or member.name == '.':
@@ -93,17 +94,28 @@ def extract(archive, manifest, target):
                 link = os.path.normpath(str(path.parent / member.linkname))
                 if entry['type'] != 'symlink' or member.linkname != entry['target'] or os.path.isabs(member.linkname) or link == '..' or link.startswith('../'):
                     raise ValueError('PYTHON_ARTIFACT_UNSAFE_LINK')
+            elif member.islnk():
+                link = PurePosixPath(member.linkname)
+                linked = entries.get(member.linkname, {})
+                linked_member = by_name.get(member.linkname)
+                if (link.is_absolute() or '..' in link.parts or str(link) != member.linkname or
+                        linked_member is None or not linked_member.isfile() or
+                        entry['type'] != 'file' or linked.get('type') != 'file' or
+                        linked.get('sha256') != entry.get('sha256') or linked.get('mode') != entry['mode']):
+                    raise ValueError('PYTHON_ARTIFACT_UNSAFE_HARDLINK')
             elif not ((member.isdir() and entry['type'] == 'directory') or (member.isfile() and entry['type'] == 'file')):
                 raise ValueError('PYTHON_ARTIFACT_UNSAFE_TYPE')
         target.mkdir(mode=0o700)
         # Parents first, regular contents next, symlinks last: never write via a link.
         # Keep regular members in archive order to avoid repeatedly rewinding gzip.
-        for member in sorted(members, key=lambda item: (0 if item.isdir() else 2 if item.issym() else 1, len(PurePosixPath(item.name).parts) if item.isdir() else 0)):
+        for member in sorted(members, key=lambda item: (0 if item.isdir() else 3 if item.issym() else 2 if item.islnk() else 1, len(PurePosixPath(item.name).parts) if item.isdir() else 0)):
             path = target / member.name
             if member.isdir():
                 path.mkdir(mode=0o700)
             elif member.issym():
                 path.symlink_to(member.linkname)
+            elif member.islnk():
+                os.link(str(target / member.linkname), str(path))
             else:
                 with stream.extractfile(member) as source, path.open('xb') as output:
                     for block in iter(lambda: source.read(1024 * 1024), b''):
