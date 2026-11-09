@@ -521,3 +521,6 @@ safe diagnostic metadata, never proof of task completion/revocation.
 - 保留沙箱、身份/任务授权、私密配置只读挂载、进程与文件隔离。普通议事/材料阅读不获得任务执行工具或公网浏览权限，沿用原Provider通道。宿主机内网、回环、链路本地/云元数据、保留/组播及IPv6过渡地址不作为普通公网目标；原显式可信Provider/集成通道不扩权。
 - 公网域名由代理解析，检查全部返回地址并连接已检查的IP（不再二次DNS解析），阻止混合私网回答和DNS rebinding。HTTP/HTTPS每次连接（包括浏览器重定向后的连接）都走同一地址隔离；不关闭nft默认拒绝、不直连宿主网络、不挂载宿主凭据。HTTP代理不向目标转发Proxy-Authorization等逐跳头。
 - 验证入口：`conf/codex-bridge/test/public-web-network.test.mjs`、`typed-inspection-network.test.mjs`、`native-execution.test.mjs`及`native-execution-profile.test.mjs`。本地socket/受控DNS fixture不代表线上技能通过；发布仍需固定源码/制品、受控安装、检查在途执行和隔离会话实际验收，不能热改正在运行的目录或回放已取消事项。
+### 原生执行与资料读取独立（Runtime 1.3.68候选）
+
+原生技能环境不要求配置资料输入载体。Provider、主体私有根与兼容说明见 `conf/codex-bridge/README.md`“独立原生执行环境”。探测、注册声明、执行和清理由独立Owner持有，沿用已有隔离实现及API合同；不自动补凭据或搬迁生产状态。此说明为源码候选，不代表已安装或业务验收。

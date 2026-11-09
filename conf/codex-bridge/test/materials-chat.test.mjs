@@ -171,28 +171,28 @@ test('public materials transport allows only exact GET content route, no aliases
 test('native local-file capability is a separate online declaration and requires the execution transport', () => {
   const adapter = { closed: false, readback: { schema: { ...schema, measured: true, schemaContractId: schema.contractId } } }
   const declaration = { schemaVersion: 1, executionProtocolVersion: 5, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json'] }
-  const runtime = { declaration: () => ({ supportedInputs: formats }), nativeExecutionDeclaration: () => declaration }
+  const runtime = { declaration: () => ({ supportedInputs: formats }) }
+  const native = { nativeExecutionDeclaration: () => declaration }
   const readyProfile = { ...profile, workspaceFileApiOrigin: 'https://platform.example', workspaceFileRootDir: '/synthetic/private-root' }
-  const registered = buildAgentRegistrationPayload(readyProfile, null, true, adapter, runtime)
+  const registered = buildAgentRegistrationPayload(readyProfile, null, true, adapter, runtime, null, null, native)
   assert.deepEqual(registered.typedDeliberation.nativeExecution, declaration)
   assert.equal(buildAgentPresencePayload(readyProfile, 'busy', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation, undefined)
-  assert.equal(buildAgentRegistrationPayload(readyProfile, null, false, adapter, runtime).typedDeliberation.nativeExecution, undefined)
+  assert.equal(buildAgentRegistrationPayload(readyProfile, null, false, adapter, runtime, null, null, native).typedDeliberation.nativeExecution, undefined)
   assert.equal(buildAgentPresencePayload(readyProfile, 'offline', { appServerAdapter: adapter, typedInspectionProfileRuntime: runtime }).typedDeliberation, undefined)
-  assert.equal(buildAgentRegistrationPayload(profile, null, true, adapter, runtime).typedDeliberation.nativeExecution, undefined)
+  assert.equal(buildAgentRegistrationPayload(profile, null, true, adapter, runtime, null, null, native).typedDeliberation.nativeExecution, undefined)
   assert.equal(buildAgentRegistrationPayload(readyProfile, null, true, adapter, { declaration: runtime.declaration }).typedDeliberation.nativeExecution, undefined)
-  assert.equal(buildAgentRegistrationPayload(readyProfile, null, true, adapter, { ...runtime, nativeExecutionDeclaration: () => null }).typedDeliberation.nativeExecution, undefined)
+  assert.equal(buildAgentRegistrationPayload(readyProfile, null, true, adapter, runtime, null, null, { nativeExecutionDeclaration: () => null }).typedDeliberation.nativeExecution, undefined)
 })
 
 
 test('native-only measured readiness refreshes registration without claiming read-only carriers', () => {
   let refreshed = 0, statuses = 0
-  const state = { disposed: false, typedInspectionProfileRuntime: { declaration: () => null,
-    nativeExecutionDeclaration: () => ({ executionProtocolVersion: 5 }) },
+  const state = { disposed: false, typedInspectionProfileRuntime: null, nativeExecutionProfileRuntime: { nativeExecutionDeclaration: () => ({ executionProtocolVersion: 5 }) },
     runtimeTransport: { refreshCapabilities: () => { refreshed++; return true } } }
   const p = { ...profile, runtimeIdentity: {} }
   assert.equal(publishTypedInspectionReadiness(p, state, { sendStatusFn: () => { statuses++; return true }, busyFn: () => false }), true)
   assert.equal(refreshed, 1); assert.equal(statuses, 1)
-  state.typedInspectionProfileRuntime.nativeExecutionDeclaration = () => null
+  state.nativeExecutionProfileRuntime.nativeExecutionDeclaration = () => null
   assert.equal(publishTypedInspectionReadiness(p, state), false)
   assert.equal(refreshed, 1)
 })

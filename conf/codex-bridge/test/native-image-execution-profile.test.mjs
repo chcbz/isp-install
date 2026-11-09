@@ -1,3 +1,4 @@
+import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 // Opt-in integration fixture: real profile/app-server/CONNECT, synthetic HTTPS
 // image provider and synthetic CA/key. No model turn, paid call or API commit.
 import test from 'node:test'
@@ -9,7 +10,6 @@ import { createServer } from 'node:https'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
 import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { snapshotNativeArtifact } from '../native-artifact-snapshot.mjs'
@@ -49,7 +49,7 @@ test('real app-server runs native-image against synthetic HTTPS via restricted C
     const origin = `https://localhost:${server.address().port}`
     const packageRoot = realpathSync(fileURLToPath(new URL('../../skills/native-image/', import.meta.url)))
     const nativeToolchain = measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath })
-    runtime = new TypedInspectionProfileRuntime({ profile: { profileId: 'native-image-probe', agentId: 'native-image-probe-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: sourceHome,
+    runtime = new NativeExecutionProfileRuntime({ profile: { profileId: 'native-image-probe', agentId: 'native-image-probe-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: sourceHome,
       typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'isolation-probe', typedInspectionProviderBaseUrl: 'https://provider.invalid/v1', typedInspectionNetworkConnectTimeoutMs: 10000 }, materializerRoot, stateRoot, nativeToolchain })
     // Test-only CA fixture: production's root-owned source validation is not
     // measured here. Preserve actual read-only staging/mount/readback checks.

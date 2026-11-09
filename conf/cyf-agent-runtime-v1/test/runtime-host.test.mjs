@@ -80,6 +80,12 @@ test('three complete subjects initialize immutable config without writing any st
   assert.deepEqual(await Promise.all(f.entries.map(entry => readdir(entry.stateRoot))), before);
 });
 
+for (const field of ['nativeExecutionRootDir', 'nativeExecutionStateRoot']) test(`reject cross-subject ${field} overlap`, async t => {
+  const f = await fixture(t)
+  await f.profile(1, { [field]: resolve(f.profiles[0].codexHome, 'native') })
+  await assert.rejects(f.config(), code('RUNTIME_AGENT_ROOTS_OVERLAP'))
+})
+
 test('duplicate complete subjects and installation authorization are rejected independently', async t => {
   const f = await fixture(t);
   await f.manifest(1, { tenantId: f.manifests[0].tenantId, clientId: f.manifests[0].clientId, canonicalAgentId: f.manifests[0].canonicalAgentId });
@@ -249,6 +255,35 @@ test('mature executor retains isolated subjects/session namespaces and allowlist
   for (const [i, state] of states.entries()) assert.equal(state.sessionStore.get(state.profile, { conversationId: 'conversation' }), `session-${config.agents[i].subjectKey}`);
 });
 
+for (const materialsFailure of [false, true]) test(`native owner survives absent/failed materials initialization (${materialsFailure}) without claiming readiness`, async t => {
+  const f = await fixture(t, { count: 1 })
+  const config = await f.config()
+  const subject = structuredClone(config.agents[0])
+  Object.assign(subject.profile, { workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: resolve(f.root, 'files'),
+    nativeExecutionRootDir: resolve(f.root, 'native-inputs'), nativeExecutionStateRoot: resolve(f.root, 'native-state') })
+  if (materialsFailure) Object.assign(subject.profile, { inputCarriers: {}, typedInspectionRootDir: resolve(f.root, 'material-inputs'), typedInspectionStateRoot: subject.profile.codexHome })
+  // Source-only checkout has no prepared delivery venv. Create an isolated
+  // copied library with a never-invoked interpreter fixture; do not alter source
+  // or weaken the release-local toolchain prerequisite.
+  const library = resolve(f.root, 'test-engine')
+  await collateExecutionPayload(engineSource, library)
+  await symlink(resolve(engineSource, 'node_modules'), resolve(library, 'node_modules'))
+  await mkdir(resolve(library, '.toolchain/bin'), { recursive: true })
+  await symlink('/usr/bin/python3', resolve(library, '.toolchain/bin/python'))
+  const { createRuntimeExecutionHost } = await import(resolve(library, 'agent-client.mjs'))
+  const engine = createRuntimeExecutionHost({ agents: [subject], runtimeInstanceId: 'native-owner-test', apiOrigin: 'https://api.example.test' })
+  f.cleanup(() => engine.close())
+  const executor = engine.createExecutor({ subjectKey: subject.subjectKey })
+  await executor.initialize()
+  const state = executor.state()
+  assert.equal(state.typedInspectionProfileRuntime, null)
+  assert.ok(state.nativeExecutionProfileRuntime)
+  assert.equal(state.nativeExecutionProfileRuntime.nativeExecutionDeclaration(), null)
+  assert.equal(state.nativeExecutionProfileFailure.code, 'NATIVE_EXECUTION_PROVIDER_CONFIG_REQUIRED')
+  assert.equal(Boolean(state.typedInspectionProfileFailure), materialsFailure)
+  assert.equal(executor.registrationPayload().typedDeliberation?.nativeExecution, undefined)
+})
+
 test('unified library catalog closes actual engine imports without retired provisioning or host state', async t => {
   const f = await fixture(t, { count: 1 });
   for (const path of RETIRED_EXECUTION_PAYLOAD_PATHS) {
@@ -259,6 +294,7 @@ test('unified library catalog closes actual engine imports without retired provi
     'toolchain/browser/package.json', 'toolchain/browser/package-lock.json']) {
     assert.ok(EXECUTION_PAYLOAD_FILES.includes(path), path);
   }
+  for (const name of ['isolated-engine-profile.mjs', 'native-execution-runtime.mjs']) assert.equal(EXECUTION_PAYLOAD_FILES.includes(name), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('app-server-usage.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('native-usage-receipts.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('chat-usage-delivery.mjs'), true);

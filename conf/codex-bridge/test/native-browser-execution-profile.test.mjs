@@ -1,3 +1,4 @@
+import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 // Target-only integration: no model turn, production session, or public writes.
 // The synthetic site's CA is trusted only in this fixture's private NSS DB.
 import test from 'node:test'
@@ -8,7 +9,6 @@ import { chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync
 import { createServer } from 'node:https'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
 import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
 import { measureNativeBrowserToolchain } from '../native-browser-toolchain.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
@@ -69,7 +69,7 @@ test('real app-server ordinary browser script preserves TLS, origins and read-on
   const packageRoot = mkdir(resolve(root, 'browser-fixture'))
   writeFileSync(resolve(packageRoot, 'SKILL.md'), '---\nname: browser-fixture\ndescription: Synthetic browser network test only.\n---\nUse the configured synthetic site.\n', { mode: 0o600 })
   writeFileSync(resolve(sourceHome, 'auth.json'), '{"OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
-  runtime = new TypedInspectionProfileRuntime({ profile: { profileId: 'native-browser-probe', agentId: 'native-browser-probe-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: sourceHome,
+  runtime = new NativeExecutionProfileRuntime({ profile: { profileId: 'native-browser-probe', agentId: 'native-browser-probe-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: sourceHome,
     typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'isolation-probe', typedInspectionProviderBaseUrl: 'https://provider.invalid/v1', typedInspectionNetworkConnectTimeoutMs: 10000 }, materializerRoot, stateRoot, nativeToolchain })
   // Existing profile fixture mechanism: trust only this synthetic CA. Do not
   // measure this as production root-owned CA source attestation.

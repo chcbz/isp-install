@@ -19,9 +19,8 @@ const row = i => ({ skillKey: `skill-${String(i).padStart(4, '0')}`, skillInstal
   kind: 'INSTRUCTION', manifest: null, enabled: true, policyRevision: '1' })
 const wire = (profile, registry, supportedInputs) => JSON.stringify(toAgentWire(buildProtocolEnvelope('agent.register', {
   ...buildAgentRegistrationPayload(profile, null, true, null, {
-    declaration: () => ({ supportedInputs, enginePolicyDigest: 'LOCAL_ONLY', recovery: 'LOCAL_ONLY' }),
-    nativeExecutionDeclaration: () => nativeExecution
-  }, null, registry), durableStateHealthy: true, readyCommandTypes: ['WORK_ITEM_EXECUTE'],
+    declaration: () => ({ supportedInputs, enginePolicyDigest: 'LOCAL_ONLY', recovery: 'LOCAL_ONLY' })
+  }, null, registry, { nativeExecutionDeclaration: () => nativeExecution }), durableStateHealthy: true, readyCommandTypes: ['WORK_ITEM_EXECUTE'],
   tenantId: '1', clientId: 'client', hostId: 'host', installationId: 'installation', sessionGeneration: '1'
 }, profile, 'runtime')))
 

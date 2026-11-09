@@ -1,3 +1,4 @@
+import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -8,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
-import { buildTypedInspectionCodexConfig, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
+import { buildTypedInspectionCodexConfig } from '../typed-inspection-profile.mjs'
 import { buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
 
 const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('hex')
@@ -33,7 +34,7 @@ const fixture = () => {
 }
 const discovery = layout => ({ data: [{ cwd: '/execution', skills: layout.skills.map(skill => ({ name: skill.skillKey, path: `/state/codex-home/skills/${skill.skillKey}/SKILL.md`, enabled: true, scope: 'user' })), errors: [] }] })
 const stubRuntime = f => {
-  const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+  const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
   let spawns = 0, disposals = 0, shutdowns = 0; const egressCalls = []
   Object.assign(runtime, { profile: { codexHome: f.options.sourceHome, typedInspectionProviderNetwork: 'restricted-proxy' },
     stateRoot: f.options.stateRoot, nativeToolchain: f.options.toolchain, activeAdapters: new Map(), pendingNativeAdapters: new Map(), pendingInspectionKeys: new Set(),
@@ -296,7 +297,7 @@ test('real bwrap native shell writes drafts, cannot mutate inputs/skills/config 
 
 test('real native open masks auto-discovered system skills, supports empty skills and measures restricted egress without a model turn', { skip: !realProbe }, async () => {
   const f = fixture(); const nativeToolchain = realToolchain()
-  const runtime = new TypedInspectionProfileRuntime({ profile: { profileId: 'native-isolation-test', agentId: 'native-isolation-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: f.options.sourceHome,
+  const runtime = new NativeExecutionProfileRuntime({ profile: { profileId: 'native-isolation-test', agentId: 'native-isolation-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: f.options.sourceHome,
     typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'isolation-probe', typedInspectionProviderBaseUrl: 'https://provider.invalid/v1', typedInspectionNetworkConnectTimeoutMs: 1000 },
     materializerRoot: mkdir(resolve(f.root, 'inspection-inputs')), stateRoot: f.options.stateRoot, nativeToolchain })
   let control
@@ -343,7 +344,7 @@ test('native declaration requires a successful isolated engine, TLS and shell pr
   const f = fixture()
   try {
     const materializerRoot = mkdir(resolve(f.root, 'declaration-inputs'))
-    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
     Object.assign(runtime, { materializerRoot, profile: { typedInspectionProviderNetwork: 'restricted-proxy' }, nativeToolchain: f.options.toolchain, activeAdapters: new Map() })
     let mode = 'ok', releases = 0, openings = 0
     runtime.openNativeExecutionAdapter = async (inputs, id, binding, options) => {
@@ -383,7 +384,7 @@ test('native declaration requires a successful isolated engine, TLS and shell pr
 
 test('real native capability declaration measures shell and provider TLS without a model turn', { skip: !realProbe || !process.env.CYF_NATIVE_DECLARATION_PROVIDER_URL }, async () => {
   const f = fixture()
-  const runtime = new TypedInspectionProfileRuntime({ profile: { profileId: 'native-declaration-test', agentId: 'native-declaration-agent',
+  const runtime = new NativeExecutionProfileRuntime({ profile: { profileId: 'native-declaration-test', agentId: 'native-declaration-agent',
     codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: f.options.sourceHome,
     typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'isolation-probe',
     typedInspectionProviderBaseUrl: process.env.CYF_NATIVE_DECLARATION_PROVIDER_URL, typedInspectionNetworkConnectTimeoutMs: 10000 },
@@ -498,7 +499,7 @@ test('native skill configuration is removed on suspend, process exit and profile
 test('SCRIPT declaration requires its own successful configured package and restricted network probe; failures retain LOCAL', async () => {
   const f = fixture()
   try {
-    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
     const node = tool('/usr/bin/bash', '/usr/bin/node') // The adapter is mocked; no program is executed.
     Object.assign(runtime, { materializerRoot: mkdir(resolve(f.root, 'script-measurements')), profile: { typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionNetworkConnectTimeoutMs: 1000 }, nativeToolchain: { ...f.options.toolchain, files: [...f.options.toolchain.files, node] }, activeAdapters: new Map() })
     let mode = 'ok', releases = 0, scriptOpens = 0
@@ -538,7 +539,7 @@ test('SCRIPT declaration requires its own successful configured package and rest
 
 test('real SCRIPT declaration uses Node package, read-only config and additional-origin proxy without a model turn', { skip: !realProbe || !process.env.CYF_NATIVE_DECLARATION_PROVIDER_URL }, async () => {
   const f = fixture()
-  const runtime = new TypedInspectionProfileRuntime({ profile: { profileId: 'native-script-declaration-test', agentId: 'native-script-declaration-agent',
+  const runtime = new NativeExecutionProfileRuntime({ profile: { profileId: 'native-script-declaration-test', agentId: 'native-script-declaration-agent',
     codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: f.options.sourceHome,
     typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'isolation-probe',
     typedInspectionProviderBaseUrl: process.env.CYF_NATIVE_DECLARATION_PROVIDER_URL, typedInspectionNetworkConnectTimeoutMs: 10000 },
@@ -567,7 +568,7 @@ test('Office declaration requires actual document reopens; document failure reta
   const { DOCUMENT_PROBE, DOCUMENT_MIMES } = await import('../native-document-toolchain.mjs')
   const f = fixture()
   try {
-    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
     Object.assign(runtime, { materializerRoot: mkdir(resolve(f.root, 'document-measurements')), profile: { typedInspectionProviderNetwork: 'restricted-proxy' },
       nativeToolchain: { ...f.options.toolchain, files: [...f.options.toolchain.files, tool('/usr/bin/bash', DOCUMENT_PROBE)] }, activeAdapters: new Map() })
     let success = true
@@ -603,7 +604,7 @@ test('browser readiness requires a successful process probe and retains text/Off
   const { DOCUMENT_PROBE, DOCUMENT_MIMES } = await import('../native-document-toolchain.mjs')
   const f = fixture()
   try {
-    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
     Object.assign(runtime, { materializerRoot: mkdir(resolve(f.root, 'browser-measurements')), profile: { typedInspectionProviderNetwork: 'restricted-proxy' },
       nativeToolchain: { ...f.options.toolchain, files: [...f.options.toolchain.files, tool('/usr/bin/bash', BROWSER_PROBE), tool('/usr/bin/bash', DOCUMENT_PROBE)] }, activeAdapters: new Map() })
     let success = true
@@ -654,7 +655,7 @@ test('PDF capability requires its real render/reopen probe; failure retains Offi
   const { DOCUMENT_PROBE, PDF_PROBE, DOCUMENT_MIMES } = await import('../native-document-toolchain.mjs')
   const f = fixture()
   try {
-    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
     Object.assign(runtime, { materializerRoot: mkdir(resolve(f.root, 'pdf-measurements')), profile: { typedInspectionProviderNetwork: 'restricted-proxy' },
       nativeToolchain: { ...f.options.toolchain, files: [...f.options.toolchain.files, ...[BROWSER_PROBE, DOCUMENT_PROBE, PDF_PROBE].map(path => tool('/usr/bin/bash', path))] }, activeAdapters: new Map() })
     let success = true
@@ -743,7 +744,7 @@ test('native model catalog path survives the actual agent profile normalization'
 
 
 test('native startup retries only a cleaned engine-open RPC timeout, once and single-flight', async () => {
-  const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+  const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
   let calls = 0, release
   const cleaned = new Promise(resolve => { release = resolve })
   const declaration = Object.freeze({ executionProtocolVersion: 5 })
@@ -774,7 +775,7 @@ test('native startup does not loop or retry permanent, cleanup, execution or dis
     ['shell', 'APP_SERVER_RPC_TIMEOUT', false, 1],
     ['engine-open', 'APP_SERVER_RPC_TIMEOUT', true, 1]
   ]) {
-    const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+    const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
     let calls = 0
     runtime._measureNativeExecution = async () => {
       calls++
