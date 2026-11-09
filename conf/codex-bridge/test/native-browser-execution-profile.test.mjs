@@ -223,3 +223,53 @@ await withBrowser(async ({page}) => {
   console.log(`ordinary engine disposal stops owned browser process tree: PASS (${owned.size} processes)`)
 
 })
+
+// Explicit opt-in: real public read-only sites, no provider/model request or business write.
+test('real app-server browses unconfigured public sites and still blocks host metadata', {
+  skip: !enabled || process.env.CYF_PUBLIC_WEB_PROFILE_PROBE !== '1'
+}, async t => {
+  const root = mkdtempSync(resolve(tmpdir(), 'cyf-public-web-'))
+  const inputs = mkdir(resolve(root, 'inputs')), scratch = mkdir(resolve(root, 'scratch')), drafts = mkdir(resolve(root, 'drafts'))
+  const sourceHome = mkdir(resolve(root, 'home')), stateRoot = mkdir(resolve(root, 'state'))
+  const toolchainRoot = resolve(process.env.CYF_NATIVE_BROWSER_PROFILE_PROBE_ROOT)
+  const base = measureMinimalNativeExecutionToolchain({ nodeBin: process.execPath })
+  const nativeToolchain = measureNativeBrowserToolchain({ base, scriptsRoot: mkdir(resolve(root, 'scripts')),
+    browserRoot: resolve(toolchainRoot, 'chromium'), playwrightRoot: resolve(toolchainRoot, 'node_modules/playwright-core'), fontsRoot: resolve(toolchainRoot, 'fonts') })
+  writeFileSync(resolve(sourceHome, 'auth.json'), '{"OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
+  writeFileSync(resolve(inputs, 'readonly.txt'), 'public-web-readonly', { mode: 0o600 })
+  const runtime = new NativeExecutionProfileRuntime({ profile: { profileId: 'public-web-probe', agentId: 'public-web-probe-agent',
+    codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: sourceHome,
+    typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'isolation-probe',
+    typedInspectionProviderBaseUrl: 'https://provider.invalid/v1', typedInspectionNetworkConnectTimeoutMs: 10000 },
+    materializerRoot: mkdir(resolve(root, 'materials')), stateRoot, nativeToolchain })
+  t.after(async () => { await runtime.dispose(); rmSync(root, { recursive: true, force: true }) })
+  const binding = { schemaVersion: 1, requestKey: 'public-web-probe', authorizationId: 'auth-1', manifestDigest: 'manifest-1',
+    requestId: 'req-public', turnId: 'turn-public', inputPolicyDigest: 'policy-1' }
+  const adapter = await runtime.openNativeExecutionAdapter(inputs, binding.requestKey, binding, {
+    scratchDirectory: scratch, draftsDirectory: drafts, skills: [], skillConfiguration: [],
+    nativeExecution: { executionId: 'exec-public-web', tools: [], networkAccess: true, checkActive() {}, callTool() { assert.fail('no model tools expected') } } })
+  assert.equal(adapter.nativeExecutionIsolation.network.directInternetBlocked, true)
+  assert.equal(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback, true)
+  const code = `import assert from 'node:assert/strict';
+import {writeFileSync} from 'node:fs';
+import {withBrowser} from '/usr/lib/cyf-browser/browser-session.mjs';
+assert.throws(()=>writeFileSync('/inputs/readonly.txt','bad'),/EROFS|EACCES|EPERM/);
+await withBrowser(async ({page}) => {
+ for (const url of ['https://example.com/', 'https://www.iana.org/help/example-domains']) {
+  const response=await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000});
+  assert.equal(response.status(),200);const title=await page.title();assert.ok(title.length>0);
+  console.log(JSON.stringify({url,status:response.status(),title}));
+ }
+ await page.screenshot({path:'/outputs/public-web.png'});
+ for (const url of ['http://169.254.169.254/latest/meta-data/', 'https://127.0.0.1/']) {
+  await assert.rejects(page.goto(url,{timeout:5000}));
+ }
+});console.log('public-web-isolated-ready');`
+  const response = await adapter.request('command/exec', { command: ['/usr/bin/node', '--input-type=module', '-e', code],
+    cwd: '/execution', permissionProfile: 'native-execution', timeoutMs: 120000 }, 150000)
+  assert.equal(response.exitCode, 0, response.stderr)
+  assert.match(response.stdout, /public-web-isolated-ready/)
+  assert.equal(readFileSync(resolve(drafts, 'public-web.png')).subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+  assert.equal(readFileSync(resolve(inputs, 'readonly.txt'), 'utf8'), 'public-web-readonly')
+  console.log(response.stdout.trim())
+})

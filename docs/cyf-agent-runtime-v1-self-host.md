@@ -524,3 +524,7 @@ safe diagnostic metadata, never proof of task completion/revocation.
 ### 原生执行与资料读取独立（Runtime 1.3.68候选）
 
 原生技能环境不要求配置资料输入载体。Provider、主体私有根与兼容说明见 `conf/codex-bridge/README.md`“独立原生执行环境”。探测、注册声明、执行和清理由独立Owner持有，沿用已有隔离实现及API合同；不自动补凭据或搬迁生产状态。此说明为源码候选，不代表已安装或业务验收。
+
+### Runtime 1.3.70候选：文件响应契约与公网验收
+
+原始文件响应由Runtime HTTP传输层按精确路由/方法合同识别，不以`application/json`推断公共响应信封：materials/inspection输入、任务输入下载及带租约的conversation输入下载，成功时保留原始Response与字节；错误仍校验公共JSON信封。输入物化继续核对授权会话、长度、MIME、SHA-256，上传返回的JSON元数据及archive source仍按接口信封校验，不开放任意`/content`后缀例外。真实隔离公网浏览验收入口为`CYF_PUBLIC_WEB_PROFILE_PROBE=1`与既有浏览器toolchain probe变量，无模型请求，不代表技能业务及全部多轮议事已通过。

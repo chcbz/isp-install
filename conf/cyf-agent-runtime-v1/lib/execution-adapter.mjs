@@ -428,6 +428,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "toolchain/browser/sources.json",
   "typed-inspection-input-carriers.mjs",
   "typed-inspection-network.mjs",
+  "public-web-network.mjs",
   "typed-inspection-profile.mjs",
   "isolated-engine-profile.mjs",
   "native-execution-runtime.mjs",

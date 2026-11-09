@@ -155,6 +155,20 @@ export const materialsChatHttpScope = (endpoint, options = {}) => {
     && new RegExp(`^/internal/agent/chat/requests/${id}/turns/${id}/materials/inputs/${id}/content$`).test(endpoint.pathname)
 }
 
+// File response contracts belong to the transport, not the MIME type or caller.
+// A JSON document is still raw file bytes. Errors on these routes remain R envelopes.
+const nativeFileResponse = (endpoint, method) => {
+  if (endpoint.search || endpoint.href.includes('?')) return false;
+  const id = '[A-Za-z0-9][A-Za-z0-9._:-]{0,99}';
+  const routes = method === 'GET' ? [
+    `^/internal/agent/chat/requests/${id}/turns/${id}/(?:materials|inspection)/inputs/${id}/content$`,
+    `^/internal/agent/tasks/${id}/runs/${id}/inputs/${id}/content$`
+  ] : method === 'POST' ? [
+    `^/internal/agent/tasks/${id}/runs/${id}/conversation/inputs/${id}/content$`
+  ] : [];
+  return routes.some(pattern => new RegExp(pattern).test(endpoint.pathname));
+};
+
 const ENROLLMENT_AUTHORIZATION = /^rta1_[0-9a-f]{64}$/;
 const safeEpoch = value => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime());
 export function validateEnrollmentResult(response, manifest) {
@@ -287,7 +301,8 @@ export class RuntimeV1Client {
     if (this.currentSession !== session) throw fail('RUNTIME_NATIVE_SESSION_CHANGED');
     // Validate correlation without replacing Response or rewriting canonical data/file bytes.
     // Consumers explicitly decode data; failures remain real HTTP responses for their reconciliation policy.
-    if (method !== 'HEAD' && ![204, 304].includes(response.status) && /application\/json/i.test(response.headers.get('content-type') || '')) {
+    if (!(response.ok && nativeFileResponse(endpoint, method))
+        && method !== 'HEAD' && ![204, 304].includes(response.status) && /application\/json/i.test(response.headers.get('content-type') || '')) {
       try { decodeHttpResponse(await response.clone().text(), { status: response.status, requestId, responseRequestId: response.headers.get('X-Request-Id') }); }
       catch (error) { if (error.failureClass !== 'http') throw error; }
       if (this.currentSession !== session) throw fail('RUNTIME_NATIVE_SESSION_CHANGED');

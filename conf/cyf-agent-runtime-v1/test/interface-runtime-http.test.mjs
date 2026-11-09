@@ -66,3 +66,57 @@ test('engine and Runtime share identical codec source bytes', async () => {
   const { readFile } = await import('node:fs/promises')
   assert.deepEqual(await readFile(new URL('../lib/api-envelope.mjs', import.meta.url)), await readFile(new URL('../../codex-bridge/api-envelope.mjs', import.meta.url)))
 })
+
+const nativeClient = fetchFn => {
+  const api = client(fetchFn)
+  api.currentSession = { installationId: 'i', canonicalAgentId: 'a', hostId: 'h', runtimeInstanceId: 'r', sessionGeneration: '1', sessionToken: `rts1_${'a'.repeat(64)}` }
+  api.sessionAbort = new AbortController()
+  return api
+}
+const fileRoutes = [
+  ['GET', '/internal/agent/chat/requests/req/turns/turn/materials/inputs/ref/content'],
+  ['GET', '/internal/agent/chat/requests/req/turns/turn/inspection/inputs/ref/content'],
+  ['GET', '/internal/agent/tasks/task/runs/run/inputs/ref/content'],
+  ['POST', '/internal/agent/tasks/task/runs/run/conversation/inputs/ref/content']
+]
+for (const [method, path] of fileRoutes) {
+  test(`native file contract preserves JSON bytes on ${method} ${path}`, async () => {
+    // Deliberately not an R envelope, including whitespace that must survive SHA checks.
+    const bytes = Buffer.from(' {"data":"previous-turn-artifact", "rows": [1,2]}\n')
+    let original
+    const api = nativeClient(async (_url, config) => {
+      assert.match(config.headers.get('Authorization'), /^AgentRuntime /)
+      assert.equal(config.redirect, 'error')
+      if (method === 'POST') assert.deepEqual(JSON.parse(config.body).data, { version: '1', token: 'lease-fixture' })
+      original = new Response(bytes, { headers: { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length) } })
+      return original
+    })
+    const result = await api.nativeFetch(`https://api.test${path}`, { method,
+      ...(method === 'POST' ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: '1', token: 'lease-fixture' }) } : {}) })
+    assert.equal(result, original)
+    assert.deepEqual(Buffer.from(await result.arrayBuffer()), bytes)
+  })
+  test(`native file failures still verify the R envelope on ${path}`, async () => {
+    const api = nativeClient(async () => new Response('{"data":"not-an-error-envelope"}', {
+      status: 403, headers: { 'Content-Type': 'application/json' }
+    }))
+    await assert.rejects(api.nativeFetch(`https://api.test${path}`, { method }), { code: 'PROTOCOL_INVALID_RESPONSE' })
+    api.fetchFn = async (_url, config) => new Response(JSON.stringify({ protocolVersion: 1,
+      requestId: config.headers.get('X-Request-Id'), code: 'RUNTIME_FORBIDDEN', msg: 'denied', data: null }), {
+      status: 403, headers: { 'Content-Type': 'application/json', 'X-Request-Id': config.headers.get('X-Request-Id') }
+    })
+    assert.equal((await api.nativeFetch(`https://api.test${path}`, { method })).status, 403)
+  })
+}
+test('JSON metadata, archive source and uploads are not file response exceptions', async () => {
+  const api = nativeClient(async () => new Response('{"rows":[]}', { headers: { 'Content-Type': 'application/json' } }))
+  for (const [method, path] of [
+    ['GET', '/internal/agent/tasks/task/runs/run/inputs'],
+    ['GET', '/internal/archive/v1/jobs/job/source'],
+    ['POST', '/internal/agent/tasks/task/runs/run/outputs/output/content']
+  ]) await assert.rejects(api.nativeFetch(`https://api.test${path}`, { method }), { code: 'PROTOCOL_INVALID_RESPONSE' })
+})
+test('raw JSON file response cannot confirm a rotated session', async () => {
+  const api = nativeClient(async () => { api.invalidateSession(); return new Response('{}', { headers: { 'Content-Type': 'application/json' } }) })
+  await assert.rejects(api.nativeFetch(`https://api.test${fileRoutes[0][1]}`), { code: 'RUNTIME_NATIVE_SESSION_CHANGED' })
+})
