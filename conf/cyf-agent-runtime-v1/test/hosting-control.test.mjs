@@ -452,7 +452,7 @@ test('current lookup is read-only and selects admitted operation rather than hig
   assert.equal(reply.data.provisionGeneration, '1');
   assert.equal(reply.data.runtimeInstallationId, prepared.installationId);
   for (const field of ['bindingId', 'leaseId', 'initialIntentId'])
-    await assert.rejects(f.control().handle({ ...current, [field]: 'foreign' }), code('HOSTING_ASSOCIATION_REJECTED'));
+    await assert.rejects(f.control().handle({ ...current, [field]: 'foreign', ...(field === 'initialIntentId' ? { operationId: 'foreign' } : {}) }), code('HOSTING_ASSOCIATION_REJECTED'));
   await assert.rejects(f.control().handle({ ...wire.reprovisionPrepareRequest, method: 'current' }), code('HOSTING_WIRE_INVALID'));
   await f.control().handle(candidateRequest(wire.reprovisionPrepareRequest, newer, 'ensure')); await f.settle();
   const updated = await f.control().handle(current);
@@ -473,4 +473,17 @@ test('shared current-operation fixture uses original initial query and active as
   assert.equal(reply.data.provisionGeneration, '2');
   assert.equal(reply.data.operationId, shared.response.operationId);
   assert.equal(reply.correlationId, query.messageId);
+});
+
+test('prepared reprovision cannot change admitted operation after permanent quiesce', async t => {
+  const f = await hostingFixture(t); const control = f.control();
+  const first = await control.handle(prepare);
+  await control.handle(candidateRequest(prepare, first, 'ensure')); await f.settle();
+  const pending = await control.handle(wire.reprovisionPrepareRequest);
+  await control.handle({ ...candidateRequest(prepare, first, 'quiesce'), handoverId: 'finish-before-ensure' });
+  const before = await readFile(control.path, 'utf8');
+  await assert.rejects(control.handle(candidateRequest(wire.reprovisionPrepareRequest, pending, 'ensure')), code('RUNTIME_HANDOVER_PENDING'));
+  assert.equal(await readFile(control.path, 'utf8'), before);
+  assert.equal((await control.handle({ ...prepare, method: 'current' })).provisionGeneration, 1);
+  assert.equal(f.sessionCount(), 1);
 });
