@@ -2270,3 +2270,27 @@ test('static public baseline cannot live in any Agent private root or be an unsa
   const link = resolve(f.root, 'public-link'); await symlink(baseline, link); f.entries[0].publicFilesPath = link;
   await assert.rejects(f.config(), code('RUNTIME_PATH_SYMLINK'));
 });
+
+test('knowledge checkpoint survives lost final cleanup receipt and restart without a second extraction', async t => {
+  const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const engine = executors(); let calls = 0, lose = true;
+  const cleanup = async options => {
+    const result = await cleanStoppedPrivateData({ ...options, apiOrigin: 'https://example.test', instanceId: 'test',
+      publicFiles: { 'config.toml': 'model="test"' }, extractKnowledge: async () => { calls++; return { confirmed: true }; } });
+    if (lose) throw new Error('lost final cleanup receipt');
+    return result;
+  };
+  const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, cleanPrivateData: cleanup,
+    flushEvidence: async () => ({ confirmed: true }) });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), /lost final/);
+  const record = JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json')));
+  assert.equal(record.knowledgeStatus, 'EXTRACTED'); assert.equal(record.cleanupComplete, undefined); assert.equal(calls, 1);
+  await host.stop(); lose = false;
+  const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor, cleanPrivateData: cleanup });
+  f.cleanup(() => restarted.stop()); await restarted.start();
+  assert.deepEqual(await restarted.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true }); assert.equal(calls, 1);
+});

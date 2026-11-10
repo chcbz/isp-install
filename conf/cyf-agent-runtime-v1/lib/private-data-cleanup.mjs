@@ -8,15 +8,25 @@ export async function cleanStoppedPrivateData(options) {
   await validateStoppedHomeCleanup(options);
   await validateStoppedStateCleanup(options);
   await stoppedMaterialRoots(options);
-  if (typeof options.extractKnowledge !== 'function')
-    throw Object.assign(new Error('RUNTIME_KNOWLEDGE_ADAPTER_REQUIRED'), { code: 'RUNTIME_KNOWLEDGE_ADAPTER_REQUIRED' });
-  // Extraction is operation-idempotent and publishes only sanitized generic facts.
-  // Failure is deliberately nonblocking, but never recorded as successful extraction.
-  let knowledgeStatus = 'FAILED';
-  try {
-    const result = await options.extractKnowledge({ agent: options.agent, ownerJiacn: options.ownerJiacn, operationId: options.operationId });
-    if (result?.confirmed === true) knowledgeStatus = 'EXTRACTED';
-  } catch { /* Do not persist raw error text which could contain private material. */ }
+  if (typeof options.recordKnowledgeStatus !== 'function')
+    throw Object.assign(new Error('RUNTIME_KNOWLEDGE_JOURNAL_REQUIRED'), { code: 'RUNTIME_KNOWLEDGE_JOURNAL_REQUIRED' });
+  let knowledgeStatus = options.knowledgeStatus;
+  if (!['EXTRACTED', 'FAILED'].includes(knowledgeStatus)) {
+    if (knowledgeStatus === 'REQUESTED') {
+      // A prior call has an unknown outcome. Do not spend again or claim success.
+      knowledgeStatus = 'FAILED';
+    } else {
+      if (typeof options.extractKnowledge !== 'function')
+        throw Object.assign(new Error('RUNTIME_KNOWLEDGE_ADAPTER_REQUIRED'), { code: 'RUNTIME_KNOWLEDGE_ADAPTER_REQUIRED' });
+      await options.recordKnowledgeStatus('REQUESTED'); // before any provider call
+      knowledgeStatus = 'FAILED';
+      try {
+        const result = await options.extractKnowledge({ agent: options.agent, ownerJiacn: options.ownerJiacn, operationId: options.operationId });
+        if (result?.confirmed === true) knowledgeStatus = 'EXTRACTED';
+      } catch { /* Never persist provider errors containing private material. */ }
+    }
+    await options.recordKnowledgeStatus(knowledgeStatus); // before any private erasure
+  }
   // Retirement is the first destructive step and may refuse pending management
   // results. Do not erase HOME or inputs before this ownership decision succeeds.
   await cleanStoppedRuntimeState(options);

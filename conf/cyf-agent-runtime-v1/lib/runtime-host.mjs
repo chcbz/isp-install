@@ -199,6 +199,7 @@ export class RuntimeHost {
         || typeof record.operationId !== 'string' || !record.operationId.trim()
         || record.evidenceOwnerJiacn !== undefined && (typeof record.evidenceOwnerJiacn !== 'string' || !record.evidenceOwnerJiacn.trim() || record.evidenceOwnerJiacn !== record.evidenceOwnerJiacn.trim())
         || record.evidenceAccepted !== undefined && (record.evidenceAccepted !== true || !record.evidenceOwnerJiacn || record.phase !== 'QUIESCED')
+        || record.knowledgeStatus !== undefined && (!['REQUESTED', 'EXTRACTED', 'FAILED'].includes(record.knowledgeStatus) || record.evidenceAccepted !== true)
         || record.cleanupComplete !== undefined && (record.cleanupComplete !== true || record.evidenceAccepted !== true)
         || !['REQUESTED', 'QUIESCED'].includes(record.phase)) throw error('RUNTIME_HANDOVER_STATE_INVALID');
   }
@@ -250,7 +251,14 @@ export class RuntimeHost {
       if (record.evidenceAccepted !== true) throw error('RUNTIME_HANDOVER_EVIDENCE_REQUIRED');
       if (record.cleanupComplete !== true) {
         if (typeof this.cleanPrivateData !== 'function') throw error('RUNTIME_PRIVATE_CLEANUP_UNAVAILABLE');
-        const result = await this.cleanPrivateData({ agent: state.agent, ownerJiacn, operationId });
+        const result = await this.cleanPrivateData({ agent: state.agent, ownerJiacn, operationId,
+          knowledgeStatus: record.knowledgeStatus,
+          recordKnowledgeStatus: async status => {
+            if (!['REQUESTED', 'EXTRACTED', 'FAILED'].includes(status)) throw error('RUNTIME_KNOWLEDGE_STATE_INVALID');
+            record.knowledgeStatus = status;
+            await writePrivateJson(path, record);
+            state.handover = record;
+          } });
         if (result?.confirmed !== true) return { confirmed: false };
         // The adapter must preserve this control journal and lifetime writer lock.
         // Persist only after successful deletion; failures retry the same operation.

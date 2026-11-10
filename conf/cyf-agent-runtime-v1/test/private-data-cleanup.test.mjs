@@ -25,9 +25,11 @@ async function fixture(t) {
     await mkdir(resolve(parent, 'another-agent')); await writeFile(resolve(parent, 'another-agent/private'), 'other owner');
   }
   await symlink(repository, resolve(work, 'link'));
-  return { root, home, stateRoot, repository, privateRoots, options: { agent: { profile, stateRoot, manifest: {} },
+  const fixture = { root, home, stateRoot, repository, privateRoots, options: { agent: { profile, stateRoot, manifest: {} },
     apiOrigin: 'https://example.test', instanceId: 'boot', ownerJiacn: 'original', operationId: 'finish',
     publicRepositoryRoots: [repository], publicFiles: { 'config.toml': 'model="test"' } } };
+  fixture.options.recordKnowledgeStatus = async status => { fixture.options.knowledgeStatus = status; };
+  return fixture;
 }
 
 test('aggregate cleanup attempts extraction before erasure and clears all owned roots while preserving public and other-agent files', async t => {
@@ -72,4 +74,19 @@ test('material cleanup refuses ancestors of lifecycle state and does not follow 
   const alias = resolve(f.root, 'alias'); await symlink(f.privateRoots[0], alias); profile.chatWorkdir = alias;
   await assert.rejects(cleanStoppedMaterials(f.options), { code: 'RUNTIME_ROOT_UNSAFE' });
   assert.equal(await readFile(resolve(f.privateRoots[0], 'private'), 'utf8'), 'original user data');
+});
+
+test('unknown prior knowledge call is recorded failed without calling provider again, then cleanup continues', async t => {
+  const f = await fixture(t); f.options.knowledgeStatus = 'REQUESTED'; let calls = 0;
+  f.options.extractKnowledge = async () => { calls++; return { confirmed: true }; };
+  assert.deepEqual(await cleanStoppedPrivateData(f.options), { confirmed: true, knowledgeStatus: 'FAILED' });
+  assert.equal(calls, 0); assert.equal(f.options.knowledgeStatus, 'FAILED');
+});
+
+test('failure to persist knowledge request prevents provider calls and all deletion', async t => {
+  const f = await fixture(t); let calls = 0;
+  f.options.recordKnowledgeStatus = async () => { throw new Error('journal unavailable'); };
+  f.options.extractKnowledge = async () => { calls++; return { confirmed: true }; };
+  await assert.rejects(cleanStoppedPrivateData(f.options), /journal unavailable/);
+  assert.equal(calls, 0); assert.equal(await readFile(resolve(f.home, 'private'), 'utf8'), 'original user data');
 });
