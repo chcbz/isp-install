@@ -153,6 +153,13 @@ export const skillManagementResultHttpScope = (endpoint, options = {}) => {
     && (options.method || 'GET').toUpperCase() === 'POST';
 };
 
+export const knowledgeUsageHttpScope = (endpoint, options = {}) => {
+  let decoded; try { decoded = decodeURIComponent(endpoint.pathname); } catch { return false; }
+  if (!decoded.startsWith('/internal/agent/hosting-leases')) return true;
+  return /^\/internal\/agent\/hosting-leases\/[A-Za-z0-9][A-Za-z0-9._:-]{0,99}\/knowledge-usage$/.test(endpoint.pathname)
+    && !endpoint.href.includes('?') && (options.method || 'GET').toUpperCase() === 'POST';
+};
+
 export const materialsChatHttpScope = (endpoint, options = {}) => {
   let decoded; try { decoded = decodeURIComponent(endpoint.pathname) } catch { return false }
   if (!/^\/internal\/agent\/chat\/requests\/.*\/materials(?:\/|$)/.test(decoded)) return true
@@ -270,7 +277,7 @@ export class RuntimeV1Client {
     const endpoint = new URL(url);
     if (endpoint.origin !== this.apiBaseUrl || endpoint.username || endpoint.password || endpoint.hash
         || !(endpoint.pathname.startsWith('/internal/agent/') || archiveNativeEndpoint(endpoint, options) || isReassignmentLeaseEndpoint(endpoint, options, this.manifest))
-        || !skillManagementResultHttpScope(endpoint, options) || !e05InternalScope(endpoint, options) || !skillConversationHttpScope(endpoint, options) || !materialsChatHttpScope(endpoint, options)
+        || !knowledgeUsageHttpScope(endpoint, options) || !skillManagementResultHttpScope(endpoint, options) || !e05InternalScope(endpoint, options) || !skillConversationHttpScope(endpoint, options) || !materialsChatHttpScope(endpoint, options)
         || [...endpoint.searchParams.keys()].some(key => /^(?:api[_-]?key|authorization|session[_-]?token|token)$/i.test(key))) throw fail('RUNTIME_NATIVE_SCOPE_INVALID');
     const session = this.currentSession; const proof = this.sessionHeaders();
     const signal = this.sessionAbort?.signal;

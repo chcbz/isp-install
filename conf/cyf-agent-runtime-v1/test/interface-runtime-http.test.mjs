@@ -66,3 +66,11 @@ test('engine and Runtime share identical codec source bytes', async () => {
   const { readFile } = await import('node:fs/promises')
   assert.deepEqual(await readFile(new URL('../lib/api-envelope.mjs', import.meta.url)), await readFile(new URL('../../codex-bridge/api-envelope.mjs', import.meta.url)))
 })
+
+test('knowledge usage native namespace accepts only exact POST accounting route', async () => {
+  const { knowledgeUsageHttpScope } = await import('../lib/runtime-client.mjs');
+  const base = 'https://api.test/internal/agent/hosting-leases/lease/knowledge-usage';
+  assert.equal(knowledgeUsageHttpScope(new URL(base), { method: 'POST' }), true);
+  for (const path of [base, `${base}?owner=x`, `${base}/other`, base.replace('/lease/', '/%6cease/'), base.replace('knowledge-usage', 'cleanup')])
+    assert.equal(knowledgeUsageHttpScope(new URL(path), { method: path === base ? 'GET' : 'POST' }), false);
+});

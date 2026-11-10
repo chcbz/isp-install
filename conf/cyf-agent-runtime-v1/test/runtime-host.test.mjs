@@ -1402,8 +1402,8 @@ async function workspaceCliUnit(t) {
   };
   const never = () => assert.fail('S01 source unit must not enroll/create a session');
   const main = new Function('resolve', 'readRuntimeHostConfig', 'createLogger', 'runUnifiedRuntime',
-    'RuntimeV1Client', 'readEnrollmentSecret', 'process', 'readRuntimeProviderEnvironments', 'readKnowledgeMaintenanceConfig', 'createKnowledgeMaintenance', `${source.slice(argsStart, argsEnd)}\n${mainSource}\nreturn main;`)(
-    resolve, readRuntimeHostConfig, createLogger, async settings => { calls.push(settings); }, never, never, processCapture, readRuntimeProviderEnvironments, readKnowledgeMaintenanceConfig, createKnowledgeMaintenance);
+    'RuntimeV1Client', 'readEnrollmentSecret', 'process', 'readRuntimeProviderEnvironments', 'readKnowledgeMaintenanceConfig', 'createKnowledgeMaintenance', 'randomUUID', `${source.slice(argsStart, argsEnd)}\n${mainSource}\nreturn main;`)(
+    resolve, readRuntimeHostConfig, createLogger, async settings => { calls.push(settings); }, never, never, processCapture, readRuntimeProviderEnvironments, readKnowledgeMaintenanceConfig, createKnowledgeMaintenance, () => 'fixture-runtime-boot');
   const invoke = async ({ argv = [], env = {} } = {}) => {
     try {
       return await main(['run', '--config', f.path, ...argv], { CYF_RUNTIME_V1_API_BASE_URL: 'https://no-network.invalid', ...env });
@@ -2165,7 +2165,7 @@ test('private cleanup gate requires original stopped evidence and persists succe
   const host = new RuntimeHost({ config, createExecutor: engine.createExecutor,
     flushEvidence: async () => ({ confirmed: evidence }), cleanPrivateData: cleanup });
   f.cleanup(() => host.stop()); await host.start();
-  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original', leaseId: 'lease' };
   await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
   await host.quiesceAgent(agent.subjectKey, request);
   await host.flushAgentEvidence(agent.subjectKey, request);
@@ -2176,6 +2176,7 @@ test('private cleanup gate requires original stopped evidence and persists succe
     await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, { ...request, ...change }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
   assert.equal(cleanups, 0);
   assert.deepEqual(await host.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: false });
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, { ...request, leaseId: 'other' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
   outcome = 'failure'; await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), /interrupted/);
   assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'))).cleanupComplete, undefined);
   outcome = 'complete';
@@ -2198,7 +2199,7 @@ test('private cleanup gate does not invent a receipt when storage adapter is abs
   const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
   const host = new RuntimeHost({ config, createExecutor: executors().createExecutor, flushEvidence: async () => ({ confirmed: true }) });
   f.cleanup(() => host.stop()); await host.start();
-  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original', leaseId: 'lease' };
   await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
   await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_PRIVATE_CLEANUP_UNAVAILABLE'));
   const path = resolve(agent.stateRoot, 'handover.json'), record = JSON.parse(await readFile(path));
@@ -2216,12 +2217,12 @@ test('private cleanup host gate uses real storage aggregate and persists extract
     await writeFile(resolve(root, 'private'), 'old user');
   const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushEvidence: async () => ({ confirmed: true }),
     cleanPrivateData: options => cleanStoppedPrivateData({ ...options, apiOrigin: 'https://api.example.test', instanceId: 'cleanup',
-      publicFiles: { 'config.toml': 'model="test"' }, extractKnowledge: async () => {
+      publicFiles: { 'config.toml': 'model="test"' }, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => {
         extractions++; assert.equal(await readFile(resolve(agent.profile.codexHome, 'private'), 'utf8'), 'old user');
         throw new Error('synthetic private error text');
       } }) });
   f.cleanup(() => host.stop()); await host.start();
-  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original', leaseId: 'lease' };
   await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
   assert.deepEqual(await host.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true });
   const record = JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json')));
@@ -2278,14 +2279,14 @@ test('knowledge checkpoint survives lost final cleanup receipt and restart witho
   const engine = executors(); let calls = 0, lose = true;
   const cleanup = async options => {
     const result = await cleanStoppedPrivateData({ ...options, apiOrigin: 'https://example.test', instanceId: 'test',
-      publicFiles: { 'config.toml': 'model="test"' }, extractKnowledge: async () => { calls++; return { confirmed: true }; } });
+      publicFiles: { 'config.toml': 'model="test"' }, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => { calls++; return { confirmed: true }; } });
     if (lose) throw new Error('lost final cleanup receipt');
     return result;
   };
   const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, cleanPrivateData: cleanup,
     flushEvidence: async () => ({ confirmed: true }) });
   f.cleanup(() => host.stop()); await host.start();
-  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original', leaseId: 'lease' };
   await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
   await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), /lost final/);
   const record = JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json')));

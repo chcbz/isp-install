@@ -26,7 +26,7 @@ try {
   // Actual storage aggregate; only the knowledge provider is synthetic here.
   fixture.host().cleanPrivateData = options => cleanStoppedPrivateData({ ...options,
     apiOrigin: 'https://example.test', instanceId: fixture.host().instanceId,
-    publicFiles: options.agent.publicFiles, extractKnowledge: async () => ({ confirmed: true }) });
+    publicFiles: options.agent.publicFiles, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
   server = await startHostingServer({ control: fixture.control() });
   process.stdout.write(JSON.stringify({ socketPath: fixture.controlConfig.socketPath, uid: process.getuid(), gid: fixture.controlConfig.socketGid,
     hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId }) + '\n');

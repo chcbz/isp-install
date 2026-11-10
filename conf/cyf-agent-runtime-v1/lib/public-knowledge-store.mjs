@@ -1,7 +1,7 @@
 // Host-owned public Agent knowledge and PLATFORM-only usage receipts. These roots
 // are siblings of per-Agent private roots, not under CODEX_HOME or user workdirs.
 import { createHash } from 'node:crypto';
-import { constants, open } from 'node:fs/promises';
+import { constants, open, readdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { readPrivateJson, writePrivateJson } from './security.mjs';
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -43,13 +43,42 @@ export function createPublicKnowledgeStore({ hostStateRoot, privateRoots }) {
       // No source conversation, user identity, paths, credentials or raw draft.
       await append(path, { formatVersion: 1, entries });
     },
-    platformCostSink: subjectKey => {
-      const root = subjectDirectory('platform-usage', subjectKey);
-      return async event => {
+    platformCostJournal: ({ subjectKey, leaseId, operationId }) => {
+      if ([leaseId, operationId].some(value => typeof value !== 'string' || !value.trim()))
+        fail('KNOWLEDGE_COST_BINDING_INVALID');
+      const root = resolve(subjectDirectory('platform-usage', subjectKey), digest([leaseId, operationId]));
+      const binding = { formatVersion: 1, subjectKey, leaseId, operationId };
+      const prepare = () => append(resolve(root, 'binding.json'), binding);
+      const pathFor = event => {
         if (event?.costBearer !== 'PLATFORM' || typeof event.attemptId !== 'string' || !event.attemptId
-            || !['started', 'responded'].includes(event.receiptId)) fail('KNOWLEDGE_COST_BINDING_INVALID');
-        const path = resolve(root, digest(event.attemptId), `${event.receiptId}.json`);
-        await append(path, event);
+            || !['started', 'responded'].includes(event.receiptId)
+            || event.phase !== event.receiptId.toUpperCase()) fail('KNOWLEDGE_COST_BINDING_INVALID');
+        return resolve(root, digest(event.attemptId), `${event.receiptId}.json`);
+      };
+      return {
+        record: async event => { await prepare(); await append(pathFor(event), event); },
+        acknowledge: async (event, receipt) => {
+          const path = pathFor(event);
+          if (!same(await readPrivateJson(path, null), event)) fail('KNOWLEDGE_COST_BINDING_INVALID');
+          await append(`${path}.ack`, { receiptSha256: digest(event), receipt });
+        },
+        pending: async function* () {
+          // Scan only this stopped relationship/handover, never all Agent history.
+          await prepare();
+          for (const child of (await readdir(root, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+            if (!/^[a-f0-9]{64}$/.test(child.name)) continue;
+            if (!child.isDirectory()) fail('KNOWLEDGE_COST_BINDING_INVALID');
+            for (const phase of ['started', 'responded']) {
+              const path = resolve(root, child.name, `${phase}.json`);
+              const event = await readPrivateJson(path, null);
+              if (!event) continue;
+              if (pathFor(event) !== path) fail('KNOWLEDGE_COST_BINDING_INVALID');
+              const ack = await readPrivateJson(`${path}.ack`, null);
+              if (ack && ack.receiptSha256 !== digest(event)) fail('KNOWLEDGE_RETAINED_FACT_CONFLICT');
+              if (!ack) yield event;
+            }
+          }
+        }
       };
     }
   };

@@ -239,7 +239,7 @@ export class RuntimeHost {
   // skill retirement and every private root before confirming. No default erasure
   // of codexWorkdir: it may be the shared project repository. This receipt alone
   // neither releases the business relationship nor permits another executor.
-  cleanAgentPrivateData(key, { installationId, operationId, ownerJiacn } = {}) {
+  cleanAgentPrivateData(key, { installationId, operationId, ownerJiacn, leaseId } = {}) {
     return this.withAgent(key, async state => {
       if (this.stopping || !this.releaseHost || !state.release) throw error('RUNTIME_HANDOVER_OWNERSHIP_REQUIRED');
       const path = resolve(state.agent.stateRoot, 'handover.json');
@@ -249,9 +249,16 @@ export class RuntimeHost {
           || !ownerJiacn || ownerJiacn !== record.evidenceOwnerJiacn) throw error('RUNTIME_HANDOVER_IDENTITY_CONFLICT');
       if (record.phase !== 'QUIESCED' || state.executor) throw error('RUNTIME_HANDOVER_STOP_REQUIRED');
       if (record.evidenceAccepted !== true) throw error('RUNTIME_HANDOVER_EVIDENCE_REQUIRED');
+      if (typeof leaseId !== 'string' || !leaseId.trim() || record.cleanupLeaseId && record.cleanupLeaseId !== leaseId)
+        throw error('RUNTIME_HANDOVER_IDENTITY_CONFLICT');
+      if (!record.cleanupLeaseId) {
+        record.cleanupLeaseId = leaseId;
+        await writePrivateJson(path, record);
+        state.handover = record;
+      }
       if (record.cleanupComplete !== true) {
         if (typeof this.cleanPrivateData !== 'function') throw error('RUNTIME_PRIVATE_CLEANUP_UNAVAILABLE');
-        const result = await this.cleanPrivateData({ agent: state.agent, ownerJiacn, operationId,
+        const result = await this.cleanPrivateData({ agent: state.agent, ownerJiacn, operationId, leaseId,
           knowledgeStatus: record.knowledgeStatus,
           recordKnowledgeStatus: async status => {
             if (!['REQUESTED', 'EXTRACTED', 'FAILED'].includes(status)) throw error('RUNTIME_KNOWLEDGE_STATE_INVALID');

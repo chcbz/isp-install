@@ -176,7 +176,7 @@ export class HostingControl {
         if (!this.host.agents.has(subjectKey)) throw hostingError('HOSTING_OPERATION_PENDING');
         if (request.method === 'cleanup') {
           const result = await this.host.cleanAgentPrivateData(subjectKey, { installationId: request.installationId,
-            operationId: request.handoverId, ownerJiacn: request.ownerJiacn });
+            operationId: request.handoverId, ownerJiacn: request.ownerJiacn, leaseId: request.leaseId });
           return { ...request, outcome: result.confirmed ? 'CLEANED' : 'CLEANUP_PENDING', hostId: this.host.config.hostId };
         }
         if (request.method === 'evidence') {

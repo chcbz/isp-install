@@ -108,8 +108,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   if (!Number.isSafeInteger(interval) || interval < 1) throw failure('RUNTIME_HEARTBEAT_INTERVAL_INVALID');
   const controller = new AbortController(); const stop = () => controller.abort();
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
-  const extractKnowledge = createKnowledgeMaintenance({ hostConfig: config, knowledgeConfig });
-  try { await runUnifiedRuntime({ config, apiOrigin, signal: controller.signal, logger, workspacePolicies, providerEnvironments, extractKnowledge, heartbeatIntervalMs: interval }); return 0; }
+  const instanceId = randomUUID();
+  const extractKnowledge = createKnowledgeMaintenance({ hostConfig: config, knowledgeConfig, apiOrigin, instanceId });
+  try { await runUnifiedRuntime({ config, apiOrigin, instanceId, signal: controller.signal, logger, workspacePolicies, providerEnvironments, extractKnowledge, heartbeatIntervalMs: interval }); return 0; }
   finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
 }
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;

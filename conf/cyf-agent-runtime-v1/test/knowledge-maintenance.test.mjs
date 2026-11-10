@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { knowledgeClientFactory } from './knowledge-usage-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -9,7 +10,7 @@ const route = { configVersion: 1, endpoint: 'https://fixture.invalid/v1/response
 async function fixture(t) {
   const root = await mkdtemp(resolve(tmpdir(), 'knowledge-maintenance-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const agent = { subjectKey: 'tenant/client/agent', stateRoot: resolve(root, 'agent-state'),
+  const agent = { manifest: { canonicalAgentId: 'agent' }, subjectKey: 'tenant/client/agent', stateRoot: resolve(root, 'agent-state'),
     profile: { codexHome: resolve(root, 'home'), codexWorkdir: resolve(root, 'work') } };
   for (const dir of [agent.stateRoot, agent.profile.codexHome, agent.profile.codexWorkdir]) await mkdir(dir, { mode: 0o700 });
   const hostConfig = { stateRoot: resolve(root, 'host'), agents: [agent] };
@@ -42,7 +43,7 @@ test('configured adapter reads actual stopped session files and retains public k
   } }) + '\n');
   const knowledgeConfig = await readKnowledgeMaintenanceConfig(configPath, hostConfig);
   let calls = 0;
-  const extract = createKnowledgeMaintenance({ hostConfig, knowledgeConfig, fetchImpl: async (_url, options) => {
+  const extract = createKnowledgeMaintenance({ hostConfig, knowledgeConfig, apiOrigin: 'https://fixture.invalid', instanceId: 'boot', clientFactory: knowledgeClientFactory(), fetchImpl: async (_url, options) => {
     calls++; const sent = JSON.parse(options.body);
     assert.equal(sent.model, 'gpt-6-luna'); assert.equal(options.headers.Authorization, 'Bearer fixture-platform-secret');
     assert.equal(sent.input.includes('private fixture lesson source'), calls === 1);
@@ -52,7 +53,7 @@ test('configured adapter reads actual stopped session files and retains public k
         { type: 'output_text', text: JSON.stringify(calls === 1 ? { entries } : { safe: true, entries }) }
       ] }] }) };
   } });
-  assert.deepEqual(await extract({ agent, operationId: 'handover', ownerJiacn: 'not-in-provider-request' }), { confirmed: true });
+  assert.deepEqual(await extract({ agent, leaseId: 'lease', operationId: 'handover', ownerJiacn: 'not-in-provider-request' }), { confirmed: true });
   assert.equal(calls, 2);
   assert.equal((await readdir(resolve(hostConfig.stateRoot, 'public-knowledge'))).length, 1);
   assert.equal((await readdir(resolve(hostConfig.stateRoot, 'platform-usage'))).length, 1);
@@ -80,4 +81,69 @@ test('artifact install and validation inventories include the complete runtime e
   }
   await visit(resolve(root, 'agent-runtime.mjs'));
   assert.ok(seen.has('lib/knowledge-maintenance.mjs')); assert.ok(seen.has('lib/evidence-handover.mjs'));
+});
+
+test('native HTTP roundtrip acknowledges STARTED before spend and reuses the original session for actual usage', async t => {
+  const { createServer } = await import('node:http'), { once } = await import('node:events');
+  const { knowledgeReceipt } = await import('./knowledge-usage-fixture.mjs');
+  const { configPath, hostConfig, agent } = await fixture(t);
+  Object.assign(agent.manifest, { installationId: 'install', tenantId: 'tenant', clientId: 'client', manifestVersion: 1, manifestSha256: `sha256:${'a'.repeat(64)}` });
+  hostConfig.hostId = 'host';
+  await writeFile(resolve(agent.stateRoot, 'runtime-authorization.json'), JSON.stringify({ installationId: 'install', runtimeAuthorization: `rta1_${'b'.repeat(64)}` }), { mode: 0o600 });
+  await mkdir(resolve(agent.profile.codexHome, 'sessions'));
+  await writeFile(resolve(agent.profile.codexHome, 'sessions/one.jsonl'), JSON.stringify({ type: 'response_item', payload: {
+    type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Synthetic lesson.' }]
+  } }) + '\n');
+  const seen = []; let sessions = 0;
+  const server = createServer(async (request, response) => {
+    try {
+      let text = ''; for await (const chunk of request) text += chunk;
+      const q = JSON.parse(text); assert.equal(q.protocolVersion, 1); assert.equal(q.requestId, request.headers['x-request-id']);
+      let data;
+      if (request.url === '/agent/runtime/v1/session') {
+        sessions++; assert.equal(request.headers.authorization, `Bearer rta1_${'b'.repeat(64)}`);
+        assert.equal(q.data.runtimeInstanceId, 'same-runtime-boot');
+        data = { ...q.data, scheme: 'AgentRuntime', sessionToken: `rts1_${'c'.repeat(64)}`, sessionGeneration: '1', status: 'CHANNEL_PENDING', websocketPath: '/ws/agent/channel' };
+      } else {
+        assert.equal(request.url, '/internal/agent/hosting-leases/lease/knowledge-usage');
+        assert.equal(request.headers.authorization, `AgentRuntime rts1_${'c'.repeat(64)}`);
+        assert.equal(request.headers['x-agent-runtime-id'], 'same-runtime-boot');
+        assert.equal(q.data.observation.requestedTier, 'standard');
+        assert.equal('ownerJiacn' in q.data, false); assert.equal('taskId' in q.data, false);
+        seen.push(q.data); data = knowledgeReceipt(agent.manifest, 'lease', q.data);
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json', 'X-Request-Id': q.requestId });
+      response.end(JSON.stringify({ protocolVersion: 1, requestId: q.requestId, code: 'E0', msg: 'OK', data }));
+    } catch (error) { response.writeHead(500); response.end('fixture failed'); server.fixtureError = error; }
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const extract = createKnowledgeMaintenance({ hostConfig, knowledgeConfig: await readKnowledgeMaintenanceConfig(configPath, hostConfig),
+    apiOrigin: `http://127.0.0.1:${server.address().port}`, instanceId: 'same-runtime-boot', fetchImpl: async () => {
+      assert.equal(seen.length, 1); assert.equal(seen[0].observation.phase, 'STARTED');
+      return { ok: true, status: 200, json: async () => ({ id: 'response', model: 'gpt-6-luna', service_tier: 'default', status: 'completed',
+        usage: { input_tokens: 3, output_tokens: 2, input_tokens_details: { cached_tokens: 0 }, total_tokens: 5 },
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '{"entries":[]}' }] }] }) };
+    } });
+  const context = { agent, operationId: 'handover', leaseId: 'lease' };
+  await extract(context); await extract.flushPlatformCosts(context);
+  assert.ifError(server.fixtureError); assert.equal(sessions, 1); assert.equal(seen.length, 2);
+  assert.equal(seen[1].observation.evidence.usage.total_tokens, 5);
+});
+
+test('failed STARTED acknowledgement never calls provider; empty history creates no session or model spend', async t => {
+  const { configPath, hostConfig, agent } = await fixture(t);
+  let spent = 0, sessions = 0;
+  const extract = createKnowledgeMaintenance({ hostConfig, knowledgeConfig: await readKnowledgeMaintenanceConfig(configPath, hostConfig),
+    apiOrigin: 'https://fixture.invalid', instanceId: 'boot', fetchImpl: async () => { spent++; },
+    clientFactory: knowledgeClientFactory({ onSession: () => sessions++, beforeReply: async () => { throw new Error('start unacknowledged'); } }) });
+  const context = { agent, operationId: 'handover', leaseId: 'lease' };
+  await extract(context); await extract.flushPlatformCosts(context);
+  assert.equal(sessions, 0); assert.equal(spent, 0);
+  await mkdir(resolve(agent.profile.codexHome, 'sessions'));
+  await writeFile(resolve(agent.profile.codexHome, 'sessions/one.jsonl'), JSON.stringify({ type: 'response_item', payload: {
+    type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Synthetic.' }]
+  } }) + '\n');
+  await assert.rejects(extract(context), /start unacknowledged/);
+  assert.equal(spent, 0); assert.equal(sessions, 1);
 });

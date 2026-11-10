@@ -60,7 +60,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       if (policyId && !policy) throw adapterError('RUNTIME_CLEANUP_WORKSPACE_POLICY_REQUIRED');
       return cleanStoppedPrivateData({ ...options, apiOrigin, instanceId,
         publicFiles: options.agent.publicFiles,
-        publicRepositoryRoots: policy ? [policy.repository, policy.root] : [], extractKnowledge });
+        publicRepositoryRoots: policy ? [policy.repository, policy.root] : [], extractKnowledge, flushPlatformCosts: extractKnowledge?.flushPlatformCosts });
     },
     createExecutor: options => {
       if (closing || attached.has(options.subjectKey)) throw adapterError('RUNTIME_EXECUTOR_SUBJECT_INVALID');

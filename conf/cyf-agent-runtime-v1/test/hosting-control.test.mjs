@@ -406,7 +406,7 @@ test('cleanup control uses trusted saved template, requires evidence and preserv
   let cleans = 0;
   f.host().cleanPrivateData = options => {
     cleans++; return cleanStoppedPrivateData({ ...options, apiOrigin: 'https://example.test', instanceId: 'cleanup',
-      publicFiles: options.agent.publicFiles, extractKnowledge: async () => ({ confirmed: true }) });
+      publicFiles: options.agent.publicFiles, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
   };
   await assert.rejects(control.handle(request), code('RUNTIME_HANDOVER_STATE_INVALID'));
   await control.handle({ ...request, method: 'quiesce' });

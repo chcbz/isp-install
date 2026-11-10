@@ -106,9 +106,17 @@ cleanup. Both roots survive owner removal. No private transcript/draft is stored
 Model privacy review is not an anonymity guarantee; semantic acceptance remains required.
 
 As of 2026-11-10 this is an uninstalled source candidate: no production route is configured.
-Price snapshot acquisition, delivery of platform receipts to API accounting and the full
-business finishing handler remain unfinished. Local receipts alone do not establish a
-priced RMB cost, relationship release or new-owner admission.
+The candidate sends STARTED through original native authentication to
+`POST /internal/agent/hosting-leases/{leaseId}/knowledge-usage` before spending;
+the API retains the tariff snapshot, then receives actual RESPONDED usage. The same
+runtime boot identity is reused without engine restart or channel registration.
+Per-relationship host journals retain evidence and immutable ACKs. Cleanup flushes
+pending receipts before deleting original private credentials; a failed upload blocks
+erasure, but never retries model spend. Missing usage/prices remain pending platform
+costs, not zero or user charges. No wallet/task settlement is performed by this path.
+Full business finishing orchestration, real provider/privacy acceptance and production
+rollout remain unfinished. Local receipts alone do not establish a priced RMB cost,
+relationship release or new-owner admission.
 
 Each sealed manifest contains exact `installationId`, `tenantId`, `clientId`,
 `canonicalAgentId`, `manifestVersion`, `runtimeProtocolVersion: "v1"`, and

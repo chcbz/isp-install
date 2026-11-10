@@ -1,5 +1,8 @@
 // Operator-only platform model route. No original user's HOME/auth/environment is
 // used to select credentials; no control request can change endpoint or filesystem.
+import { createHash } from 'node:crypto';
+import { RuntimeV1Client } from './runtime-client.mjs';
+import { readNativeJson } from '../../codex-bridge/native-json.mjs';
 import { resolve } from 'node:path';
 import { readPrivateJson } from './security.mjs';
 import { mutableProfilePaths } from './manifest.mjs';
@@ -28,16 +31,51 @@ export async function readKnowledgeMaintenanceConfig(path, hostConfig) {
   return Object.freeze({ ...value });
 }
 
-export function createKnowledgeMaintenance({ hostConfig, knowledgeConfig, fetchImpl }) {
+export function createKnowledgeMaintenance({ hostConfig, knowledgeConfig, apiOrigin, instanceId, fetchImpl,
+  clientFactory = settings => new RuntimeV1Client(settings) }) {
   if (!knowledgeConfig) return undefined;
   const store = createPublicKnowledgeStore({ hostStateRoot: hostConfig.stateRoot, privateRoots: privateRoots(hostConfig) });
   const readConversations = createCodexKnowledgeReader(knowledgeConfig);
-  return async ({ agent, operationId }) => {
-    // Dynamic managed Agents are protected by the containing managedRoot checked
-    // at configuration time; static roots are already admitted by the host manifest.
-    const invoke = createKnowledgeResponsesClient({ ...knowledgeConfig, fetchImpl,
-      recordAttempt: store.platformCostSink(agent.subjectKey) });
-    const extract = createPublicKnowledgeExtractor({ invoke, readConversations, publish: store.publish });
-    return extract({ agent, operationId });
+  const withDelivery = async ({ agent, operationId, leaseId }, action) => {
+    const journal = store.platformCostJournal({ subjectKey: agent.subjectKey, leaseId, operationId });
+    let client;
+    const deliver = async event => {
+      const attempt = JSON.parse(event.attemptId);
+      if (!Array.isArray(attempt) || attempt.length !== 4 || attempt[0] !== agent.subjectKey || attempt[1] !== operationId)
+        throw failure('KNOWLEDGE_COST_BINDING_INVALID');
+      if (!client) {
+        client = clientFactory({ manifest: agent.manifest, apiBaseUrl: apiOrigin,
+          stateDir: agent.stateRoot, hostId: hostConfig.hostId, runtimeInstanceId: instanceId });
+        await client.session(); // original native authorization; never register/enroll/start an engine
+      }
+      const response = await client.nativeFetch(new URL(`/internal/agent/hosting-leases/${encodeURIComponent(leaseId)}/knowledge-usage`, apiOrigin), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ handoverId: operationId,
+          observation: { batchId: attempt[2], stage: attempt[3], phase: event.phase, channel: event.channel,
+            requestedModel: event.requestedModel, requestedTier: 'standard', evidence: event.evidence } }) });
+      const receipt = await readNativeJson(response);
+      // Same digest as the central usage journal; neither owner nor task is part of platform billing.
+      const sourceAttemptId = JSON.stringify([agent.manifest.canonicalAgentId, leaseId, operationId, attempt[2], attempt[3]]);
+      const expected = createHash('sha256').update(JSON.stringify(['PUBLIC_KNOWLEDGE_EXTRACTION', sourceAttemptId])).digest('hex');
+      if (receipt?.handoverId !== operationId || receipt.attemptId !== expected
+          || receipt.revision !== (event.phase === 'STARTED' ? '1' : '2')
+          || !['PENDING_USAGE', 'PENDING_PRICE', 'PRICED'].includes(receipt.status)
+          || (receipt.status === 'PRICED' ? typeof receipt.costYuan !== 'string' || !/^\d+(?:\.\d{1,6})?$/.test(receipt.costYuan) : receipt.costYuan !== null))
+        throw failure('KNOWLEDGE_COST_ACK_INVALID');
+      await journal.acknowledge(event, receipt);
+    };
+    try { return await action(journal, deliver); }
+    finally { client?.invalidateSession(); }
   };
+  const extract = context => withDelivery(context, async (journal, deliver) => {
+    const invoke = createKnowledgeResponsesClient({ ...knowledgeConfig, fetchImpl,
+      recordAttempt: async event => { await journal.record(event); await deliver(event); } });
+    return createPublicKnowledgeExtractor({ invoke, readConversations, publish: store.publish })(context);
+  });
+  // Runs even after failed/unknown extraction. Persisted evidence may be replayed,
+  // but the model request never is. A failed flush retains original credentials.
+  extract.flushPlatformCosts = context => withDelivery(context, async (journal, deliver) => {
+    for await (const event of journal.pending()) await deliver(event);
+    return { confirmed: true };
+  });
+  return extract;
 }
