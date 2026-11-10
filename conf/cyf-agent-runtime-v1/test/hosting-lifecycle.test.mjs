@@ -222,3 +222,68 @@ test('adapter readmission joins durable skill identity and real engine registrat
   await assert.rejects(adapters.admitRelationship(request), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
   await executor.close();
 });
+
+async function cleanedReadmission(t) {
+  const f = await hostingFixture(t), previous = await freshAgent(f), next = structuredClone(previous), host = f.host();
+  next.manifest.installationId = 'rti_' + 'e'.repeat(32); next.manifest.manifestSha256 = digestManifest(next.manifest);
+  const association = { operationId: 'next-invitation', handoverId: 'original-finish', leaseId: 'original-lease',
+    previousOwnerJiacn: 'old-owner', ownerJiacn: 'new-owner' };
+  await host.ensureAgent(previous);
+  await host.quiesceAgent(previous.subjectKey, { installationId: previous.manifest.installationId, operationId: association.handoverId });
+  host.flushEvidence = async () => ({ confirmed: true }); host.cleanPrivateData = async () => ({ confirmed: true });
+  await host.flushAgentEvidence(previous.subjectKey, { installationId: previous.manifest.installationId,
+    operationId: association.handoverId, ownerJiacn: association.previousOwnerJiacn });
+  await host.cleanAgentPrivateData(previous.subjectKey, { installationId: previous.manifest.installationId,
+    operationId: association.handoverId, ownerJiacn: association.previousOwnerJiacn, leaseId: association.leaseId });
+  return { f, previous, next, association };
+}
+
+test('host readmission requires full original cleanup, preserves writer inode/public files, and initializes only new identity', async t => {
+  const { f, previous, next, association } = await cleanedReadmission(t), host = f.host();
+  const lockPath = resolve(previous.stateRoot, '.runtime-writer.lock'), lock = await lstat(lockPath, { bigint: true });
+  const publicPath = resolve(previous.profile.codexWorkdir, 'public-repo.txt'); await writeFile(publicPath, 'keep-public-history');
+  let admitted = 0, materialized = 0;
+  host.admitRelationship = async options => { admitted++; assert.equal(options.operationId, association.handoverId); assert.equal(options.agent.manifest.installationId, next.manifest.installationId); };
+  const materialize = async () => { materialized++; };
+  await assert.rejects(host.readmitAgent(previous, next, { ...association, previousOwnerJiacn: 'wrong' }, materialize), code('RUNTIME_ADMISSION_CLEANUP_REQUIRED'));
+  await assert.rejects(host.readmitAgent(previous, next, { ...association, leaseId: 'wrong' }, materialize), code('RUNTIME_ADMISSION_CLEANUP_REQUIRED'));
+  const result = await host.readmitAgent(previous, next, association, materialize);
+  assert.equal(result.phase, 'INITIALIZED'); assert.equal((await lstat(lockPath, { bigint: true })).ino, lock.ino);
+  assert.equal(await readFile(publicPath, 'utf8'), 'keep-public-history'); assert.equal(admitted, 1); assert.equal(materialized, 1);
+  assert.equal(f.states.get(previous.subjectKey).length, 2); assert.equal(f.states.get(previous.subjectKey)[0].closed, 1);
+  assert.equal(f.states.get(previous.subjectKey)[1].agent.manifest.installationId, next.manifest.installationId);
+  await host.readmitAgent(previous, next, association, materialize); assert.equal(admitted, 1);
+  await assert.rejects(host.quiesceAgent(previous.subjectKey, { installationId: previous.manifest.installationId, operationId: association.handoverId }));
+  await host.quiesceAgent(next.subjectKey, { installationId: next.manifest.installationId, operationId: 'new-finish' });
+  await assert.rejects(host.readmitAgent(previous, next, association, materialize));
+});
+
+test('interrupted host admission blocks old startup after restart and resumes the exact transition', async t => {
+  const { f, previous, next, association } = await cleanedReadmission(t);
+  f.host().admitRelationship = async () => { throw Error('fixture interrupted identity transition'); };
+  await assert.rejects(f.host().readmitAgent(previous, next, association, async () => {}), /fixture interrupted/);
+  const markerPath = resolve(previous.stateRoot, 'relationship-admission.json');
+  assert.equal(JSON.parse(await readFile(markerPath)).phase, 'PREPARED');
+  await f.stop(); await f.start();
+  const host = f.host(); let admitted = 0;
+  await assert.rejects(host.ensureAgent(previous), code('RUNTIME_HANDOVER_PENDING'));
+  assert.equal(f.states.get(previous.subjectKey).length, 1); // No old executor recreated.
+  host.admitRelationship = async () => { admitted++; };
+  await assert.rejects(host.readmitAgent(previous, next, { ...association, operationId: 'another-invitation' }, async () => {}), code('RUNTIME_ADMISSION_IDENTITY_CONFLICT'));
+  await host.readmitAgent(previous, next, association, async () => {});
+  assert.equal(admitted, 1); assert.equal(JSON.parse(await readFile(markerPath)).phase, 'COMMITTED');
+  assert.equal(f.states.get(previous.subjectKey).at(-1).agent.manifest.installationId, next.manifest.installationId);
+});
+
+test('committed admission receipt prevents old startup even after old handover marker is removed', async t => {
+  const { f, previous, next, association } = await cleanedReadmission(t);
+  f.host().admitRelationship = async () => {};
+  await f.host().readmitAgent(previous, next, association, async () => {});
+  await f.stop(); await f.start();
+  await assert.rejects(f.host().ensureAgent(previous), code('RUNTIME_HANDOVER_PENDING'));
+  assert.equal(f.states.get(previous.subjectKey).length, 2);
+  f.host().admitRelationship = async () => {};
+  await f.host().readmitAgent(previous, next, association, async () => {});
+  assert.equal(f.states.get(previous.subjectKey).length, 3);
+  assert.equal(f.states.get(previous.subjectKey).at(-1).agent.manifest.installationId, next.manifest.installationId);
+});

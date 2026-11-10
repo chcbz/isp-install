@@ -53,10 +53,10 @@ export async function acquireRuntimeOwnership(root, { hostId, instanceId, subjec
 }
 
 export class RuntimeHost {
-  constructor({ config, instanceId = randomUUID(), createExecutor, flushEvidence, cleanPrivateData, logger = () => {} }) {
+  constructor({ config, instanceId = randomUUID(), createExecutor, flushEvidence, cleanPrivateData, admitRelationship, logger = () => {} }) {
     if (typeof createExecutor !== 'function' || !config?.agents?.length) throw error('RUNTIME_HOST_CONFIG_REQUIRED');
     if (typeof instanceId !== 'string' || !instanceId || instanceId === config.hostId) throw error('RUNTIME_INSTANCE_ID_INVALID');
-    this.config = config; this.instanceId = instanceId; this.createExecutor = createExecutor; this.flushEvidence = flushEvidence; this.cleanPrivateData = cleanPrivateData; this.logger = logger;
+    this.config = config; this.instanceId = instanceId; this.createExecutor = createExecutor; this.flushEvidence = flushEvidence; this.cleanPrivateData = cleanPrivateData; this.admitRelationship = admitRelationship; this.logger = logger;
     this.agents = new Map(config.agents.map(agent => [runtimeSubjectKey(agent.manifest), {
       agent, phase: 'STOPPED', executor: null, release: null, gate: Promise.resolve(), reasonCode: null
     }]));
@@ -105,6 +105,16 @@ export class RuntimeHost {
           hostId: this.config.hostId, instanceId: this.instanceId, subjectKey: key
         });
         const handover = await readPrivateJson(resolve(state.agent.stateRoot, 'handover.json'), undefined);
+        const admission = await readPrivateJson(resolve(state.agent.stateRoot, 'relationship-admission.json'), undefined);
+        if (admission !== undefined) {
+          this.requireAdmissionRecord(key, admission);
+          if (![admission.previousManifest.manifestSha256, admission.manifest.manifestSha256].includes(state.agent.manifest.manifestSha256))
+            throw error('RUNTIME_ADMISSION_IDENTITY_CONFLICT');
+          if (admission.phase !== 'COMMITTED' || admission.manifest.manifestSha256 !== state.agent.manifest.manifestSha256 || handover !== undefined) {
+            state.quiesceRequested = true; state.phase = 'QUIESCED';
+            return; // A restart cannot revive either side of an unfinished admission.
+          }
+        }
         if (handover !== undefined) {
           this.requireHandoverRecord(key, state, handover);
           state.handover = handover; state.quiesceRequested = true;
@@ -169,6 +179,77 @@ export class RuntimeHost {
   }
 
   reprovisionAgent(agent) { return this.ensureAgent(agent, { recreate: true }); }
+
+  requireAdmissionRecord(key, record) {
+    if (!record || record.formatVersion !== 1 || record.subjectKey !== key
+        || !['PREPARED', 'COMMITTED'].includes(record.phase)
+        || ['operationId', 'handoverId', 'leaseId', 'previousOwnerJiacn', 'ownerJiacn'].some(field => typeof record[field] !== 'string' || !record[field].trim()))
+      throw error('RUNTIME_ADMISSION_STATE_INVALID');
+    validateManifest(record.previousManifest); validateManifest(record.manifest);
+    if (runtimeSubjectKey(record.previousManifest) !== key || runtimeSubjectKey(record.manifest) !== key
+        || record.previousManifest.installationId === record.manifest.installationId)
+      throw error('RUNTIME_ADMISSION_IDENTITY_CONFLICT');
+  }
+
+  // Trusted control transition, not a public request DTO. Keep the same writer
+  // lock and roots across private identity replacement; no enrollment here.
+  readmitAgent(previousAgent, agent, association, materialize) {
+    try {
+      if (this.stopping || !this.releaseHost) throw error('RUNTIME_HOST_NOT_RUNNING');
+      const key = runtimeSubjectKey(agent.manifest);
+      const intent = { formatVersion: 1, subjectKey: key, ...association,
+        previousManifest: previousAgent.manifest, manifest: agent.manifest, phase: 'PREPARED' };
+      this.requireAdmissionRecord(key, intent);
+      if (agent.subjectKey !== key || previousAgent.subjectKey !== key || agent.profile.agentId !== agent.manifest.canonicalAgentId
+          || agent.stateRoot !== previousAgent.stateRoot || stableJson(agent.profile) !== stableJson(previousAgent.profile)
+          || typeof materialize !== 'function' || typeof this.admitRelationship !== 'function')
+        throw error('RUNTIME_ADMISSION_IDENTITY_CONFLICT');
+      const roots = candidate => [candidate.stateRoot, candidate.profile.codexHome, candidate.profile.codexWorkdir];
+      const overlaps = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+      for (const path of roots(agent)) {
+        if (!isAbsolute(path) || resolve(path) !== path || overlaps(path, this.config.stateRoot)) throw error('RUNTIME_PATH_INVALID');
+        for (const [otherKey, other] of this.agents) if (otherKey !== key && (other.agent.manifest.installationId === agent.manifest.installationId
+            || roots(other.agent).some(root => overlaps(path, root)))) throw error('RUNTIME_AGENT_ROOTS_OVERLAP');
+      }
+      if (!this.agents.has(key)) this.agents.set(key, { agent: previousAgent, phase: 'STOPPED', executor: null, release: null, gate: Promise.resolve(), reasonCode: null });
+      return this.withAgent(key, async state => {
+        if (this.stopping) throw error('RUNTIME_HOST_STOPPED');
+        if (![previousAgent.manifest.manifestSha256, agent.manifest.manifestSha256].includes(state.agent.manifest.manifestSha256))
+          throw error('RUNTIME_ADMISSION_IDENTITY_CONFLICT');
+        const path = resolve(agent.stateRoot, 'relationship-admission.json'), handoverPath = resolve(agent.stateRoot, 'handover.json');
+        for (const root of roots(agent)) await requireOwnedPrivateRoot(root);
+        state.release ||= await acquireRuntimeOwnership(agent.stateRoot, { hostId: this.config.hostId, instanceId: this.instanceId, subjectKey: key });
+        let record = await readPrivateJson(path, undefined);
+        if (record !== undefined) {
+          this.requireAdmissionRecord(key, record);
+          if (stableJson({ ...record, phase: 'PREPARED' }) !== stableJson(intent)) throw error('RUNTIME_ADMISSION_IDENTITY_CONFLICT');
+          if (record.phase === 'COMMITTED' && state.agent.manifest.manifestSha256 === agent.manifest.manifestSha256 && state.executor) return state;
+        }
+        if (state.executor) throw error('RUNTIME_HANDOVER_STOP_REQUIRED');
+        const handover = await readPrivateJson(handoverPath, undefined);
+        if (handover !== undefined) {
+          this.requireHandoverRecord(key, { agent: previousAgent }, handover);
+          if (handover.cleanupComplete !== true || handover.operationId !== association.handoverId
+              || handover.cleanupLeaseId !== association.leaseId || handover.evidenceOwnerJiacn !== association.previousOwnerJiacn)
+            throw error('RUNTIME_ADMISSION_CLEANUP_REQUIRED');
+        } else if (record?.phase !== 'COMMITTED') throw error('RUNTIME_ADMISSION_CLEANUP_REQUIRED');
+        state.quiesceRequested = true; state.phase = 'QUIESCED';
+        if (!record) { await writePrivateJson(path, intent, { exclusive: true }); record = intent; }
+        await materialize(previousAgent, agent);
+        await this.admitRelationship({ previousAgent, agent, operationId: association.handoverId,
+          previousOwnerJiacn: association.previousOwnerJiacn, ownerJiacn: association.ownerJiacn });
+        if (record.phase !== 'COMMITTED') await writePrivateJson(path, { ...intent, phase: 'COMMITTED' });
+        // The committed receipt keeps the original cleanup identity for crash recovery.
+        // Delete only this checked old marker, never public files or private roots.
+        if (handover !== undefined) { await unlink(handoverPath); await syncDirectory(agent.stateRoot); }
+        state.agent = agent; state.handover = null; state.handoverOperation = null;
+        state.quiesceRequested = false; state.phase = 'STOPPED'; state.reasonCode = null;
+        await this.initializeAgent(key, state);
+        if (state.phase !== 'INITIALIZED') throw error(state.reasonCode || 'RUNTIME_AGENT_NOT_INITIALIZED');
+        return state;
+      });
+    } catch (cause) { return Promise.reject(cause); }
+  }
 
   agentEvidence(key) {
     const state = this.agents.get(key);
