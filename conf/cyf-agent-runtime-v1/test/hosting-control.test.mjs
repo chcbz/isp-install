@@ -184,6 +184,9 @@ async function wireExchange(path, internal) {
 test('private UDS uses closed correlated envelopes, preserves scope and rejects old wire/duplicates', async t => {
   const f = await hostingFixture(t); const server = await startHostingServer({ control: f.control() }); t.after(() => server.close());
   const stat = await lstat(f.controlConfig.socketPath); assert.equal(stat.mode & 0o777, 0o660); assert.equal(stat.gid, f.controlConfig.socketGid);
+  const inventoryRequest = { protocol: 'runtime-hosting-v1', method: 'inventory', tenantId: prepare.tenantId,
+    clientId: prepare.clientId, ownerJiacn: prepare.ownerJiacn, canonicalAgentId: prepare.canonicalAgentId };
+  assert.equal((await wireExchange(f.controlConfig.socketPath, inventoryRequest)).installedSkillCount, '0');
   const candidate = await wireExchange(f.controlConfig.socketPath, prepare); assert.equal(candidate.outcome, 'PREPARED');
   assert.equal(candidate.provisionGeneration, '1'); assert.equal(candidate.validUntilAt, null);
   assert.match(candidate.runtimeInstallationId, /^rti_[0-9a-f]{32}$/); assert.equal(Object.hasOwn(candidate, 'installationId'), false);
@@ -641,4 +644,15 @@ test('public inventory is scoped, has no paths or provisioning side effects, and
   const message = eventMessage('inventory-request', 'hosting.inventory', 'inventory-fixture', Object.fromEntries(Object.entries(request).filter(([key]) => !['protocol', 'method'].includes(key))));
   assert.deepEqual(validateHostingRequest(message), request);
   assert.equal(hostingReply(message, existing).data.installedSkillCount, '1');
+});
+
+
+test('shared inventory fixture preserves Unicode digest and public envelope without local paths', async () => {
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/hosting-inventory-v1.json', import.meta.url)));
+  assert.deepEqual(validateHostingAssociation(fixture.request), fixture.request);
+  assert.equal(createHash('sha256').update(JSON.stringify(fixture.response.skills)).digest('hex'), fixture.response.inventorySha256);
+  assert.equal(String(fixture.response.skills.length), fixture.response.installedSkillCount);
+  const request = messageOf(fixture.request), reply = hostingReply(request, fixture.response);
+  assert.deepEqual(reply.data.skills.map(skill => skill.skillKey), ['installed', '菜谱']);
+  assert.equal(reply.data.installedSkillCount, '2');
 });
