@@ -903,18 +903,31 @@ export class TypedInspectionProfileRuntime {
   }
   async dispose() {
     this.disposed = true
+    const failures = []
+    const collect = results => { for (const result of results) if (result.status === 'rejected') failures.push(result.reason) }
     await Promise.all([...(this.pendingWarmChats?.values() || [])].map(promise => promise.catch(() => {})))
-    await Promise.all([...(this.warmChatAdapters?.values() || [])].map(async item => {
-      await (item.closing || item.adapter.shutdown({ timeoutMs: 1000 })).catch(() => {})
-      await item.egress?.dispose().catch(() => {})
+    collect(await Promise.allSettled([...(this.warmChatAdapters?.entries() || [])].map(async ([key, item]) => {
+      if (item.closing) await item.closing
+      else { try { await item.adapter.shutdown({ timeoutMs: 1000 }) } finally { await item.egress?.dispose() } }
       if (item.emptyInputs) rmSync(item.emptyInputs, { recursive: true, force: true })
-    }))
-    this.warmChatAdapters?.clear(); this.idleWarmChatKey = null
+      if (this.warmChatAdapters.get(key) === item) this.warmChatAdapters.delete(key)
+      if (this.conversationOwners?.get(key) === item.owner) this.conversationOwners.delete(key)
+      if (this.idleWarmChatKey === key) this.idleWarmChatKey = null
+    })))
     await Promise.all([...(this.pendingInspectionAdapters?.values() || [])].map(promise => promise.catch(() => {})))
-    await Promise.all([...(this.closingAdapters?.values() || [])].map(promise => promise.catch(() => {})))
+    collect(await Promise.allSettled([...(this.closingAdapters?.values() || [])]))
     await Promise.all([...(this.pendingNativeAdapters?.values() || [])].map(slot => slot.promise.catch(() => {})))
-    const active = [...this.activeAdapters.values()]; this.activeAdapters.clear(); this.conversationOwners?.clear()
-    await Promise.all(active.map(async item => { await item.adapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await item.egress?.dispose().catch(() => {}); if (item.nativeLayout) rmSync(resolve(item.engineState.directory, 'skill-config'), { recursive: true, force: true }) }))
+    collect(await Promise.allSettled([...this.activeAdapters.entries()].map(async ([key, item]) => {
+      try { await item.adapter.shutdown({ timeoutMs: 1000 }) } finally { await item.egress?.dispose() }
+      if (item.nativeLayout) rmSync(resolve(item.engineState.directory, 'skill-config'), { recursive: true, force: true })
+      if (this.activeAdapters.get(key) === item) this.activeAdapters.delete(key)
+      const conversationKey = item.engineState.conversationKey
+      if (conversationKey && this.conversationOwners?.get(conversationKey) === key) this.conversationOwners.delete(conversationKey)
+    })))
+    // Failed closes retain their ownership/resource references. The RuntimeHost
+    // must not publish QUIESCED, remove private state or release its writer lock.
+    if (failures.length) fail('TYPED_INSPECTION_SHUTDOWN_UNCONFIRMED')
+    this.conversationOwners?.clear()
     if (this.providerCaTrust?.directory) rmSync(this.providerCaTrust.directory, { recursive: true, force: true })
   }
   mapInputPath(hostPath, inputDirectory) {
