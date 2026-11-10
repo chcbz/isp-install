@@ -5,6 +5,8 @@
 import { hostingFixture } from './hosting-fixture.mjs';
 import { cleanStoppedPrivateData } from '../lib/private-data-cleanup.mjs';
 import { startHostingServer } from '../lib/hosting-server.mjs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 const cleanups = [];
 let server; let stopPromise;
 const stop = () => stopPromise ||= (async () => {
@@ -20,6 +22,17 @@ const stop = () => stopPromise ||= (async () => {
 if (!process.env.NODE_TEST_CONTEXT) {
 try {
   const fixture = await hostingFixture({ after: cleanup => cleanups.push(cleanup) });
+  if (process.env.CYF_GSS_INVENTORY_CODEX_BIN) {
+    const peer = fixture.peers[0];
+    peer.profile.codexBin = process.env.CYF_GSS_INVENTORY_CODEX_BIN;
+    for (const name of ['manual-fixture', 'disabled-fixture']) {
+      const directory = resolve(peer.profile.codexHome, 'skills', name);
+      await mkdir(directory, { recursive: true });
+      await writeFile(resolve(directory, 'SKILL.md'), `---\nname: ${name}\ndescription: Public inventory integration fixture.\n---\n`);
+    }
+    await writeFile(resolve(peer.profile.codexHome, 'config.toml'),
+      `[[skills.config]]\npath = ${JSON.stringify(resolve(peer.profile.codexHome, 'skills/disabled-fixture/SKILL.md'))}\nenabled = false\n`);
+  }
   // Evidence transport fixture only: real stop/gate/journal; provider delivery is synthetic.
   let attempts = 0;
   fixture.host().flushEvidence = async () => ({ confirmed: ++attempts > 1 });
