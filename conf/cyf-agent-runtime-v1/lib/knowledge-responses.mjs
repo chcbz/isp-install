@@ -13,7 +13,9 @@ export function createKnowledgeResponsesClient({ endpoint, model, credential, ch
     throw failure('KNOWLEDGE_PROVIDER_CONFIG_INVALID');
   // endpoint is the exact trusted /responses endpoint, not model-selected input.
   return async ({ attemptId, instructions, input, schema, schemaName }) => {
-    if (![attemptId, instructions, input, schemaName].every(exact) || !schema || typeof schema !== 'object')
+    if (![attemptId, schemaName].every(exact)
+        || [instructions, input].some(value => typeof value !== 'string' || !value.trim())
+        || !schema || typeof schema !== 'object')
       throw failure('KNOWLEDGE_REQUEST_INVALID');
     const binding = Object.freeze({ attemptId, channel, requestedModel: model, costBearer: 'PLATFORM' });
     // A crash/timeout remains a real unpriced attempt. Fail closed BEFORE spending

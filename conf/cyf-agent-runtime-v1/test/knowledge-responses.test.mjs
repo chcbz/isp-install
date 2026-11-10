@@ -78,3 +78,10 @@ test('operator endpoint and durable sink required; untrusted redirects cannot re
     assert.throws(() => createKnowledgeResponsesClient({ ...config, endpoint, recordAttempt: async () => {} }));
   assert.throws(() => createKnowledgeResponsesClient(config));
 });
+
+test('source whitespace is preserved rather than rejected as an identity field', async () => {
+  const { client, calls } = fixture();
+  const input = '\n  Original user message with trailing newline.\n';
+  await client({ ...request, input });
+  assert.equal(JSON.parse(calls[0].options.body).input, input);
+});
