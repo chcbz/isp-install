@@ -22,7 +22,8 @@ test('reads immutable platform route outside private roots and never falls back 
   assert.deepEqual(value, route); assert.equal(Object.isFrozen(value), true);
   assert.equal(await readKnowledgeMaintenanceConfig(undefined, hostConfig), null);
   assert.equal(createKnowledgeMaintenance({ hostConfig, knowledgeConfig: null }), undefined);
-  for (const root of [hostConfig.stateRoot, agent.stateRoot, agent.profile.codexHome])
+  agent.profile.typedInspectionStateRoot = resolve(agent.stateRoot, 'typed-state');
+  for (const root of [hostConfig.stateRoot, agent.stateRoot, agent.profile.codexHome, agent.profile.typedInspectionStateRoot])
     await assert.rejects(readKnowledgeMaintenanceConfig(resolve(root, 'operator.json'), hostConfig), { code: 'KNOWLEDGE_OPERATOR_CONFIG_PATH_INVALID' });
 });
 test('unsafe configuration permissions and input-controlled extra keys are rejected without exposing credentials', async t => {

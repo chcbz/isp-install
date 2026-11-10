@@ -48,9 +48,9 @@ export function runtimeSubjectKey(manifest) {
     clientId: manifest.clientId, canonicalAgentId: manifest.canonicalAgentId })).digest('hex');
 }
 
-const mutableProfilePaths = ['codexHome', 'codexWorkdir', 'chatWorkdir', 'workspaceFallbackWorkdir',
+export const mutableProfilePaths = Object.freeze(['codexHome', 'codexWorkdir', 'chatWorkdir', 'workspaceFallbackWorkdir',
   'workspaceFileRootDir', 'typedInspectionRootDir', 'typedInspectionStateRoot',
-  'controlledImageHttpLedgerRoot'];
+  'controlledImageHttpLedgerRoot']);
 const configError = code => Object.assign(new Error(code), { code });
 const exact = value => typeof value === 'string' && value.length > 0 && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);

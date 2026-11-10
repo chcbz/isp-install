@@ -90,3 +90,32 @@ test('failure to persist knowledge request prevents provider calls and all delet
   await assert.rejects(cleanStoppedPrivateData(f.options), /journal unavailable/);
   assert.equal(calls, 0); assert.equal(await readFile(resolve(f.home, 'private'), 'utf8'), 'original user data');
 });
+
+test('configured real knowledge pipeline publishes outside private roots before cleanup and does not spend again on retry', async t => {
+  const { createKnowledgeMaintenance } = await import('../lib/knowledge-maintenance.mjs');
+  const f = await fixture(t); f.options.agent.subjectKey = 'tenant/client/agent';
+  const hostRoot = resolve(f.root, 'host');
+  await mkdir(resolve(f.home, 'sessions'), { mode: 0o755 });
+  await writeFile(resolve(f.home, 'sessions/one.jsonl'), JSON.stringify({ type: 'response_item', payload: {
+    type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Private synthetic experience to generalize.' }]
+  } }) + '\n');
+  let calls = 0;
+  f.options.extractKnowledge = createKnowledgeMaintenance({ hostConfig: { stateRoot: hostRoot, agents: [f.options.agent] },
+    knowledgeConfig: { endpoint: 'https://fixture.invalid/responses', credential: 'fixture', model: 'gpt-6-luna', channel: 'platform', maxInputBytes: 4096 },
+    fetchImpl: async (_url, options) => {
+      calls++; assert.equal(f.options.knowledgeStatus, 'REQUESTED');
+      assert.equal(await readFile(resolve(f.home, 'private'), 'utf8'), 'original user data');
+      const entries = [{ title: 'Validate committed state', guidance: 'Only report completion after durable persistence.' }];
+      return { ok: true, status: 200, json: async () => ({ status: 'completed', model: JSON.parse(options.body).model,
+        usage: { input_tokens: 30, output_tokens: 10, total_tokens: 40 },
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify(calls === 1 ? { entries } : { safe: true, entries }) }] }] }) };
+    } });
+  assert.deepEqual(await cleanStoppedPrivateData(f.options), { confirmed: true, knowledgeStatus: 'EXTRACTED' });
+  assert.equal(calls, 2);
+  assert.deepEqual((await readdir(f.home)).sort(), ['config.toml', 'skills']);
+  assert.equal((await readdir(resolve(hostRoot, 'public-knowledge'))).length, 1);
+  assert.equal((await readdir(resolve(hostRoot, 'platform-usage'))).length, 1);
+  assert.equal(await readFile(resolve(f.repository, '.git/history'), 'utf8'), 'public commits');
+  assert.deepEqual(await cleanStoppedPrivateData(f.options), { confirmed: true, knowledgeStatus: 'EXTRACTED' });
+  assert.equal(calls, 2);
+});

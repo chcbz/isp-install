@@ -2,16 +2,15 @@
 // used to select credentials; no control request can change endpoint or filesystem.
 import { resolve } from 'node:path';
 import { readPrivateJson } from './security.mjs';
+import { mutableProfilePaths } from './manifest.mjs';
 import { createCodexKnowledgeReader } from './knowledge-sessions.mjs';
 import { createKnowledgeResponsesClient } from './knowledge-responses.mjs';
 import { createPublicKnowledgeExtractor } from './knowledge-extraction.mjs';
 import { createPublicKnowledgeStore } from './public-knowledge-store.mjs';
 const failure = code => Object.assign(new Error(code), { code });
 const contains = (root, child) => root === child || child.startsWith(`${root}/`);
-const profileRoots = ['codexHome', 'codexWorkdir', 'chatWorkdir', 'workspaceFallbackWorkdir', 'workspaceFileRootDir',
-  'typedInspectionRootDir', 'typedInspectionStateRootDir', 'controlledImageHttpLedgerRoot'];
 const privateRoots = config => [...config.agents.flatMap(agent => [agent.stateRoot,
-  ...profileRoots.map(name => agent.profile[name]).filter(Boolean)]), ...(config.hostingControl ? [config.hostingControl.managedRoot] : [])];
+  ...mutableProfilePaths.map(name => agent.profile[name]).filter(Boolean)]), ...(config.hostingControl ? [config.hostingControl.managedRoot] : [])];
 
 export async function readKnowledgeMaintenanceConfig(path, hostConfig) {
   if (!path) return null; // Missing route does not enable production cleanup with a fake extractor.
