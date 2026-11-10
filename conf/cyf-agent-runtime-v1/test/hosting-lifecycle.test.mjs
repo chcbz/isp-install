@@ -160,3 +160,65 @@ test('private socket trusted-group child UID1001/GID1000 can exchange while untr
   const other = await run(1001); assert.equal(other.exit, 13); assert.match(other.stdout, /EACCES/);
   await server.close();
 });
+
+test('trusted engine readmission replaces only the closed identity in the same public roots; ordinary add stays fenced', async t => {
+  const f = await hostingFixture(t), agent = await freshAgent(f);
+  const engine = createRuntimeExecutionHost({ agents: f.peers, runtimeInstanceId: 'engine-readmission', apiOrigin: 'https://no-network.invalid' });
+  t.after(() => engine.close());
+  const peer = engine.createExecutor({ subjectKey: f.peers[0].subjectKey }); await peer.initialize(); const peerState = peer.state();
+  engine.addAgent(agent); const first = engine.createExecutor({ subjectKey: agent.subjectKey }); await first.initialize();
+  const oldState = first.state(), next = structuredClone(agent);
+  next.manifest.installationId = 'rti_' + 'e'.repeat(32); next.manifest.manifestSha256 = digestManifest(next.manifest);
+  assert.throws(() => engine.admitAgent(next, agent.manifest), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  await first.close(); assert.equal(oldState.disposed, true);
+  assert.throws(() => engine.addAgent(next), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  assert.throws(() => engine.admitAgent(next, { ...agent.manifest, installationId: 'wrong' }), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  assert.throws(() => engine.admitAgent({ ...next, profile: { ...next.profile, codexHome: f.peers[0].profile.codexHome } }, agent.manifest), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  engine.admitAgent(next, agent.manifest); engine.admitAgent(structuredClone(next), structuredClone(agent.manifest));
+  const second = engine.createExecutor({ subjectKey: next.subjectKey }); await second.initialize();
+  assert.equal(second.state().profile.runtimeIdentity.installationId, next.manifest.installationId);
+  assert.equal(second.state().profile.codexHome, oldState.profile.codexHome);
+  assert.notEqual(second.state(), oldState); assert.equal(peer.state(), peerState); assert.equal(peerState.disposed, false);
+  assert.throws(() => engine.admitAgent(next, agent.manifest), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  assert.throws(() => engine.addAgent(agent), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+});
+
+test('engine readmission after host restart registers the public subject without an old executor', async t => {
+  const f = await hostingFixture(t), agent = await freshAgent(f), next = structuredClone(agent);
+  next.manifest.installationId = 'rti_' + 'f'.repeat(32); next.manifest.manifestSha256 = digestManifest(next.manifest);
+  const engine = createRuntimeExecutionHost({ agents: f.peers, runtimeInstanceId: 'engine-restart', apiOrigin: 'https://no-network.invalid' });
+  t.after(() => engine.close());
+  assert.throws(() => engine.admitAgent(next, { ...agent.manifest, clientId: 'other' }), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  assert.throws(() => engine.admitAgent(next, next.manifest), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  engine.admitAgent(next, agent.manifest);
+  const executor = engine.createExecutor({ subjectKey: next.subjectKey }); await executor.initialize();
+  assert.equal(executor.state().profile.runtimeIdentity.installationId, next.manifest.installationId);
+});
+
+test('adapter readmission joins durable skill identity and real engine registration without enrollment or execution', async t => {
+  const f = await hostingFixture(t), previousAgent = await freshAgent(f), agent = structuredClone(previousAgent);
+  agent.manifest.installationId = 'rti_' + 'e'.repeat(32); agent.manifest.manifestSha256 = digestManifest(agent.manifest);
+  const { SkillInstallManager, defaultSkillInstallStateRoot } = await import('../../codex-bridge/skill-install-manager.mjs');
+  const { stoppedSkillManager } = await import('../lib/evidence-handover.mjs');
+  const apiOrigin = 'https://no-network.invalid', instanceId = 'adapter-readmission';
+  const stateRoot = defaultSkillInstallStateRoot(resolve(previousAgent.stateRoot, 'inbox'), previousAgent.profile, 'wss://no-network.invalid');
+  const manager = new SkillInstallManager({ profile: previousAgent.profile, stateRoot, wsUrl: 'wss://no-network.invalid', runtimeInstanceId: instanceId });
+  manager.initialize();
+  const identity = { tenantId: '0', clientId: 'fixture-client', agentId: previousAgent.manifest.canonicalAgentId, ownerJiacn: 'original-owner' };
+  manager.bindSession({ scope: identity, fence: { installationId: previousAgent.manifest.installationId, runtimeInstanceId: instanceId } });
+  manager.bindSession(null);
+  await manager.retireRelationship({ identity: { ...identity, runtimeInstallationId: previousAgent.manifest.installationId }, operationId: 'retirement-join' });
+  const adapters = await createExecutionAdapterFactory({ config: f.hostConfig, instanceId, apiOrigin,
+    socketFactory: class { constructor() { assert.fail('admission must not open socket'); } },
+    clientFactory: () => ({ invalidateSession() {}, session() { assert.fail('admission must not enroll/session'); } }) });
+  t.after(() => adapters.close());
+  const request = { agent, previousAgent, operationId: 'retirement-join', previousOwnerJiacn: 'original-owner', ownerJiacn: 'next-owner' };
+  await adapters.admitRelationship(request); await adapters.admitRelationship(request);
+  const reloaded = stoppedSkillManager({ agent, apiOrigin, instanceId }); reloaded.initialize();
+  assert.equal(reloaded.boundIdentity.ownerJiacn, 'next-owner');
+  assert.equal(reloaded.boundIdentity.runtimeInstallationId, agent.manifest.installationId);
+  // Registration is already present: createExecutor must not fall back to ordinary addAgent.
+  const executor = adapters.createExecutor({ agent, subjectKey: agent.subjectKey });
+  await assert.rejects(adapters.admitRelationship(request), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  await executor.close();
+});

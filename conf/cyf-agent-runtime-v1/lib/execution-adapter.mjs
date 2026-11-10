@@ -62,6 +62,22 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         publicFiles: options.agent.publicFiles,
         publicRepositoryRoots: policy ? [policy.repository, policy.root] : [], extractKnowledge, flushPlatformCosts: extractKnowledge?.flushPlatformCosts });
     },
+    // Called only by the host's stopped CLEANED -> new relationship transition.
+    // Does not enroll, attach a session, initialize an executor or invoke a model.
+    admitRelationship: async ({ agent, previousAgent, operationId, previousOwnerJiacn, ownerJiacn }) => {
+      if (closing || attached.has(agent.subjectKey)) throw adapterError('RUNTIME_EXECUTOR_SUBJECT_INVALID');
+      const { stoppedSkillManager } = await import('./evidence-handover.mjs');
+      const manager = stoppedSkillManager({ agent: previousAgent, apiOrigin, instanceId });
+      if (manager) {
+        manager.initialize();
+        const identity = (entry, owner) => ({ tenantId: entry.manifest.tenantId, clientId: entry.manifest.clientId,
+          ownerJiacn: owner, agentId: entry.manifest.canonicalAgentId, runtimeInstallationId: entry.manifest.installationId });
+        await manager.admitRetiredRelationship({ operationId,
+          previousIdentity: identity(previousAgent, previousOwnerJiacn), nextIdentity: identity(agent, ownerJiacn) });
+      }
+      engine.admitAgent(agent, previousAgent.manifest);
+      known.add(agent.subjectKey);
+    },
     createExecutor: options => {
       if (closing || attached.has(options.subjectKey)) throw adapterError('RUNTIME_EXECUTOR_SUBJECT_INVALID');
       if (!known.has(options.subjectKey)) { engine.addAgent(options.agent); known.add(options.subjectKey); }

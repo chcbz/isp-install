@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import { ChatUsageDelivery } from './chat-usage-delivery.mjs'
 import { contextDeliveryPlan, requireContextThread, completedContextReceipt, contextBootstrapRejection } from './chat-context-delivery.mjs'
 import { CHAT_FILE_TOOL_INSTRUCTIONS } from './native-execution-profile.mjs'
@@ -6551,15 +6552,31 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
     entry.closed = true
     entry.state = null
   }
-  return {
-    // Trusted local lifecycle only: never accepts wire-selected profile/path data.
-    addAgent: agent => {
+  const registerAgent = (agent, previousManifest = null) => {
       if (closing || runtimeExecutionOwner !== owner) throw new AgentProtocolError('RUNTIME_EXECUTOR_OWNERSHIP_LOST', 'Execution host is stopping')
       const [key, fresh] = makeEntry(agent)
       const prior = entries.get(key)
-      if (prior && (!prior.closed || prior.agent.manifest.installationId !== agent.manifest.installationId
-          || prior.agent.manifest.manifestSha256 !== agent.manifest.manifestSha256 || prior.agent.stateRoot !== agent.stateRoot))
-        throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Existing subject must be closed with identical installation')
+      if (previousManifest && prior && !prior.closed && !prior.state
+          && isDeepStrictEqual(prior.admittedFromManifest, previousManifest)
+          && isDeepStrictEqual(prior.agent, agent)) return
+      if (prior) {
+        if (!prior.closed || prior.state || prior.agent.stateRoot !== agent.stateRoot)
+          throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Existing subject must be closed in the same root')
+        if (previousManifest) {
+          if (!isDeepStrictEqual(prior.agent.manifest, previousManifest)
+              || previousManifest.installationId === agent.manifest.installationId
+              || ['codexHome', 'codexWorkdir', 'profileId'].some(field => prior.profile[field] !== fresh.profile[field]))
+            throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Readmission requires the exact retired installation and public roots')
+        } else if (prior.agent.manifest.installationId !== agent.manifest.installationId
+            || prior.agent.manifest.manifestSha256 !== agent.manifest.manifestSha256)
+          throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Recreation requires identical installation')
+      } else if (previousManifest) {
+        // On process restart there is no old engine entry. The host still owns
+        // the durable cleanup/admission proof and original subject writer lock.
+        if (previousManifest.installationId === agent.manifest.installationId
+            || ['tenantId', 'clientId', 'canonicalAgentId'].some(field => previousManifest[field] !== agent.manifest[field]))
+          throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Readmission must retain the public subject')
+      }
       const replacement = [...entries.values()].filter(entry => entry !== prior).map(entry => entry.profile).concat(fresh.profile)
       // Dynamic entries must retain cross-subject HOME/workdir isolation.
       for (const profile of replacement) for (const other of replacement) {
@@ -6571,8 +6588,18 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         }
       }
       ensureProfiles([fresh.profile], fresh.profile.profileId, workspacePolicies, false)
+      if (previousManifest) fresh.admittedFromManifest = structuredClone(previousManifest)
       entries.set(key, fresh)
       profiles.splice(0, profiles.length, ...replacement)
+  }
+  return {
+    // Ordinary reprovisioning cannot change installation identity.
+    addAgent: agent => registerAgent(agent),
+    // Trusted host only, after stopped private cleanup and durable admission.
+    // Not exposed as a model/tool/WS operation and does not enroll or execute.
+    admitAgent: (agent, previousManifest) => {
+      if (!previousManifest) throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Retired manifest required')
+      registerAgent(agent, previousManifest)
     },
     createExecutor: ({ subjectKey }) => {
       const entry = entries.get(subjectKey)
