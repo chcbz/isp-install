@@ -45,22 +45,29 @@ export function createPublicKnowledgeExtractor({ invoke, readConversations, publ
   return async ({ agent, operationId }) => {
     if (!agent?.subjectKey || typeof operationId !== 'string' || !operationId.trim())
       throw failure('KNOWLEDGE_BINDING_INVALID');
-    // Identity appears only in the platform cost attempt, never the model prompt.
-    const attempt = stage => JSON.stringify([agent.subjectKey, operationId, stage]);
-    const conversations = await readConversations(agent);
-    if (typeof conversations !== 'string') throw failure('KNOWLEDGE_SOURCE_INVALID');
-    if (!conversations.trim()) return { confirmed: true }; // no model call for an empty HOME
-    const draft = await invoke({ attemptId: attempt('extract'), instructions: extractionInstructions,
-      input: conversations, schemaName: 'public_knowledge_draft', schema: KNOWLEDGE_DRAFT_SCHEMA });
-    if (!entries(draft).length) return { confirmed: true };
-    // A separate pass sees ONLY the draft, not the original private conversation.
-    // This is a model privacy review, not a mathematical anonymity guarantee;
-    // semantic privacy/quality still needs realistic acceptance evaluation.
-    const reviewed = await invoke({ attemptId: attempt('privacy-review'), instructions: reviewInstructions,
-      input: JSON.stringify(draft), schemaName: 'public_knowledge_review', schema: KNOWLEDGE_REVIEW_SCHEMA });
-    const publicEntries = entries(reviewed, true);
-    if (!reviewed.safe) throw failure('KNOWLEDGE_PRIVACY_REJECTED');
-    if (publicEntries.length) await publish({ agent, operationId, entries: publicEntries });
+    const conversations = readConversations(agent);
+    if (!conversations || typeof conversations === 'string'
+        || typeof conversations[Symbol.asyncIterator] !== 'function' && typeof conversations[Symbol.iterator] !== 'function')
+      throw failure('KNOWLEDGE_SOURCE_INVALID');
+    // Sequential bounded inputs: never read the entire HOME into memory and never
+    // launch parallel paid calls. Outer handover journal forbids retrying a partial run.
+    for await (const batch of conversations) {
+      if (typeof batch?.batchId !== 'string' || !batch.batchId || typeof batch.text !== 'string')
+        throw failure('KNOWLEDGE_SOURCE_INVALID');
+      if (!batch.text.trim()) continue;
+      const attempt = stage => JSON.stringify([agent.subjectKey, operationId, batch.batchId, stage]);
+      const draft = await invoke({ attemptId: attempt('extract'), instructions: extractionInstructions,
+        input: batch.text, schemaName: 'public_knowledge_draft', schema: KNOWLEDGE_DRAFT_SCHEMA });
+      if (!entries(draft).length) continue;
+      // Review sees only draft, not private source. Semantic privacy still needs
+      // realistic acceptance evaluation, not merely schema checks or mock safe=true.
+      const reviewed = await invoke({ attemptId: attempt('privacy-review'), instructions: reviewInstructions,
+        input: JSON.stringify(draft), schemaName: 'public_knowledge_review', schema: KNOWLEDGE_REVIEW_SCHEMA });
+      const publicEntries = entries(reviewed, true);
+      if (!reviewed.safe) throw failure('KNOWLEDGE_PRIVACY_REJECTED');
+      if (publicEntries.length) await publish({ agent,
+        operationId: JSON.stringify([operationId, batch.batchId]), entries: publicEntries });
+    }
     return { confirmed: true };
   };
 }

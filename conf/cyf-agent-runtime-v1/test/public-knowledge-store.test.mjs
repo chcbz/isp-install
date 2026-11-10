@@ -80,7 +80,7 @@ test('real loopback HTTP extraction and privacy review retain platform usage bef
   const invoke = createKnowledgeResponsesClient({ endpoint: 'https://fixture.invalid/v1/responses', model: 'gpt-6-luna',
     credential: 'fixture-only', channel: 'fixture', recordAttempt: store.platformCostSink(agent.subjectKey),
     fetchImpl: (_url, options) => fetch(`http://127.0.0.1:${server.address().port}/v1/responses`, options) });
-  const extract = createPublicKnowledgeExtractor({ invoke, readConversations: async () => source, publish: store.publish });
+  const extract = createPublicKnowledgeExtractor({ invoke, readConversations: () => [{ batchId: "0", text: source }], publish: store.publish });
   assert.deepEqual(await extract({ agent, operationId: knowledge.operationId }), { confirmed: true });
   assert.equal(requests.length, 2); assert.equal(requests[0].input, source);
   assert.equal(requests[1].input.includes(source), false);

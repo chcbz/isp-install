@@ -8,7 +8,7 @@ const draft = { entries: [{ title: 'Draft', guidance: 'Potentially private guida
 const reviewed = { safe: true, entries: [{ title: 'Atomic updates', guidance: 'Write to a temporary file, then rename atomically.' }] };
 function fixture(results = [draft, reviewed], source = privateText) {
   const calls = [], published = [];
-  const extract = createPublicKnowledgeExtractor({ readConversations: async () => source,
+  const extract = createPublicKnowledgeExtractor({ readConversations: () => [{ batchId: "0", text: source }],
     invoke: async request => { calls.push(request); return results[calls.length - 1]; },
     publish: async value => { published.push(value); } });
   return { calls, published, extract };
@@ -19,8 +19,8 @@ test('only reviewed generic knowledge is published; original owner and conversat
   assert.equal(calls.length, 2); assert.equal(calls[0].input, privateText);
   assert.equal(calls[1].input, JSON.stringify(draft));
   assert.equal(JSON.stringify(calls[1]).includes(privateText), false);
-  assert.deepEqual(calls.map(x => JSON.parse(x.attemptId)), [[agent.subjectKey, operationId, 'extract'], [agent.subjectKey, operationId, 'privacy-review']]);
-  assert.deepEqual(published, [{ agent, operationId, entries: reviewed.entries }]);
+  assert.deepEqual(calls.map(x => JSON.parse(x.attemptId)), [[agent.subjectKey, operationId, '0', 'extract'], [agent.subjectKey, operationId, '0', 'privacy-review']]);
+  assert.deepEqual(published, [{ agent, operationId: JSON.stringify([operationId, "0"]), entries: reviewed.entries }]);
   assert.equal(JSON.stringify(published).includes('private-owner'), false);
 });
 test('empty sources spend nothing and empty extraction does not invoke privacy review', async () => {
@@ -44,7 +44,7 @@ test('invalid model schema and self-authorizing extra fields cannot publish know
 });
 test('publication failure is not reported as extracted and cannot trigger an implicit model retry', async () => {
   let calls = 0;
-  const extract = createPublicKnowledgeExtractor({ readConversations: async () => privateText,
+  const extract = createPublicKnowledgeExtractor({ readConversations: () => [{ batchId: "0", text: privateText }],
     invoke: async () => [draft, reviewed][calls++], publish: async () => { throw new Error('disk failure'); } });
   await assert.rejects(extract({ agent, operationId }), /disk failure/); assert.equal(calls, 2);
 });
