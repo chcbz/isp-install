@@ -57,3 +57,27 @@ test('configured adapter reads actual stopped session files and retains public k
   assert.equal((await readdir(resolve(hostConfig.stateRoot, 'public-knowledge'))).length, 1);
   assert.equal((await readdir(resolve(hostConfig.stateRoot, 'platform-usage'))).length, 1);
 });
+test('artifact install and validation inventories include the complete runtime entry import graph', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, relative } = await import('node:path');
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const inventory = async name => {
+    const text = await readFile(resolve(root, name), 'utf8'); const files = new Set();
+    for (const match of text.matchAll(/for file in ([\s\S]*?); do/g))
+      for (const token of match[1].replaceAll('\\\n', ' ').split(/\s+/)) if (token) files.add(token);
+    return files;
+  };
+  const installed = await inventory('install.sh'), validated = await inventory('validate.sh'), seen = new Set();
+  async function visit(path) {
+    const name = relative(root, path); if (name.startsWith('..') || seen.has(name)) return;
+    seen.add(name);
+    assert.ok(installed.has(name), `installer must copy ${name}`);
+    assert.ok(validated.has(name), `artifact validator must require ${name}`);
+    const text = await readFile(path, 'utf8');
+    for (const match of text.matchAll(/\b(?:from\s*|import\s*\()\s*['"](\.[^'"]+\.mjs)['"]/g))
+      await visit(resolve(dirname(path), match[1]));
+  }
+  await visit(resolve(root, 'agent-runtime.mjs'));
+  assert.ok(seen.has('lib/knowledge-maintenance.mjs')); assert.ok(seen.has('lib/evidence-handover.mjs'));
+});

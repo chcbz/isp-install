@@ -19,7 +19,7 @@ NODE_BIN="$PACKAGE_ROOT/node/bin/node"
 NODE_VERSION="$("$NODE_BIN" -p 'process.versions.node')"
 printf 'Runtime Node version: %s\n' "$NODE_VERSION"
 for file in agent-runtime.mjs install.sh validate.sh package.json runtime.env.example manifest.example.json \
-    lib/manifest.mjs lib/runtime-client.mjs lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs \
+    lib/manifest.mjs lib/runtime-client.mjs lib/api-envelope.mjs lib/message-envelope.mjs lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs \
     lib/hosting-config.mjs lib/hosting-wire.mjs lib/hosting-control.mjs lib/hosting-server.mjs \
     lib/evidence-handover.mjs lib/private-data-cleanup.mjs lib/private-home-cleanup.mjs lib/private-state-cleanup.mjs lib/private-material-cleanup.mjs \
     lib/knowledge-maintenance.mjs lib/knowledge-sessions.mjs lib/knowledge-extraction.mjs lib/knowledge-responses.mjs lib/public-knowledge-store.mjs \
