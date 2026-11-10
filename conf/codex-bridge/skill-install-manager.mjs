@@ -1318,6 +1318,47 @@ export class SkillInstallManager {
     return pending
   }
 
+  /** Host-only admission after full private cleanup. Never exposed through a
+   * session/message: the caller owns the stopped subject gate and new enrollment.
+   * Retain public packages; only replace the retired private identity. */
+  admitRetiredRelationship({ operationId, previousIdentity, nextIdentity }) {
+    const run = () => this._withLockSync('admit-retired-skill-relationship', () => {
+      if (this.session) throw new SkillInstallError('SKILL_RELATIONSHIP_ACTIVE', 'detach the live session before admission')
+      const fields = ['tenantId', 'clientId', 'ownerJiacn', 'agentId', 'runtimeInstallationId']
+      if (typeof operationId !== 'string' || !operationId.trim()
+          || [previousIdentity, nextIdentity].some(identity => !identity
+            || fields.some(key => typeof identity[key] !== 'string' || !identity[key].trim()))
+          || ['tenantId', 'clientId', 'agentId'].some(key => previousIdentity[key] !== nextIdentity[key])
+          || nextIdentity.agentId !== this.profile.agentId
+          || previousIdentity.runtimeInstallationId === nextIdentity.runtimeInstallationId)
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'same public subject and fresh installation required')
+      const state = this._load()
+      const receipt = { operationId,
+        identitySha256: managementDigest('cyf.skill.retired-identity.v1', previousIdentity),
+        nextIdentitySha256: managementDigest('cyf.skill.retired-identity.v1', nextIdentity) }
+      if (!state.retirement) {
+        if (!this._same(state.admission || null, receipt) || !this._same(state.identity, nextIdentity))
+          throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'original retirement required')
+        this.boundIdentity = structuredClone(nextIdentity)
+        return { admitted: true }
+      }
+      if (state.retirement.operationId !== operationId || state.retirement.identitySha256 !== receipt.identitySha256)
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'different relationship retirement')
+      // Finish an interrupted retirement before committing the replacement identity.
+      // Exact replay above never runs cleanup against the new relationship.
+      this._clearRetiredPrivateState(state)
+      state.identity = structuredClone(nextIdentity); state.admission = receipt
+      delete state.retirement
+      this._save(state)
+      this.boundIdentity = structuredClone(nextIdentity)
+      this.replayToken = null; this.replayed.clear()
+      this.checkpoint('relationship-admitted', receipt)
+      return { admitted: true }
+    })
+    const pending = this.tail.then(run, run); this.tail = pending.catch(() => {})
+    return pending
+  }
+
   // The stopped owner already committed retirement and validated public packages.
   // Keep only immutable package facts/journal and the currently held writer lock;
   // staging, old lock metadata and interrupted private writes are not public skills.
