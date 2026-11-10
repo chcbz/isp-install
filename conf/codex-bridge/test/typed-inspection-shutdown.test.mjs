@@ -52,3 +52,17 @@ test('pending close rejection is not converted into a successful profile disposa
   rejectClose(new Error('unconfirmed close')); await disposed
   assert.equal(existsSync(ca), true)
 })
+
+test('failed idle warm close preserves private inputs and can be retried by disposal', async t => {
+  const { runtime, root, ca } = fixture(t); const inputs = resolve(root, 'inputs'); mkdirSync(inputs)
+  let refuse = true; let stops = 0
+  const item = { idle: true, owner: 'owner', emptyInputs: inputs,
+    adapter: { shutdown: async () => { stops++; if (refuse) throw new Error('unconfirmed') } },
+    egress: { dispose: async () => {} } }
+  runtime.warmChatAdapters.set('warm', item); runtime.conversationOwners.set('warm', 'owner')
+  await assert.rejects(runtime._closeWarmChat('warm'), /unconfirmed/)
+  assert.equal(item.closing, null); assert.equal(existsSync(inputs), true)
+  assert.equal(runtime.warmChatAdapters.get('warm'), item); assert.equal(existsSync(ca), true)
+  refuse = false; await runtime.dispose()
+  assert.equal(stops, 2); assert.equal(existsSync(inputs), false); assert.equal(runtime.warmChatAdapters.size, 0)
+})

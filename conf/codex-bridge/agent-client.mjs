@@ -6363,25 +6363,35 @@ export const unbindProfileChatAdapter = (state, adapter) => {
   state.appServerExitListener = null; state.appServerAdapter = null
 }
 
-export const disposeAppServerState = async (state, { timeoutMs = 5000 } = {}) => {
-  if (!state || state.disposed) return
-  state.e05CommandAbort?.abort()
-  state.disposed = true
-  if (state.appServerRestartTimer) clearTimeout(state.appServerRestartTimer)
-  state.appServerRestartTimer = null
-  state.appServerNotBefore = 0
-  const pendingStart = state.appServerPromise
-  const adapter = state.appServerAdapter
-  const startingAdapter = state.appServerStartingAdapter
-  const exitListener = state.appServerExitListener
-  if (adapter && exitListener) adapter.off('exit', exitListener)
-  state.appServerExitListener = null
-  state.appServerAdapter = null
-  state.appServerStartingAdapter = null
-  state.appServerPromise = null
-  for (const candidate of new Set([adapter, startingAdapter, ...(state.conversationToolAdapters || []), ...(state.retainedChatAdapters || [])].filter(Boolean))) await candidate.shutdown({ timeoutMs })
-  // Async integrity work must settle before releasing this subject lifecycle.
-  await pendingStart?.catch(() => {})
+export const disposeAppServerState = (state, { timeoutMs = 5000 } = {}) => {
+  if (!state) return Promise.resolve()
+  if (state.appServerShutdownPromise) return state.appServerShutdownPromise
+  if (!state.appServerShutdownPending) {
+    state.e05CommandAbort?.abort()
+    state.disposed = true
+    clearTimeout(state.appServerRestartTimer)
+    state.appServerRestartTimer = null
+    state.appServerNotBefore = 0
+    state.appServerShutdownStart = state.appServerPromise
+    state.appServerShutdownPending = new Set([state.appServerAdapter, state.appServerStartingAdapter,
+      ...(state.conversationToolAdapters || []), ...(state.retainedChatAdapters || [])].filter(Boolean))
+    if (state.appServerAdapter && state.appServerExitListener) state.appServerAdapter.off('exit', state.appServerExitListener)
+    state.appServerExitListener = null
+    state.appServerAdapter = null
+    state.appServerStartingAdapter = null
+    state.appServerPromise = null
+  }
+  // Admission stays disabled on failure. Keep each unconfirmed adapter so an
+  // explicit retry can finish shutdown without losing ownership or restarting it.
+  state.appServerShutdownPromise = (async () => {
+    const results = await Promise.allSettled([...state.appServerShutdownPending].map(async candidate => {
+      await candidate.shutdown({ timeoutMs })
+      state.appServerShutdownPending.delete(candidate)
+    }))
+    await state.appServerShutdownStart?.catch(() => {})
+    if (results.some(result => result.status === 'rejected')) throw new AgentProtocolError('APP_SERVER_SHUTDOWN_UNCONFIRMED', 'App server shutdown is unconfirmed')
+  })().catch(error => { state.appServerShutdownPromise = null; throw error })
+  return state.appServerShutdownPromise
 }
 
 // Wait for actual owned-child close, not ChildProcess.killed (signal-sent).
@@ -6406,6 +6416,7 @@ export const stopRuntimeExecutionChild = (profile, child, { escalationMs = 5000 
 export const disposeProfileState = (state, reason = 'profile removed') => {
   if (!state) return Promise.resolve()
   if (!state.profileShutdownPromise) state.profileShutdownPromise = disposeProfileStateOnce(state, reason)
+    .catch(error => { state.profileShutdownPromise = null; throw error })
   return state.profileShutdownPromise
 }
 const disposeProfileStateOnce = async (state, reason) => {

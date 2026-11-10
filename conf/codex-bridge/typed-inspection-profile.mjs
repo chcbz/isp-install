@@ -423,11 +423,9 @@ export class TypedInspectionProfileRuntime {
     this.chatAdapterLifecycle?.closing(active.adapter)
     active.closing = (async () => {
       try { await active.adapter.shutdown({ timeoutMs: 1000 }) }
-      finally {
-        try { await active.egress?.dispose() }
-        finally { if (active.emptyInputs) rmSync(active.emptyInputs, { recursive: true, force: true }) }
-      }
-    })()
+      finally { await active.egress?.dispose() }
+      if (active.emptyInputs) rmSync(active.emptyInputs, { recursive: true, force: true })
+    })().catch(error => { active.closing = null; throw error })
     await active.closing
     if (this.warmChatAdapters.get(conversationKey) === active) this.warmChatAdapters.delete(conversationKey)
     if (this.conversationOwners?.get(conversationKey) === active.owner) this.conversationOwners.delete(conversationKey)
