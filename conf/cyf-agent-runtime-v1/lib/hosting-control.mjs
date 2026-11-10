@@ -405,8 +405,9 @@ export class HostingControl {
     if (!authorization && operation.association.operationKind === 'REPROVISION') throw hostingError('HOSTING_AUTHORIZATION_REQUIRED');
     const prior = this.host.agents.get(operation.subjectKey);
     const floor = maxGeneration(journalGeneration(subject.lastSessionGeneration), prior?.executor?.sessionGeneration?.() ?? '0');
-    if (subject.readmission) { /* Host already initialized the admitted identity under its writer lock. */ }
-    else if (prior) await this.host.reprovisionAgent(agent); else await this.host.ensureAgent(agent);
+    if (!subject.readmission) {
+      if (prior) await this.host.reprovisionAgent(agent); else await this.host.ensureAgent(agent);
+    } // Readmission already initialized the new identity under its writer lock.
     if (!authorization) {
       if (this.closing) return;
       if (subject.enrollmentExpiresAt <= this.now()) throw hostingError('HOSTING_ENROLLMENT_EXPIRED');

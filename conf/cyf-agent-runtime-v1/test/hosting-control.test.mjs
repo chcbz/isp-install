@@ -592,3 +592,32 @@ test('CLEANED public subject can be invited twice more in the same roots with fr
   }
   assert.equal(admissions, 2);
 });
+
+test('control resumes partially materialized readmission after restart without extra enrollment or old execution', async t => {
+  const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
+  const f = await hostingFixture(t), original = await f.control().handle(prepare);
+  await f.control().handle(candidateRequest(prepare, original, 'ensure')); await f.settle();
+  const agent = f.control().subjectAgent(Object.values(f.control().state.subjects)[0]);
+  const finish = { ...candidateRequest(prepare, original, 'quiesce'), handoverId: 'finish-before-interruption' };
+  await f.control().handle(finish);
+  f.host().flushEvidence = async () => ({ confirmed: true });
+  await f.control().handle({ ...finish, method: 'evidence' });
+  f.host().cleanPrivateData = options => cleanStoppedPrivateData({ ...options, apiOrigin: 'https://no-network.invalid',
+    instanceId: f.host().instanceId, publicFiles: options.agent.publicFiles,
+    flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
+  await f.control().handle({ ...finish, method: 'cleanup' });
+  const next = { ...prepare, operationId: 'recover-invite', initialIntentId: 'recover-invite', bindingId: 'recover-binding', leaseId: 'recover-lease' };
+  const candidate = await f.control().handle(next);
+  f.host().admitRelationship = async () => { throw Error('fixture interruption after manifest materialization'); };
+  await f.control().handle(candidateRequest(next, candidate, 'ensure')); await f.settle();
+  assert.equal((await readPrivateJson(agent.manifestPath)).installationId, candidate.installationId);
+  assert.equal((await readPrivateJson(resolve(agent.stateRoot, 'relationship-admission.json'))).phase, 'PREPARED');
+  assert.equal(f.enrollmentCount(), 1); assert.equal(f.states.get(agent.subjectKey).length, 1);
+  await f.stop(); await f.start();
+  f.host().admitRelationship = async () => {};
+  f.control().resumeAdmitted(); await f.settle();
+  assert.equal((await f.control().handle(candidateRequest(next, candidate, 'observe'))).outcome, 'SERVICE_READY');
+  assert.equal(f.enrollmentCount(), 2); assert.equal(f.states.get(agent.subjectKey).length, 2);
+  assert.equal(f.states.get(agent.subjectKey)[1].agent.manifest.installationId, candidate.installationId);
+  assert.deepEqual(await f.control().handle(prepare), original);
+});
