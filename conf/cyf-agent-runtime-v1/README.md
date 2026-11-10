@@ -67,6 +67,22 @@ plus optional `hostingControlPath` for the private managed-subject control chann
 }
 ```
 
+Static Agent entries may also declare `publicFilesPath`, pointing to an operator-owned
+0600 JSON file outside **all** Agent mutable roots and host state. Its exact schema is
+`{ "tenantId": "...", "clientId": "...", "canonicalAgentId": "...", "files": { "config.toml": "..." } }`.
+The three identity fields must match that Agent's sealed manifest. `files` permits only
+`config.toml` and optional `auth.json`, with literal UTF-8 contents sourced from the
+operator's classified public configuration/credentials, never copied from an old owner's
+mutable HOME. This file is loaded once and frozen with the host config; it is not sent
+on the control wire. Missing baseline leaves normal execution unchanged but cannot
+satisfy final private cleanup. Managed subjects use their saved hosting template instead.
+“Public” here means retained for the same Agent, not anonymous access to credentials.
+
+Candidate cleanup additionally requires the original stopped/evidence-accepted handover
+and a real knowledge-extraction adapter. These source capabilities alone do not enable
+production finishing, revoke a relationship, or authorize a new owner. The CLI knowledge
+adapter and full business finishing handler remain unconnected as of 2026-11-10.
+
 Each sealed manifest contains exact `installationId`, `tenantId`, `clientId`,
 `canonicalAgentId`, `manifestVersion`, `runtimeProtocolVersion: "v1"`, and
 `manifestSha256` (`sha256:` + SHA256 of recursively key-sorted unsigned JSON).
