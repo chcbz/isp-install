@@ -78,7 +78,7 @@ export class HostingControl {
         || Array.isArray(state.subjects) || Array.isArray(state.operations)) throw hostingError('HOSTING_JOURNAL_INVALID');
     const installations = new Set();
     for (const [key, subject] of Object.entries(state.subjects)) {
-      if (Object.keys(subject).sort().join(',') !== 'activeOperationKey,enrollmentExpiresAt,enrollmentSecret,enrollmentSecretSha256,initialAssociation,lastSessionGeneration,latestGeneration,manifest,template') throw hostingError('HOSTING_JOURNAL_INVALID');
+      if (Object.keys(subject).filter(field => field !== 'readmission').sort().join(',') !== 'activeOperationKey,enrollmentExpiresAt,enrollmentSecret,enrollmentSecretSha256,initialAssociation,lastSessionGeneration,latestGeneration,manifest,template') throw hostingError('HOSTING_JOURNAL_INVALID');
       if (Object.keys(subject.initialAssociation || {}).sort().join(',') !== [...HOSTING_ASSOCIATION_FIELDS].sort().join(',')) throw hostingError('HOSTING_JOURNAL_INVALID');
       validateManifest(subject.manifest);
       validateHostingAssociation({ protocol: HOSTING_PROTOCOL, method: 'prepare', ...subject.initialAssociation });
@@ -132,6 +132,14 @@ export class HostingControl {
           || new Set(operations.map(([, operation]) => operation.provisionGeneration)).size !== operations.length
           || Math.max(...operations.map(([, operation]) => operation.provisionGeneration)) !== subject.latestGeneration
           || operations.length !== subject.latestGeneration) throw hostingError('HOSTING_JOURNAL_INVALID');
+      if (subject.readmission !== undefined) {
+        const previous = state.operations[subject.readmission?.previousOperationKey];
+        if (Object.keys(subject.readmission || {}).sort().join(',') !== 'handoverId,previousOperationKey'
+            || typeof subject.readmission.handoverId !== 'string' || !subject.readmission.handoverId.trim()
+            || !previous || previous.subjectKey !== subjectKey || previous.admittedAt === null
+            || previous.candidate.manifest.installationId === subject.manifest.installationId)
+          throw hostingError('HOSTING_JOURNAL_INVALID');
+      }
       if (subject.activeOperationKey !== null) {
         const active = state.operations[subject.activeOperationKey];
         if (!active || active.subjectKey !== subjectKey || active.candidate.manifest.installationId !== subject.manifest.installationId || active.admittedAt === null) throw hostingError('HOSTING_JOURNAL_INVALID');
@@ -186,24 +194,31 @@ export class HostingControl {
           installationId: subject.manifest.installationId, manifestSha256: subject.manifest.manifestSha256.slice(7),
           provisionGeneration: active.provisionGeneration, outcome: 'CURRENT', hostId: this.host.config.hostId };
       }
-      if (request.method === 'prepare') return this.mutate(state => {
+      if (request.method === 'prepare') {
+        let readmission = null;
+        const existing = this.state.subjects[subjectKey];
+        if (!this.state.operations[key] && request.operationKind === 'INITIAL' && existing)
+          readmission = await this.cleanedReadmission(existing);
+        return this.mutate(state => {
         const prior = state.operations[key];
         if (prior) {
           if (!same(prior.association, hostingAssociation(request))) throw hostingError('HOSTING_OPERATION_CONFLICT');
           return { value: this.prepared(request, prior, prior.candidate), changed: false };
         }
-        if (this.host.agents.get(subjectKey)?.quiesceRequested) throw hostingError('RUNTIME_HANDOVER_PENDING');
+        if (!readmission && this.host.agents.get(subjectKey)?.quiesceRequested) throw hostingError('RUNTIME_HANDOVER_PENDING');
         if (this.config.template.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template.profile.workspacePolicyId)) throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
         let subject = state.subjects[subjectKey];
         if (request.operationKind === 'INITIAL') {
-          if (subject || this.host.agents.has(subjectKey)) throw hostingError('HOSTING_SUBJECT_CONFLICT');
+          if (!readmission && (subject || this.host.agents.has(subjectKey))) throw hostingError('HOSTING_SUBJECT_CONFLICT');
+          const template = readmission ? subject.template : this.config.template;
           const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: `rti_${randomBytes(16).toString('hex')}`,
             tenantId: request.tenantId, clientId: request.clientId, canonicalAgentId: request.canonicalAgentId };
           const enrollmentSecret = randomBytes(32).toString('hex'); const enrollmentExpiresAt = this.now() + this.config.enrollmentTtlMs;
           if (!positiveEpoch(enrollmentExpiresAt)) throw hostingError('HOSTING_GENERATION_EXHAUSTED');
           subject = { manifest: { ...unsigned, manifestSha256: digestManifest(unsigned) }, enrollmentSecret,
             enrollmentSecretSha256: sha(enrollmentSecret), enrollmentExpiresAt, initialAssociation: hostingAssociation(request),
-            template: structuredClone(this.config.template), latestGeneration: 1, activeOperationKey: null, lastSessionGeneration: '0' };
+            template: structuredClone(template), latestGeneration: 1, activeOperationKey: null, lastSessionGeneration: '0',
+            ...(readmission ? { readmission } : {}) };
           state.subjects[subjectKey] = subject;
         } else {
           if (!subject || initialFields.some(field => request[field] !== subject.initialAssociation[field])) throw hostingError('HOSTING_ASSOCIATION_REJECTED');
@@ -214,7 +229,8 @@ export class HostingControl {
         const operation = { association: hostingAssociation(request), subjectKey, candidate: this.candidateFacts(subject), provisionGeneration: subject.latestGeneration, admittedAt: null, recoveryRequired: false };
         state.operations[key] = operation;
         return { value: this.prepared(request, operation, subject) };
-      });
+        });
+      }
       const operation = this.state.operations[key]; const subject = operation?.candidate;
       if (!operation || !subject || operation.subjectKey !== subjectKey || !same(operation.association, hostingAssociation(request))
           || request.installationId !== subject.manifest.installationId || request.manifestSha256 !== subject.manifest.manifestSha256.slice(7)
@@ -245,7 +261,7 @@ export class HostingControl {
         await this.jobs.get(subjectKey);
         return { ...request, outcome: 'QUIESCED', hostId: this.host.config.hostId };
       }
-      if (request.method === 'ensure' && operation.admittedAt === null && this.host.agents.get(subjectKey)?.quiesceRequested)
+      if (request.method === 'ensure' && operation.admittedAt === null && !currentSubject.readmission && this.host.agents.get(subjectKey)?.quiesceRequested)
         throw hostingError('RUNTIME_HANDOVER_PENDING');
       if (request.method === 'ensure' && operation.admittedAt === null) {
         if (request.operationKind === 'REPROVISION' && request.validUntil <= this.now()) throw hostingError('HOSTING_LEASE_EXPIRED');
@@ -280,7 +296,31 @@ export class HostingControl {
       serviceReadyAt: proof.serviceReadyAt, registeredAt: proof.registeredAt, executorReady: true, durableReady: true,
       evidenceRef: `hosting:${request.operationId}:${operation.provisionGeneration}` };
   }
-  async materialize(subject) {
+  async cleanedReadmission(subject) {
+    const agent = this.subjectAgent(subject), key = agent.subjectKey;
+    const active = this.state.operations[subject.activeOperationKey];
+    if (!active || active.admittedAt === null || subject.readmission) throw hostingError('HOSTING_SUBJECT_CONFLICT');
+    const readProof = async () => {
+      const record = await readPrivateJson(resolve(agent.stateRoot, 'handover.json'), undefined);
+      this.host.requireHandoverRecord(key, { agent }, record);
+      if (record.cleanupComplete !== true || record.cleanupLeaseId !== subject.initialAssociation.leaseId
+          || record.evidenceOwnerJiacn !== subject.initialAssociation.ownerJiacn) throw hostingError('RUNTIME_HANDOVER_PENDING');
+      return record;
+    };
+    await readProof(); // Never initialize an existing subject without durable cleanup.
+    if (!this.host.agents.has(key)) {
+      try { await this.host.ensureAgent(agent); }
+      catch (cause) { if (cause.code !== 'RUNTIME_HANDOVER_PENDING') throw cause; }
+    }
+    const proof = await this.host.withAgent(key, async state => {
+      if (!state.release || state.executor || state.agent.manifest.manifestSha256 !== subject.manifest.manifestSha256)
+        throw hostingError('RUNTIME_HANDOVER_PENDING');
+      return readProof();
+    });
+    await this.jobs.get(key);
+    return { previousOperationKey: subject.activeOperationKey, handoverId: proof.operationId };
+  }
+  async materialize(subject, previousManifest = null) {
     const agent = this.subjectAgent(subject); const root = resolve(this.config.managedRoot, agent.subjectKey);
     try {
       await mkdir(root, { mode: 0o700 });
@@ -288,12 +328,19 @@ export class HostingControl {
     } catch (cause) {
       if (cause.code !== 'EEXIST') throw cause;
       await requireOwnedPrivateRoot(root);
-      if (!same(await readPrivateJson(resolve(root, 'subject.json'), null), { manifest: subject.manifest })) throw hostingError('HOSTING_STATE_UNCONFIRMED');
+      const path = resolve(root, 'subject.json'), current = await readPrivateJson(path, null);
+      if (!same(current, { manifest: subject.manifest })) {
+        if (!previousManifest || !same(current, { manifest: previousManifest })) throw hostingError('HOSTING_STATE_UNCONFIRMED');
+        await writePrivateJson(path, { manifest: subject.manifest });
+      }
     }
     for (const path of [agent.stateRoot, agent.profile.codexHome, agent.profile.codexWorkdir]) await ensurePrivateDirectory(path);
     for (const [path, value] of [[agent.manifestPath, subject.manifest], [agent.profilePath, agent.profile]]) {
       const current = await readPrivateJson(path, null);
-      if (current && !same(current, value)) throw hostingError('HOSTING_STATE_UNCONFIRMED');
+      if (current && !same(current, value)) {
+        if (path !== agent.manifestPath || !previousManifest || !same(current, previousManifest)) throw hostingError('HOSTING_STATE_UNCONFIRMED');
+        await writePrivateJson(path, value);
+      }
       if (!current) await writePrivateJson(path, value, { exclusive: true });
     }
     // New independent HOME: no auth.json or other user's file is read/copied.
@@ -337,7 +384,17 @@ export class HostingControl {
     if (this.closing || subject.activeOperationKey !== key || operation.recoveryRequired) return;
     if (operation.association.operationKind === 'REPROVISION' && operation.association.validUntil <= this.now()) throw hostingError('HOSTING_LEASE_EXPIRED');
     const aborter = new AbortController(); this.aborters.set(key, aborter);
-    const agent = await this.materialize(subject);
+    let agent;
+    if (subject.readmission) {
+      const previous = this.state.operations[subject.readmission.previousOperationKey].candidate;
+      const previousAgent = this.subjectAgent({ ...subject, manifest: previous.manifest });
+      agent = this.subjectAgent(subject);
+      await this.host.readmitAgent(previousAgent, agent, { operationId: operation.association.operationId,
+        handoverId: subject.readmission.handoverId, leaseId: previous.initialAssociation.leaseId,
+        previousOwnerJiacn: previous.initialAssociation.ownerJiacn, ownerJiacn: subject.initialAssociation.ownerJiacn },
+      () => this.materialize(subject, previous.manifest));
+      await this.mutate(state => { delete state.subjects[operation.subjectKey].readmission; return { value: null }; });
+    } else agent = await this.materialize(subject);
     if (this.closing || this.state.subjects[operation.subjectKey].activeOperationKey !== key) return;
     const client = this.clientFactory({ manifest: subject.manifest, stateDir: agent.stateRoot, apiBaseUrl: this.apiOrigin,
       hostId: this.host.config.hostId, runtimeInstanceId: this.host.instanceId });
@@ -348,7 +405,8 @@ export class HostingControl {
     if (!authorization && operation.association.operationKind === 'REPROVISION') throw hostingError('HOSTING_AUTHORIZATION_REQUIRED');
     const prior = this.host.agents.get(operation.subjectKey);
     const floor = maxGeneration(journalGeneration(subject.lastSessionGeneration), prior?.executor?.sessionGeneration?.() ?? '0');
-    if (prior) await this.host.reprovisionAgent(agent); else await this.host.ensureAgent(agent);
+    if (subject.readmission) { /* Host already initialized the admitted identity under its writer lock. */ }
+    else if (prior) await this.host.reprovisionAgent(agent); else await this.host.ensureAgent(agent);
     if (!authorization) {
       if (this.closing) return;
       if (subject.enrollmentExpiresAt <= this.now()) throw hostingError('HOSTING_ENROLLMENT_EXPIRED');

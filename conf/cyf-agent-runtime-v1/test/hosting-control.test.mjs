@@ -539,3 +539,56 @@ test('original candidate replay is immutable after public subject changes; old l
   control.state.operations[oldKey].candidate.enrollmentSecretSha256 = 'invalid';
   assert.throws(() => control.validateJournal());
 });
+
+test('CLEANED public subject can be invited twice more in the same roots with fresh enrollment and immutable old replies', async t => {
+  const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
+  const f = await hostingFixture(t);
+  f.controlConfig.scopes.push({ ...f.controlConfig.scopes[0], ownerJiacn: 'second-owner' });
+  let request = prepare, candidate = await f.control().handle(request);
+  await f.control().handle(candidateRequest(request, candidate, 'ensure')); await f.settle();
+  const original = candidate, rootAgent = f.control().subjectAgent(Object.values(f.control().state.subjects)[0]);
+  const repo = resolve(rootAgent.profile.codexWorkdir, '.git'); await mkdir(repo);
+  await writeFile(resolve(repo, 'public-history'), 'public immutable repository history');
+  const privateCredential = resolve(rootAgent.profile.codexHome, 'auth.json'); await writeFile(privateCredential, 'original private credential');
+  let admissions = 0;
+  for (let invitation = 2; invitation <= 3; invitation++) {
+    const next = { ...prepare, ownerJiacn: invitation === 2 ? 'second-owner' : prepare.ownerJiacn,
+      operationId: `invite-${invitation}`, initialIntentId: `invite-${invitation}`, bindingId: `binding-${invitation}`, leaseId: `lease-${invitation}` };
+    await assert.rejects(f.control().handle(next)); // An active relationship is not reusable.
+    const finish = { ...candidateRequest(request, candidate, 'quiesce'), handoverId: `finish-${invitation - 1}` };
+    await f.control().handle(finish);
+    f.host().flushEvidence = async () => ({ confirmed: true });
+    await f.control().handle({ ...finish, method: 'evidence' });
+    await assert.rejects(f.control().handle(next), code('RUNTIME_HANDOVER_PENDING'));
+    f.host().cleanPrivateData = options => cleanStoppedPrivateData({ ...options,
+      apiOrigin: 'https://no-network.invalid', instanceId: f.host().instanceId,
+      publicFiles: options.agent.publicFiles, publicRepositoryRoots: [rootAgent.profile.codexWorkdir],
+      flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
+    assert.equal((await f.control().handle({ ...finish, method: 'cleanup' })).outcome, 'CLEANED');
+    await assert.rejects(readFile(privateCredential), { code: 'ENOENT' });
+    await assert.rejects(readFile(resolve(rootAgent.stateRoot, 'runtime-authorization.json')), { code: 'ENOENT' });
+    if (invitation === 2) { await f.stop(); await f.start(); } // Cleanup must survive host restart before prepare.
+    const nextCandidate = await f.control().handle(next);
+    assert.notEqual(nextCandidate.installationId, candidate.installationId);
+    assert.notEqual(nextCandidate.enrollmentSecretSha256, candidate.enrollmentSecretSha256);
+    assert.equal(nextCandidate.manifest.canonicalAgentId, original.manifest.canonicalAgentId);
+    assert.equal(f.enrollmentCount(), invitation - 1);
+    assert.deepEqual(await f.control().handle(prepare), original);
+    await assert.rejects(f.control().handle({ ...finish, method: 'cleanup' }), code('HOSTING_OPERATION_SUPERSEDED'));
+    // Prepared readmission must reload without borrowing the old native authorization.
+    await f.stop(); await f.start();
+    f.host().admitRelationship = async () => { admissions++; };
+    await f.control().handle(candidateRequest(next, nextCandidate, 'ensure')); await f.settle();
+    const ready = await f.control().handle(candidateRequest(next, nextCandidate, 'observe'));
+    assert.equal(ready.outcome, 'SERVICE_READY'); assert.equal(ready.installationId, nextCandidate.installationId);
+    const agent = f.control().subjectAgent(Object.values(f.control().state.subjects)[0]);
+    assert.equal(agent.stateRoot, rootAgent.stateRoot); assert.deepEqual(agent.profile, rootAgent.profile);
+    assert.equal(await readFile(resolve(repo, 'public-history'), 'utf8'), 'public immutable repository history');
+    assert.equal(f.enrollmentCount(), invitation); assert.equal(f.host().agents.size, 4);
+    await f.stop(); await f.start(); f.control().resumeAdmitted(); await f.settle();
+    assert.equal((await f.control().handle(candidateRequest(next, nextCandidate, 'observe'))).outcome, 'SERVICE_READY');
+    assert.equal(f.enrollmentCount(), invitation);
+    request = next; candidate = nextCandidate;
+  }
+  assert.equal(admissions, 2);
+});
