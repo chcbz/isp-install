@@ -1003,16 +1003,7 @@ export class SkillInstallManager {
         if (evidence.outcome === 'APPLIED') this._applyObserved(state, record)
         return this._finish(state, record, evidence)
       }
-      if (c.phase === 'READ') {
-        const observed = this._command(state, c.observedCommandId)
-        if (observed && !['skillChangeId', 'skillKey', 'attempt', 'fencingToken', 'skillRevision', 'approvedPermissionsSha256'].every(key => observed.envelope.data[key] === c[key])
-            || observed && (!this._same(observed.envelope.data.target, c.target) || !this._same(observed.envelope.data.source, c.source))) throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'READ binding mismatch')
-        // Absence alone proves nothing; READ never downloads, changes policy, or publishes a view.
-        const evidence = observed ? this._observe(state, observed) : {
-          ...this._baseEvidence(state, { ...record, envelope: { ...envelope, data: { ...c, phase: ['ENABLE', 'DISABLE', 'UNINSTALL'].includes(c.action) ? 'POLICY' : 'ACTIVATE' } } }, 'UNKNOWN', 'INTEGRITY_UNPROVEN'), observedCommandId: c.observedCommandId }
-        if (observed && evidence.outcome === 'APPLIED') this._applyObserved(state, observed)
-        return this._finish(state, record, evidence, observed?.executionRuntimeInstanceId || record.executionRuntimeInstanceId)
-      }
+      if (c.phase === 'READ') return this._finishRead(state, record)
       try {
         this._fence(state, c); this._assertSource(state, c)
         if ((c.phase === 'POLICY') && (!this._same(c.source, c.target) || !this._installation(state, c.target.skillInstallationId))) throw new SkillInstallError('SKILL_STATE_CONFLICT', 'policy requires precise installed target')
@@ -1180,6 +1171,19 @@ export class SkillInstallManager {
     this.checkpoint('view-switched', record)
     if (this._observe(state, record).outcome !== 'APPLIED') throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'policy view evidence differs')
   }
+  // Read-only marker observation shared by normal READ and permanently stopped handover.
+  _finishRead(state, record, { stopped = false } = {}) {
+    const envelope = record.envelope, c = envelope.data, observed = this._command(state, c.observedCommandId)
+    if (observed && (!['skillChangeId', 'skillKey', 'attempt', 'fencingToken', 'skillRevision', 'approvedPermissionsSha256'].every(key => observed.envelope.data[key] === c[key])
+        || !this._same(observed.envelope.data.target, c.target) || !this._same(observed.envelope.data.source, c.source)))
+      throw new SkillInstallError('SKILL_RESULT_CONFLICT', 'READ binding mismatch')
+    const evidence = observed ? { ...this._observe(state, observed) } : {
+      ...this._baseEvidence(state, { ...record, envelope: { ...envelope, data: { ...c, phase: ['ENABLE', 'DISABLE', 'UNINSTALL'].includes(c.action) ? 'POLICY' : 'ACTIVATE' } } }, 'UNKNOWN', 'INTEGRITY_UNPROVEN'), observedCommandId: c.observedCommandId }
+    if (stopped && evidence.outcome === 'NOT_STARTED') evidence.reasonCode = 'ENTITLEMENT_TERMINATED'
+    if (observed && evidence.outcome === 'APPLIED') this._applyObserved(state, observed)
+    return this._finish(state, record, evidence, observed?.executionRuntimeInstanceId || record.executionRuntimeInstanceId)
+  }
+
   _applyObserved(state, record) {
     const c = record.envelope.data, current = this._skill(state, c.skillKey)
     if (current && BigInt(current.revision) > BigInt(c.skillRevision)) return
@@ -1236,6 +1240,27 @@ export class SkillInstallManager {
       }
       return { ...row, active: !current?.removed && current?.target.skillInstallationId === id }
     })
+  }
+
+  /** Only the trusted permanently stopped host calls this. A RECEIVED journal
+   * entry proves no mutation started; missing/uncertain execution never does. */
+  finalizeStoppedResults({ identity }) {
+    const run = () => this._withLockSync('finalize-stopped-skill-results', () => {
+      if (this.session) throw new SkillInstallError('SKILL_RELATIONSHIP_ACTIVE', 'stop the live session before finalizing results')
+      const state = this._load()
+      if (!state.identity || !this._same(state.identity, identity))
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'original result owner required')
+      for (const record of Object.values(state.commands)) {
+        if (record.result) continue // immutable results, including UNKNOWN, are never rewritten
+        if (record.envelope.data.phase === 'READ') { this._finishRead(state, record, { stopped: true }); continue }
+        const evidence = record.state === 'RECEIVED'
+          ? this._baseEvidence(state, record, 'NOT_STARTED', 'ENTITLEMENT_TERMINATED') : this._observe(state, record)
+        if (evidence.outcome === 'APPLIED') this._applyObserved(state, record)
+        this._finish(state, record, evidence)
+      }
+      return { pending: this.pendingResults().length }
+    })
+    const pending = this.tail.then(run, run); this.tail = pending.catch(() => {}); return pending
   }
 
   /** Deliver original immutable results only; no WS registration, receive, execute or download. */

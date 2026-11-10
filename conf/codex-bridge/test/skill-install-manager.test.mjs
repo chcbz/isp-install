@@ -879,3 +879,49 @@ test('shared native HTTP result fixture preserves independent HTTP and original 
   for (const path of ['/internal/agent/skill-management/%72esults', '/internal/agent/skill-management/results?owner=other', '/internal/agent/skill-management/execute'])
     assert.equal(skillManagementResultHttpScope(new URL(path, endpoint), { method: 'POST' }), false)
 })
+
+test('stopped RECEIVED preparation becomes terminal no-start evidence without a download or fabricated execution', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), c = command(pkg.target)
+  f.manager._receive(c)
+  await assert.rejects(f.manager.finalizeStoppedResults({ identity: retiredIdentity() }), { code: 'SKILL_RELATIONSHIP_ACTIVE' })
+  f.manager.bindSession(null)
+  await assert.rejects(f.manager.finalizeStoppedResults({ identity: { ...retiredIdentity(), ownerJiacn: 'new-owner' } }))
+  assert.equal(f.manager.pendingResults().length, 0)
+  assert.deepEqual(await f.manager.finalizeStoppedResults({ identity: retiredIdentity() }), { pending: 1 })
+  const result = f.manager.pendingResults()[0].envelope
+  assert.equal(result.data.evidence.outcome, 'NOT_STARTED'); assert.equal(result.data.evidence.reasonCode, 'ENTITLEMENT_TERMINATED')
+  assert.equal(result.data.evidence.observedCommandId, c.data.commandId); assert.equal(result.data.executionRuntimeInstanceId, 'boot_demo')
+  assert.equal(f.downloads(), 0); assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
+  const restarted = new SkillInstallManager(f.settings); restarted.initialize()
+  await restarted.finalizeStoppedResults({ identity: retiredIdentity() })
+  assert.deepEqual(restarted.pendingResults()[0].envelope, result)
+  await assert.rejects(restarted.retireRelationship(retireRequest()), { code: 'SKILL_RELATIONSHIP_RESULTS_PENDING' })
+  restarted.acknowledgeResultReceipt(receiptFor(result)); await restarted.retireRelationship(retireRequest())
+})
+
+test('stopped activation is not executed and READ observes the exact original no-start evidence', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), prepare = command(pkg.target)
+  const prepared = (await f.manager.handle(prepare)).resultEnvelope
+  const activation = activate(prepare), read = reconcile(activation)
+  f.manager._receive(activation); f.manager._receive(read); f.manager.bindSession(null)
+  await f.manager.finalizeStoppedResults({ identity: retiredIdentity() })
+  const results = f.manager.pendingResults().map(row => row.envelope)
+  assert.deepEqual(results.find(row => row.data.commandId === prepare.data.commandId), prepared)
+  for (const id of [activation.data.commandId, read.data.commandId]) {
+    const result = results.find(row => row.data.commandId === id)
+    assert.equal(result.data.evidence.outcome, 'NOT_STARTED'); assert.equal(result.data.evidence.phase, 'ACTIVATE')
+    assert.equal(result.data.evidence.observedCommandId, activation.data.commandId)
+    assert.equal(result.data.evidence.reasonCode, 'ENTITLEMENT_TERMINATED')
+  }
+  assert.equal(f.downloads(), 1); assert.equal(existsSync(resolve(f.home, 'skills/repo-test')), false)
+})
+
+test('stopped READ with missing original execution remains UNKNOWN and immutable on repeat', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), original = command(pkg.target), read = reconcile(original)
+  f.manager._receive(read); f.manager.bindSession(null)
+  await f.manager.finalizeStoppedResults({ identity: retiredIdentity() })
+  const first = f.manager.pendingResults()[0].envelope
+  assert.equal(first.data.evidence.outcome, 'UNKNOWN'); assert.equal(first.data.evidence.observedCommandId, original.data.commandId)
+  await f.manager.finalizeStoppedResults({ identity: retiredIdentity() })
+  assert.deepEqual(f.manager.pendingResults()[0].envelope, first); assert.equal(f.downloads(), 0)
+})

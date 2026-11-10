@@ -36,9 +36,10 @@ export async function flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostI
     if (present) {
       // Existing marker-only recovery observes accepted installation work; never runs it.
       manager.initialize();
-      management = await manager.flushResults({ identity: { tenantId: agent.manifest.tenantId, clientId: agent.manifest.clientId,
-        ownerJiacn, agentId: agent.manifest.canonicalAgentId, runtimeInstallationId: agent.manifest.installationId },
-        apiOrigin, nativeFetch: (url, options) => client.nativeFetch(url, options) });
+      const identity = { tenantId: agent.manifest.tenantId, clientId: agent.manifest.clientId,
+        ownerJiacn, agentId: agent.manifest.canonicalAgentId, runtimeInstallationId: agent.manifest.installationId };
+      await manager.finalizeStoppedResults({ identity });
+      management = await manager.flushResults({ identity, apiOrigin, nativeFetch: (url, options) => client.nativeFetch(url, options) });
     }
     return { confirmed: chat.confirmed && native.confirmed && management.confirmed, chat, native, management };
   } finally {
