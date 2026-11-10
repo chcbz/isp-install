@@ -6,7 +6,7 @@ import { chmod, lstat, mkdir, readFile, readdir, symlink, writeFile } from 'node
 import { connect } from 'node:net';
 import { resolve } from 'node:path';
 import { hostingFixture, candidateRequest, tick, code } from './hosting-fixture.mjs';
-import { parseHostingJson, validateHostingRequest, validateHostingAssociation } from '../lib/hosting-wire.mjs';
+import { parseHostingJson, validateHostingRequest, validateHostingAssociation, hostingReply } from '../lib/hosting-wire.mjs';
 import { startHostingServer } from '../lib/hosting-server.mjs';
 import { digestManifest, stableJson } from '../lib/manifest.mjs';
 import { readPrivateJson, writePrivateJson } from '../lib/security.mjs';
