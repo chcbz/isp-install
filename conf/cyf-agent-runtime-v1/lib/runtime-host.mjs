@@ -255,6 +255,7 @@ export class RuntimeHost {
         // The adapter must preserve this control journal and lifetime writer lock.
         // Persist only after successful deletion; failures retry the same operation.
         record.cleanupComplete = true;
+        if (['EXTRACTED', 'FAILED'].includes(result.knowledgeStatus)) record.knowledgeStatus = result.knowledgeStatus;
         await writePrivateJson(path, record);
         state.handover = record;
       }

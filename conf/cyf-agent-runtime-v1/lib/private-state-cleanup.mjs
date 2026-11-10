@@ -7,13 +7,18 @@ import { stoppedSkillManager } from './evidence-handover.mjs';
 
 const contains = (root, child) => root === child || child.startsWith(`${root}/`);
 const fail = code => { throw Object.assign(new Error(code), { code }); };
-export async function cleanStoppedRuntimeState({ agent, apiOrigin, instanceId, ownerJiacn, operationId, publicRepositoryRoots = [] }) {
+export async function validateStoppedStateCleanup({ agent, apiOrigin, instanceId, ownerJiacn, operationId, publicRepositoryRoots = [] }) {
   const root = agent.stateRoot;
   await requireOwnedPrivateRoot(root);
   for (const repository of publicRepositoryRoots) {
     if (typeof repository !== 'string' || resolve(repository) !== repository) fail('RUNTIME_PUBLIC_REPOSITORY_ROOT_INVALID');
     if (contains(root, repository) || contains(repository, root)) fail('RUNTIME_STATE_PUBLIC_REPOSITORY_OVERLAP');
   }
+  return root;
+}
+export async function cleanStoppedRuntimeState(options) {
+  const { agent, apiOrigin, instanceId, ownerJiacn, operationId } = options;
+  const root = await validateStoppedStateCleanup(options);
   const retained = [resolve(root, '.runtime-writer.lock'), resolve(root, 'handover.json')];
   const manager = stoppedSkillManager({ agent, apiOrigin, instanceId });
   if (manager) {

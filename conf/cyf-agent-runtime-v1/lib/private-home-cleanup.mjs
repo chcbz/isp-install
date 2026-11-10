@@ -9,7 +9,7 @@ import { requireOwnedPrivateRoot } from './runtime-host.mjs';
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const overlaps = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 
-export async function cleanStoppedCodexHome({ agent, publicFiles, publicRepositoryRoots = [] }) {
+export async function validateStoppedHomeCleanup({ agent, publicFiles, publicRepositoryRoots = [] }) {
   const home = agent?.profile?.codexHome;
   if (typeof home !== 'string' || resolve(home) !== home) fail('RUNTIME_HOME_CLEANUP_ROOT_INVALID');
   // Config availability is established before deleting private state. Missing auth
@@ -28,6 +28,10 @@ export async function cleanStoppedCodexHome({ agent, publicFiles, publicReposito
     const stat = await lstat(skills);
     if (!stat.isDirectory() || stat.isSymbolicLink()) fail('RUNTIME_PUBLIC_SKILLS_ROOT_UNSAFE');
   } catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
+  return home;
+}
+export async function cleanStoppedCodexHome(options) {
+  const home = await validateStoppedHomeCleanup(options), { publicFiles } = options;
   // Do not enumerate a fixed list of Codex filenames: that misses SQLite sidecars,
   // memories, snapshots and future private files. Keep only classified public skills.
   // rm on a child symlink unlinks it; it does not traverse into a shared repository.
