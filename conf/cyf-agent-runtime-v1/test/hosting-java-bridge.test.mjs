@@ -1,4 +1,5 @@
 import { eventMessage, validateMessage } from '../lib/message-envelope.mjs';
+import { quotedPreparation } from './hosting-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
@@ -36,7 +37,8 @@ test('Java bridge entry actual UDS/controller initial/replay/free reprovision an
   const b = await bridge(t); const call = request => exchange(b.metadata.socketPath, request);
   async function ready(request) {
     const candidate = await call(request); assert.equal(candidate.outcome, 'PREPARED'); assert.deepEqual(await call(request), candidate);
-    const operation = { ...request, method: 'ensure', ...{ installationId: candidate.runtimeInstallationId, manifestSha256: candidate.manifestSha256, provisionGeneration: Number(candidate.provisionGeneration) } };
+    const { quotedInventory, ...association } = request;
+    const operation = { ...association, method: 'ensure', ...{ installationId: candidate.runtimeInstallationId, manifestSha256: candidate.manifestSha256, provisionGeneration: Number(candidate.provisionGeneration) } };
     await call(operation); operation.method = 'observe';
     for (let i = 0; i < 1000; i++) {
       const response = await call(operation); if (response.outcome === 'SERVICE_READY') return { candidate, response };
@@ -44,7 +46,7 @@ test('Java bridge entry actual UDS/controller initial/replay/free reprovision an
     }
     assert.fail('synthetic subject did not become ready');
   }
-  const initial = await ready(wire.prepareRequest); const repro = await ready({ ...wire.reprovisionPrepareRequest, requestedAt: wire.reprovisionPrepareRequest.reservedAt });
+  const initial = await ready(quotedPreparation(wire.prepareRequest)); const repro = await ready({ ...wire.reprovisionPrepareRequest, requestedAt: wire.reprovisionPrepareRequest.reservedAt });
   assert.equal(initial.candidate.runtimeInstallationId, repro.candidate.runtimeInstallationId); assert.equal(initial.response.sessionGeneration, '1'); assert.equal(repro.response.sessionGeneration, '2');
   assert.equal(repro.response.hostId, b.metadata.hostId); assert.equal(repro.response.runtimeInstanceId, b.metadata.instanceId);
   b.child.stdin.write('stop\n'); const [exit] = await b.exited; assert.equal(exit, 0, b.stderr());

@@ -6,11 +6,12 @@ import { resolve } from 'node:path';
 import { digestManifest, runtimeSubjectKey } from '../lib/manifest.mjs';
 import { RuntimeHost } from '../lib/runtime-host.mjs';
 import { HostingControl } from '../lib/hosting-control.mjs';
+import { skillInventorySnapshot } from '../../codex-bridge/skill-inventory.mjs';
 import { RuntimeV1Client } from '../lib/runtime-client.mjs';
 
 export const tick = () => new Promise(done => setImmediate(done));
 export const code = expected => cause => cause?.code === expected;
-export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false, rootParent = tmpdir() } = {}) {
+export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false, rootParent = tmpdir(), observeInventory } = {}) {
   const root = await mkdtemp(resolve(rootParent, 'gss-hosting-owned-')); await mkdir(resolve(root, 'host'), { mode: 0o700 });
   await mkdir(resolve(root, 'managed'), { mode: 0o700 }); await mkdir(resolve(root, 'socket'), { mode: 0o750 });
   // Parent test runners may deliberately use umask 077. The real server requires
@@ -74,7 +75,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
   const start = async () => {
     host = new RuntimeHost({ config: hostConfig, instanceId: `fixture-instance-${++boot}`, createExecutor });
     await host.start(); for (const peer of peers) await host.activate(peer.subjectKey);
-    control = await new HostingControl({ host, config: controlConfig, apiOrigin: 'https://no-network.invalid', now: () => now, clientFactory }).initialize();
+    control = await new HostingControl({ host, config: controlConfig, apiOrigin: 'https://no-network.invalid', now: () => now, clientFactory, ...(observeInventory ? { observeInventory } : {}) }).initialize();
     return { host, control };
   };
   const stop = async () => { await control?.close(); await host?.stop(); await control?.releaseOwnership(); };
@@ -86,6 +87,15 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
     enrollmentCount: () => enrollments, sessionCount: () => sessions, pending: () => pending };
 }
 export function candidateRequest(prepare, candidate, method) {
-  return { ...prepare, method, installationId: candidate.installationId, manifestSha256: candidate.manifestSha256, provisionGeneration: candidate.provisionGeneration };
+  const { quotedInventory, ...association } = prepare;
+  return { ...association, method, installationId: candidate.installationId, manifestSha256: candidate.manifestSha256, provisionGeneration: candidate.provisionGeneration };
 }
 export function unchangedPeers(f, before) { assert.deepEqual(f.peers.map(peer => f.states.get(peer.subjectKey)[0]), before); }
+
+// Synthetic catalog-only fixtures explicitly declare no native discoveries. Real manager rows
+// are still included when a retained installation exists; actual discovery has its own tests.
+export const fixtureInventory = async ({ profile, manager } = {}) => skillInventorySnapshot({
+  discovery: { data: [{ cwd: profile?.codexWorkdir || '', skills: [], errors: [] }] },
+  managed: manager?.listInstalledSkills() || [], cwd: profile?.codexWorkdir || '', codexHome: profile?.codexHome || '' });
+export const quotedPreparation = (request, hostId = 'fixture-host', inventorySha256 = '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945') => ({
+  ...request, quotedInventory: { hostId, inventorySha256 } });

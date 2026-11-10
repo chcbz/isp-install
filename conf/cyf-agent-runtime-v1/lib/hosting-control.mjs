@@ -10,7 +10,7 @@ import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './sec
 import { hostingError, validateHostingConfig } from './hosting-config.mjs';
 import { stoppedSkillManager } from './evidence-handover.mjs';
 import { observeInstalledSkillInventory, skillInventorySnapshot } from '../../codex-bridge/skill-inventory.mjs';
-import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validateHostingAssociation } from './hosting-wire.mjs';
+import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validQuotedInventory, validateHostingAssociation } from './hosting-wire.mjs';
 
 // Existing private journals may contain exact safe integers. Preserve their bytes on load;
 // new mutable counters are decimal strings. Public session proofs accept strings only.
@@ -99,9 +99,19 @@ export class HostingControl {
     }
     const relationships = new Map();
     for (const [key, operation] of Object.entries(state.operations)) {
-      if (Object.keys(operation).sort().join(',') !== 'admittedAt,association,candidate,provisionGeneration,recoveryRequired,subjectKey') throw hostingError('HOSTING_JOURNAL_INVALID');
+      if (Object.keys(operation).filter(field => field !== 'quotedInventory').sort().join(',') !== 'admittedAt,association,candidate,provisionGeneration,recoveryRequired,subjectKey') throw hostingError('HOSTING_JOURNAL_INVALID');
       if (Object.keys(operation.association || {}).sort().join(',') !== [...HOSTING_ASSOCIATION_FIELDS].sort().join(',')) throw hostingError('HOSTING_JOURNAL_INVALID');
       const association = validateHostingAssociation({ protocol: HOSTING_PROTOCOL, method: 'prepare', ...operation.association });
+      if (operation.quotedInventory !== undefined && (!validQuotedInventory(operation.quotedInventory)
+          || association.operationKind !== 'INITIAL')) throw hostingError('HOSTING_JOURNAL_INVALID');
+      if (operation.candidate === null) {
+        // Terminal rejection owns this intent, but never owns/creates a Runtime subject.
+        if (!operation.quotedInventory || association.operationKind !== 'INITIAL'
+            || operation.provisionGeneration !== 0 || operation.admittedAt !== null || operation.recoveryRequired !== false
+            || opKey(association) !== key || runtimeSubjectKey(association) !== operation.subjectKey || !this.scopeAllowed(association))
+          throw hostingError('HOSTING_JOURNAL_INVALID');
+        continue;
+      }
       const current = state.subjects[operation.subjectKey], subject = operation.candidate;
       if (!subject || Object.keys(subject).sort().join(',') !== 'enrollmentExpiresAt,enrollmentSecretSha256,initialAssociation,manifest')
         throw hostingError('HOSTING_JOURNAL_INVALID');
@@ -172,9 +182,30 @@ export class HostingControl {
     this.journalGate = result.catch(() => {}); return result;
   }
   prepared(request, operation, subject) {
-    return { ...hostingEnvelope(request), outcome: 'PREPARED', installationId: subject.manifest.installationId, manifest: subject.manifest,
+    const quoted = operation.quotedInventory ? { quotedInventory: operation.quotedInventory } : {};
+    if (subject === null) return { ...hostingEnvelope(request), ...quoted, outcome: 'FAILED_NO_EFFECT',
+      reasonCode: 'HOSTING_INVENTORY_CHANGED', evidenceRef: sha(stableJson(operation)), hostId: this.host.config.hostId };
+    return { ...hostingEnvelope(request), ...quoted, outcome: 'PREPARED', installationId: subject.manifest.installationId, manifest: subject.manifest,
       manifestSha256: subject.manifest.manifestSha256.slice(7), enrollmentSecretSha256: subject.enrollmentSecretSha256,
       enrollmentExpiresAt: subject.enrollmentExpiresAt, provisionGeneration: operation.provisionGeneration, hostId: this.host.config.hostId };
+  }
+  async installedInventory(subjectKey) {
+    if (this.config.template.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template.profile.workspacePolicyId))
+      throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
+    const subject = this.state.subjects[subjectKey];
+    const agent = subject ? this.subjectAgent(subject) : this.host.agents.get(subjectKey)?.agent;
+    if (!agent) {
+      // An orphan root is not proof of an empty public inventory; never adopt it for a zero quote.
+      try {
+        await lstat(resolve(this.config.managedRoot, subjectKey));
+        throw hostingError('HOSTING_SUBJECT_CONFLICT');
+      } catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
+    }
+    // New managed subjects have fresh HOME/work roots and a validated model-only
+    // template: no skill/plugin source is copied. Do not create an instance to quote.
+    return agent ? await this.observeInventory({ profile: agent.profile,
+      manager: stoppedSkillManager({ agent, apiOrigin: this.apiOrigin, instanceId: this.host.instanceId }) })
+      : skillInventorySnapshot({ discovery: { data: [{ cwd: '', skills: [], errors: [] }] }, cwd: '', codexHome: '' });
   }
   async handle(input) {
     const request = validateHostingAssociation(input);
@@ -185,22 +216,7 @@ export class HostingControl {
     if (request.method === 'inventory') {
       const subjectKey = runtimeSubjectKey(request);
       return this.withSubject(subjectKey, async () => {
-        if (this.config.template.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template.profile.workspacePolicyId))
-          throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
-        const subject = this.state.subjects[subjectKey];
-        const agent = subject ? this.subjectAgent(subject) : this.host.agents.get(subjectKey)?.agent;
-        if (!agent) {
-          // An orphan root is not proof of an empty public inventory; never adopt it for a zero quote.
-          try {
-            await lstat(resolve(this.config.managedRoot, subjectKey));
-            throw hostingError('HOSTING_SUBJECT_CONFLICT');
-          } catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
-        }
-        // New managed subjects have fresh HOME/work roots and a validated model-only
-        // template: no skill/plugin source is copied. Do not create an instance to quote.
-        const inventory = agent ? await this.observeInventory({ profile: agent.profile,
-          manager: stoppedSkillManager({ agent, apiOrigin: this.apiOrigin, instanceId: this.host.instanceId }) })
-          : skillInventorySnapshot({ discovery: { data: [{ cwd: '', skills: [], errors: [] }] }, cwd: '', codexHome: '' });
+        const inventory = await this.installedInventory(subjectKey);
         return { ...request, hostId: this.host.config.hostId, ...inventory };
       });
     }
@@ -220,16 +236,29 @@ export class HostingControl {
           provisionGeneration: active.provisionGeneration, outcome: 'CURRENT', hostId: this.host.config.hostId };
       }
       if (request.method === 'prepare') {
+        const prior = this.state.operations[key];
+        if (prior) {
+          if (!same(prior.association, hostingAssociation(request)) || !same(prior.quotedInventory ?? null, request.quotedInventory ?? null))
+            throw hostingError('HOSTING_OPERATION_CONFLICT');
+          return this.prepared(request, prior, prior.candidate);
+        }
         let readmission = null;
         const existing = this.state.subjects[subjectKey];
-        if (!this.state.operations[key] && request.operationKind === 'INITIAL' && existing)
-          readmission = await this.cleanedReadmission(existing);
-        return this.mutate(state => {
-        const prior = state.operations[key];
-        if (prior) {
-          if (!same(prior.association, hostingAssociation(request))) throw hostingError('HOSTING_OPERATION_CONFLICT');
-          return { value: this.prepared(request, prior, prior.candidate), changed: false };
+        if (request.operationKind === 'INITIAL') {
+          if (!request.quotedInventory) throw hostingError('HOSTING_INVENTORY_REQUIRED');
+          if (existing) readmission = await this.cleanedReadmission(existing);
+          const inventory = await this.installedInventory(subjectKey);
+          if (request.quotedInventory.hostId !== this.host.config.hostId
+              || request.quotedInventory.inventorySha256 !== inventory.inventorySha256) {
+            return this.mutate(state => {
+              const rejection = { association: hostingAssociation(request), subjectKey, candidate: null,
+                provisionGeneration: 0, admittedAt: null, recoveryRequired: false, quotedInventory: request.quotedInventory };
+              state.operations[key] = rejection;
+              return { value: this.prepared(request, rejection, null) };
+            });
+          }
         }
+        return this.mutate(state => {
         if (!readmission && this.host.agents.get(subjectKey)?.quiesceRequested) throw hostingError('RUNTIME_HANDOVER_PENDING');
         if (this.config.template.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template.profile.workspacePolicyId)) throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
         let subject = state.subjects[subjectKey];
@@ -251,7 +280,8 @@ export class HostingControl {
           if (subject.latestGeneration === Number.MAX_SAFE_INTEGER) throw hostingError('HOSTING_GENERATION_EXHAUSTED');
           subject.latestGeneration++;
         }
-        const operation = { association: hostingAssociation(request), subjectKey, candidate: this.candidateFacts(subject), provisionGeneration: subject.latestGeneration, admittedAt: null, recoveryRequired: false };
+        const operation = { association: hostingAssociation(request), subjectKey, candidate: this.candidateFacts(subject), provisionGeneration: subject.latestGeneration, admittedAt: null, recoveryRequired: false,
+          ...(request.quotedInventory ? { quotedInventory: request.quotedInventory } : {}) };
         state.operations[key] = operation;
         return { value: this.prepared(request, operation, subject) };
         });

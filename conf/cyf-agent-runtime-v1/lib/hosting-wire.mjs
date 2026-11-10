@@ -9,6 +9,9 @@ export const HOSTING_ASSOCIATION_FIELDS = Object.freeze(['tenantId', 'clientId',
   'leaseId', 'initialIntentId', 'operationId', 'operationKind', 'reservedAt', 'requestedAt', 'validUntil']);
 export const HOSTING_CANDIDATE_FIELDS = Object.freeze(['installationId', 'manifestSha256', 'provisionGeneration']);
 export const positiveEpoch = value => Number.isSafeInteger(value) && value > 0 && Number.isFinite(new Date(value).getTime());
+export const validQuotedInventory = value => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join(',') === 'hostId,inventorySha256'
+  && exactHostingId(value.hostId) && /^[0-9a-f]{64}$/.test(value.inventorySha256);
 const fail = () => { throw hostingError('HOSTING_WIRE_INVALID'); };
 
 // Reuse the mature duplicate/Unicode-safe parser; sanitize its diagnostic, which
@@ -22,8 +25,10 @@ export function validateHostingAssociation(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request) || request.protocol !== HOSTING_PROTOCOL
       || !HOSTING_METHODS.includes(request.method)) fail();
   const allowed = ['protocol', 'method', ...(['capabilities', 'inventory'].includes(request.method) ? ['tenantId', 'clientId', 'ownerJiacn', ...(request.method === 'inventory' ? ['canonicalAgentId'] : [])] : HOSTING_ASSOCIATION_FIELDS),
+    ...(request.method === 'prepare' && Object.hasOwn(request, 'quotedInventory') ? ['quotedInventory'] : []),
     ...(['ensure', 'observe', 'quiesce', 'evidence', 'cleanup'].includes(request.method) ? HOSTING_CANDIDATE_FIELDS : []), ...(['quiesce', 'evidence', 'cleanup'].includes(request.method) ? ['handoverId'] : [])];
   if (Object.keys(request).sort().join(',') !== allowed.sort().join(',')) throw hostingError('HOSTING_FIELD_FORBIDDEN');
+  if (Object.hasOwn(request, 'quotedInventory') && (request.operationKind !== 'INITIAL' || !validQuotedInventory(request.quotedInventory))) fail();
   const ids = ['capabilities', 'inventory'].includes(request.method) ? ['tenantId', 'clientId', 'ownerJiacn', ...(request.method === 'inventory' ? ['canonicalAgentId'] : [])] : HOSTING_ASSOCIATION_FIELDS.slice(0, 8);
   if (ids.some(field => !exactHostingId(request[field]))) fail();
   if (['quiesce', 'evidence', 'cleanup'].includes(request.method) && !exactHostingId(request.handoverId)) fail();

@@ -10,7 +10,7 @@ import { RuntimeV1Client } from '../lib/runtime-client.mjs';
 import { createExecutionAdapterFactory } from '../lib/execution-adapter.mjs';
 import { digestManifest, runtimeSubjectKey } from '../lib/manifest.mjs';
 import { agentMessageFixture, httpFixture } from './agent-wire-fixture.mjs';
-import { candidateRequest } from './hosting-fixture.mjs';
+import { candidateRequest, quotedPreparation, fixtureInventory } from './hosting-fixture.mjs';
 import { fromAgentWire, toAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
 import { packageFixture, command, activate, reconcile } from '../../codex-bridge/test/fixtures/skill-management-fixture.mjs';
 import { replyMessage } from '../../codex-bridge/message-envelope.mjs';
@@ -73,14 +73,14 @@ test('real control/host/adapter/engine preserve installed skill through cleanup 
         createExecutor: options => { const executor = engine.createExecutor(options); captures.set(options.subjectKey, executor); return executor; } }; } }) });
   host = new RuntimeHost({ config, instanceId, createExecutor: adapters.createExecutor, flushEvidence: adapters.flushEvidence,
     cleanPrivateData: adapters.cleanPrivateData, admitRelationship: adapters.admitRelationship }); await host.start();
-  control = await new HostingControl({ host, clientFactory, apiOrigin, config: { configVersion: 1,
+  control = await new HostingControl({ host, clientFactory, apiOrigin, observeInventory: fixtureInventory, config: { configVersion: 1,
     socketPath: resolve(root, 'socket/control.sock'), socketGid: process.getgid(), managedRoot: resolve(root, 'managed'),
     scopes: ['fixture-owner', 'next-owner'].map(ownerJiacn => ({ tenantId: '0', clientId: 'fixture-client', ownerJiacn })), enrollmentTtlMs: 3600000,
     template: { profile: { codexBin: '/bin/true', appServerEnabled: false, fastChatEnabled: false },
       codexConfig: 'model_provider = "managed"\n[model_providers.managed]\nbase_url = "https://no-network.invalid/v1"\nenv_key = "CYF_MANAGED_PROVIDER_API_KEY"\nrequires_openai_auth = false\n',
       providerEnvironment: { CYF_MANAGED_PROVIDER_API_KEY: 'never-live-fixture' } } } }).initialize();
   const wire = JSON.parse(await readFile(new URL('./fixtures/gss-hosting-control-v1.json', import.meta.url)));
-  const request = wire.prepareRequest, candidate = await control.handle(request);
+  const request = quotedPreparation(wire.prepareRequest, 'real-fixture-host'), candidate = await control.handle(request);
   await control.handle(candidateRequest(request, candidate, 'ensure')); await Promise.all([...control.jobs.values()]);
   assert.equal((await control.handle(candidateRequest(request, candidate, 'observe'))).outcome, 'SERVICE_READY', JSON.stringify(logs));
   const agent = control.subjectAgent(Object.values(control.state.subjects)[0]), old = captures.get(agent.subjectKey).state(), manager = old.skillInstallManager;
@@ -100,6 +100,10 @@ test('real control/host/adapter/engine preserve installed skill through cleanup 
   assert.equal(old.disposed, true);
   owner = 'next-owner';
   const next = { ...request, ownerJiacn: owner, operationId: 'real-reinvite', initialIntentId: 'real-reinvite', bindingId: 'real-new-binding', leaseId: 'real-new-lease' };
+  const inventory = await control.handle({ protocol: request.protocol, method: 'inventory', tenantId: next.tenantId,
+    clientId: next.clientId, ownerJiacn: next.ownerJiacn, canonicalAgentId: next.canonicalAgentId });
+  assert.equal(inventory.installedSkillCount, '1');
+  next.quotedInventory = { hostId: inventory.hostId, inventorySha256: inventory.inventorySha256 };
   const nextCandidate = await control.handle(next);
   await control.handle(candidateRequest(next, nextCandidate, 'ensure')); await Promise.all([...control.jobs.values()]);
   assert.equal((await control.handle(candidateRequest(next, nextCandidate, 'observe'))).outcome, 'SERVICE_READY', JSON.stringify(logs));

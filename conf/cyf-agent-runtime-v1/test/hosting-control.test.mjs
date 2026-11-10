@@ -5,14 +5,14 @@ import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { resolve } from 'node:path';
-import { hostingFixture, candidateRequest, tick, code } from './hosting-fixture.mjs';
+import { hostingFixture, candidateRequest, quotedPreparation, fixtureInventory, tick, code } from './hosting-fixture.mjs';
 import { parseHostingJson, validateHostingRequest, validateHostingAssociation, hostingReply } from '../lib/hosting-wire.mjs';
 import { startHostingServer } from '../lib/hosting-server.mjs';
 import { digestManifest, runtimeSubjectKey, stableJson } from '../lib/manifest.mjs';
 import { readPrivateJson, writePrivateJson } from '../lib/security.mjs';
 const fixtureBytes = await readFile(new URL('./fixtures/gss-hosting-control-v1.json', import.meta.url));
 const wire = JSON.parse(fixtureBytes);
-const prepare = wire.prepareRequest;
+const prepare = quotedPreparation(wire.prepareRequest);
 
 // Frozen acceptance: exact wire and full immutable association; private journal
 // before admission; no enrollment during prepare/observe; single initial enroll;
@@ -433,7 +433,7 @@ test('cleanup control uses trusted saved template, requires evidence and preserv
 test('current lookup is read-only and selects admitted operation rather than highest prepared generation', async t => {
   const f = await hostingFixture(t);
   const prepared = await f.control().handle(prepare);
-  const current = { ...prepare, method: 'current' };
+  const current = { ...wire.prepareRequest, method: 'current' };
   const before = await readFile(f.control().path, 'utf8');
   assert.equal((await f.control().handle(current)).outcome, 'UNKNOWN');
   assert.equal(await readFile(f.control().path, 'utf8'), before);
@@ -487,23 +487,25 @@ test('prepared reprovision cannot change admitted operation after permanent quie
   const before = await readFile(control.path, 'utf8');
   await assert.rejects(control.handle(candidateRequest(wire.reprovisionPrepareRequest, pending, 'ensure')), code('RUNTIME_HANDOVER_PENDING'));
   assert.equal(await readFile(control.path, 'utf8'), before);
-  assert.equal((await control.handle({ ...prepare, method: 'current' })).provisionGeneration, 1);
+  assert.equal((await control.handle({ ...wire.prepareRequest, method: 'current' })).provisionGeneration, 1);
   assert.equal(f.sessionCount(), 1);
 });
 
 test('format1 journal upgrades exact candidate facts once without enrollment or changed prepared bytes', async t => {
   const f = await hostingFixture(t), control = f.control();
   const original = await control.handle(prepare), path = control.path;
+  delete original.quotedInventory;
   const legacy = await readPrivateJson(path); legacy.formatVersion = 1;
-  for (const operation of Object.values(legacy.operations)) delete operation.candidate;
+  for (const operation of Object.values(legacy.operations)) { delete operation.candidate; delete operation.quotedInventory; }
   await f.stop(); await writePrivateJson(path, legacy); await f.start();
   assert.equal((await readPrivateJson(path)).formatVersion, 2);
-  assert.deepEqual(await f.control().handle(prepare), original);
+  assert.deepEqual(await f.control().handle(wire.prepareRequest), original);
+  await assert.rejects(f.control().handle(prepare), code('HOSTING_OPERATION_CONFLICT'));
   assert.equal(f.enrollmentCount(), 0);
   const bytes = await readFile(path);
   await f.stop(); await f.start();
   assert.deepEqual(await readFile(path), bytes);
-  assert.deepEqual(await f.control().handle(prepare), original);
+  assert.deepEqual(await f.control().handle(wire.prepareRequest), original);
 });
 
 test('invalid format1 migration does not persist a guessed candidate or enroll', async t => {
@@ -545,7 +547,7 @@ test('original candidate replay is immutable after public subject changes; old l
 
 test('CLEANED public subject can be invited twice more in the same roots with fresh enrollment and immutable old replies', async t => {
   const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
-  const f = await hostingFixture(t);
+  const f = await hostingFixture(t, { observeInventory: fixtureInventory });
   f.controlConfig.scopes.push({ ...f.controlConfig.scopes[0], ownerJiacn: 'second-owner' });
   let request = prepare, candidate = await f.control().handle(request);
   await f.control().handle(candidateRequest(request, candidate, 'ensure')); await f.settle();
@@ -598,7 +600,7 @@ test('CLEANED public subject can be invited twice more in the same roots with fr
 
 test('control resumes partially materialized readmission after restart without extra enrollment or old execution', async t => {
   const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
-  const f = await hostingFixture(t), original = await f.control().handle(prepare);
+  const f = await hostingFixture(t, { observeInventory: fixtureInventory }), original = await f.control().handle(prepare);
   await f.control().handle(candidateRequest(prepare, original, 'ensure')); await f.settle();
   const agent = f.control().subjectAgent(Object.values(f.control().state.subjects)[0]);
   const finish = { ...candidateRequest(prepare, original, 'quiesce'), handoverId: 'finish-before-interruption' };
@@ -671,4 +673,46 @@ test('inventory never treats an orphan public root or missing workspace policy a
   await assert.rejects(control.handle(request), code('HOSTING_SUBJECT_CONFLICT'));
   assert.equal(await readFile(control.path, 'utf8'), before);
   assert.equal(f.enrollmentCount(), 0);
+});
+
+
+test('inventory mismatch is a durable terminal no-effect reply across restart, not a retryable candidate', async t => {
+  const f = await hostingFixture(t);
+  const stale = quotedPreparation(wire.prepareRequest, 'fixture-host', 'a'.repeat(64));
+  const rejection = await f.control().handle(stale);
+  const shared = JSON.parse(await readFile(new URL('./fixtures/hosting-inventory-rejection-v1.json', import.meta.url)));
+  assert.deepEqual(stale, shared.request); assert.deepEqual(rejection, shared.response);
+  assert.equal(rejection.outcome, 'FAILED_NO_EFFECT'); assert.equal(rejection.reasonCode, 'HOSTING_INVENTORY_CHANGED');
+  assert.match(rejection.evidenceRef, /^[0-9a-f]{64}$/);
+  assert.equal(Object.keys(f.control().state.subjects).length, 0); assert.equal(f.enrollmentCount(), 0);
+  assert.equal(Object.values(f.control().state.operations)[0].candidate, null);
+  assert.doesNotThrow(() => f.control().validateJournal());
+  await f.stop(); await f.start();
+  assert.deepEqual(await f.control().handle(stale), rejection);
+  await assert.rejects(f.control().handle(prepare), code('HOSTING_OPERATION_CONFLICT'));
+  const next = { ...prepare, initialIntentId: 'new-quote-intent', operationId: 'new-quote-intent' };
+  assert.equal((await f.control().handle(next)).outcome, 'PREPARED');
+  assert.deepEqual(await f.control().handle(stale), rejection); assert.equal(f.enrollmentCount(), 0);
+});
+test('initial prepare requires an exact quote and successful replay never re-observes mutable inventory', async t => {
+  const f = await hostingFixture(t);
+  await assert.rejects(f.control().handle(wire.prepareRequest), code('HOSTING_INVENTORY_REQUIRED'));
+  for (const value of [{}, { hostId: 'fixture-host', inventorySha256: 'bad' }, { ...prepare.quotedInventory, price: 0 }])
+    await assert.rejects(f.control().handle({ ...prepare, quotedInventory: value }));
+  assert.equal(Object.keys(f.control().state.operations).length, 0);
+  const candidate = await f.control().handle(prepare);
+  f.control().observeInventory = async () => { throw Error('later inventory must not rewrite first prepare'); };
+  assert.deepEqual(await f.control().handle(prepare), candidate);
+  await f.stop(); await f.start(); assert.deepEqual(await f.control().handle(prepare), candidate);
+});
+
+test('inventory observation or rejection journal failure never becomes a refundable no-effect proof', async t => {
+  const f = await hostingFixture(t);
+  f.control().installedInventory = async () => { throw Object.assign(Error('unconfirmed'), { code: 'SKILL_INVENTORY_UNCONFIRMED' }); };
+  await assert.rejects(f.control().handle(prepare), code('SKILL_INVENTORY_UNCONFIRMED'));
+  assert.equal(Object.keys(f.control().state.operations).length, 0);
+  // Reboot restores the real observation method. A failed durable write may not return a rejection.
+  await f.stop(); await f.start(); f.control().path = f.controlConfig.managedRoot;
+  await assert.rejects(f.control().handle(quotedPreparation(wire.prepareRequest, 'fixture-host', 'a'.repeat(64))), code('HOSTING_JOURNAL_WRITE_UNCONFIRMED'));
+  assert.equal(Object.keys(f.control().state.operations).length, 0); assert.equal(f.enrollmentCount(), 0);
 });
