@@ -621,3 +621,24 @@ test('control resumes partially materialized readmission after restart without e
   assert.equal(f.states.get(agent.subjectKey)[1].agent.manifest.installationId, candidate.installationId);
   assert.deepEqual(await f.control().handle(prepare), original);
 });
+
+test('public inventory is scoped, has no paths or provisioning side effects, and does not instantiate a new Agent', async t => {
+  const f = await hostingFixture(t), control = f.control();
+  const request = { protocol: 'runtime-hosting-v1', method: 'inventory', tenantId: prepare.tenantId,
+    clientId: prepare.clientId, ownerJiacn: prepare.ownerJiacn, canonicalAgentId: prepare.canonicalAgentId };
+  const before = await readFile(control.path, 'utf8');
+  const empty = await control.handle(request);
+  assert.equal(empty.installedSkillCount, '0'); assert.equal(empty.inventoryVersion, '1');
+  assert.equal(f.enrollmentCount(), 0); assert.equal(await readFile(control.path, 'utf8'), before);
+  let observations = 0;
+  control.observeInventory = async ({ profile }) => { observations++; assert.equal(profile.agentId, f.peers[0].manifest.canonicalAgentId);
+    return { inventoryVersion: '1', inventorySha256: 'a'.repeat(64), installedSkillCount: '1', skills: [{ skillKey: 'manual', source: 'NATIVE', revision: 'b'.repeat(64) }] }; };
+  const existing = await control.handle({ ...request, canonicalAgentId: f.peers[0].manifest.canonicalAgentId });
+  assert.equal(existing.installedSkillCount, '1'); assert.equal(observations, 1);
+  await assert.rejects(control.handle({ ...request, ownerJiacn: 'other' }), code('HOSTING_SCOPE_REJECTED'));
+  assert.equal(observations, 1); assert.equal(await readFile(control.path, 'utf8'), before);
+  assert.throws(() => validateHostingAssociation({ ...request, codexHome: '/caller-selected' }));
+  const message = eventMessage('inventory-request', 'hosting.inventory', 'inventory-fixture', Object.fromEntries(Object.entries(request).filter(([key]) => !['protocol', 'method'].includes(key))));
+  assert.deepEqual(validateHostingRequest(message), request);
+  assert.equal(hostingReply(message, existing).data.installedSkillCount, '1');
+});

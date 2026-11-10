@@ -8,6 +8,8 @@ import { acquireRuntimeOwnership, requireOwnedPrivateRoot } from './runtime-host
 import { RuntimeV1Client, canonicalVersion } from './runtime-client.mjs';
 import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './security.mjs';
 import { hostingError, validateHostingConfig } from './hosting-config.mjs';
+import { stoppedSkillManager } from './evidence-handover.mjs';
+import { observeInstalledSkillInventory, skillInventorySnapshot } from '../../codex-bridge/skill-inventory.mjs';
 import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validateHostingAssociation } from './hosting-wire.mjs';
 
 // Existing private journals may contain exact safe integers. Preserve their bytes on load;
@@ -28,8 +30,9 @@ const privateFile = async (path, bytes) => {
 };
 
 export class HostingControl {
-  constructor({ host, config, apiOrigin, clientFactory = settings => new RuntimeV1Client(settings), workspacePolicies = new Map(), now = Date.now, logger = () => {} }) {
+  constructor({ host, config, apiOrigin, clientFactory = settings => new RuntimeV1Client(settings), workspacePolicies = new Map(), now = Date.now, logger = () => {}, observeInventory = observeInstalledSkillInventory }) {
     this.host = host; this.config = validateHostingConfig(config); this.apiOrigin = apiOrigin; this.clientFactory = clientFactory; this.workspacePolicies = workspacePolicies; this.now = now; this.logger = logger;
+    this.observeInventory = observeInventory;
     this.path = resolve(config.managedRoot, 'hosting-journal.json'); this.state = null; this.release = null;
     this.gates = new Map(); this.journalGate = Promise.resolve(); this.jobs = new Map(); this.started = new Set(); this.aborters = new Map(); this.live = new Map(); this.closing = false; this.journalFailed = false;
   }
@@ -179,6 +182,19 @@ export class HostingControl {
     if (!this.scopeAllowed(request)) throw hostingError('HOSTING_SCOPE_REJECTED');
     if (request.method === 'capabilities') return { protocol: HOSTING_PROTOCOL, method: request.method, tenantId: request.tenantId,
       clientId: request.clientId, ownerJiacn: request.ownerJiacn, available: !this.config.template.profile.workspacePolicyId || this.workspacePolicies.has(this.config.template.profile.workspacePolicyId), hostId: this.host.config.hostId };
+    if (request.method === 'inventory') {
+      const subjectKey = runtimeSubjectKey(request);
+      return this.withSubject(subjectKey, async () => {
+        const subject = this.state.subjects[subjectKey];
+        const agent = subject ? this.subjectAgent(subject) : this.host.agents.get(subjectKey)?.agent;
+        // New managed subjects have fresh HOME/work roots and a validated model-only
+        // template: no skill/plugin source is copied. Do not create an instance to quote.
+        const inventory = agent ? await this.observeInventory({ profile: agent.profile,
+          manager: stoppedSkillManager({ agent, apiOrigin: this.apiOrigin, instanceId: this.host.instanceId }) })
+          : skillInventorySnapshot({ discovery: { data: [{ cwd: '', skills: [], errors: [] }] }, cwd: '', codexHome: '' });
+        return { ...request, hostId: this.host.config.hostId, ...inventory };
+      });
+    }
     const subjectKey = runtimeSubjectKey(request); const key = opKey(request);
     return this.withSubject(subjectKey, async () => {
       if (this.closing) throw hostingError('HOSTING_CONTROL_NOT_RUNNING');

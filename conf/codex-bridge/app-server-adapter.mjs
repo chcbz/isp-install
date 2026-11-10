@@ -474,7 +474,7 @@ export class AppServerAdapter extends EventEmitter {
     })
   }
   notify(method, params = {}) { if (!this.closed) this.send({ method, params }) }
-  async initialize() {
+  async initialize({ catalogOnly = false } = {}) {
     const timings = []
     const measured = async (phase, operation) => {
       const started = performance.now(); let completed = false
@@ -490,6 +490,8 @@ export class AppServerAdapter extends EventEmitter {
       // No account/config/tool requests or turns are admitted before verification.
       if (sandboxed && this.readback.schema?.measured === true && !this.readback.processExecutable) await measured('executable-readback', () => this.verifySpawnedExecutable())
       this.notify('initialized', {})
+      // Inventory requires only native skill discovery, never provider/account/tool startup.
+      if (catalogOnly) return this.readback
       this.readback.account = await measured('account/read', () => this.request('account/read', { refreshToken: false }))
       this.readback.models = await measured('model/list', () => this.request('model/list', {}))
       this.readback.config = await measured('config/read', () => this.request('config/read', {}))
