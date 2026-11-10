@@ -2104,3 +2104,50 @@ test('cost-only original session drains CHAT without inbox recovery, enrollment,
   await assert.rejects(flushStoppedEvidence({ ...options, clientFactory: () => ({ session: async () => { throw new Error('original authorization revoked'); }, invalidateSession: () => { invalidations++; } }) }), /authorization revoked/);
   assert.equal(invalidations, 2); assert.equal(sends, 2);
 });
+
+test('stopped evidence locates the real management journal and keeps unacknowledged results pending across restart', async t => {
+  const { flushStoppedEvidence } = await import('../lib/evidence-handover.mjs');
+  const { SkillInstallManager, defaultSkillInstallStateRoot } = await import('../../codex-bridge/skill-install-manager.mjs');
+  const { headers } = await import('../../codex-bridge/test/fixtures/skill-management-fixture.mjs');
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const identity = agent.manifest, instanceId = 'original-boot', apiOrigin = 'https://api.example.test';
+  const binding = { scope: { tenantId: identity.tenantId, clientId: identity.clientId, ownerJiacn: 'original', agentId: identity.canonicalAgentId },
+    fence: { installationId: identity.installationId, hostId: config.hostId, runtimeInstanceId: instanceId, sessionGeneration: '1' } };
+  const pkg = managementPackage(); let downloads = 0;
+  const settings = { profile: agent.profile, runtimeInstanceId: instanceId, wsUrl: 'wss://api.example.test/ws/agent/channel',
+    stateRoot: defaultSkillInstallStateRoot(resolve(agent.stateRoot, 'inbox'), agent.profile, 'wss://api.example.test/ws/agent/channel'),
+    getRuntimeHeaders: () => headers(binding), fetchFn: async () => {
+      downloads++; return new Response(pkg.bytes, { headers: { 'content-length': String(pkg.bytes.length), 'content-type': 'application/octet-stream' } });
+    } };
+  const manager = new SkillInstallManager(settings); manager.initialize(); manager.bindSession(binding);
+  manager.verifyCandidate = async () => ({ readiness: 'READY' });
+  const command = managementCommand(pkg.target, { ...binding.scope, runtimeInstallationId: identity.installationId });
+  await manager.handle(command); await manager.handle(managementActivate(command)); manager.bindSession(null);
+  const originals = manager.pendingResults().map(row => row.envelope), sent = [];
+  assert.equal(originals.length, 2);
+  let lose = true, invalidations = 0;
+  const options = { agent, ownerJiacn: 'original', apiOrigin, hostId: config.hostId, instanceId: 'drain-boot', clientFactory: () => ({
+    session: async () => {}, invalidateSession: () => { invalidations++; }, nativeFetch: async (url, request) => {
+      assert.equal(url.pathname, '/internal/agent/skill-management/results'); assert.equal(request.method, 'POST');
+      const original = JSON.parse(request.body); sent.push(original);
+      if (lose) throw Error('receipt lost');
+      const receipt = replyMessage(original, 'work.result.receipt', `receipt_${original.messageId}`, 'E0', 'committed', {
+        schemaVersion: 2, skillChangeId: original.data.skillChangeId, commandId: original.data.commandId,
+        attempt: original.data.attempt, receiptStatus: 'ACCEPTED' });
+      const response = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'drain-http', code: 'E0', msg: '', data: receipt }),
+        { headers: { 'content-type': 'application/json', 'x-request-id': 'drain-http' } });
+      Object.defineProperty(response, 'url', { value: url.href }); return response;
+    }
+  }) };
+  const first = await flushStoppedEvidence(options);
+  assert.equal(first.confirmed, false); assert.equal(first.management.pending, 2); assert.deepEqual(sent, originals);
+  lose = false;
+  const second = await flushStoppedEvidence(options);
+  assert.equal(second.confirmed, true); assert.equal(second.management.pending, 0); assert.deepEqual(sent.slice(2), originals);
+  assert.equal(downloads, 1); assert.equal(invalidations, 2);
+  const reopened = new SkillInstallManager(settings); reopened.initialize();
+  assert.equal(reopened.pendingResults().length, 0); assert.equal(reopened.listInstalledSkills().length, 1);
+  assert.equal((await flushStoppedEvidence(options)).confirmed, true); assert.equal(sent.length, 4);
+  await assert.rejects(flushStoppedEvidence({ ...options, ownerJiacn: 'next-owner' }));
+  assert.equal(sent.length, 4); assert.equal(invalidations, 4);
+});
