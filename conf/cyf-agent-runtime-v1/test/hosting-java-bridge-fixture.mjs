@@ -3,6 +3,7 @@
 // synthetic native enrollment/session/executor; no real API/provider/production.
 // Parent keeps stdin open. Send "stop\n" or EOF to close all owned resources.
 import { hostingFixture } from './hosting-fixture.mjs';
+import { cleanStoppedPrivateData } from '../lib/private-data-cleanup.mjs';
 import { startHostingServer } from '../lib/hosting-server.mjs';
 const cleanups = [];
 let server; let stopPromise;
@@ -22,6 +23,10 @@ try {
   // Evidence transport fixture only: real stop/gate/journal; provider delivery is synthetic.
   let attempts = 0;
   fixture.host().flushEvidence = async () => ({ confirmed: ++attempts > 1 });
+  // Actual storage aggregate; only the knowledge provider is synthetic here.
+  fixture.host().cleanPrivateData = options => cleanStoppedPrivateData({ ...options,
+    apiOrigin: 'https://example.test', instanceId: fixture.host().instanceId,
+    publicFiles: options.agent.publicFiles, extractKnowledge: async () => ({ confirmed: true }) });
   server = await startHostingServer({ control: fixture.control() });
   process.stdout.write(JSON.stringify({ socketPath: fixture.controlConfig.socketPath, uid: process.getuid(), gid: fixture.controlConfig.socketGid,
     hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId }) + '\n');

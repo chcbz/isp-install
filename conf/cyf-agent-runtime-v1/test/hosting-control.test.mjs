@@ -383,7 +383,7 @@ test('original evidence is sent only after stop and exact relation match, pendin
 });
 
 test('cleanup wire binds original relation and refuses caller-selected public files or paths', async () => {
-  const fixture = JSON.parse(await readFile(new URL('./fixtures/hosting-evidence-v1.json', import.meta.url)));
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/hosting-cleanup-v1.json', import.meta.url)));
   const original = fixture.request;
   const request = { ...original, messageType: 'hosting.cleanup' };
   const decoded = validateHostingRequest(request);
