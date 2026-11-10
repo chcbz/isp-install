@@ -8,8 +8,8 @@
     "api/docs/interface-standard.md": "7dc50a51b5c3faa2d5311dd0f749ed2000365c34febc3c3714ba2a945180548f",
     "specs/juyiting-skill-execution/management-contract.md": "42707edf45970cb7370806518765575970c064f2670e85fc52275d19ed86da3a",
     "specs/juyiting-skill-execution/management-mvp.md": "db71c941ad7dd65c1b10028c591e2619b9c56f040067d19ddec5ab5a2ef5ff27",
-    "specs/juyiting-skill-execution/fixtures/management-contract-v1.schema.json": "6692316be719bc93e3d4f03be2e12b0fa1233e6b490a7610cd8aec392f175776",
-    "specs/juyiting-skill-execution/fixtures/management-contract-v1.examples.json": "b9e48e96fc431b4920af44a437097d6479a61d7c2ccb076ad6be266db133171e",
+    "specs/juyiting-skill-execution/fixtures/management-contract-v1.schema.json": "4ac4ceb85bf7c39ab460f936479900a67d8d1728ec38ea21ef37f28bfbd8cf67",
+    "specs/juyiting-skill-execution/fixtures/management-contract-v1.examples.json": "b3b2198c6a439217dd52904134a190fc832f40231fc0ab1d2f84c01f4764c638",
     "specs/juyiting-skill-execution/fixtures/management-contract-v1.behavior.json": "dcd4b7ae53c539b343480fe11b639fcf47bcd6c14b100b139f10fa24302a8edf",
     "specs/juyiting-skill-execution/evidence/management-contract-20261023/static-check.cjs": "c65ac0e67908c82cb48a52d065e59346d6ad256ef859fbcb954145ff404acb77",
     "specs/juyiting-skill-execution/evidence/management-contract-20261023/static-check.json": "b73c10edf19a70765db1833b1ce49138312faeb798d511802d691a2884e9358a",
@@ -33,5 +33,13 @@
   "uninstallOverlay": {
     "date": "2026-10-26",
     "scope": "UNINSTALL POLICY, nullable removal evidence, retained-entitlement reinstall; target contract not deployment evidence"
+  },
+  "wenRevision": {
+    "date": "2026-11-05",
+    "scope": "Candidate WEN currency; only current consumed fixture hashes updated; historical provenance retained. Not a release approval.",
+    "previousHashes": {
+      "specs/juyiting-skill-execution/fixtures/management-contract-v1.schema.json": "6692316be719bc93e3d4f03be2e12b0fa1233e6b490a7610cd8aec392f175776",
+      "specs/juyiting-skill-execution/fixtures/management-contract-v1.examples.json": "b9e48e96fc431b4920af44a437097d6479a61d7c2ccb076ad6be266db133171e"
+    }
   }
 }

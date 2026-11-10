@@ -222,3 +222,14 @@ This source change does not install, migrate live state, change credentials or
 systemd. CYF's fixed program directory is `app/`, not releases/current; any future
 release must preserve package/commit/tree/file digests, identity, locks and
 recovery under the separately authorized controlled installation process.
+
+
+### CYF default execution model display (2026-11-05 candidate)
+Registration now includes optional `executionModel`: explicit `codexModel`, otherwise the
+existing app-server config readback's `config.model`; unknown is null. `chatModel` overrides
+and tool-specific models are not projected as the default execution model. This publishes no
+credentials/endpoint configuration and adds no config read or provider request. The API stores
+this as display metadata, not per-call billing authority. Roll out the nullable API schema and
+consumer changes together; do not backfill a target model as a reported fact. Versions here
+are source candidates, not installation evidence. CYF AGENTS/RB-1 and the 600-second Flow rule
+apply; Flow must not call/wait for production hosts.

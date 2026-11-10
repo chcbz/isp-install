@@ -46,7 +46,8 @@ function context(t, message = messageFixture(), outcome = { revision: null, sche
   const fetched = [], frames = [], events = [], preparations = []; let finalPrepared = null, starts = 0
   const readback = { initialize: {}, account: {}, models: {}, config: {}, tools: {}, schema: { ...schema, schemaContractId: schema.contractId, measured: true } }
   const adapter = { closed: false, readback, startOrResumeThread: async (prior, policy) => {
-    assert.match(policy.developerInstructions, /Context Envelope and the authorized material carriers actually attached/);
+    assert.match(policy.developerInstructions, /Context Envelope, the conversation history already present in this same native thread/);
+    assert.match(policy.developerInstructions, /authorized material carriers attached to this turn/);
     assert.match(policy.developerInstructions, /inputMimeTypes list restricts that skill execution, not native reading/);
     assert.match(policy.developerInstructions, /if a carrier is absent or genuinely unreadable/);
     assert.equal(prior, null); assert.equal(policy.cwd, '/inputs'); assert.deepEqual(policy.config, { network: false, project_doc_max_bytes: 0 }); return { threadId: 'materials-thread' }
@@ -473,4 +474,15 @@ test('real materialized XLSX opens directly with openpyxl on the first attempt',
   const output = execFileSync(python, ['-I', '-B', '-c',
     'import sys,openpyxl; w=openpyxl.load_workbook(sys.argv[1],read_only=True,data_only=True); print(w.active["A1"].value); w.close()', path], { encoding: 'utf8' })
   assert.equal(output.trim(), 'materialized-first-read')
+})
+
+test('invalid business output cannot discard terminal CHAT cost evidence', async t => {
+  const c = context(t), usage = []
+  const run = c.adapter.runTurn
+  c.adapter.runTurn = async options => ({ ...await run(options), content: 'invalid business output', usageEvidence: { status: 'UNVERIFIED' } })
+  c.options.controls.recordUsage = (phase, model, evidence) => usage.push({ phase, model, evidence })
+  await assert.rejects(runFastChat(profile, c.message, c.options))
+  assert.deepEqual(usage.map(item => item.phase), ['STARTED', 'TERMINAL'])
+  assert.deepEqual(usage[1].evidence, { status: 'UNVERIFIED' })
+  assert.equal(c.frames.length, 0)
 })

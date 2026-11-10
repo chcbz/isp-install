@@ -1,3 +1,4 @@
+import { ChatUsageDelivery } from './chat-usage-delivery.mjs'
 import { contextDeliveryPlan, requireContextThread, completedContextReceipt, contextBootstrapRejection } from './chat-context-delivery.mjs'
 import { CHAT_FILE_TOOL_INSTRUCTIONS } from './native-execution-profile.mjs'
 import { prepareConversationTools } from './conversation-tools.mjs'
@@ -2492,7 +2493,7 @@ export class AgentMessageProcessor {
     profile, inbox, runCommand, runChat, recoverChat = null, onChatFinalConfirmed = () => {}, onTaskEvent = () => {}, onWorkResultReceipt = () => null,
     recoverCommandOutcome = () => null, onReject = () => {}, sendChatBusy = () => {},
     ledger = null, ackOutbox = null, executionReportOutbox = null, sendFn = null, chatInbox = null, chatAckOutbox = null, lanes = null,
-    sendCommandAckFn = null, onCommandTerminalConfirmed = null, chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
+    sendCommandAckFn = null, onCommandTerminalConfirmed = null, onChatUsagePending = () => {}, chatRecoveryRetryBaseMs = 250, chatRecoveryRetryMaxMs = 30000
   }) {
     this.profile = profile
     this.inbox = inbox
@@ -2509,6 +2510,7 @@ export class AgentMessageProcessor {
     this.ackOutbox = ackOutbox
     this.executionReportOutbox = executionReportOutbox
     this.sendFn = sendFn
+    this.onChatUsagePending = onChatUsagePending
     this.onCommandTerminalConfirmed = onCommandTerminalConfirmed
     this.sendCommandAckFn = sendCommandAckFn
     this.runtimeAckTail = Promise.resolve()
@@ -2999,6 +3001,7 @@ export class AgentMessageProcessor {
         if (!latest || latest.state !== 'recovery') { this._clearChatRecoveryRetry(item.key); return }
         item = latest
         const recoveryControls = {
+          recordUsage: (phase, model, evidence) => { if (this.chatInbox.recordUsage(item, phase, model, evidence)) this.onChatUsagePending() },
           markFinalPrepared: finalPrepared => this.chatInbox.markFinalPrepared(item, finalPrepared),
           markFinalPublication: publication => this.chatInbox.markFinalPublication(item, publication)
         }
@@ -3027,6 +3030,7 @@ export class AgentMessageProcessor {
       active.state = 'STARTING'; active.item = claimed; this.chatActive = true
       const controls = {
         markPrepared: preparation => { active.state = 'PREPARED'; this.chatInbox.markPrepared(claimed, preparation) },
+        recordUsage: (phase, model, evidence) => { if (this.chatInbox.recordUsage(claimed, phase, model, evidence)) this.onChatUsagePending() },
         markRunning: (cancel, engine = {}) => { active.state = 'RUNNING'; active.cancel = cancel; this.chatInbox.markRunning(claimed, engine); if (active.cancelRequested && cancel) void Promise.resolve(cancel()).catch(() => {}) },
         markFinalPrepared: finalPrepared => { active.state = 'FINAL_PREPARED'; return this.chatInbox.markFinalPrepared(claimed, finalPrepared) },
         markFinalPublication: publication => this.chatInbox.markFinalPublication(claimed, publication),
@@ -4168,8 +4172,12 @@ export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, onl
   const typedInspection = typedInspectionProfileRuntime?.declaration?.() || null
   const nativeExecution = online && profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
     ? typedInspectionProfileRuntime?.nativeExecutionDeclaration?.() : null
+  // Reuse the existing measured config readback; no filesystem read or model call on publication.
+  // chatModel is a deliberation override, not the default execution model.
+  const executionModel = profile.codexModel || appServerAdapter?.readback?.config?.config?.model
   return {
     endpoint: config?.wsUrl ? sanitizeWebSocketEndpoint(config.wsUrl) : '',
+    executionModel: typeof executionModel === 'string' && executionModel.trim() ? executionModel.trim() : null,
     runtimeCapabilities: buildRuntimeCapabilities(profile),
     ...(typedDeliberation ? { typedDeliberation: { ...typedDeliberation,
       ...(online && typedInspection ? { materialsInput: { schemaVersion: 1, supportedInputs: typedInspection.supportedInputs } } : {}),
@@ -4474,7 +4482,6 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     } catch (error) {
       const errorMessage = `${error.code || 'WORKSPACE_ERROR'}: ${error.message}`
       const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
-      sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
       resolveRun({ ...payload, workspaceErrorCode: error.code || 'WORKSPACE_ERROR' })
       return
@@ -4506,7 +4513,6 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     if (mode === 'chat') sendChatFinal(profile, message, `无法继续会话：${errorMessage}`, { status: 'failed' }, sendProtocolFn)
     else {
       const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
-      sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
     }
     resolveRun({ status: 'failed', errorMessage, sessionErrorCode: code, ...(leaseError ? { workspaceErrorCode: 'WORKSPACE_LOCK_ERROR' } : {}) })
@@ -4532,7 +4538,6 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
     if (mode === 'chat') sendChatFinal(profile, message, `执行失败：${errorMessage}`, { status: 'failed' }, sendProtocolFn)
     else {
       const payload = { taskId, agentId: profile.agentId, status: 'failed', currentTaskTitle: title, errorMessage }
-      sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
     }
     if (mode === 'command') sendStatusFn(profile, 'online')
@@ -4632,7 +4637,6 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
       await streamQueue
       if (!controls.isCancelled()) sendChatFinal(profile, message, replyContent, { status }, sendProtocolFn)
     } else {
-      sendLegacyFn('task.report', payload, profile)
       sendLegacyFn('codex.result', payload, profile)
     }
     if (mode === 'command') sendStatusFn(profile, 'online')
@@ -4783,6 +4787,7 @@ export const runFastChat = async (profile, message, {
       ? bindingStore?.put(key, { ...binding, state: 'RECOVERY_REQUIRED', recoveryReason: reason, recoveryMessageId: message.messageId, updatedAt: Date.now() })
       : bindingStore?.markRecovery(key, reason)
     try {
+      await controls.recordUsage?.('STARTED', profile.chatModel || profile.codexModel)
       turnAttempted = true
       const result = await selectedAdapter.runTurn({
         threadId: binding.threadId, clientUserMessageId: message.messageId, input: preparedMaterials ? [{ type: 'text', text: JSON.stringify(envelope) }, ...preparedMaterials.nativeInputs] : JSON.stringify(envelope),
@@ -4802,6 +4807,7 @@ export const runFastChat = async (profile, message, {
           metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, content, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', ...(decoder ? { streamOutcomeKind: decoder.kind } : {}) }, sendProtocolFn)
         }
       })
+      await controls.recordUsage?.('TERMINAL', null, result.usageEvidence ?? null)
       turnCompleted = !materials || result.finishReason === 'completed'
       if (typedStreamError) throw typedStreamError
       if ((materials || deliveryPlan) && (result.finishReason !== 'completed' || result.threadId !== binding.threadId || !result.turnId || (acceptedTurn?.turnId && acceptedTurn.turnId !== result.turnId))) throw new AgentProtocolError(materials ? 'MATERIALS_NATIVE_RESULT_UNKNOWN' : 'TURN_ACCEPTANCE_UNKNOWN', 'No exact completed native turn readback')
@@ -4833,6 +4839,8 @@ export const runFastChat = async (profile, message, {
       metrics.publishAt = Date.now(); bindingStore?.put(key, { ...binding, state: 'IDLE', lastAppliedContextHash: message.contextSnapshot.contextHash, updatedAt: Date.now() })
       return { status: 'completed', turnId: result.turnId, threadKey: key, routeUsed: 'CHAT_FAST', metrics }
     } catch (error) {
+      if (turnAttempted && ['TURN_FAILED', 'TURN_INTERRUPTED'].includes(error.code))
+        await controls.recordUsage?.('TERMINAL', null, error.usageEvidence ?? null)
       // An error returned after runTurn was attempted cannot certify non-execution,
       // even if a native/adapter failure happens to use the pre-start error code.
       if (error.code === 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED')
@@ -4879,8 +4887,10 @@ export const recoverActionChat = async (profile, message, record, {
   const readback = await selected.reconcileTurn({ threadId: engineThreadId, turnId: expectedTurnId || null, clientUserMessageId: message.messageId })
   if (readback?.status !== 'TERMINAL') return { status: 'recovery_required', reconciliationStatus: readback?.status || 'RECOVERY_REQUIRED' }
   const turnId = readback.turnId || readback.turn?.id
-  if (readback.terminalStatus !== 'completed' || (readback.result?.thread?.id && readback.result.thread.id !== engineThreadId) || !turnId || (expectedTurnId && turnId !== expectedTurnId))
-    throw new AgentProtocolError('CHAT_RECOVERY_TURN_INVALID', 'Readback is not the original completed turn')
+  if ((readback.result?.thread?.id && readback.result.thread.id !== engineThreadId) || !turnId || (expectedTurnId && turnId !== expectedTurnId))
+    throw new AgentProtocolError('CHAT_RECOVERY_TURN_INVALID', 'Readback is not the original turn')
+  await controls.recordUsage?.('TERMINAL', null, readback.usageEvidence ?? null)
+  if (readback.terminalStatus !== 'completed') throw new AgentProtocolError('CHAT_RECOVERY_TURN_INVALID', 'Readback is not a completed turn')
   const messages = (readback.turn?.items || []).filter(item => ['agentMessage', 'agent_message'].includes(item.type) && typeof item.text === 'string')
   if (messages.length !== 1) throw new AgentProtocolError('CHAT_RECOVERY_FINAL_INVALID', 'One exact native final required')
   const finalPrepared = buildActionChatFinal({ message, outcome: validateOutcome(messages[0].text), engineThreadId, engineTurnId: turnId, threadKey: preparation.threadKey })
@@ -4909,7 +4919,9 @@ export const recoverMaterialsChat = async (profile, message, record, { profileRu
   const readback = await selected.reconcileTurn({ threadId: engineThreadId, turnId: expectedTurnId || null, clientUserMessageId: message.messageId })
   if (readback?.status !== 'TERMINAL') return { status: 'recovery_required', reconciliationStatus: readback?.status || 'RECOVERY_REQUIRED' }
   const turnId = readback.turnId || readback.turn?.id
-  if (readback.terminalStatus !== 'completed' || (readback.result?.thread?.id && readback.result.thread.id !== engineThreadId) || !turnId || (expectedTurnId && turnId !== expectedTurnId)) throw new AgentProtocolError('MATERIALS_RECOVERY_TURN_INVALID', 'Readback is not the original completed turn')
+  if ((readback.result?.thread?.id && readback.result.thread.id !== engineThreadId) || !turnId || (expectedTurnId && turnId !== expectedTurnId)) throw new AgentProtocolError('MATERIALS_RECOVERY_TURN_INVALID', 'Readback is not the original turn')
+  await controls.recordUsage?.('TERMINAL', null, readback.usageEvidence ?? null)
+  if (readback.terminalStatus !== 'completed') throw new AgentProtocolError('MATERIALS_RECOVERY_TURN_INVALID', 'Readback is not a completed turn')
   const messages = (readback.turn?.items || []).filter(item => ['agentMessage', 'agent_message'].includes(item.type) && typeof item.text === 'string')
   if (messages.length !== 1) throw new AgentProtocolError('MATERIALS_RECOVERY_FINAL_INVALID', 'One exact native final required')
   const content = messages[0].text
@@ -5698,24 +5710,34 @@ export const stopNativeConversationPoller = state => {
 }
 export const startNativeConversationPoller = (profile, state) => {
   stopNativeConversationPoller(state)
-  if (!state?.conversationNativeLane || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
-  state.conversationNativeLane.resetPendingDiscovery?.()
+  if ((!state?.conversationNativeLane && !state?.chatUsageDelivery) || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
+  state.conversationNativeLane?.resetPendingDiscovery?.()
   const lane = state.conversationNativeLane
   const loop = new NativeConversationWakeup({
     eventDriven: state.nativeWorkNotifications === 1,
     current: () => state.conversationNativeWakeup === loop && state.ws?.readyState === WebSocketClient.OPEN && !state.processor.paused,
-    nextRecoveryAt: () => lane.nextRecoveryAt?.() ?? Infinity,
-    hasMore: () => lane.discoveryHasMore === true,
+    nextRecoveryAt: () => Math.min(lane?.nextRecoveryAt?.() ?? Infinity, state.chatUsageDelivery?.nextRecoveryAt() ?? Infinity),
+    hasMore: () => lane?.discoveryHasMore === true,
     poll: async options => {
       if (state.conversationNativePollInFlight) return { status: 'BUSY' }
       state.conversationNativePollInFlight = true
       try {
-        const polling = lane.poll(options)
-        state.conversationNativePollPromise = polling
-        return await polling
+        // Independent delivery starts alongside discovery; it cannot block admission or model execution.
+        const usage = state.chatUsageDelivery?.deliver() ?? Promise.resolve([])
+        const polling = lane?.poll(options) ?? Promise.resolve({ status: 'IDLE' })
+        state.conversationNativePollPromise = Promise.allSettled([polling, usage])
+        const [execution, evidence] = await state.conversationNativePollPromise
+        if (execution.status === 'rejected') throw execution.reason
+        if (evidence.status === 'rejected') throw evidence.reason
+        return { ...execution.value, chatUsageErrors: evidence.value }
       } finally { state.conversationNativePollInFlight = false }
     },
     onReport: report => {
+      if (report?.chatUsageErrors?.length) console.warn(`CHAT usage evidence delivery pending | profile=${profile.profileId} | count=${report.chatUsageErrors.length}`)
+      if (report?.usageErrors?.length) {
+        const errors = report.usageErrors.map(({ executionId, code }) => ({ executionId, code }))
+        console.warn(`native usage evidence delivery pending | profile=${profile.profileId} | errors=${JSON.stringify(errors)}`)
+      }
       if (report?.status === 'PARTIAL') {
         const errors = report.executionErrors.map(({ executionId, code }) => ({ executionId, code }))
         console.warn(`native conversation poll partial | profile=${profile.profileId} | processed=${report.processed} | deferred=${report.deferred} | errors=${JSON.stringify(errors)}`)
@@ -5921,6 +5943,8 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
   })
   const chatInbox = new PersistentChatInbox({ rootDir: profileConfig.commandInboxDir, profile })
   const chatAckOutbox = new ChatAckOutbox({ rootDir: profileConfig.commandInboxDir, profile })
+  const chatUsageDelivery = profile.runtimeIdentity ? new ChatUsageDelivery({ inbox: chatInbox,
+    apiOrigin: profile.runtimeApiOrigin, nativeFetch }) : null
   const threadBindingStore = new ThreadBindingStore({ rootDir: profileConfig.commandInboxDir, profile }).initialize()
   const chatWorkdir = prepareChatWorkdir({
     rootDir: resolve(profileConfig.commandInboxDir, 'chat-workdirs'), profile,
@@ -6000,6 +6024,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     ledger,
     ackOutbox,
     chatInbox,
+    chatUsageDelivery,
     chatAckOutbox,
     threadBindingStore,
     chatWorkdir,
@@ -6264,6 +6289,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     sendCommandAckFn: profile.runtimeIdentity ? (...args) => state.runtimeTransport?.acknowledge(...args) || Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Current Runtime session required')) : null,
     chatInbox,
     chatAckOutbox,
+    onChatUsagePending: () => state.conversationNativeWakeup?.arm(Date.now()),
     lanes
   })
   const recovery = state.processor.start({ drain: false })

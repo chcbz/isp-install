@@ -143,7 +143,7 @@ export const skillConversationHttpScope = (endpoint, options = {}) => {
   const method = (options.method || 'GET').toUpperCase()
   if (endpoint.pathname === '/internal/agent/tasks/conversation-executions/commands') return method === 'GET' && options.body == null
   const id = '[A-Za-z0-9][A-Za-z0-9._:-]{0,99}'
-  return method === 'POST' && new RegExp(`^/internal/agent/tasks/${id}/runs/${id}/conversation/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|failure)$`).test(endpoint.pathname)
+  return method === 'POST' && new RegExp(`^/internal/agent/tasks/${id}/runs/${id}/conversation/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|failure|usage|provider-usage)$`).test(endpoint.pathname)
 }
 
 export const materialsChatHttpScope = (endpoint, options = {}) => {
