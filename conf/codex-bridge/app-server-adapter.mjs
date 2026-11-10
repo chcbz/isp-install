@@ -451,6 +451,8 @@ export class AppServerAdapter extends EventEmitter {
     this.toolBinding = this.nativeExecution || this.conversationTools
     this.child = child; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.maxStderrBytes = maxStderrBytes; this.spawnedExecutableVerifier = spawnedExecutableVerifier
     this.nextId = 1; this.pending = new Map(); this.buffer = ''; this.stderrBytes = 0; this.closed = false
+    this.childClosed = false
+    child.once('close', () => { this.childClosed = true })
     this.turns = new Map(); this.readback = { initialize: null, account: null, models: null, config: null, tools: null, eventMethods: [], schema: schemaMeasurement || { measured: false } }
     this.send = send || (frame => child.stdin.write(`${JSON.stringify(frame)}\n`))
     child.stdout.on('data', chunk => this._onData(chunk.toString('utf8')))
@@ -662,21 +664,28 @@ export class AppServerAdapter extends EventEmitter {
     try { if (this.child.exitCode === null && !this.child.killed) this.child.kill('SIGTERM') } catch {}
     this.emit('exit', reason)
   }
-  async shutdown({ timeoutMs = 5000 } = {}) {
+  shutdown({ timeoutMs = 5000 } = {}) {
+    if (this.shutdownPromise) return this.shutdownPromise
     const child = this.child
-    this.close(new Error('APP_SERVER_DISPOSED'))
-    if (child.exitCode !== null) return
-    await new Promise(resolveShutdown => {
-      let settled = false
-      const finish = () => { if (settled) return; settled = true; clearTimeout(timer); child.off('exit', finish); resolveShutdown() }
-      child.once('exit', finish)
-      const timer = setTimeout(() => {
-        try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}
-        setTimeout(finish, 100).unref?.()
+    // Transport closure and a sent signal are not process-exit evidence. Retain
+    // the caller's HOME ownership until this owned child's pipes have closed.
+    this.shutdownPromise = new Promise(resolveShutdown => {
+      let escalation
+      const finish = () => { clearTimeout(escalation); child.off('close', finish); resolveShutdown() }
+      if (this.childClosed) { finish(); return }
+      child.once('close', finish)
+      this.close(new Error('APP_SERVER_DISPOSED'))
+      if (this.childClosed) return
+      escalation = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode == null) {
+          try { child.kill('SIGKILL') } catch {} // No exit confirmation: retain ownership.
+        }
       }, timeoutMs)
-      timer.unref?.()
+      escalation.unref?.()
     })
+    return this.shutdownPromise
   }
+
   _onData(data) {
     this.buffer += data
     if (Buffer.byteLength(this.buffer) > 1024 * 1024) { this.close(new Error('APP_SERVER_FRAME_LIMIT')); return }
