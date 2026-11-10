@@ -22,6 +22,7 @@ import {
 import { basename, dirname, resolve } from 'node:path'
 import yauzl from 'yauzl'
 import { isManagementMessage, parseManagementMessage, managementDigest, managementCanonicalJson, preparedDigest, validateManagement } from './skill-management-wire.mjs'
+import { readNativeJson } from './native-json.mjs'
 import { parseStrictJson } from './api-envelope.mjs'
 import { eventMessage, replyMessage } from './message-envelope.mjs'
 import { parseSkillManifest, resolveSkillEntrypoint, skillPackageTreeDigest } from './skill-manifest.mjs'
@@ -1235,6 +1236,27 @@ export class SkillInstallManager {
       }
       return { ...row, active: !current?.removed && current?.target.skillInstallationId === id }
     })
+  }
+
+  /** Deliver original immutable results only; no WS registration, receive, execute or download. */
+  async flushResults({ identity, apiOrigin, nativeFetch }) {
+    const state = this._load()
+    if (!state.identity || !this._same(state.identity, identity))
+      throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'original result owner required')
+    const endpoint = new URL('/internal/agent/skill-management/results', apiOrigin), errors = []
+    for (const { envelope } of this.pendingResults()) {
+      try {
+        const response = await nativeFetch(endpoint, { method: 'POST', redirect: 'error', cache: 'no-store',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(envelope) })
+        if (response?.status !== 200 || response.redirected === true || response.url !== endpoint.href)
+          throw new Error('SKILL_RESULT_DELIVERY_UNCONFIRMED')
+        this.acknowledgeResultReceipt(await readNativeJson(response))
+      } catch {
+        errors.push({ commandId: envelope.data.commandId, code: 'SKILL_RESULT_DELIVERY_PENDING' })
+      }
+    }
+    const pending = this.pendingResults().length
+    return { confirmed: !errors.length && !pending, pending, errors }
   }
 
   /** Trusted stopped-handover caller only. Retire private relationship commands,

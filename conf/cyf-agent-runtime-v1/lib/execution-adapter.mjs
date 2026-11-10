@@ -49,9 +49,9 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
   const known = new Set(config.agents.map(agent => agent.subjectKey));
   let closing = false;
   return {
-    flushUsage: async ({ agent, ownerJiacn }) => {
-      const { flushStoppedUsage } = await import('./usage-handover.mjs');
-      return flushStoppedUsage({ agent, ownerJiacn, apiOrigin, hostId: config.hostId, instanceId, clientFactory });
+    flushEvidence: async ({ agent, ownerJiacn }) => {
+      const { flushStoppedEvidence } = await import('./evidence-handover.mjs');
+      return flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostId: config.hostId, instanceId, clientFactory });
     },
     createExecutor: options => {
       if (closing || attached.has(options.subjectKey)) throw adapterError('RUNTIME_EXECUTOR_SUBJECT_INVALID');

@@ -40,7 +40,7 @@ export async function runUnifiedRuntime({ config, apiOrigin, instanceId = random
   createAdapters = createExecutionAdapterFactory, workspacePolicies, providerEnvironments, logger = () => {},
   heartbeatIntervalMs = 30000, waitFn = wait, createControl = createHostingControlServer } = {}) {
   const adapters = await createAdapters({ config, instanceId, apiOrigin, workspacePolicies, providerEnvironments, logger });
-  const host = new RuntimeHost({ config, instanceId, createExecutor: adapters.createExecutor, flushUsage: adapters.flushUsage, logger });
+  const host = new RuntimeHost({ config, instanceId, createExecutor: adapters.createExecutor, flushEvidence: adapters.flushEvidence, logger });
   let controlServer = null;
   try {
     await host.start();

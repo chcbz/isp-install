@@ -2,12 +2,14 @@
 // Authentication stays with the original installation; no engine, WS registration,
 // lease, task result or provider invocation is created by this path.
 import { resolve } from 'node:path';
+import { lstatSync } from 'node:fs';
+import { SkillInstallManager, defaultSkillInstallStateRoot } from '../../codex-bridge/skill-install-manager.mjs';
 import { PersistentChatInbox } from '../../codex-bridge/chat-runtime.mjs';
 import { ChatUsageDelivery } from '../../codex-bridge/chat-usage-delivery.mjs';
 import { SkillUsageDelivery } from '../../codex-bridge/skill-usage-delivery.mjs';
 import { RuntimeV1Client } from './runtime-client.mjs';
 
-export async function flushStoppedUsage({ agent, ownerJiacn, apiOrigin, hostId, instanceId,
+export async function flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostId, instanceId,
   clientFactory = options => new RuntimeV1Client(options) }) {
   const client = clientFactory({ manifest: agent.manifest, apiBaseUrl: apiOrigin,
     stateDir: agent.stateRoot, hostId, runtimeInstanceId: instanceId });
@@ -25,7 +27,20 @@ export async function flushStoppedUsage({ agent, ownerJiacn, apiOrigin, hostId, 
         ownerJiacn, agentId: agent.manifest.canonicalAgentId },
       getRuntimeHeaders: () => client.sessionHeaders(), fetchFn: (url, options) => client.nativeFetch(url, options)
     }).flush() : { confirmed: true, pending: 0, errors: [] };
-    return { confirmed: chat.confirmed && native.confirmed, chat, native };
+    const origin = new URL(apiOrigin); origin.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
+    const manager = new SkillInstallManager({ profile: agent.profile, runtimeInstanceId: instanceId,
+      stateRoot: defaultSkillInstallStateRoot(resolve(agent.stateRoot, 'inbox'), agent.profile, origin.origin), wsUrl: origin.origin });
+    let present = true;
+    try { lstatSync(manager.statePath); } catch (error) { if (error.code === 'ENOENT') present = false; else throw error; }
+    let management = { confirmed: true, pending: 0, errors: [] };
+    if (present) {
+      // Existing marker-only recovery observes accepted installation work; never runs it.
+      manager.initialize();
+      management = await manager.flushResults({ identity: { tenantId: agent.manifest.tenantId, clientId: agent.manifest.clientId,
+        ownerJiacn, agentId: agent.manifest.canonicalAgentId, runtimeInstallationId: agent.manifest.installationId },
+        apiOrigin, nativeFetch: (url, options) => client.nativeFetch(url, options) });
+    }
+    return { confirmed: chat.confirmed && native.confirmed && management.confirmed, chat, native, management };
   } finally {
     client.invalidateSession(); // No heartbeat/socket or credentials survive the drain attempt.
   }

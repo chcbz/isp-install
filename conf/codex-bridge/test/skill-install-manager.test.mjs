@@ -49,7 +49,7 @@ test('SM-C1 real ZIP PREPARE → ACTIVATE, durable ACK/result, receipt retiremen
 // not a substitute management state machine.
 import { writeFileSync, symlinkSync, linkSync, renameSync, readdirSync, utimesSync, lstatSync } from 'node:fs'
 import { buildSkillDownloadUrl, LINUX_ATOMIC_FS, SKILL_INSTALL_FAILURE } from '../skill-install-manager.mjs'
-import { managementDigest } from '../skill-management-wire.mjs'
+import { managementDigest, parseManagementMessage } from '../skill-management-wire.mjs'
 import { SkillRegistry } from '../skill-registry.mjs'
 import { executeSkill } from '../skill-executor.mjs'
 import { policy, reconcile, zip, skillDocument, hash } from './fixtures/skill-management-fixture.mjs'
@@ -825,4 +825,57 @@ test('one-time v2 journal upgrade verifies original facts and preserves commands
   const corrupt = readFileSync(f.manager.statePath)
   assert.throws(() => new SkillInstallManager(f.settings).initialize(), /integrity/)
   assert.deepEqual(readFileSync(f.manager.statePath), corrupt)
+})
+
+test('stopped management HTTP sends exact original results, confirms receipts and never executes or downloads again', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), prepare = command(pkg.target)
+  await f.manager.handle(prepare); await f.manager.handle(activate(prepare)); f.manager.bindSession(null)
+  const originals = f.manager.pendingResults().map(row => row.envelope), sent = []
+  let lose = true
+  const options = { identity: retiredIdentity(), apiOrigin: 'http://localhost', nativeFetch: async (url, opts) => {
+    assert.equal(url.pathname, '/internal/agent/skill-management/results'); assert.equal(opts.method, 'POST')
+    const envelope = JSON.parse(opts.body); sent.push(envelope)
+    if (lose) throw new Error('reply lost')
+    const result = receiptFor(envelope)
+    return { status: 200, url: url.href, headers: new Headers({ 'X-Request-Id': 'http-result' }),
+      text: async () => JSON.stringify({ protocolVersion: 1, requestId: 'http-result', code: 'E0', msg: '', data: result }) }
+  } }
+  assert.equal((await f.manager.flushResults(options)).confirmed, false)
+  assert.deepEqual(sent, originals); assert.equal(f.manager.pendingResults().length, 2)
+  lose = false
+  const restarted = new SkillInstallManager(f.settings); restarted.initialize()
+  assert.deepEqual(await restarted.flushResults(options), { confirmed: true, pending: 0, errors: [] })
+  assert.deepEqual(sent.slice(2), originals); assert.equal(f.downloads(), 1)
+  assert.equal((await restarted.flushResults(options)).confirmed, true); assert.equal(sent.length, 4)
+  assert.deepEqual(await restarted.retireRelationship(retireRequest()), { retired: true })
+})
+
+test('wrong-owner or uncorrelated HTTP skill receipt never consumes original pending result', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()); await f.manager.handle(command(pkg.target)); f.manager.bindSession(null)
+  const options = { identity: retiredIdentity(), apiOrigin: 'http://localhost', nativeFetch: async (url, opts) => {
+    const receipt = receiptFor(JSON.parse(opts.body)); receipt.correlationId = 'other-result'
+    return { status: 200, url: url.href, headers: new Headers({ 'X-Request-Id': 'http-result' }),
+      text: async () => JSON.stringify({ protocolVersion: 1, requestId: 'http-result', code: 'E0', msg: '', data: receipt }) }
+  } }
+  await assert.rejects(f.manager.flushResults({ ...options, identity: { ...retiredIdentity(), ownerJiacn: 'new-owner' }, nativeFetch: () => assert.fail('wrong owner sent old result') }))
+  const result = await f.manager.flushResults(options)
+  assert.equal(result.confirmed, false); assert.equal(result.pending, 1)
+  await assert.rejects(f.manager.retireRelationship(retireRequest()), { code: 'SKILL_RELATIONSHIP_RESULTS_PENDING' })
+  assert.equal(f.downloads(), 1)
+})
+
+test('shared native HTTP result fixture preserves independent HTTP and original message correlations', async () => {
+  const { readNativeJson } = await import('../native-json.mjs')
+  const { skillManagementResultHttpScope } = await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/skill-management-result-http-v1.json', import.meta.url)))
+  const result = parseManagementMessage(fixture.request.data)
+  const receipt = await readNativeJson({ status: 200, headers: new Headers({ 'X-Request-Id': fixture.response.requestId }), text: async () => JSON.stringify(fixture.response) })
+  parseManagementMessage(receipt)
+  assert.equal(receipt.correlationId, result.messageId); assert.equal(receipt.requestId, result.requestId)
+  assert.notEqual(fixture.request.requestId, result.requestId)
+  const endpoint = new URL('https://api.example.test/internal/agent/skill-management/results')
+  assert.equal(skillManagementResultHttpScope(endpoint, { method: 'POST' }), true)
+  for (const method of ['GET', 'PUT', 'DELETE']) assert.equal(skillManagementResultHttpScope(endpoint, { method }), false)
+  for (const path of ['/internal/agent/skill-management/%72esults', '/internal/agent/skill-management/results?owner=other', '/internal/agent/skill-management/execute'])
+    assert.equal(skillManagementResultHttpScope(new URL(path, endpoint), { method: 'POST' }), false)
 })
