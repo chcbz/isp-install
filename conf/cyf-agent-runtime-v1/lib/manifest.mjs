@@ -1,3 +1,4 @@
+import { readRuntimePublicFiles } from './security.mjs';
 import { readHostingConfig } from './hosting-config.mjs';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -113,7 +114,7 @@ export async function readRuntimeHostConfig(configPath) {
   }
   const agents = [];
   for (const entry of config.agents) {
-    if (!object(entry) || Object.keys(entry).sort().join(',') !== 'manifestPath,profilePath,stateRoot') throw configError('RUNTIME_AGENT_CONFIG_INVALID');
+    if (!object(entry) || !['manifestPath,profilePath,stateRoot', 'manifestPath,profilePath,publicFilesPath,stateRoot'].includes(Object.keys(entry).sort().join(','))) throw configError('RUNTIME_AGENT_CONFIG_INVALID');
     const manifest = validateManifest(await jsonFile(entry.manifestPath));
     for (const field of ['installationId', 'tenantId', 'clientId', 'canonicalAgentId']) if (!exact(manifest[field])) throw configError('RUNTIME_AGENT_IDENTITY_INVALID');
     const subjectKey = runtimeSubjectKey(manifest);
@@ -127,7 +128,15 @@ export async function readRuntimeHostConfig(configPath) {
     for (const field of mutableProfilePaths) if (profile[field]) addRoot(await canonicalPath(profile[field]), subjectKey);
     // Model/CLI policy remains the existing executor's responsibility. No persona,
     // API key or host-environment fallback is used to synthesize an identity.
-    agents.push({ manifestPath: entry.manifestPath, profilePath: entry.profilePath, manifest, profile, stateRoot, subjectKey });
+    const publicFilesPath = entry.publicFilesPath === undefined ? null : await canonicalPath(entry.publicFilesPath);
+    const publicFiles = publicFilesPath ? await readRuntimePublicFiles(publicFilesPath, manifest) : undefined;
+    agents.push({ ...(publicFilesPath ? { publicFilesPath, publicFiles } : {}), manifestPath: entry.manifestPath, profilePath: entry.profilePath, manifest, profile, stateRoot, subjectKey });
+  }
+  for (const agent of agents) {
+    // Check after collecting all subjects: another Agent's private roots are not
+    // an operator-owned baseline either. This file must survive private cleanup.
+    if (agent.publicFilesPath && (contains(config.stateRoot, agent.publicFilesPath)
+        || roots.some(root => contains(root.path, agent.publicFilesPath)))) throw configError('RUNTIME_PUBLIC_BASELINE_PRIVATE_ROOT');
   }
   const result = { configVersion: 1, hostId: config.hostId, stateRoot: config.stateRoot, agents };
   if (Object.hasOwn(config, 'hostingControlPath')) result.hostingControl = await readHostingConfig(await canonicalPath(config.hostingControlPath), result);

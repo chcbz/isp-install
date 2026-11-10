@@ -179,3 +179,17 @@ export async function readRuntimeProviderEnvironments(path, agents) {
   if (required.some(agent => !result.has(agent.subjectKey))) fail();
   return result;
 }
+
+// Operator-classified public baseline, independent of an owner's mutable HOME.
+// Public means reusable by this Agent's next owner, not exposed over the wire.
+export async function readRuntimePublicFiles(path, manifest) {
+  const fail = () => { throw Object.assign(new Error('RUNTIME_PUBLIC_BASELINE_INVALID'), { code: 'RUNTIME_PUBLIC_BASELINE_INVALID' }); };
+  let value;
+  try { value = await readPrivateJson(path, null); } catch { fail(); }
+  if (!value || Object.keys(value).sort().join(',') !== 'canonicalAgentId,clientId,files,tenantId'
+      || ['tenantId', 'clientId', 'canonicalAgentId'].some(field => value[field] !== manifest[field])
+      || !value.files || Array.isArray(value.files) || typeof value.files !== 'object'
+      || typeof value.files['config.toml'] !== 'string' || !value.files['config.toml'].trim()
+      || Object.entries(value.files).some(([name, bytes]) => !['config.toml', 'auth.json'].includes(name) || typeof bytes !== 'string')) fail();
+  return Object.freeze({ ...value.files });
+}

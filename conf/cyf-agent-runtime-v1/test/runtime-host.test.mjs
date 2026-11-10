@@ -2235,3 +2235,38 @@ test('private cleanup host gate uses real storage aggregate and persists extract
   assert.deepEqual(await restarted.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true });
   assert.equal(extractions, 1); assert.equal(restarted.agents.get(agent.subjectKey).executor, null);
 });
+
+test('static public baseline is scoped to the immutable subject, read only at startup and not taken from HOME', async t => {
+  const f = await fixture(t, { count: 1 }), baseline = resolve(f.root, 'operator-public.json');
+  const files = { 'config.toml': 'model="public-test"', 'auth.json': '{"synthetic":"public-operator"}' };
+  const identity = Object.fromEntries(['tenantId', 'clientId', 'canonicalAgentId'].map(key => [key, f.manifests[0][key]]));
+  await f.json(baseline, { ...identity, files }); f.entries[0].publicFilesPath = baseline;
+  await writeFile(resolve(f.profiles[0].codexHome, 'auth.json'), 'old private credential');
+  const config = await f.config();
+  assert.deepEqual(config.agents[0].publicFiles, files); assert.equal(config.agents[0].publicFilesPath, baseline);
+  assert.throws(() => { config.agents[0].publicFiles['config.toml'] = 'modified'; }, TypeError);
+  assert.equal(await readFile(resolve(f.profiles[0].codexHome, 'auth.json'), 'utf8'), 'old private credential');
+  for (const field of ['tenantId', 'clientId', 'canonicalAgentId']) {
+    await f.json(baseline, { ...identity, [field]: 'different', files });
+    await assert.rejects(f.config(), code('RUNTIME_PUBLIC_BASELINE_INVALID'));
+  }
+  for (const invalidFiles of [{}, { 'config.toml': '' }, { ...files, 'sessions/private': 'not public config' }]) {
+    await f.json(baseline, { ...identity, files: invalidFiles });
+    await assert.rejects(f.config(), code('RUNTIME_PUBLIC_BASELINE_INVALID'));
+  }
+});
+
+test('static public baseline cannot live in any Agent private root or be an unsafe operator file', async t => {
+  const f = await fixture(t, { count: 2 });
+  const value = { ...Object.fromEntries(['tenantId', 'clientId', 'canonicalAgentId'].map(key => [key, f.manifests[0][key]])),
+    files: { 'config.toml': 'model="public-test"' } };
+  for (const root of [f.profiles[0].codexHome, f.entries[0].stateRoot, f.profiles[1].codexHome, f.raw.stateRoot]) {
+    const baseline = resolve(root, 'operator-public.json'); await f.json(baseline, value); f.entries[0].publicFilesPath = baseline;
+    await assert.rejects(f.config(), code('RUNTIME_PUBLIC_BASELINE_PRIVATE_ROOT'));
+  }
+  const baseline = resolve(f.root, 'unsafe-public.json'); await f.json(baseline, value); await chmod(baseline, 0o644);
+  f.entries[0].publicFilesPath = baseline;
+  await assert.rejects(f.config(), code('RUNTIME_PUBLIC_BASELINE_INVALID'));
+  const link = resolve(f.root, 'public-link'); await symlink(baseline, link); f.entries[0].publicFilesPath = link;
+  await assert.rejects(f.config(), code('RUNTIME_PATH_SYMLINK'));
+});
