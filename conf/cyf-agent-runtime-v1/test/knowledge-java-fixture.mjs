@@ -26,7 +26,10 @@ if (!process.env.NODE_TEST_CONTEXT) {
         input_tokens_details: { cached_tokens: 20 }, output_tokens: 10, total_tokens: 110 } } : {}),
       output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '{"entries":[]}' }] }] }) }; } });
   const extract = createKnowledgeMaintenance(config('gpt-6-luna'));
-  await assert.rejects(extract(context)); // server loses actual RESPONDED reply after committing the ledger
+  await assert.rejects(extract(context), error => {
+    assert.equal(spent, 1, `Expected lost RESPONDED ACK, got ${error.code || error.name} status=${error.status || 'none'} before spend`);
+    return true;
+  }); // server loses actual RESPONDED reply after committing the ledger
   assert.equal(spent, 1);
   assert.ok((await readFile(resolve(agent.profile.codexHome, 'sessions/one.jsonl'), 'utf8')).includes('Synthetic private lesson'));
   const resumed = createKnowledgeMaintenance(config('gpt-6-luna'));
