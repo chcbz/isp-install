@@ -405,6 +405,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "skill-runners/image-http-codec.mjs",
   "skill-config-candidate.mjs",
   "skill-conversation.mjs",
+  "skill-usage-delivery.mjs",
   "skill-executor.mjs",
   "position-skill-reconciler.mjs",
   "skill-execution-store.mjs",
