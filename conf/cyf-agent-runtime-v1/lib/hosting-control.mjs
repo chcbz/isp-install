@@ -135,6 +135,18 @@ export class HostingControl {
     const subjectKey = runtimeSubjectKey(request); const key = opKey(request);
     return this.withSubject(subjectKey, async () => {
       if (this.closing) throw hostingError('HOSTING_CONTROL_NOT_RUNNING');
+      if (request.method === 'current') {
+        const subject = this.state.subjects[subjectKey];
+        if (!subject || !same(subject.initialAssociation, hostingAssociation(request)))
+          throw hostingError('HOSTING_ASSOCIATION_REJECTED');
+        const active = this.state.operations[subject.activeOperationKey];
+        if (!active || active.admittedAt === null)
+          return { ...hostingEnvelope(request), outcome: 'UNKNOWN', hostId: this.host.config.hostId };
+        // Read only: the highest prepared candidate may never have been admitted.
+        return { protocol: HOSTING_PROTOCOL, method: 'current', ...active.association,
+          installationId: subject.manifest.installationId, manifestSha256: subject.manifest.manifestSha256.slice(7),
+          provisionGeneration: active.provisionGeneration, outcome: 'CURRENT', hostId: this.host.config.hostId };
+      }
       if (request.method === 'prepare') return this.mutate(state => {
         const prior = state.operations[key];
         if (prior) {

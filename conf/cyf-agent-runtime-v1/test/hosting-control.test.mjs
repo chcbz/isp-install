@@ -426,3 +426,51 @@ test('cleanup control uses trusted saved template, requires evidence and preserv
   assert.deepEqual(await f.control().handle(request), result); assert.equal(f.sessionCount(), sessions);
   await assert.rejects(f.control().handle({ ...wire.reprovisionPrepareRequest, operationId: 'no-readmission' }), code('RUNTIME_HANDOVER_PENDING'));
 });
+
+test('current lookup is read-only and selects admitted operation rather than highest prepared generation', async t => {
+  const f = await hostingFixture(t);
+  const prepared = await f.control().handle(prepare);
+  const current = { ...prepare, method: 'current' };
+  const before = await readFile(f.control().path, 'utf8');
+  assert.equal((await f.control().handle(current)).outcome, 'UNKNOWN');
+  assert.equal(await readFile(f.control().path, 'utf8'), before);
+  assert.equal(f.enrollmentCount(), 0);
+  await f.control().handle(candidateRequest(prepare, prepared, 'ensure')); await f.settle();
+  f.advance(1000);
+  const newer = await f.control().handle(wire.reprovisionPrepareRequest);
+  const allocated = await readFile(f.control().path, 'utf8');
+  const active = await f.control().handle(current);
+  assert.equal(active.operationId, prepare.operationId); assert.equal(active.provisionGeneration, 1);
+  assert.equal(active.outcome, 'CURRENT'); assert.equal(newer.provisionGeneration, 2);
+  assert.equal(await readFile(f.control().path, 'utf8'), allocated);
+  assert.equal(f.enrollmentCount(), 1); assert.equal(f.sessionCount(), 1);
+  const request = eventMessage('current-fixture-request', 'hosting.current', 'current-fixture-message', { ...(() => {
+    const { protocol, method, validUntil, ...data } = current; return { ...data, validUntilAt: validUntil };
+  })() });
+  assert.deepEqual(validateHostingRequest(request), current);
+  const reply = hostingReply(request, active);
+  assert.equal(reply.data.provisionGeneration, '1');
+  assert.equal(reply.data.runtimeInstallationId, prepared.installationId);
+  for (const field of ['bindingId', 'leaseId', 'initialIntentId'])
+    await assert.rejects(f.control().handle({ ...current, [field]: 'foreign' }), code('HOSTING_ASSOCIATION_REJECTED'));
+  await assert.rejects(f.control().handle({ ...wire.reprovisionPrepareRequest, method: 'current' }), code('HOSTING_WIRE_INVALID'));
+  await f.control().handle(candidateRequest(wire.reprovisionPrepareRequest, newer, 'ensure')); await f.settle();
+  const updated = await f.control().handle(current);
+  assert.equal(updated.operationId, wire.reprovisionPrepareRequest.operationId);
+  assert.equal(updated.provisionGeneration, 2);
+  await f.stop(); await f.start();
+  assert.deepEqual(await f.control().handle(current), updated);
+});
+
+test('shared current-operation fixture uses original initial query and active association reply', async () => {
+  const shared = JSON.parse(await readFile(new URL('./fixtures/hosting-current-v1.json', import.meta.url)));
+  assert.deepEqual(validateHostingAssociation(shared.request), shared.request);
+  assert.equal(shared.request.operationKind, 'INITIAL');
+  assert.equal(shared.response.operationKind, 'REPROVISION');
+  const { protocol, method, validUntil, ...data } = shared.request;
+  const query = eventMessage('fixture-current-request', 'hosting.current', 'fixture-current-message', { ...data, validUntilAt: validUntil });
+  const reply = hostingReply(query, shared.response);
+  assert.equal(reply.data.provisionGeneration, '2');
+  assert.equal(reply.data.operationId, shared.response.operationId);
+  assert.equal(reply.correlationId, query.messageId);
+});
