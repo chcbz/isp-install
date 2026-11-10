@@ -351,3 +351,33 @@ test('quiesce interrupts pending subject registration and joins its job without 
   assert.equal(Object.values(f.control().state.operations)[0].recoveryRequired, false);
   assert.equal(f.host().snapshot().agents.filter(a => a.ready).length, 3);
 });
+
+test('evidence wire shares the exact original relation and does not assert cleanup', async () => {
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/hosting-evidence-v1.json', import.meta.url)));
+  const request = validateHostingRequest(fixture.request);
+  assert.equal(request.method, 'evidence'); assert.equal(request.handoverId, 'finish-fixture-lease');
+  const reply = hostingReply(fixture.request, { ...request, outcome: 'EVIDENCE_ACCEPTED', hostId: 'fixture-host' });
+  assert.deepEqual({ ...reply, messageId: fixture.reply.messageId }, fixture.reply);
+});
+
+test('original evidence is sent only after stop and exact relation match, pending retries do not release or restart', async t => {
+  const f = await hostingFixture(t); const control = f.control(), candidate = await control.handle(prepare);
+  await control.handle(candidateRequest(prepare, candidate, 'ensure')); await f.settle();
+  const request = { ...candidateRequest(prepare, candidate, 'evidence'), handoverId: 'finish-evidence' };
+  let confirmed = false, sends = 0;
+  const deliver = async ({ ownerJiacn }) => { assert.equal(ownerJiacn, prepare.ownerJiacn); sends++; return { confirmed }; };
+  f.host().flushEvidence = deliver;
+  await assert.rejects(control.handle(request), code('RUNTIME_HANDOVER_STATE_INVALID')); assert.equal(sends, 0);
+  await control.handle({ ...request, method: 'quiesce' });
+  for (const field of ['ownerJiacn', 'leaseId', 'bindingId', 'handoverId']) await assert.rejects(control.handle({ ...request, [field]: 'wrong' }));
+  assert.equal(sends, 0);
+  assert.equal((await control.handle(request)).outcome, 'EVIDENCE_PENDING'); assert.equal(sends, 1);
+  confirmed = true;
+  const response = await control.handle(request); assert.equal(response.outcome, 'EVIDENCE_ACCEPTED');
+  assert.equal(Object.hasOwn(response, 'cleanupComplete'), false);
+  assert.deepEqual(await control.handle(request), response); assert.equal(sends, 2);
+  const sessions = f.sessionCount(); await f.stop(); await f.start(); f.host().flushEvidence = deliver;
+  f.control().resumeAdmitted(); await f.settle();
+  assert.deepEqual(await f.control().handle(request), response); assert.equal(sends, 2); assert.equal(f.sessionCount(), sessions);
+  await assert.rejects(f.control().handle({ ...wire.reprovisionPrepareRequest, operationId: 'forbidden-after-evidence' }), code('RUNTIME_HANDOVER_PENDING'));
+});

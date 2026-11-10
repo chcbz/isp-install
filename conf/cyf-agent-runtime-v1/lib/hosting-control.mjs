@@ -167,12 +167,17 @@ export class HostingControl {
       if (!operation || !subject || operation.subjectKey !== subjectKey || !same(operation.association, hostingAssociation(request))
           || request.installationId !== subject.manifest.installationId || request.manifestSha256 !== subject.manifest.manifestSha256.slice(7)
           || request.provisionGeneration !== operation.provisionGeneration) throw hostingError('HOSTING_ASSOCIATION_REJECTED');
-      if (request.method === 'quiesce') {
+      if (['quiesce', 'evidence'].includes(request.method)) {
         // Only the admitted current generation may stop this relationship. A
         // late provisioning response must never stop a newer admitted operation.
         if (subject.activeOperationKey !== key || operation.admittedAt === null)
           throw hostingError('HOSTING_OPERATION_SUPERSEDED');
         if (!this.host.agents.has(subjectKey)) throw hostingError('HOSTING_OPERATION_PENDING');
+        if (request.method === 'evidence') {
+          const result = await this.host.flushAgentEvidence(subjectKey, { installationId: request.installationId,
+            operationId: request.handoverId, ownerJiacn: request.ownerJiacn });
+          return { ...request, outcome: result.confirmed ? 'EVIDENCE_ACCEPTED' : 'EVIDENCE_PENDING', hostId: this.host.config.hostId };
+        }
         this.aborters.get(key)?.abort();
         await this.host.quiesceAgent(subjectKey, { installationId: request.installationId, operationId: request.handoverId });
         await this.jobs.get(subjectKey);
