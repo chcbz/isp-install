@@ -39,7 +39,7 @@ export function skillSessionBinding(receipt, session) {
 }
 
 export async function createExecutionAdapterFactory({ config, instanceId, apiOrigin, workspacePolicies,
-  providerEnvironments, loadEngine, socketFactory, clientFactory, logger = () => {} } = {}) {
+  providerEnvironments, extractKnowledge, loadEngine, socketFactory, clientFactory, logger = () => {} } = {}) {
   const module = await (loadEngine || (() => import('../../codex-bridge/agent-client.mjs')))();
   const Socket = socketFactory || await module.loadWebSocketClient();
   const { RegistrationAckObserver } = await import('../../codex-bridge/registration-ack.mjs');
@@ -52,6 +52,15 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
     flushEvidence: async ({ agent, ownerJiacn }) => {
       const { flushStoppedEvidence } = await import('./evidence-handover.mjs');
       return flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostId: config.hostId, instanceId, clientFactory });
+    },
+    cleanPrivateData: async options => {
+      const { cleanStoppedPrivateData } = await import('./private-data-cleanup.mjs');
+      const policyId = options.agent.profile.workspacePolicyId;
+      const policy = policyId ? workspacePolicies?.get(policyId) : null;
+      if (policyId && !policy) throw adapterError('RUNTIME_CLEANUP_WORKSPACE_POLICY_REQUIRED');
+      return cleanStoppedPrivateData({ ...options, apiOrigin, instanceId,
+        publicFiles: options.agent.publicFiles,
+        publicRepositoryRoots: policy ? [policy.repository, policy.root] : [], extractKnowledge });
     },
     createExecutor: options => {
       if (closing || attached.has(options.subjectKey)) throw adapterError('RUNTIME_EXECUTOR_SUBJECT_INVALID');

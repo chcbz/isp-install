@@ -381,3 +381,48 @@ test('original evidence is sent only after stop and exact relation match, pendin
   assert.deepEqual(await f.control().handle(request), response); assert.equal(sends, 2); assert.equal(f.sessionCount(), sessions);
   await assert.rejects(f.control().handle({ ...wire.reprovisionPrepareRequest, operationId: 'forbidden-after-evidence' }), code('RUNTIME_HANDOVER_PENDING'));
 });
+
+test('cleanup wire binds original relation and refuses caller-selected public files or paths', async () => {
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/hosting-evidence-v1.json', import.meta.url)));
+  const original = fixture.request;
+  const request = { ...original, messageType: 'hosting.cleanup' };
+  const decoded = validateHostingRequest(request);
+  assert.equal(decoded.method, 'cleanup'); assert.equal(decoded.handoverId, 'finish-fixture-lease');
+  for (const patch of [{ publicFiles: { 'config.toml': 'caller' } }, { codexHome: '/tmp/caller' }, { handoverId: '' }])
+    assert.throws(() => validateHostingRequest({ ...request, data: { ...request.data, ...patch } }));
+  assert.equal(hostingReply(request, { ...decoded, outcome: 'CLEANED', hostId: 'host' }).messageType, 'hosting.cleanup.result');
+});
+
+test('cleanup control uses trusted saved template, requires evidence and preserves stopped association across restart', async t => {
+  const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
+  const { writeFile } = await import('node:fs/promises');
+  const f = await hostingFixture(t), control = f.control(), candidate = await control.handle(prepare);
+  await control.handle(candidateRequest(prepare, candidate, 'ensure')); await f.settle();
+  const request = { ...candidateRequest(prepare, candidate, 'cleanup'), handoverId: 'finish-cleanup' };
+  const subject = Object.values(control.state.subjects)[0], agent = control.subjectAgent(subject);
+  await writeFile(resolve(agent.profile.codexHome, 'config.toml'), 'private user config');
+  await writeFile(resolve(agent.profile.codexHome, 'auth.json'), 'private credential');
+  await writeFile(resolve(agent.profile.codexWorkdir, 'private'), 'private task');
+  let cleans = 0;
+  f.host().cleanPrivateData = options => {
+    cleans++; return cleanStoppedPrivateData({ ...options, apiOrigin: 'https://example.test', instanceId: 'cleanup',
+      publicFiles: options.agent.publicFiles, extractKnowledge: async () => ({ confirmed: true }) });
+  };
+  await assert.rejects(control.handle(request), code('RUNTIME_HANDOVER_STATE_INVALID'));
+  await control.handle({ ...request, method: 'quiesce' });
+  f.host().flushEvidence = async () => ({ confirmed: false });
+  await control.handle({ ...request, method: 'evidence' });
+  await assert.rejects(control.handle(request), code('RUNTIME_HANDOVER_EVIDENCE_REQUIRED')); assert.equal(cleans, 0);
+  f.host().flushEvidence = async () => ({ confirmed: true }); await control.handle({ ...request, method: 'evidence' });
+  for (const patch of [{ handoverId: 'other' }, { ownerJiacn: 'other' }, { bindingId: 'other' }, { provisionGeneration: 9 }])
+    await assert.rejects(control.handle({ ...request, ...patch }));
+  assert.equal(cleans, 0);
+  const result = await control.handle(request); assert.equal(result.outcome, 'CLEANED'); assert.equal(cleans, 1);
+  assert.equal(await readFile(resolve(agent.profile.codexHome, 'config.toml'), 'utf8'), subject.template.codexConfig);
+  await assert.rejects(readFile(resolve(agent.profile.codexHome, 'auth.json')), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(agent.profile.codexWorkdir), []);
+  assert.deepEqual(await control.handle(request), result); assert.equal(cleans, 1);
+  const sessions = f.sessionCount(); await f.stop(); await f.start(); f.control().resumeAdmitted(); await f.settle();
+  assert.deepEqual(await f.control().handle(request), result); assert.equal(f.sessionCount(), sessions);
+  await assert.rejects(f.control().handle({ ...wire.reprovisionPrepareRequest, operationId: 'no-readmission' }), code('RUNTIME_HANDOVER_PENDING'));
+});

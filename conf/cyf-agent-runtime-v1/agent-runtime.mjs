@@ -37,10 +37,10 @@ const wait = (ms, signal) => new Promise(resolveWait => {
 // One lifetime host; enrollment is an explicit per-subject management operation.
 // No sidecar heartbeat-only run mode, legacy API-key entry or second ACK queue.
 export async function runUnifiedRuntime({ config, apiOrigin, instanceId = randomUUID(), signal,
-  createAdapters = createExecutionAdapterFactory, workspacePolicies, providerEnvironments, logger = () => {},
+  createAdapters = createExecutionAdapterFactory, workspacePolicies, providerEnvironments, extractKnowledge, logger = () => {},
   heartbeatIntervalMs = 30000, waitFn = wait, createControl = createHostingControlServer } = {}) {
-  const adapters = await createAdapters({ config, instanceId, apiOrigin, workspacePolicies, providerEnvironments, logger });
-  const host = new RuntimeHost({ config, instanceId, createExecutor: adapters.createExecutor, flushEvidence: adapters.flushEvidence, logger });
+  const adapters = await createAdapters({ config, instanceId, apiOrigin, workspacePolicies, providerEnvironments, extractKnowledge, logger });
+  const host = new RuntimeHost({ config, instanceId, createExecutor: adapters.createExecutor, flushEvidence: adapters.flushEvidence, cleanPrivateData: adapters.cleanPrivateData, logger });
   let controlServer = null;
   try {
     await host.start();

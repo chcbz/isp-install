@@ -39,6 +39,7 @@ export class HostingControl {
     return { subjectKey: key, manifest: subject.manifest, stateRoot: resolve(root, 'state'),
       manifestPath: resolve(root, 'manifest.json'), profilePath: resolve(root, 'profile.json'),
       providerEnvironment: subject.template.providerEnvironment,
+      publicFiles: Object.freeze({ 'config.toml': subject.template.codexConfig }),
       profile: { ...subject.template.profile, profileId: `managed-${key}`, agentId: subject.manifest.canonicalAgentId,
         codexHome: resolve(root, 'home'), codexWorkdir: resolve(root, 'work'), chatWorkdir: resolve(root, 'work'),
         workspaceFallbackWorkdir: resolve(root, 'work') } };
@@ -167,12 +168,17 @@ export class HostingControl {
       if (!operation || !subject || operation.subjectKey !== subjectKey || !same(operation.association, hostingAssociation(request))
           || request.installationId !== subject.manifest.installationId || request.manifestSha256 !== subject.manifest.manifestSha256.slice(7)
           || request.provisionGeneration !== operation.provisionGeneration) throw hostingError('HOSTING_ASSOCIATION_REJECTED');
-      if (['quiesce', 'evidence'].includes(request.method)) {
+      if (['quiesce', 'evidence', 'cleanup'].includes(request.method)) {
         // Only the admitted current generation may stop this relationship. A
         // late provisioning response must never stop a newer admitted operation.
         if (subject.activeOperationKey !== key || operation.admittedAt === null)
           throw hostingError('HOSTING_OPERATION_SUPERSEDED');
         if (!this.host.agents.has(subjectKey)) throw hostingError('HOSTING_OPERATION_PENDING');
+        if (request.method === 'cleanup') {
+          const result = await this.host.cleanAgentPrivateData(subjectKey, { installationId: request.installationId,
+            operationId: request.handoverId, ownerJiacn: request.ownerJiacn });
+          return { ...request, outcome: result.confirmed ? 'CLEANED' : 'CLEANUP_PENDING', hostId: this.host.config.hostId };
+        }
         if (request.method === 'evidence') {
           const result = await this.host.flushAgentEvidence(subjectKey, { installationId: request.installationId,
             operationId: request.handoverId, ownerJiacn: request.ownerJiacn });
