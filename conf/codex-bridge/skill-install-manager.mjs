@@ -817,9 +817,9 @@ export class SkillInstallManager {
   initialize() {
     for (const dir of [this.stateRoot, this.stagingDir, this.packagesDir, this.staleLocksDir]) ensurePrivateDirectory(dir)
     this._withLockSync('initialize', () => {
-      if (!existsSync(this.statePath)) this._save({ formatVersion: 2, scope: this.scope, identity: null,
+      if (!existsSync(this.statePath)) this._save({ formatVersion: 3, scope: this.scope, identity: null,
         commands: {}, messages: {}, installations: {}, skills: {}, fences: {} })
-      const state = this._load(); this.boundIdentity = state.identity
+      const state = this._load({ upgradeLegacy: true }); this.boundIdentity = state.identity
       // Recovery observes durable markers, never performs installation or a switch.
       for (const record of Object.values(state.commands)) {
         if (record.result || record.state === 'RECEIVED') continue
@@ -833,21 +833,34 @@ export class SkillInstallManager {
 
   _save(state) {
     const { journalSha256, ...facts } = state
-    atomicWriteJson(this.statePath, { ...facts, journalSha256: managementDigest('cyf.skill.journal.v2', facts) })
+    atomicWriteJson(this.statePath, { ...facts, journalSha256: managementDigest('cyf.skill.journal.v3', facts) })
   }
-  _load() {
+  _load({ upgradeLegacy = false } = {}) {
     if (!lstatSync(this.statePath).isFile() || lstatSync(this.statePath).nlink !== 1 || lstatSync(this.statePath).isSymbolicLink() || realpathSync(this.statePath) !== this.statePath) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'unsafe journal')
     // Always perform the complete safe read, even when validation can be reused.
     const bytes = readDurableBytes(this.statePath), scope = managementCanonicalJson(this.scope)
     const previous = validatedJournals.get(this)
     if (previous?.path === this.statePath && previous.scope === scope && previous.bytes.equals(bytes)) return structuredClone(previous.state)
-    const state = this._validateJournal(parseDurableBytes(bytes))
+    const journal = parseDurableBytes(bytes)
+    // One-time in-place journal upgrade under initialize's existing writer lock.
+    // Public installation facts no longer depend on a private management command.
+    if (upgradeLegacy && journal.formatVersion === 2) {
+      const state = this._validateJournal(journal, 2)
+      state.installations = Object.fromEntries(Object.entries(state.installations).map(([key, installation]) => {
+        const { command, ...publicFacts } = installation
+        return [key, { ...publicFacts, ...this._installationFacts(command) }]
+      }))
+      state.formatVersion = 3
+      this._save(state)
+      return this._load()
+    }
+    const state = this._validateJournal(journal)
     validatedJournals.set(this, { path: this.statePath, scope, bytes, state: structuredClone(state) })
     return state
   }
-  _validateJournal(journal) {
+  _validateJournal(journal, version = 3) {
     const { journalSha256, ...state } = journal
-    if (journalSha256 !== managementDigest('cyf.skill.journal.v2', state) || state.formatVersion !== 2
+    if (journalSha256 !== managementDigest(`cyf.skill.journal.v${version}`, state) || state.formatVersion !== version
         || managementCanonicalJson(state.scope) !== managementCanonicalJson(this.scope)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.IO_FAILED, 'journal integrity/scope conflict')
     for (const record of Object.values(state.commands)) {
       parseManagementMessage(record.envelope)
@@ -879,6 +892,8 @@ export class SkillInstallManager {
     if (!binding) { this.session = null; return }
     const identity = { ...binding.scope, runtimeInstallationId: binding.fence.installationId }
     if (identity.agentId !== this.profile.agentId || binding.fence.runtimeInstanceId !== this.runtimeInstanceId) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'authenticated subject mismatch')
+    const persisted = this._load()
+    if (persisted.retirement) throw new SkillInstallError('SKILL_RELATIONSHIP_RETIRED', 'private cleanup and authorized admission are required before rebinding')
     if (this.boundIdentity) {
       if (!this._same(this.boundIdentity, identity)) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'durable subject cannot be rebound')
       if (!this._same(this.session, binding)) this.session = structuredClone(binding)
@@ -1024,8 +1039,12 @@ export class SkillInstallManager {
     this.replayResults()
     return { status: result.data.evidence.outcome === 'FAILED' ? 'failed' : 'completed', exitCode: 0, resultEnvelope: result }
   }
+  _installationFacts(command) {
+    return { target: command.target, skillKey: command.skillKey, skillRevision: command.skillRevision,
+      approvedPermissionsSha256: command.approvedPermissionsSha256 }
+  }
   _descriptor(installation, current = null) {
-    const c = installation.command, target = c.target
+    const c = installation, target = c.target
     return { installationId: target.skillInstallationId, skillInstallationId: target.skillInstallationId, productVersionId: target.productVersionId,
       skillKey: c.skillKey, skillVersion: target.skillVersion, kind: target.kind,
       packageRoot: this._packagePath(target.skillInstallationId), packageSha256: target.packageSha256,
@@ -1039,7 +1058,7 @@ export class SkillInstallManager {
     const root = this._packagePath(id), markerPath = resolve(root, MARKER_NAME)
     if (!existsSync(markerPath) || !lstatSync(markerPath).isFile() || lstatSync(markerPath).nlink !== 1 || lstatSync(markerPath).uid !== process.geteuid() || (lstatSync(markerPath).mode & 0o022) || lstatSync(markerPath).isSymbolicLink() || !this._same(readJson(markerPath), installation.marker)
         || skillPackageTreeDigest(root) !== installation.packageTreeDigest) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'managed immutable package changed')
-    const row = this._descriptor(installation, this._skill(state, installation.command.skillKey))
+    const row = this._descriptor(installation, this._skill(state, installation.skillKey))
     if (row.manifest) {
       const actual = parseSkillManifest(readFileSync(resolve(root, 'manifest.json')), { skillKey: row.skillKey, skillVersion: row.skillVersion })
       if (actual.manifestSha256 !== row.manifestSha256) throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'manifest changed')
@@ -1065,7 +1084,7 @@ export class SkillInstallManager {
     atomicWriteJson(resolve(stage, MARKER_NAME), marker, 0o644); fsyncDirectory(stage)
     const move = this.atomicFs.renameNoReplace(stage, path)
     if (!move.ok) throw this._atomicFailure(move, 'immutable package publication')
-    state.installations[this._key(target.skillInstallationId)] = { command: c, marker, manifest, packageTreeDigest }
+    state.installations[this._key(target.skillInstallationId)] = { ...this._installationFacts(c), marker, manifest, packageTreeDigest }
     record.preparedSha256 = marker.preparedSha256; record.state = 'PREPARED'; this._save(state)
     this.checkpoint('prepared-persisted', record)
     return this._finish(state, record, { ...this._baseEvidence(state, record, 'PREPARED'), preparedSha256: marker.preparedSha256 })
@@ -1206,7 +1225,7 @@ export class SkillInstallManager {
 
   listInstalledSkills({ includeRetained = false, skillInstallationId = null } = {}) {
     // Atomic journal read + immutable package verification must not block old tasks during PREPARE.
-    const state = this._load(), ids = includeRetained ? Object.values(state.installations).filter(row => row.activated).map(row => row.command.target.skillInstallationId)
+    const state = this._load(), ids = includeRetained ? Object.values(state.installations).filter(row => row.activated).map(row => row.target.skillInstallationId)
       : Object.values(state.skills).filter(row => !row.removed).map(row => row.target.skillInstallationId)
     return ids.filter(id => skillInstallationId === null || id === skillInstallationId).map(id => {
       const row = this._verifiedInstallation(state, id), current = this._skill(state, row.skillKey)
@@ -1216,6 +1235,37 @@ export class SkillInstallManager {
       }
       return { ...row, active: !current?.removed && current?.target.skillInstallationId === id }
     })
+  }
+
+  /** Trusted stopped-handover caller only. Retire private relationship commands,
+   * not installed packages. This does NOT grant admission to another owner. */
+  retireRelationship({ identity, operationId }) {
+    const run = () => this._withLockSync('retire-skill-relationship', () => {
+      if (this.session) throw new SkillInstallError('SKILL_RELATIONSHIP_ACTIVE', 'detach the live session before retirement')
+      if (typeof operationId !== 'string' || !operationId.trim() || !identity)
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'handover identity required')
+      const state = this._load(), identitySha256 = managementDigest('cyf.skill.retired-identity.v1', identity)
+      if (state.retirement) {
+        if (state.retirement.operationId !== operationId || state.retirement.identitySha256 !== identitySha256)
+          throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'different relationship retirement')
+        return { retired: true }
+      }
+      if (!state.identity || !this._same(state.identity, identity))
+        throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'original durable subject required')
+      if (Object.values(state.commands).some(record => !record.receipt && record.state !== 'RECEIVED'))
+        throw new SkillInstallError('SKILL_RELATIONSHIP_RESULTS_PENDING', 'original management results must be durably received')
+      // Verify exact current views and every retained public package before removing
+      // their private command provenance. No download, model or install is performed.
+      this.listInstalledSkills()
+      for (const id of Object.keys(state.installations)) this._verifiedInstallation(state, state.installations[id].target.skillInstallationId)
+      state.identity = null; state.commands = {}; state.messages = {}; state.fences = {}
+      state.retirement = { operationId, identitySha256 }
+      this._save(state)
+      this.boundIdentity = null; this.replayToken = null; this.replayed.clear()
+      return { retired: true }
+    })
+    const pending = this.tail.then(run, run); this.tail = pending.catch(() => {})
+    return pending
   }
 
   matchesDurableAckEnvelope(envelope) {

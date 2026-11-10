@@ -16,8 +16,8 @@ const fixture = t => {
   let validations = 0
   const validate = manager._validateJournal
   manager._validateJournal = function (value) { validations++; return validate.call(this, value) }
-  const state = { formatVersion: 2, scope: manager.scope, identity: null, commands: {}, messages: {}, installations: {}, skills: {}, fences: {} }
-  const write = value => writeFileSync(manager.statePath, JSON.stringify({ ...value, journalSha256: managementDigest('cyf.skill.journal.v2', value) }), { mode: 0o600 })
+  const state = { formatVersion: 3, scope: manager.scope, identity: null, commands: {}, messages: {}, installations: {}, skills: {}, fences: {} }
+  const write = value => writeFileSync(manager.statePath, JSON.stringify({ ...value, journalSha256: managementDigest('cyf.skill.journal.v3', value) }), { mode: 0o600 })
   write(state)
   return { root, manager, state, write, validations: () => validations }
 }

@@ -201,7 +201,7 @@ test('cross-boot deliveryEpoch fencing preserves original ACK/result bytes; only
   assert.equal(f.downloads(), 1)
   // Corrupting acknowledged evidence, even with a recomputed container hash, cannot invent a receipt correlation.
   const state = JSON.parse(readFileSync(m.statePath)); const record = Object.values(state.commands)[0]
-  record.receipt.correlationId = 'forged'; delete state.journalSha256; state.journalSha256 = managementDigest('cyf.skill.journal.v2', state)
+  record.receipt.correlationId = 'forged'; delete state.journalSha256; state.journalSha256 = managementDigest('cyf.skill.journal.v3', state)
   writeFileSync(m.statePath, JSON.stringify(state)); assert.throws(() => restart(f), /receipt integrity/)
 })
 
@@ -745,4 +745,84 @@ test('ACK replay retires only receipted commands, preserving unconfirmed ACK byt
   assert.equal(attempts, 1)
   manager.bindSession(null)
   assert.equal(manager.replayAcks(() => { assert.fail('unbound ACK replay') }), 0)
+})
+
+const retiredIdentity = () => ({ ...binding.scope, runtimeInstallationId: binding.fence.installationId })
+const retireRequest = () => ({ identity: retiredIdentity(), operationId: 'rental-finish-fixture' })
+async function installedForRetirement(t) {
+  const f = setup(t), pkg = f.add(packageFixture({ executable: true })), prepare = command(pkg.target)
+  const prepared = (await f.manager.handle(prepare)).resultEnvelope
+  const applied = (await f.manager.handle(activate(prepare))).resultEnvelope
+  f.manager.acknowledgeResultReceipt(receiptFor(prepared)); f.manager.acknowledgeResultReceipt(receiptFor(applied))
+  return { ...f, pkg, prepare }
+}
+
+test('public installation facts survive retirement while old identities, commands and result replay are removed', async t => {
+  const f = await installedForRetirement(t), before = f.manager.listInstalledSkills({ includeRetained: true })
+  const bytes = readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md'))
+  const stateBefore = JSON.parse(readFileSync(f.manager.statePath))
+  assert.equal(stateBefore.formatVersion, 3)
+  assert.equal(Object.hasOwn(Object.values(stateBefore.installations)[0], 'command'), false)
+  await assert.rejects(f.manager.retireRelationship(retireRequest()), { code: 'SKILL_RELATIONSHIP_ACTIVE' })
+  f.manager.bindSession(null)
+  await assert.rejects(f.manager.retireRelationship({ ...retireRequest(), identity: { ...retiredIdentity(), ownerJiacn: 'other' } }))
+  assert.deepEqual(await f.manager.retireRelationship(retireRequest()), { retired: true })
+  assert.deepEqual(f.manager.listInstalledSkills({ includeRetained: true }), before)
+  assert.deepEqual(readFileSync(resolve(f.home, 'skills/repo-test/SKILL.md')), bytes)
+  const state = JSON.parse(readFileSync(f.manager.statePath)), wire = JSON.stringify(state)
+  assert.equal(state.identity, null)
+  for (const key of ['commands', 'messages', 'fences']) assert.deepEqual(state[key], {})
+  assert.equal(wire.includes(binding.scope.ownerJiacn), false)
+  assert.equal(wire.includes('downloadPath'), false)
+  assert.deepEqual(f.manager.pendingResults(), []); assert.deepEqual(f.manager.acknowledgedResults(), [])
+  assert.equal(f.manager.replayAcks(() => assert.fail('old ACK replay')), 0)
+  assert.equal(f.manager.replayResults(() => assert.fail('old result replay')), 0)
+  assert.throws(() => f.manager.bindSession(binding), { code: 'SKILL_RELATIONSHIP_RETIRED' })
+  assert.throws(() => f.manager.bindSession({ ...binding, scope: { ...binding.scope, ownerJiacn: 'new-owner' } }), { code: 'SKILL_RELATIONSHIP_RETIRED' })
+  const restarted = new SkillInstallManager(f.settings); restarted.initialize()
+  assert.deepEqual(await restarted.retireRelationship(retireRequest()), { retired: true })
+  assert.deepEqual(restarted.listInstalledSkills({ includeRetained: true }), before)
+  await assert.rejects(restarted.retireRelationship({ ...retireRequest(), operationId: 'different' }))
+  assert.throws(() => restarted.bindSession(binding), { code: 'SKILL_RELATIONSHIP_RETIRED' })
+  assert.equal(f.downloads(), 1)
+})
+
+test('retirement cannot erase unacknowledged management results or changed public skill bytes', async t => {
+  const f = setup(t), pkg = f.add(packageFixture()), prepare = command(pkg.target)
+  const prepared = (await f.manager.handle(prepare)).resultEnvelope
+  f.manager.bindSession(null)
+  const original = readFileSync(f.manager.statePath)
+  await assert.rejects(f.manager.retireRelationship(retireRequest()), { code: 'SKILL_RELATIONSHIP_RESULTS_PENDING' })
+  assert.deepEqual(readFileSync(f.manager.statePath), original)
+  f.manager.acknowledgeResultReceipt(receiptFor(prepared))
+  const installation = f.manager.getInstallation(pkg.target.skillInstallationId)
+  assert.equal(installation.skillKey, 'repo-test')
+  writeFileSync(resolve(f.manager._packagePath(pkg.target.skillInstallationId), 'SKILL.md'), 'changed public skill')
+  await assert.rejects(f.manager.retireRelationship(retireRequest()), /immutable package changed/)
+  assert.notEqual(JSON.parse(readFileSync(f.manager.statePath)).identity, null)
+})
+
+test('one-time v2 journal upgrade verifies original facts and preserves commands without retaining private command in public installation', async t => {
+  const f = await installedForRetirement(t), before = f.manager.listInstalledSkills()
+  const old = JSON.parse(readFileSync(f.manager.statePath)); delete old.journalSha256; old.formatVersion = 2
+  for (const [key, row] of Object.entries(old.installations)) {
+    const { target, skillKey, skillRevision, approvedPermissionsSha256, ...rest } = row
+    old.installations[key] = { ...rest, command: f.prepare.data }
+  }
+  const legacy = { ...old, journalSha256: managementDigest('cyf.skill.journal.v2', old) }
+  writeFileSync(f.manager.statePath, JSON.stringify(legacy))
+  const restarted = new SkillInstallManager(f.settings); restarted.initialize(); restarted.bindSession(binding)
+  assert.deepEqual(restarted.listInstalledSkills(), before)
+  const migrated = JSON.parse(readFileSync(f.manager.statePath))
+  assert.equal(migrated.formatVersion, 3); assert.deepEqual(migrated.commands, old.commands)
+  assert.equal(Object.hasOwn(Object.values(migrated.installations)[0], 'command'), false)
+  const stable = readFileSync(f.manager.statePath)
+  new SkillInstallManager(f.settings).initialize()
+  assert.deepEqual(readFileSync(f.manager.statePath), stable)
+  assert.equal(f.downloads(), 1)
+  // An invalid original digest is not a license to rewrite the old state.
+  writeFileSync(f.manager.statePath, JSON.stringify({ ...legacy, journalSha256: '0'.repeat(64) }))
+  const corrupt = readFileSync(f.manager.statePath)
+  assert.throws(() => new SkillInstallManager(f.settings).initialize(), /integrity/)
+  assert.deepEqual(readFileSync(f.manager.statePath), corrupt)
 })
