@@ -275,3 +275,26 @@ test('persisted journal rejects extra fields, orphan operation, duplicate instal
   for (const change of changes) { const modified = structuredClone(pristine); change(modified); f.control().state = modified; assert.throws(() => f.control().validateJournal()); }
   f.control().state = pristine; assert.doesNotThrow(() => f.control().validateJournal()); assert.equal(f.enrollmentCount(), 0);
 });
+
+test('managed restart honors durable handover without creating a new executor, enrollment or recovery failure', async t => {
+  const f = await hostingFixture(t); const candidate = await f.control().handle(prepare);
+  const ensure = candidateRequest(prepare, candidate, 'ensure');
+  await f.control().handle(ensure); await f.settle();
+  const key = Object.keys(f.control().state.subjects)[0];
+  const operationKey = f.control().state.subjects[key].activeOperationKey;
+  const request = { installationId: candidate.installationId, operationId: 'final-handover' };
+  await f.host().quiesceAgent(key, request);
+  assert.equal((await f.control().handle({ ...ensure, method: 'observe' })).outcome, 'UNKNOWN');
+  await f.stop(); f.advance(); await f.start();
+  f.control().resumeAdmitted(); await f.settle();
+  assert.equal(f.enrollmentCount(), 1); assert.equal(f.sessionCount(), 1);
+  assert.equal(f.states.get(key).length, 1); assert.equal(f.states.get(key)[0].closed, 1);
+  assert.equal(f.host().snapshot().agents.find(agent => agent.subjectKey === key).phase, 'QUIESCED');
+  assert.equal(f.control().state.operations[operationKey].recoveryRequired, false);
+  const journal = await readPrivateJson(f.control().path);
+  assert.equal(journal.operations[operationKey].recoveryRequired, false);
+  assert.equal(journal.subjects[key].activeOperationKey, operationKey);
+  assert.equal((await f.control().handle(ensure)).outcome, 'UNKNOWN');
+  assert.equal((await f.host().quiesceAgent(key, request)).phase, 'QUIESCED');
+  for (const peer of f.peers) assert.equal(f.host().snapshot().agents.find(agent => agent.subjectKey === peer.subjectKey).ready, true);
+});

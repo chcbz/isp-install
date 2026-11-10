@@ -161,6 +161,7 @@ export class RuntimeHost {
           // Retain Agent writer ownership throughout replacement.
         }
         if (state.phase === 'STOPPED') await this.initializeAgent(key, state);
+        if (state.quiesceRequested) throw error('RUNTIME_HANDOVER_PENDING');
         if (!['INITIALIZED', 'READY'].includes(state.phase)) throw error(state.reasonCode || 'RUNTIME_AGENT_NOT_INITIALIZED');
         return state;
       });

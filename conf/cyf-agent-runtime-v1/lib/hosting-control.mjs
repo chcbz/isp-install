@@ -237,6 +237,9 @@ export class HostingControl {
     // still runs behind the subject's gate, retaining its writer ownership.
     if (this.jobs.has(operation.subjectKey)) this.host.agents.get(operation.subjectKey)?.executor?.cancelActivation?.();
     const job = previous.catch(() => {}).then(() => this.runOperation(key)).catch(async cause => {
+      // A durable local handover intentionally suppresses startup, including after
+      // restart. It is not a failed enrollment/provision and must not rewrite that fact.
+      if (cause.code === 'RUNTIME_HANDOVER_PENDING') return;
       if ((this.closing || this.state.subjects[operation.subjectKey].activeOperationKey !== key)
           && cause.code !== 'RUNTIME_ENROLLMENT_RECOVERY_REQUIRED') return;
       try { await this.mutate(state => { state.operations[key].recoveryRequired = true; return { value: null }; }); }
