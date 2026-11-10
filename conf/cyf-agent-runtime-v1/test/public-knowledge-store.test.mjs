@@ -57,3 +57,37 @@ test('separate Agents do not overwrite each others knowledge or platform receipt
   await assert.rejects(store.platformCostSink(agent.subjectKey)({ ...event, costBearer: 'USER' }));
   assert.equal((await files(hostStateRoot)).length, 4);
 });
+test('real loopback HTTP extraction and privacy review retain platform usage before public publication', async t => {
+  const { createServer } = await import('node:http');
+  const { once } = await import('node:events');
+  const { createKnowledgeResponsesClient } = await import('../lib/knowledge-responses.mjs');
+  const { createPublicKnowledgeExtractor } = await import('../lib/knowledge-extraction.mjs');
+  const { store, hostStateRoot, privateRoot } = await fixture(t);
+  const requests = []; let source = 'Synthetic private user text: never publish this.';
+  const server = createServer(async (request, response) => {
+    let body = ''; for await (const chunk of request) body += chunk;
+    requests.push(JSON.parse(body));
+    const receipts = (await files(resolve(hostStateRoot, 'platform-usage'))).filter(path => path.endsWith('/started.json'));
+    assert.equal(receipts.length, requests.length); // the real network call follows durable STARTED
+    const value = requests.length === 1 ? { entries: knowledge.entries } : { safe: true, entries: knowledge.entries };
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ id: `provider-${requests.length}`, model: 'gpt-6-luna', service_tier: 'default', status: 'completed',
+      usage: { input_tokens: 100, output_tokens: 10, input_tokens_details: { cached_tokens: 0 }, total_tokens: 110 },
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify(value) }] }] }));
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const invoke = createKnowledgeResponsesClient({ endpoint: 'https://fixture.invalid/v1/responses', model: 'gpt-6-luna',
+    credential: 'fixture-only', channel: 'fixture', recordAttempt: store.platformCostSink(agent.subjectKey),
+    fetchImpl: (_url, options) => fetch(`http://127.0.0.1:${server.address().port}/v1/responses`, options) });
+  const extract = createPublicKnowledgeExtractor({ invoke, readConversations: async () => source, publish: store.publish });
+  assert.deepEqual(await extract({ agent, operationId: knowledge.operationId }), { confirmed: true });
+  assert.equal(requests.length, 2); assert.equal(requests[0].input, source);
+  assert.equal(requests[1].input.includes(source), false);
+  await rm(privateRoot, { recursive: true });
+  const paths = await files(hostStateRoot); assert.equal(paths.length, 5); // one public artifact, four platform receipts
+  for (const path of paths) {
+    const text = await readFile(path, 'utf8');
+    assert.equal(text.includes(source), false); assert.equal(text.includes('fixture-only'), false);
+  }
+});
