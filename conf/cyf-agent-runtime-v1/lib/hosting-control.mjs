@@ -201,7 +201,7 @@ export class HostingControl {
         await this.jobs.get(subjectKey);
         return { ...request, outcome: 'QUIESCED', hostId: this.host.config.hostId };
       }
-      if (request.method === 'ensure' && this.host.agents.get(subjectKey)?.quiesceRequested)
+      if (request.method === 'ensure' && operation.admittedAt === null && this.host.agents.get(subjectKey)?.quiesceRequested)
         throw hostingError('RUNTIME_HANDOVER_PENDING');
       if (request.method === 'ensure' && operation.admittedAt === null) {
         if (request.operationKind === 'REPROVISION' && request.validUntil <= this.now()) throw hostingError('HOSTING_LEASE_EXPIRED');
