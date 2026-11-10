@@ -2052,7 +2052,7 @@ test('cost handover requires stopped ownership, persists original owner and neve
   const engine = executors(); let confirmed = false, sends = 0;
   const delivery = async options => { sends++; assert.equal(options.agent, agent); assert.equal(options.ownerJiacn, 'original'); return { confirmed }; };
   const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushUsage: delivery });
-  f.cleanup(() => host.close()); await host.start();
+  f.cleanup(() => host.stop()); await host.start();
   const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
   await assert.rejects(host.flushAgentUsage(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
   assert.equal(sends, 0);
@@ -2069,9 +2069,9 @@ test('cost handover requires stopped ownership, persists original owner and neve
   assert.equal(durable.usageAccepted, true); assert.equal(durable.usageOwnerJiacn, 'original'); assert.equal(durable.phase, 'QUIESCED');
   assert.equal(engine.states.get(agent.subjectKey).initialized, 1);
   assert.ok(host.agents.get(agent.subjectKey).release);
-  await host.close();
+  await host.stop();
   const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushUsage: delivery });
-  f.cleanup(() => restarted.close()); await restarted.start();
+  f.cleanup(() => restarted.stop()); await restarted.start();
   assert.deepEqual(await restarted.flushAgentUsage(agent.subjectKey, request), { confirmed: true }); assert.equal(sends, 2);
   assert.equal(restarted.agents.get(agent.subjectKey).executor, null);
 });
