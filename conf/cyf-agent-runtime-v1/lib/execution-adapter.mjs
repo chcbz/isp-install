@@ -60,7 +60,10 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       if (policyId && !policy) throw adapterError('RUNTIME_CLEANUP_WORKSPACE_POLICY_REQUIRED');
       return cleanStoppedPrivateData({ ...options, apiOrigin, instanceId,
         publicFiles: options.agent.publicFiles,
-        publicRepositoryRoots: policy ? [policy.repository, policy.root] : [], extractKnowledge, flushPlatformCosts: extractKnowledge?.flushPlatformCosts });
+        // codexWorkdir is the retained public project, including a managed Agent
+        // without a workspace policy. Private materials have dedicated roots.
+        publicRepositoryRoots: [...new Set([options.agent.profile.codexWorkdir, ...(policy ? [policy.repository, policy.root] : [])])],
+        extractKnowledge, flushPlatformCosts: extractKnowledge?.flushPlatformCosts });
     },
     // Called only by the host's stopped CLEANED -> new relationship transition.
     // Does not enroll, attach a session, initialize an executor or invoke a model.
