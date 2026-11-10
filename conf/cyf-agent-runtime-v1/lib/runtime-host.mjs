@@ -53,10 +53,10 @@ export async function acquireRuntimeOwnership(root, { hostId, instanceId, subjec
 }
 
 export class RuntimeHost {
-  constructor({ config, instanceId = randomUUID(), createExecutor, logger = () => {} }) {
+  constructor({ config, instanceId = randomUUID(), createExecutor, flushUsage, logger = () => {} }) {
     if (typeof createExecutor !== 'function' || !config?.agents?.length) throw error('RUNTIME_HOST_CONFIG_REQUIRED');
     if (typeof instanceId !== 'string' || !instanceId || instanceId === config.hostId) throw error('RUNTIME_INSTANCE_ID_INVALID');
-    this.config = config; this.instanceId = instanceId; this.createExecutor = createExecutor; this.logger = logger;
+    this.config = config; this.instanceId = instanceId; this.createExecutor = createExecutor; this.flushUsage = flushUsage; this.logger = logger;
     this.agents = new Map(config.agents.map(agent => [runtimeSubjectKey(agent.manifest), {
       agent, phase: 'STOPPED', executor: null, release: null, gate: Promise.resolve(), reasonCode: null
     }]));
@@ -197,11 +197,42 @@ export class RuntimeHost {
     if (!record || typeof record !== 'object' || record.formatVersion !== 1 || record.subjectKey !== key
         || record.installationId !== manifest.installationId || record.manifestSha256 !== manifest.manifestSha256
         || typeof record.operationId !== 'string' || !record.operationId.trim()
+        || record.usageOwnerJiacn !== undefined && (typeof record.usageOwnerJiacn !== 'string' || !record.usageOwnerJiacn.trim() || record.usageOwnerJiacn !== record.usageOwnerJiacn.trim())
+        || record.usageAccepted !== undefined && (record.usageAccepted !== true || !record.usageOwnerJiacn || record.phase !== 'QUIESCED')
         || !['REQUESTED', 'QUIESCED'].includes(record.phase)) throw error('RUNTIME_HANDOVER_STATE_INVALID');
   }
 
   // Trusted local lifecycle boundary. The authenticated control adapter must bind
   // operationId to the current business relationship; this host never decides rent.
+  // Trusted controller supplies the original owner from the authenticated relationship.
+  // A source-delivery receipt is not a private-cleanup or relationship-release receipt.
+  flushAgentUsage(key, { installationId, operationId, ownerJiacn } = {}) {
+    return this.withAgent(key, async state => {
+      if (this.stopping || !this.releaseHost || !state.release) throw error('RUNTIME_HANDOVER_OWNERSHIP_REQUIRED');
+      const path = resolve(state.agent.stateRoot, 'handover.json');
+      const record = await readPrivateJson(path, undefined);
+      this.requireHandoverRecord(key, state, record);
+      if (installationId !== record.installationId || operationId !== record.operationId
+          || typeof ownerJiacn !== 'string' || !ownerJiacn.trim() || ownerJiacn !== ownerJiacn.trim()
+          || record.usageOwnerJiacn && record.usageOwnerJiacn !== ownerJiacn) throw error('RUNTIME_HANDOVER_IDENTITY_CONFLICT');
+      if (record.phase !== 'QUIESCED' || state.executor) throw error('RUNTIME_HANDOVER_STOP_REQUIRED');
+      if (record.usageAccepted !== true) {
+        if (typeof this.flushUsage !== 'function') throw error('RUNTIME_USAGE_DELIVERY_UNAVAILABLE');
+        // Bind even a failed attempt to its original owner before external I/O.
+        if (!record.usageOwnerJiacn) {
+          record.usageOwnerJiacn = ownerJiacn;
+          await writePrivateJson(path, record);
+        }
+        const result = await this.flushUsage({ agent: state.agent, ownerJiacn });
+        if (result?.confirmed !== true) return { confirmed: false };
+        record.usageAccepted = true;
+        await writePrivateJson(path, record);
+        state.handover = record;
+      }
+      return { confirmed: true };
+    });
+  }
+
   quiesceAgent(key, { installationId, operationId } = {}) {
     const state = this.agents.get(key);
     if (!state) return Promise.reject(error('RUNTIME_AGENT_UNKNOWN'));

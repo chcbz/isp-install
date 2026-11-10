@@ -1,5 +1,6 @@
 // Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
 // Session credentials live only here; outbound work checkpoints hold no proof.
+import { flushStoppedUsage } from './usage-handover.mjs';
 import { isManagementMessage } from '../../codex-bridge/skill-management-wire.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { toAgentWire, fromAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
@@ -49,6 +50,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
   const known = new Set(config.agents.map(agent => agent.subjectKey));
   let closing = false;
   return {
+    flushUsage: ({ agent, ownerJiacn }) => flushStoppedUsage({ agent, ownerJiacn, apiOrigin, hostId: config.hostId, instanceId, clientFactory }),
     createExecutor: options => {
       if (closing || attached.has(options.subjectKey)) throw adapterError('RUNTIME_EXECUTOR_SUBJECT_INVALID');
       if (!known.has(options.subjectKey)) { engine.addAgent(options.agent); known.add(options.subjectKey); }

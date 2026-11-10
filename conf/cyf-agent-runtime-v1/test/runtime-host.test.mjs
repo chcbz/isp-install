@@ -2046,3 +2046,61 @@ test('real execution adapter retains attachment on failed close and allows expli
   refuse = false; await executor.close(); await executor.close(); assert.equal(stops, 2);
   await factory.close();
 });
+
+test('cost handover requires stopped ownership, persists original owner and never releases or restarts executor', async t => {
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const engine = executors(); let confirmed = false, sends = 0;
+  const delivery = async options => { sends++; assert.equal(options.agent, agent); assert.equal(options.ownerJiacn, 'original'); return { confirmed }; };
+  const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushUsage: delivery });
+  f.cleanup(() => host.close()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  await assert.rejects(host.flushAgentUsage(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
+  assert.equal(sends, 0);
+  await host.quiesceAgent(agent.subjectKey, request);
+  assert.deepEqual(await host.flushAgentUsage(agent.subjectKey, request), { confirmed: false });
+  assert.equal(sends, 1);
+  await assert.rejects(host.flushAgentUsage(agent.subjectKey, { ...request, ownerJiacn: 'next-owner' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  await assert.rejects(host.flushAgentUsage(agent.subjectKey, { ...request, operationId: 'other' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  assert.equal(sends, 1);
+  confirmed = true;
+  const replies = await Promise.all([host.flushAgentUsage(agent.subjectKey, request), host.flushAgentUsage(agent.subjectKey, request)]);
+  assert.deepEqual(replies, [{ confirmed: true }, { confirmed: true }]); assert.equal(sends, 2);
+  const durable = JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json')));
+  assert.equal(durable.usageAccepted, true); assert.equal(durable.usageOwnerJiacn, 'original'); assert.equal(durable.phase, 'QUIESCED');
+  assert.equal(engine.states.get(agent.subjectKey).initialized, 1);
+  assert.ok(host.agents.get(agent.subjectKey).release);
+  await host.close();
+  const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushUsage: delivery });
+  f.cleanup(() => restarted.close()); await restarted.start();
+  assert.deepEqual(await restarted.flushAgentUsage(agent.subjectKey, request), { confirmed: true }); assert.equal(sends, 2);
+  assert.equal(restarted.agents.get(agent.subjectKey).executor, null);
+});
+
+test('cost-only original session drains CHAT without inbox recovery, enrollment, registration or model execution', async t => {
+  const { flushStoppedUsage } = await import('../lib/usage-handover.mjs');
+  const { PersistentChatInbox } = await import('../../codex-bridge/chat-runtime.mjs');
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const inbox = new PersistentChatInbox({ rootDir: resolve(agent.stateRoot, 'inbox'), profile: agent.profile }); inbox.initialize();
+  const item = { key: 'a'.repeat(64), record: { message: { dispatchId: 'old-dispatch' } } };
+  inbox.recordUsage(item, 'STARTED', 'requested'); inbox.recordUsage(item, 'TERMINAL', null, { last: { inputTokens: 10 } });
+  // A normal inbox initialization would move this private business record; cost-only must not touch it.
+  const business = resolve(inbox.processing, `${'c'.repeat(64)}.json`);
+  await writeFile(business, JSON.stringify({ state: 'PROCESSING', private: 'untouched' }), { mode: 0o600 });
+  let sessions = 0, invalidations = 0, sends = 0;
+  const options = { agent, ownerJiacn: 'original', apiOrigin: 'https://api.example.test', hostId: config.hostId, instanceId: 'cost-instance',
+    clientFactory: settings => {
+      assert.equal(settings.manifest, agent.manifest); assert.equal(settings.stateDir, agent.stateRoot);
+      return { session: async () => { sessions++; }, invalidateSession: () => { invalidations++; }, nativeFetch: async (url, request) => {
+        assert.equal(url.pathname, '/internal/agent/chat/dispatches/old-dispatch/usage'); assert.equal(request.method, 'POST'); sends++;
+        const payload = JSON.parse(request.body);
+        const data = { dispatchId: 'old-dispatch', attemptId: 'b'.repeat(64), revision: payload.phase === 'STARTED' ? '1' : '2', status: 'PENDING_USAGE', costYuan: null };
+        const response = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'cost-fixture', code: 'E0', msg: '', data }), { headers: { 'content-type': 'application/json', 'x-request-id': 'cost-fixture' } });
+        Object.defineProperty(response, 'url', { value: url.href }); return response;
+      } };
+    } };
+  assert.equal((await flushStoppedUsage(options)).confirmed, true);
+  assert.equal(sessions, 1); assert.equal(invalidations, 1); assert.equal(sends, 2);
+  assert.deepEqual(JSON.parse(await readFile(business)), { state: 'PROCESSING', private: 'untouched' });
+  await assert.rejects(flushStoppedUsage({ ...options, clientFactory: () => ({ session: async () => { throw new Error('original authorization revoked'); }, invalidateSession: () => { invalidations++; } }) }), /authorization revoked/);
+  assert.equal(invalidations, 2); assert.equal(sends, 2);
+});

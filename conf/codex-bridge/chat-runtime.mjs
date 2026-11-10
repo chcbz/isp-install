@@ -648,7 +648,9 @@ export class PersistentChatInbox {
   }) }
   pendingUsage() {
     const pending = []
-    for (const name of readdirSync(this.usagePending).sort()) {
+    let names
+    try { names = readdirSync(this.usagePending) } catch (error) { if (error.code === 'ENOENT') return pending; throw error }
+    for (const name of names.sort()) {
       if (!/^[0-9a-f]{64}\.json$/.test(name)) continue
       const record = JSON.parse(readFileSync(resolve(this.usagePending, name), 'utf8'))
       for (const phase of ['STARTED', 'TERMINAL']) {
