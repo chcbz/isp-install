@@ -2206,3 +2206,32 @@ test('private cleanup gate does not invent a receipt when storage adapter is abs
   await f.json(path, record);
   await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
 });
+
+test('private cleanup host gate uses real storage aggregate and persists extraction failure without restarting old execution', async t => {
+  const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const engine = executors(); let extractions = 0;
+  for (const root of [agent.stateRoot, agent.profile.codexHome, agent.profile.codexWorkdir])
+    await writeFile(resolve(root, 'private'), 'old user');
+  const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushEvidence: async () => ({ confirmed: true }),
+    cleanPrivateData: options => cleanStoppedPrivateData({ ...options, apiOrigin: 'https://api.example.test', instanceId: 'cleanup',
+      publicFiles: { 'config.toml': 'model="test"' }, extractKnowledge: async () => {
+        extractions++; assert.equal(await readFile(resolve(agent.profile.codexHome, 'private'), 'utf8'), 'old user');
+        throw new Error('synthetic private error text');
+      } }) });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
+  assert.deepEqual(await host.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true });
+  const record = JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json')));
+  assert.equal(record.cleanupComplete, true); assert.equal(record.knowledgeStatus, 'FAILED');
+  assert.equal(JSON.stringify(record).includes('synthetic private'), false);
+  assert.deepEqual(await readdir(agent.profile.codexWorkdir), []);
+  assert.deepEqual(await readdir(agent.profile.codexHome), ['config.toml']);
+  assert.ok(host.agents.get(agent.subjectKey).release); assert.equal(extractions, 1);
+  await host.stop();
+  const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor });
+  f.cleanup(() => restarted.stop()); await restarted.start();
+  assert.deepEqual(await restarted.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true });
+  assert.equal(extractions, 1); assert.equal(restarted.agents.get(agent.subjectKey).executor, null);
+});
