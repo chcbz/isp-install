@@ -80,8 +80,35 @@ satisfy final private cleanup. Managed subjects use their saved hosting template
 
 Candidate cleanup additionally requires the original stopped/evidence-accepted handover
 and a real knowledge-extraction adapter. These source capabilities alone do not enable
-production finishing, revoke a relationship, or authorize a new owner. The CLI knowledge
-adapter and full business finishing handler remain unconnected as of 2026-11-10.
+production finishing, revoke a relationship, or authorize a new owner. The CLI knowledge adapter can be configured with `CYF_RUNTIME_KNOWLEDGE_CONFIG_FILE`;
+without it cleanup remains unavailable (normal execution is unchanged). The file must
+be canonical, operator-owned 0600, outside host state and every Agent/managed root:
+
+```json
+{
+  "configVersion": 1,
+  "endpoint": "https://provider.example/v1/responses",
+  "model": "gpt-6-luna",
+  "channel": "platform-maintenance",
+  "credential": "OPERATOR_PLATFORM_CREDENTIAL",
+  "maxInputBytes": 8192
+}
+```
+
+The byte capacity above is an example, **not a verified model context limit**. Set it
+for the actual provider/model with headroom for instructions and output. Active and
+archived sessions are read sequentially, only user/assistant text; images, tool results,
+metadata and linked external files are excluded. UTF-8 text is split without loss.
+Extraction and a separate privacy review have no tools or original thread continuation.
+Only reviewed generic entries are saved under host state `public-knowledge/`; platform
+usage STARTED/RESPONDED receipts are fsynced under `platform-usage/` before any private
+cleanup. Both roots survive owner removal. No private transcript/draft is stored there.
+Model privacy review is not an anonymity guarantee; semantic acceptance remains required.
+
+As of 2026-11-10 this is an uninstalled source candidate: no production route is configured.
+Price snapshot acquisition, delivery of platform receipts to API accounting and the full
+business finishing handler remain unfinished. Local receipts alone do not establish a
+priced RMB cost, relationship release or new-owner admission.
 
 Each sealed manifest contains exact `installationId`, `tenantId`, `clientId`,
 `canonicalAgentId`, `manifestVersion`, `runtimeProtocolVersion: "v1"`, and
