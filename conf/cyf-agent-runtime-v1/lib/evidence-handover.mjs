@@ -9,6 +9,15 @@ import { ChatUsageDelivery } from '../../codex-bridge/chat-usage-delivery.mjs';
 import { SkillUsageDelivery } from '../../codex-bridge/skill-usage-delivery.mjs';
 import { RuntimeV1Client } from './runtime-client.mjs';
 
+// Both evidence delivery and retirement must locate the exact live manager journal.
+export function stoppedSkillManager({ agent, apiOrigin, instanceId }) {
+  const origin = new URL(apiOrigin); origin.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
+  const manager = new SkillInstallManager({ profile: agent.profile, runtimeInstanceId: instanceId,
+    stateRoot: defaultSkillInstallStateRoot(resolve(agent.stateRoot, 'inbox'), agent.profile, origin.origin), wsUrl: origin.origin });
+  try { lstatSync(manager.statePath); return manager; }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
 export async function flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostId, instanceId,
   clientFactory = options => new RuntimeV1Client(options) }) {
   const client = clientFactory({ manifest: agent.manifest, apiBaseUrl: apiOrigin,
@@ -27,13 +36,9 @@ export async function flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostI
         ownerJiacn, agentId: agent.manifest.canonicalAgentId },
       getRuntimeHeaders: () => client.sessionHeaders(), fetchFn: (url, options) => client.nativeFetch(url, options)
     }).flush() : { confirmed: true, pending: 0, errors: [] };
-    const origin = new URL(apiOrigin); origin.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
-    const manager = new SkillInstallManager({ profile: agent.profile, runtimeInstanceId: instanceId,
-      stateRoot: defaultSkillInstallStateRoot(resolve(agent.stateRoot, 'inbox'), agent.profile, origin.origin), wsUrl: origin.origin });
-    let present = true;
-    try { lstatSync(manager.statePath); } catch (error) { if (error.code === 'ENOENT') present = false; else throw error; }
+    const manager = stoppedSkillManager({ agent, apiOrigin, instanceId });
     let management = { confirmed: true, pending: 0, errors: [] };
-    if (present) {
+    if (manager) {
       // Existing marker-only recovery observes accepted installation work; never runs it.
       manager.initialize();
       const identity = { tenantId: agent.manifest.tenantId, clientId: agent.manifest.clientId,
