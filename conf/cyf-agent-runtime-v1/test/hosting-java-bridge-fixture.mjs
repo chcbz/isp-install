@@ -19,6 +19,9 @@ const stop = () => stopPromise ||= (async () => {
 if (!process.env.NODE_TEST_CONTEXT) {
 try {
   const fixture = await hostingFixture({ after: cleanup => cleanups.push(cleanup) });
+  // Evidence transport fixture only: real stop/gate/journal; provider delivery is synthetic.
+  let attempts = 0;
+  fixture.host().flushEvidence = async () => ({ confirmed: ++attempts > 1 });
   server = await startHostingServer({ control: fixture.control() });
   process.stdout.write(JSON.stringify({ socketPath: fixture.controlConfig.socketPath, uid: process.getuid(), gid: fixture.controlConfig.socketGid,
     hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId }) + '\n');
