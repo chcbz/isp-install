@@ -1295,6 +1295,7 @@ export class SkillInstallManager {
       if (state.retirement) {
         if (state.retirement.operationId !== operationId || state.retirement.identitySha256 !== identitySha256)
           throw new SkillInstallError(SKILL_INSTALL_FAILURE.CONFLICT, 'different relationship retirement')
+        this._clearRetiredPrivateState(state)
         return { retired: true }
       }
       if (!state.identity || !this._same(state.identity, identity))
@@ -1309,10 +1310,33 @@ export class SkillInstallManager {
       state.retirement = { operationId, identitySha256 }
       this._save(state)
       this.boundIdentity = null; this.replayToken = null; this.replayed.clear()
+      this.checkpoint('relationship-retired', state.retirement)
+      this._clearRetiredPrivateState(state)
       return { retired: true }
     })
     const pending = this.tail.then(run, run); this.tail = pending.catch(() => {})
     return pending
+  }
+
+  // The stopped owner already committed retirement and validated public packages.
+  // Keep only immutable package facts/journal and the currently held writer lock;
+  // staging, old lock metadata and interrupted private writes are not public skills.
+  _clearRetiredPrivateState(state) {
+    ensurePrivateDirectory(this.packagesDir)
+    verifyControlledCodexHome(this.profile.codexHome, { create: false })
+    const viewStaging = resolve(this.profile.codexHome, '.cyf-skill-view-staging')
+    const retained = new Set(Object.keys(state.installations))
+    for (const name of readdirSync(this.packagesDir)) {
+      if (!retained.has(name)) rmSync(resolve(this.packagesDir, name), { recursive: true, force: true })
+    }
+    fsyncDirectory(this.packagesDir)
+    for (const name of readdirSync(this.stateRoot)) {
+      if (!['packages', 'journal.json', 'installer.lock'].includes(name))
+        rmSync(resolve(this.stateRoot, name), { recursive: true, force: true })
+    }
+    fsyncDirectory(this.stateRoot)
+    rmSync(viewStaging, { recursive: true, force: true })
+    fsyncDirectory(this.profile.codexHome)
   }
 
   matchesDurableAckEnvelope(envelope) {
