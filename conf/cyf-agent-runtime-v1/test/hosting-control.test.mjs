@@ -298,3 +298,56 @@ test('managed restart honors durable handover without creating a new executor, e
   assert.equal((await f.host().quiesceAgent(key, request)).phase, 'QUIESCED');
   for (const peer of f.peers) assert.equal(f.host().snapshot().agents.find(agent => agent.subjectKey === peer.subjectKey).ready, true);
 });
+
+test('quiesce shared public fixture preserves current generation and distinct handover identity', async () => {
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/hosting-quiesce-v1.json', import.meta.url)));
+  const request = validateHostingRequest(fixture.request);
+  assert.equal(request.method, 'quiesce'); assert.equal(request.handoverId, 'finish-fixture-lease');
+  assert.equal(request.provisionGeneration, 1);
+  const { hostingReply } = await import('../lib/hosting-wire.mjs');
+  const reply = hostingReply(fixture.request, { ...request, outcome: 'QUIESCED', hostId: 'fixture-host' });
+  assert.deepEqual({ ...reply, messageId: fixture.reply.messageId }, fixture.reply);
+  for (const changed of [{ handoverId: '' }, { handoverId: null }, { privatePath: '/tmp/forbidden' }])
+    assert.throws(() => validateHostingAssociation({ ...request, ...changed }));
+});
+
+test('authenticated quiesce stops only current relationship, is durable and never reports cleanup', async t => {
+  const f = await hostingFixture(t); const control = f.control();
+  const candidate = await control.handle(prepare);
+  const request = { ...candidateRequest(prepare, candidate, 'quiesce'), handoverId: 'finish-one' };
+  await assert.rejects(control.handle(request), code('HOSTING_OPERATION_SUPERSEDED'));
+  await control.handle(candidateRequest(prepare, candidate, 'ensure')); await f.settle();
+  for (const field of ['ownerJiacn', 'leaseId', 'bindingId', 'installationId', 'manifestSha256']) {
+    const changed = field === 'installationId' ? 'rti_' + 'd'.repeat(32) : field === 'manifestSha256' ? 'd'.repeat(64) : 'wrong';
+    await assert.rejects(control.handle({ ...request, [field]: changed }));
+  }
+  const stopped = await control.handle(request);
+  assert.deepEqual(stopped, { ...request, outcome: 'QUIESCED', hostId: 'fixture-host' });
+  assert.equal(Object.hasOwn(stopped, 'cleanupComplete'), false);
+  assert.deepEqual(await control.handle(request), stopped);
+  await assert.rejects(control.handle({ ...request, handoverId: 'other' }), code('RUNTIME_HANDOVER_CONFLICT'));
+  const reenroll = { ...wire.reprovisionPrepareRequest, operationId: 'not-allowed-after-quiesce' };
+  await assert.rejects(control.handle(reenroll), code('RUNTIME_HANDOVER_PENDING'));
+  const sessions = f.sessionCount(); await f.stop(); await f.start(); f.control().resumeAdmitted(); await f.settle();
+  assert.deepEqual(await f.control().handle(request), stopped); assert.equal(f.sessionCount(), sessions);
+  assert.equal(f.host().snapshot().agents.filter(a => a.ready).length, 3);
+});
+
+test('late prior-generation quiesce cannot stop a reprovisioned current executor', async t => {
+  const f = await hostingFixture(t); const control = f.control(); const initial = await control.handle(prepare);
+  await control.handle(candidateRequest(prepare, initial, 'ensure')); await f.settle();
+  const next = await control.handle(wire.reprovisionPrepareRequest);
+  await control.handle(candidateRequest(wire.reprovisionPrepareRequest, next, 'ensure')); await f.settle();
+  await assert.rejects(control.handle({ ...candidateRequest(prepare, initial, 'quiesce'), handoverId: 'stale' }), code('HOSTING_OPERATION_SUPERSEDED'));
+  const request = { ...candidateRequest(wire.reprovisionPrepareRequest, next, 'quiesce'), handoverId: 'current' };
+  assert.equal((await control.handle(request)).outcome, 'QUIESCED');
+});
+
+test('quiesce interrupts pending subject registration and joins its job without stopping peers', async t => {
+  const f = await hostingFixture(t, { stalled: true }); const candidate = await f.control().handle(prepare);
+  await f.control().handle(candidateRequest(prepare, candidate, 'ensure')); await until(() => !!f.pending());
+  const result = await f.control().handle({ ...candidateRequest(prepare, candidate, 'quiesce'), handoverId: 'finish-pending' });
+  assert.equal(result.outcome, 'QUIESCED'); assert.equal(f.control().jobs.size, 0);
+  assert.equal(Object.values(f.control().state.operations)[0].recoveryRequired, false);
+  assert.equal(f.host().snapshot().agents.filter(a => a.ready).length, 3);
+});

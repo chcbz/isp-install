@@ -140,6 +140,7 @@ export class HostingControl {
           if (!same(prior.association, hostingAssociation(request))) throw hostingError('HOSTING_OPERATION_CONFLICT');
           return { value: this.prepared(request, prior, state.subjects[prior.subjectKey]), changed: false };
         }
+        if (this.host.agents.get(subjectKey)?.quiesceRequested) throw hostingError('RUNTIME_HANDOVER_PENDING');
         if (this.config.template.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template.profile.workspacePolicyId)) throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
         let subject = state.subjects[subjectKey];
         if (request.operationKind === 'INITIAL') {
@@ -166,6 +167,17 @@ export class HostingControl {
       if (!operation || !subject || operation.subjectKey !== subjectKey || !same(operation.association, hostingAssociation(request))
           || request.installationId !== subject.manifest.installationId || request.manifestSha256 !== subject.manifest.manifestSha256.slice(7)
           || request.provisionGeneration !== operation.provisionGeneration) throw hostingError('HOSTING_ASSOCIATION_REJECTED');
+      if (request.method === 'quiesce') {
+        // Only the admitted current generation may stop this relationship. A
+        // late provisioning response must never stop a newer admitted operation.
+        if (subject.activeOperationKey !== key || operation.admittedAt === null)
+          throw hostingError('HOSTING_OPERATION_SUPERSEDED');
+        if (!this.host.agents.has(subjectKey)) throw hostingError('HOSTING_OPERATION_PENDING');
+        this.aborters.get(key)?.abort();
+        await this.host.quiesceAgent(subjectKey, { installationId: request.installationId, operationId: request.handoverId });
+        await this.jobs.get(subjectKey);
+        return { ...request, outcome: 'QUIESCED', hostId: this.host.config.hostId };
+      }
       if (request.method === 'ensure' && operation.admittedAt === null) {
         if (request.operationKind === 'REPROVISION' && request.validUntil <= this.now()) throw hostingError('HOSTING_LEASE_EXPIRED');
         await this.mutate(state => {
@@ -239,7 +251,8 @@ export class HostingControl {
     const job = previous.catch(() => {}).then(() => this.runOperation(key)).catch(async cause => {
       // A durable local handover intentionally suppresses startup, including after
       // restart. It is not a failed enrollment/provision and must not rewrite that fact.
-      if (cause.code === 'RUNTIME_HANDOVER_PENDING') return;
+      if (cause.code === 'RUNTIME_HANDOVER_PENDING' || this.host.agents.get(operation.subjectKey)?.quiesceRequested
+          && cause.code !== 'RUNTIME_ENROLLMENT_RECOVERY_REQUIRED') return;
       if ((this.closing || this.state.subjects[operation.subjectKey].activeOperationKey !== key)
           && cause.code !== 'RUNTIME_ENROLLMENT_RECOVERY_REQUIRED') return;
       try { await this.mutate(state => { state.operations[key].recoveryRequired = true; return { value: null }; }); }

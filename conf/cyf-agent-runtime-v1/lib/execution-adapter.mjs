@@ -310,7 +310,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             admitted = false; abort?.abort(); socket?.close(); rejectActivated?.(adapterError('RUNTIME_CHANNEL_STOPPED'));
             await loop; await ingress; await Promise.allSettled([...inFlightSkillReceipts]); await replay; await executor.close(); client.invalidateSession();
             if (attached.get(options.subjectKey) === api) { attached.delete(options.subjectKey); known.delete(options.subjectKey); }
-          })();
+          })().catch(error => { closed = null; throw error; });
           return closed;
         },
         cancelActivation: () => { admitted = false; abort?.abort(); socket?.close(); rejectActivated?.(adapterError('RUNTIME_CHANNEL_STOPPED')); },

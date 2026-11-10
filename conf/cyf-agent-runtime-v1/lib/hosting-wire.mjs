@@ -4,7 +4,7 @@ import { validateMessage, replyMessage } from './message-envelope.mjs';
 import { randomUUID } from 'node:crypto';
 import { hostingError, exactHostingId } from './hosting-config.mjs';
 export const HOSTING_PROTOCOL = 'runtime-hosting-v1';
-export const HOSTING_METHODS = Object.freeze(['capabilities', 'prepare', 'ensure', 'observe']);
+export const HOSTING_METHODS = Object.freeze(['capabilities', 'prepare', 'ensure', 'observe', 'quiesce']);
 export const HOSTING_ASSOCIATION_FIELDS = Object.freeze(['tenantId', 'clientId', 'ownerJiacn', 'canonicalAgentId', 'bindingId',
   'leaseId', 'initialIntentId', 'operationId', 'operationKind', 'reservedAt', 'requestedAt', 'validUntil']);
 export const HOSTING_CANDIDATE_FIELDS = Object.freeze(['installationId', 'manifestSha256', 'provisionGeneration']);
@@ -22,17 +22,18 @@ export function validateHostingAssociation(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request) || request.protocol !== HOSTING_PROTOCOL
       || !HOSTING_METHODS.includes(request.method)) fail();
   const allowed = ['protocol', 'method', ...(request.method === 'capabilities' ? ['tenantId', 'clientId', 'ownerJiacn'] : HOSTING_ASSOCIATION_FIELDS),
-    ...(['ensure', 'observe'].includes(request.method) ? HOSTING_CANDIDATE_FIELDS : [])];
+    ...(['ensure', 'observe', 'quiesce'].includes(request.method) ? HOSTING_CANDIDATE_FIELDS : []), ...(request.method === 'quiesce' ? ['handoverId'] : [])];
   if (Object.keys(request).sort().join(',') !== allowed.sort().join(',')) throw hostingError('HOSTING_FIELD_FORBIDDEN');
   const ids = request.method === 'capabilities' ? ['tenantId', 'clientId', 'ownerJiacn'] : HOSTING_ASSOCIATION_FIELDS.slice(0, 8);
   if (ids.some(field => !exactHostingId(request[field]))) fail();
+  if (request.method === 'quiesce' && !exactHostingId(request.handoverId)) fail();
   if (request.method !== 'capabilities') {
     if (!['INITIAL', 'REPROVISION'].includes(request.operationKind) || !positiveEpoch(request.reservedAt) || !positiveEpoch(request.requestedAt)
         || request.requestedAt < request.reservedAt
         || request.operationKind === 'INITIAL' && (request.operationId !== request.initialIntentId || request.validUntil !== null)
         || request.operationKind === 'REPROVISION' && (request.operationId === request.initialIntentId || !positiveEpoch(request.validUntil)
           || request.validUntil <= request.requestedAt)) fail();
-    if (['ensure', 'observe'].includes(request.method) && (!/^rti_[0-9a-f]{32}$/.test(request.installationId)
+    if (['ensure', 'observe', 'quiesce'].includes(request.method) && (!/^rti_[0-9a-f]{32}$/.test(request.installationId)
         || !/^[0-9a-f]{64}$/.test(request.manifestSha256) || !Number.isSafeInteger(request.provisionGeneration) || request.provisionGeneration < 1)) fail();
   }
   return Object.freeze({ ...request });

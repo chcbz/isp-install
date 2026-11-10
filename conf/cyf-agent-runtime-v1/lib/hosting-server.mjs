@@ -19,7 +19,7 @@ export async function requireHostingSocketParent(config) {
 }
 const reasonCodes = new Set(['HOSTING_WIRE_INVALID', 'HOSTING_DUPLICATE_FIELD', 'HOSTING_FIELD_FORBIDDEN', 'HOSTING_SCOPE_REJECTED',
   'HOSTING_CONTROL_NOT_RUNNING', 'HOSTING_OPERATION_CONFLICT', 'HOSTING_SUBJECT_CONFLICT', 'HOSTING_ASSOCIATION_REJECTED',
-  'HOSTING_LEASE_EXPIRED', 'HOSTING_GENERATION_EXHAUSTED', 'HOSTING_OPERATION_SUPERSEDED']);
+  'HOSTING_OPERATION_PENDING', 'RUNTIME_HANDOVER_PENDING', 'RUNTIME_HANDOVER_CONFLICT', 'HOSTING_LEASE_EXPIRED', 'HOSTING_GENERATION_EXHAUSTED', 'HOSTING_OPERATION_SUPERSEDED']);
 export async function startHostingServer({ control }) {
   const config = control.config; await requireHostingSocketParent(config);
   // Never unlink an existing listener, stale socket, symlink or unknown file.

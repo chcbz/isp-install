@@ -2027,3 +2027,18 @@ test('handover interrupts only its pending activation and cannot be bypassed by 
   await activation; assert.equal((await quiescing).phase, 'QUIESCED'); await queuedRestart;
   assert.equal(host.snapshot().agents[0].ready, false);
 });
+
+test('real execution adapter retains attachment on failed close and allows explicit retry', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  let refuse = true, stops = 0;
+  const engine = { createExecutor: () => ({ close: async () => { stops++; if (refuse) throw Error('not stopped'); } }), close: async () => {} };
+  const factory = await createExecutionAdapterFactory({ config, instanceId: 'retry-adapter', apiOrigin: 'https://fixture.invalid',
+    socketFactory: class {}, loadEngine: async () => ({ createRuntimeExecutionHost: () => engine }),
+    clientFactory: () => ({ invalidateSession() {} }) });
+  const executor = factory.createExecutor({ agent, instanceId: 'retry-adapter', subjectKey: agent.subjectKey });
+  const first = executor.close(); assert.equal(executor.close(), first);
+  await assert.rejects(first, /not stopped/);
+  assert.throws(() => factory.createExecutor({ agent, subjectKey: agent.subjectKey }), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  refuse = false; await executor.close(); await executor.close(); assert.equal(stops, 2);
+  await factory.close();
+});
