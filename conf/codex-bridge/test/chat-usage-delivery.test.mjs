@@ -65,3 +65,28 @@ test('lost HTTP reply retries exact evidence without a new invocation or inferre
   inbox.recordUsage(item, 'TERMINAL', null, null)
   assert.equal(delivery.nextRecoveryAt(), now)
 })
+
+for (const terminal of [false, true]) test(`stopped CHAT flush accepts unknown usage without inventing terminal (terminal=${terminal})`, async t => {
+  const { inbox, item } = fixture(t), calls = []
+  inbox.recordUsage(item, 'STARTED', 'requested')
+  if (terminal) inbox.recordUsage(item, 'TERMINAL', null, { last: { inputTokens: 10 } })
+  const delivery = new ChatUsageDelivery({ inbox, apiOrigin: 'http://localhost', nativeFetch: async (endpoint, options) => {
+    const payload = JSON.parse(options.body); calls.push(payload)
+    assert.equal(endpoint.pathname, '/internal/agent/chat/dispatches/dispatch/usage')
+    return { status: 200, url: endpoint.href, headers: new Headers({ 'X-Request-Id': 'fixture' }),
+      text: async () => JSON.stringify({ protocolVersion: 1, requestId: 'fixture', code: 'E0', msg: '', data: receipt(payload.phase) }) }
+  } })
+  assert.deepEqual(await delivery.flush(), { confirmed: true, pending: 0, errors: [] })
+  assert.equal(calls.length, terminal ? 2 : 1)
+  assert.equal((await delivery.flush()).confirmed, true)
+  assert.equal(calls.length, terminal ? 2 : 1)
+})
+
+test('stopped CHAT flush cannot confirm a lost ACK or bypass existing retry delay', async t => {
+  const { inbox, item } = fixture(t); inbox.recordUsage(item, 'STARTED', 'requested')
+  let calls = 0
+  const delivery = new ChatUsageDelivery({ inbox, apiOrigin: 'http://localhost', nativeFetch: async () => { calls++; throw new Error('lost') } })
+  assert.equal((await delivery.flush()).confirmed, false)
+  assert.equal((await delivery.flush()).confirmed, false)
+  assert.equal(calls, 1); assert.equal(inbox.pendingUsage().length, 1)
+})

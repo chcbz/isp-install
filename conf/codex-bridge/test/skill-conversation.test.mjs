@@ -673,3 +673,75 @@ for(const path of ['usage','provider-usage']) test(`cost ${path} route permits o
  assert.equal(skillConversationHttpScope(url,{method:'GET'}),false)
  url.search='?owner=another';assert.equal(skillConversationHttpScope(url,{method:'POST'}),false)
 })
+
+// Handover uses source-only delivery, not a live lane with a fake registry/runner.
+for (const terminal of [false, true]) test(`stopped source-only flush preserves original owner and unknown usage (terminal=${terminal})`, async t => {
+  const { SkillUsageDelivery } = await import('../skill-usage-delivery.mjs')
+  const f = fixture(t), calls = []
+  const store = new SkillExecutionStore({ rootDirectory: f.lane.root, scope: { ...scope, apiOrigin: f.lane.origin }, command: f.c })
+  store.write('native-start-attempt', { requestedModel: 'requested-only' })
+  if (terminal) store.write('native-final-message', { usageEvidence: { tokenUsage: { last: { inputTokens: 123 } } } })
+  store.write('receipt', { state: 'RESULT_COMMITTED' })
+  const provider = beginProviderUsage({ directory: resolve(store.directory, 'scratch/.provider-usage'), config: { model: 'image-fixture', usageChannel: 'gpt', usageTier: 'standard', usagePriceVersion: 'fixture' }, mode: 'generate' })
+  if (terminal) provider.complete({ usage: { output_tokens: 9 } })
+  const { registry, runners, runNative, ...options } = f.options
+  const delivery = new SkillUsageDelivery({ ...options, fetchFn: async (url, opts) => {
+    assert.match(url.pathname, /^\/internal\/agent\/tasks\/task\/runs\/run\/conversation\/(usage|provider-usage)$/)
+    assert.equal(opts.method, 'POST')
+    const payload = JSON.parse(opts.body); calls.push(payload)
+    return response(url, { executionId: f.c.executionId, attemptId: 'b'.repeat(64), revision: (payload.phase || payload.observation.phase) === 'STARTED' ? '1' : '2', status: 'PENDING_USAGE', costYuan: null })
+  } })
+  assert.equal(delivery.poll, undefined); assert.equal(delivery.process, undefined)
+  assert.deepEqual(await delivery.flush(), { confirmed: true, pending: 0, errors: [] })
+  assert.equal(calls.length, terminal ? 4 : 2)
+  assert.equal(store.read('native-usage-start-receipt').costYuan, null)
+  assert.equal(f.modelCalls(), 0)
+  if (terminal) assert.equal(calls.find(c => c.phase === 'TERMINAL').usageEvidence.tokenUsage.last.inputTokens, 123)
+  const before = calls.length
+  assert.equal((await new SkillUsageDelivery({ ...options, fetchFn: delivery.fetch }).flush()).confirmed, true)
+  assert.equal(calls.length, before)
+  // Another owner's source partition is never traversed or sent under this session.
+  const other = new SkillExecutionStore({ rootDirectory: f.lane.root, scope: { ...scope, ownerJiacn: 'other', apiOrigin: f.lane.origin }, command: f.c })
+  other.write('native-start-attempt', { requestedModel: 'other-private-model' })
+  assert.equal((await delivery.flush()).confirmed, true)
+  assert.equal(other.read('native-usage-start-receipt'), null)
+  assert.equal(calls.length, before)
+})
+
+test('stopped flush lost reply stays pending; reconstruction only replays exact cost source', async t => {
+  const { SkillUsageDelivery } = await import('../skill-usage-delivery.mjs')
+  const f = fixture(t), calls = []
+  const store = new SkillExecutionStore({ rootDirectory: f.lane.root, scope: { ...scope, apiOrigin: f.lane.origin }, command: f.c })
+  store.write('native-start-attempt', { requestedModel: 'requested' })
+  let lost = true
+  const options = { ...f.options, fetchFn: async (url, opts) => {
+    assert.ok(url.pathname.endsWith('/usage')); calls.push(JSON.parse(opts.body))
+    if (lost) throw new Error('lost ACK')
+    return response(url, { executionId: f.c.executionId, attemptId: 'a'.repeat(64), revision: '1', status: 'PENDING_PRICE', costYuan: null })
+  } }
+  const delivery = new SkillUsageDelivery(options)
+  assert.equal((await delivery.flush()).confirmed, false)
+  assert.equal((await delivery.flush()).confirmed, false)
+  assert.equal(calls.length, 1) // Existing retry timing is not bypassed by flush.
+  assert.equal(store.read('native-usage-start-receipt'), null)
+  lost = false
+  assert.equal((await new SkillUsageDelivery(options).flush()).confirmed, true)
+  assert.deepEqual(calls[1], calls[0]); assert.equal(f.modelCalls(), 0)
+})
+
+test('stopped flush cannot confirm unreadable historical commands or inconsistent cost evidence', async t => {
+  const { SkillUsageDelivery } = await import('../skill-usage-delivery.mjs')
+  const f = fixture(t)
+  const store = new SkillExecutionStore({ rootDirectory: f.lane.root, scope: { ...scope, apiOrigin: f.lane.origin }, command: f.c })
+  const delivery = new SkillUsageDelivery(f.options)
+  writeFileSync(store.path('command'), JSON.stringify({ ...f.c, executionProtocolVersion: 4 }))
+  for (let i = 0; i < 2; i++) {
+    const result = await delivery.flush()
+    assert.equal(result.confirmed, false); assert.equal(result.errors[0].code, 'SKILL_COMMAND_INVALID')
+  }
+  writeFileSync(store.path('command'), JSON.stringify(f.c))
+  store.write('native-final-message', { usageEvidence: null })
+  const result = await delivery.flush()
+  assert.equal(result.confirmed, false); assert.equal(result.errors[0].code, 'NATIVE_USAGE_SOURCE_MISSING')
+  assert.equal(f.modelCalls(), 0)
+})

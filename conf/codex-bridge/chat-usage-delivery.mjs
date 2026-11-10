@@ -6,6 +6,17 @@ export class ChatUsageDelivery {
     Object.assign(this, { inbox, apiOrigin, nativeFetch, now })
     this.retries = new Map()
   }
+  // The caller owns the stopped subject gate; original session/dispatch attribution is unchanged.
+  async flush() {
+    const errors = []
+    for (let phase = 0; phase < 2; phase++) {
+      if (!this.inbox.pendingUsage().length) break
+      errors.push(...await this.deliver())
+      if (errors.length) break
+    }
+    const pending = this.inbox.pendingUsage().length
+    return { confirmed: !errors.length && !pending, pending, errors }
+  }
   nextRecoveryAt() {
     return this.inbox.pendingUsage().reduce((next, item) => Math.min(next,
       this.retries.get(item.key)?.at ?? this.now()), Infinity)
