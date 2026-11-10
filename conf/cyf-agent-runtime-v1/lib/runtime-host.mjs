@@ -214,7 +214,8 @@ export class RuntimeHost {
       if (!this.agents.has(key)) this.agents.set(key, { agent: previousAgent, phase: 'STOPPED', executor: null, release: null, gate: Promise.resolve(), reasonCode: null });
       return this.withAgent(key, async state => {
         if (this.stopping) throw error('RUNTIME_HOST_STOPPED');
-        if (![previousAgent.manifest.manifestSha256, agent.manifest.manifestSha256].includes(state.agent.manifest.manifestSha256))
+        if (state.agent.stateRoot !== agent.stateRoot || stableJson(state.agent.profile) !== stableJson(agent.profile)
+            || ![previousAgent.manifest.manifestSha256, agent.manifest.manifestSha256].includes(state.agent.manifest.manifestSha256))
           throw error('RUNTIME_ADMISSION_IDENTITY_CONFLICT');
         const path = resolve(agent.stateRoot, 'relationship-admission.json'), handoverPath = resolve(agent.stateRoot, 'handover.json');
         for (const root of roots(agent)) await requireOwnedPrivateRoot(root);

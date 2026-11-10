@@ -181,6 +181,10 @@ test('trusted engine readmission replaces only the closed identity in the same p
   assert.notEqual(second.state(), oldState); assert.equal(peer.state(), peerState); assert.equal(peerState.disposed, false);
   assert.throws(() => engine.admitAgent(next, agent.manifest), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
   assert.throws(() => engine.addAgent(agent), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  // Initialization failure/host retry may have closed the newly admitted entry.
+  await second.close(); engine.admitAgent(next, agent.manifest);
+  const recovered = engine.createExecutor({ subjectKey: next.subjectKey }); await recovered.initialize();
+  assert.equal(recovered.state().profile.runtimeIdentity.installationId, next.manifest.installationId);
 });
 
 test('engine readmission after host restart registers the public subject without an old executor', async t => {
@@ -247,6 +251,8 @@ test('host readmission requires full original cleanup, preserves writer inode/pu
   const materialize = async () => { materialized++; };
   await assert.rejects(host.readmitAgent(previous, next, { ...association, previousOwnerJiacn: 'wrong' }, materialize), code('RUNTIME_ADMISSION_CLEANUP_REQUIRED'));
   await assert.rejects(host.readmitAgent(previous, next, { ...association, leaseId: 'wrong' }, materialize), code('RUNTIME_ADMISSION_CLEANUP_REQUIRED'));
+  const alteredRoot = resolve(f.root, 'unknown-state');
+  await assert.rejects(host.readmitAgent({ ...previous, stateRoot: alteredRoot }, { ...next, stateRoot: alteredRoot }, association, materialize), code('RUNTIME_ADMISSION_IDENTITY_CONFLICT'));
   const result = await host.readmitAgent(previous, next, association, materialize);
   assert.equal(result.phase, 'INITIALIZED'); assert.equal((await lstat(lockPath, { bigint: true })).ino, lock.ino);
   assert.equal(await readFile(publicPath, 'utf8'), 'keep-public-history'); assert.equal(admitted, 1); assert.equal(materialized, 1);
@@ -286,4 +292,21 @@ test('committed admission receipt prevents old startup even after old handover m
   await f.host().readmitAgent(previous, next, association, async () => {});
   assert.equal(f.states.get(previous.subjectKey).length, 3);
   assert.equal(f.states.get(previous.subjectKey).at(-1).agent.manifest.installationId, next.manifest.installationId);
+});
+
+test('committed receipt with old handover still present resumes without restarting old identity', async t => {
+  const { f, previous, next, association } = await cleanedReadmission(t);
+  const path = resolve(previous.stateRoot, 'relationship-admission.json');
+  f.host().admitRelationship = async () => {
+    const record = JSON.parse(await readFile(path));
+    await writePrivateJson(path, { ...record, phase: 'COMMITTED' });
+    throw Error('fixture crash between commit and old marker deletion');
+  };
+  await assert.rejects(f.host().readmitAgent(previous, next, association, async () => {}), /fixture crash/);
+  await f.stop(); await f.start();
+  await assert.rejects(f.host().ensureAgent(previous), code('RUNTIME_HANDOVER_PENDING'));
+  f.host().admitRelationship = async () => {};
+  await f.host().readmitAgent(previous, next, association, async () => {});
+  await assert.rejects(readFile(resolve(previous.stateRoot, 'handover.json')), { code: 'ENOENT' });
+  assert.equal(f.states.get(previous.subjectKey).length, 2);
 });

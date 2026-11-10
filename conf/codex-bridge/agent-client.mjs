@@ -6556,14 +6556,14 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
       if (closing || runtimeExecutionOwner !== owner) throw new AgentProtocolError('RUNTIME_EXECUTOR_OWNERSHIP_LOST', 'Execution host is stopping')
       const [key, fresh] = makeEntry(agent)
       const prior = entries.get(key)
-      if (previousManifest && prior && !prior.closed && !prior.state
-          && isDeepStrictEqual(prior.admittedFromManifest, previousManifest)
-          && isDeepStrictEqual(prior.agent, agent)) return
+      const repeatedAdmission = previousManifest && prior && isDeepStrictEqual(prior.admittedFromManifest, previousManifest)
+        && isDeepStrictEqual(prior.agent, agent)
+      if (repeatedAdmission && !prior.closed && !prior.state) return
       if (prior) {
         if (!prior.closed || prior.state || prior.agent.stateRoot !== agent.stateRoot)
           throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Existing subject must be closed in the same root')
         if (previousManifest) {
-          if (!isDeepStrictEqual(prior.agent.manifest, previousManifest)
+          if (!repeatedAdmission && !isDeepStrictEqual(prior.agent.manifest, previousManifest)
               || previousManifest.installationId === agent.manifest.installationId
               || ['codexHome', 'codexWorkdir', 'profileId'].some(field => prior.profile[field] !== fresh.profile[field]))
             throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Readmission requires the exact retired installation and public roots')
