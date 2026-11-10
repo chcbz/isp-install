@@ -44,7 +44,7 @@ test('same-length changed content cannot hit; malformed, duplicate and digest fa
   const f = fixture(t); f.manager._load()
   const good = readFileSync(f.manager.statePath, 'utf8')
   const bad = good.replace('owner_demo', 'owner_fail'); assert.equal(bad.length, good.length)
-  for (const bytes of [bad, '{', good.replace('"formatVersion":2', '"formatVersion":2,"formatVersion":2')]) {
+  for (const bytes of [bad, '{', good.replace('"formatVersion":3', '"formatVersion":3,"formatVersion":3')]) {
     writeFileSync(f.manager.statePath, bytes)
     assert.throws(() => f.manager._load())
     assert.throws(() => f.manager._load())
