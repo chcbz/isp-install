@@ -48,16 +48,31 @@ export class HostingControl {
     await requireOwnedPrivateRoot(this.config.managedRoot);
     this.release = await acquireRuntimeOwnership(this.config.managedRoot, { hostId: this.host.config.hostId, instanceId: this.host.instanceId, subjectKey: 'managed-control' });
     try {
-      const initial = { formatVersion: 1, hostId: this.host.config.hostId, subjects: {}, operations: {} };
+      const initial = { formatVersion: 2, hostId: this.host.config.hostId, subjects: {}, operations: {} };
       this.state = await readPrivateJson(this.path, null);
       if (!this.state) { await writePrivateJson(this.path, initial, { exclusive: true }); this.state = initial; }
+      // Upgrade only exact old facts under the existing control writer lock.
+      // No enrollment, replay or changed relationship is inferred by migration.
+      const migrated = this.state.formatVersion === 1;
+      if (migrated) {
+        const next = structuredClone(this.state);
+        for (const operation of Object.values(next.operations || {})) {
+          if (Object.keys(operation).sort().join(',') !== 'admittedAt,association,provisionGeneration,recoveryRequired,subjectKey')
+            throw hostingError('HOSTING_JOURNAL_INVALID');
+          const subject = next.subjects?.[operation.subjectKey];
+          if (!subject) throw hostingError('HOSTING_JOURNAL_INVALID');
+          operation.candidate = this.candidateFacts(subject);
+        }
+        next.formatVersion = 2; this.state = next;
+      }
       this.validateJournal();
+      if (migrated) await writePrivateJson(this.path, this.state);
       return this;
     } catch (cause) { await this.release(); this.release = null; throw cause; }
   }
   validateJournal() {
     const state = this.state;
-    if (!state || state.formatVersion !== 1 || state.hostId !== this.host.config.hostId
+    if (!state || state.formatVersion !== 2 || state.hostId !== this.host.config.hostId
         || Object.keys(state).sort().join(',') !== 'formatVersion,hostId,operations,subjects'
         || !state.subjects || !state.operations || typeof state.subjects !== 'object' || typeof state.operations !== 'object'
         || Array.isArray(state.subjects) || Array.isArray(state.operations)) throw hostingError('HOSTING_JOURNAL_INVALID');
@@ -79,29 +94,53 @@ export class HostingControl {
       installations.add(subject.manifest.installationId);
       if (this.host.agents.has(key) || [...this.host.agents.values()].some(item => item.agent.manifest.installationId === subject.manifest.installationId)) throw hostingError('HOSTING_SUBJECT_STATIC_CONFLICT');
     }
+    const relationships = new Map();
     for (const [key, operation] of Object.entries(state.operations)) {
-      if (Object.keys(operation).sort().join(',') !== 'admittedAt,association,provisionGeneration,recoveryRequired,subjectKey') throw hostingError('HOSTING_JOURNAL_INVALID');
+      if (Object.keys(operation).sort().join(',') !== 'admittedAt,association,candidate,provisionGeneration,recoveryRequired,subjectKey') throw hostingError('HOSTING_JOURNAL_INVALID');
       if (Object.keys(operation.association || {}).sort().join(',') !== [...HOSTING_ASSOCIATION_FIELDS].sort().join(',')) throw hostingError('HOSTING_JOURNAL_INVALID');
       const association = validateHostingAssociation({ protocol: HOSTING_PROTOCOL, method: 'prepare', ...operation.association });
-      const subject = state.subjects[operation.subjectKey];
-      if (!subject || opKey(association) !== key || runtimeSubjectKey(association) !== operation.subjectKey || !this.scopeAllowed(association)
+      const current = state.subjects[operation.subjectKey], subject = operation.candidate;
+      if (!subject || Object.keys(subject).sort().join(',') !== 'enrollmentExpiresAt,enrollmentSecretSha256,initialAssociation,manifest')
+        throw hostingError('HOSTING_JOURNAL_INVALID');
+      validateManifest(subject.manifest);
+      validateHostingAssociation({ protocol: HOSTING_PROTOCOL, method: 'prepare', ...subject.initialAssociation });
+      if (!current || runtimeSubjectKey(subject.manifest) !== operation.subjectKey
+          || subject.initialAssociation.operationKind !== 'INITIAL'
+          || !/^[0-9a-f]{64}$/.test(subject.enrollmentSecretSha256) || !positiveEpoch(subject.enrollmentExpiresAt)
+          || ['tenantId', 'clientId', 'canonicalAgentId'].some(field => subject.manifest[field] !== subject.initialAssociation[field])
+          || subject.manifest.installationId === current.manifest.installationId && !same(subject, this.candidateFacts(current))
+          || opKey(association) !== key || runtimeSubjectKey(association) !== operation.subjectKey || !this.scopeAllowed(association)
           || initialFields.some(field => association[field] !== subject.initialAssociation[field])
-          || !Number.isSafeInteger(operation.provisionGeneration) || operation.provisionGeneration < 1 || operation.provisionGeneration > subject.latestGeneration
+          || !Number.isSafeInteger(operation.provisionGeneration) || operation.provisionGeneration < 1
           || association.operationKind === 'INITIAL' && operation.provisionGeneration !== 1
           || association.operationKind === 'REPROVISION' && operation.provisionGeneration <= 1
           || operation.admittedAt !== null && !positiveEpoch(operation.admittedAt) || typeof operation.recoveryRequired !== 'boolean') throw hostingError('HOSTING_JOURNAL_INVALID');
+      const installationId = subject.manifest.installationId;
+      const group = relationships.get(installationId) || { candidate: subject, operations: [] };
+      if (!same(group.candidate, subject)) throw hostingError('HOSTING_JOURNAL_INVALID');
+      group.operations.push([key, operation]); relationships.set(installationId, group);
+    }
+    for (const { candidate, operations } of relationships.values()) {
+      const generations = new Set(operations.map(([, operation]) => operation.provisionGeneration));
+      if (generations.size !== operations.length || Math.max(...generations) !== operations.length
+          || !operations.some(([, operation]) => operation.provisionGeneration === 1 && same(operation.association, candidate.initialAssociation)))
+        throw hostingError('HOSTING_JOURNAL_INVALID');
     }
     for (const [subjectKey, subject] of Object.entries(state.subjects)) {
-      const operations = Object.entries(state.operations).filter(([, operation]) => operation.subjectKey === subjectKey);
+      const operations = relationships.get(subject.manifest.installationId)?.operations || [];
       if (!operations.some(([, operation]) => operation.provisionGeneration === 1 && same(operation.association, subject.initialAssociation))
           || new Set(operations.map(([, operation]) => operation.provisionGeneration)).size !== operations.length
           || Math.max(...operations.map(([, operation]) => operation.provisionGeneration)) !== subject.latestGeneration
           || operations.length !== subject.latestGeneration) throw hostingError('HOSTING_JOURNAL_INVALID');
       if (subject.activeOperationKey !== null) {
         const active = state.operations[subject.activeOperationKey];
-        if (!active || active.subjectKey !== subjectKey || active.admittedAt === null) throw hostingError('HOSTING_JOURNAL_INVALID');
+        if (!active || active.subjectKey !== subjectKey || active.candidate.manifest.installationId !== subject.manifest.installationId || active.admittedAt === null) throw hostingError('HOSTING_JOURNAL_INVALID');
       }
     }
+  }
+  candidateFacts(subject) {
+    return structuredClone(Object.fromEntries(['manifest', 'initialAssociation', 'enrollmentSecretSha256', 'enrollmentExpiresAt']
+      .map(field => [field, subject[field]])));
   }
   withSubject(key, operation) {
     const prior = this.gates.get(key) || Promise.resolve();
@@ -151,7 +190,7 @@ export class HostingControl {
         const prior = state.operations[key];
         if (prior) {
           if (!same(prior.association, hostingAssociation(request))) throw hostingError('HOSTING_OPERATION_CONFLICT');
-          return { value: this.prepared(request, prior, state.subjects[prior.subjectKey]), changed: false };
+          return { value: this.prepared(request, prior, prior.candidate), changed: false };
         }
         if (this.host.agents.get(subjectKey)?.quiesceRequested) throw hostingError('RUNTIME_HANDOVER_PENDING');
         if (this.config.template.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template.profile.workspacePolicyId)) throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
@@ -172,18 +211,23 @@ export class HostingControl {
           if (subject.latestGeneration === Number.MAX_SAFE_INTEGER) throw hostingError('HOSTING_GENERATION_EXHAUSTED');
           subject.latestGeneration++;
         }
-        const operation = { association: hostingAssociation(request), subjectKey, provisionGeneration: subject.latestGeneration, admittedAt: null, recoveryRequired: false };
+        const operation = { association: hostingAssociation(request), subjectKey, candidate: this.candidateFacts(subject), provisionGeneration: subject.latestGeneration, admittedAt: null, recoveryRequired: false };
         state.operations[key] = operation;
         return { value: this.prepared(request, operation, subject) };
       });
-      const operation = this.state.operations[key]; const subject = this.state.subjects[subjectKey];
+      const operation = this.state.operations[key]; const subject = operation?.candidate;
       if (!operation || !subject || operation.subjectKey !== subjectKey || !same(operation.association, hostingAssociation(request))
           || request.installationId !== subject.manifest.installationId || request.manifestSha256 !== subject.manifest.manifestSha256.slice(7)
           || request.provisionGeneration !== operation.provisionGeneration) throw hostingError('HOSTING_ASSOCIATION_REJECTED');
+      const currentSubject = this.state.subjects[subjectKey];
+      if (subject.manifest.installationId !== currentSubject.manifest.installationId) {
+        if (request.method === 'observe') return this.observe(request, key);
+        throw hostingError('HOSTING_OPERATION_SUPERSEDED');
+      }
       if (['quiesce', 'evidence', 'cleanup'].includes(request.method)) {
         // Only the admitted current generation may stop this relationship. A
         // late provisioning response must never stop a newer admitted operation.
-        if (subject.activeOperationKey !== key || operation.admittedAt === null)
+        if (currentSubject.activeOperationKey !== key || operation.admittedAt === null)
           throw hostingError('HOSTING_OPERATION_SUPERSEDED');
         if (!this.host.agents.has(subjectKey)) throw hostingError('HOSTING_OPERATION_PENDING');
         if (request.method === 'cleanup') {
@@ -218,11 +262,12 @@ export class HostingControl {
     });
   }
   observe(request, key) {
-    const operation = this.state.operations[key]; const subject = this.state.subjects[operation.subjectKey];
+    const operation = this.state.operations[key]; const subject = operation.candidate;
+    const current = this.state.subjects[operation.subjectKey];
     const response = { ...hostingEnvelope(request), installationId: subject.manifest.installationId,
       manifestSha256: subject.manifest.manifestSha256.slice(7), provisionGeneration: operation.provisionGeneration,
       hostId: this.host.config.hostId, outcome: operation.recoveryRequired ? 'RECOVERY_REQUIRED' : 'UNKNOWN' };
-    if (operation.recoveryRequired || subject.activeOperationKey !== key || operation.admittedAt === null
+    if (operation.recoveryRequired || current.activeOperationKey !== key || current.manifest.installationId !== subject.manifest.installationId || operation.admittedAt === null
         || request.operationKind === 'REPROVISION' && request.validUntil <= this.now()) return response;
     const active = this.live.get(operation.subjectKey); const proof = this.host.agentEvidence(operation.subjectKey);
     if (!active || !active.confirmed || active.key !== key || !proof || ['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].some(field => proof[field] !== subject.manifest[field])

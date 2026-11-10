@@ -487,3 +487,55 @@ test('prepared reprovision cannot change admitted operation after permanent quie
   assert.equal((await control.handle({ ...prepare, method: 'current' })).provisionGeneration, 1);
   assert.equal(f.sessionCount(), 1);
 });
+
+test('format1 journal upgrades exact candidate facts once without enrollment or changed prepared bytes', async t => {
+  const f = await hostingFixture(t), control = f.control();
+  const original = await control.handle(prepare), path = control.path;
+  const legacy = await readPrivateJson(path); legacy.formatVersion = 1;
+  for (const operation of Object.values(legacy.operations)) delete operation.candidate;
+  await f.stop(); await writePrivateJson(path, legacy); await f.start();
+  assert.equal((await readPrivateJson(path)).formatVersion, 2);
+  assert.deepEqual(await f.control().handle(prepare), original);
+  assert.equal(f.enrollmentCount(), 0);
+  const bytes = await readFile(path);
+  await f.stop(); await f.start();
+  assert.deepEqual(await readFile(path), bytes);
+  assert.deepEqual(await f.control().handle(prepare), original);
+});
+
+test('invalid format1 migration does not persist a guessed candidate or enroll', async t => {
+  const f = await hostingFixture(t), path = f.control().path;
+  await f.control().handle(prepare);
+  const legacy = await readPrivateJson(path); legacy.formatVersion = 1;
+  for (const operation of Object.values(legacy.operations)) { delete operation.candidate; operation.subjectKey = 'missing'; }
+  await f.stop(); await writePrivateJson(path, legacy);
+  const bytes = await readFile(path);
+  await assert.rejects(f.start(), code('HOSTING_JOURNAL_INVALID'));
+  assert.deepEqual(await readFile(path), bytes); assert.equal(f.enrollmentCount(), 0);
+});
+
+test('original candidate replay is immutable after public subject changes; old lifecycle writes are fenced', async t => {
+  const f = await hostingFixture(t), control = f.control(), original = await control.handle(prepare);
+  const oldKey = Object.keys(control.state.operations)[0], subjectKey = Object.keys(control.state.subjects)[0];
+  // Storage-boundary fixture only. Full CLEANED -> admission is separately required.
+  const current = control.state.subjects[subjectKey];
+  current.manifest = { ...current.manifest, installationId: 'rti_' + '9'.repeat(32) };
+  current.manifest.manifestSha256 = digestManifest(current.manifest);
+  current.initialAssociation = { ...current.initialAssociation, bindingId: 'next-binding', leaseId: 'next-lease',
+    initialIntentId: 'next-intent', operationId: 'next-intent' };
+  const operation = { ...structuredClone(control.state.operations[oldKey]), association: structuredClone(current.initialAssociation),
+    candidate: control.candidateFacts(current) };
+  const key = createHash('sha256').update(stableJson({ tenantId: operation.association.tenantId,
+    clientId: operation.association.clientId, operationId: operation.association.operationId })).digest('hex');
+  control.state.operations[key] = operation;
+  assert.doesNotThrow(() => control.validateJournal());
+  assert.deepEqual(await control.handle(prepare), original);
+  const observed = await control.handle(candidateRequest(prepare, original, 'observe'));
+  assert.equal(observed.installationId, original.installationId); assert.equal(observed.outcome, 'UNKNOWN');
+  await assert.rejects(control.handle(candidateRequest(prepare, original, 'ensure')), code('HOSTING_OPERATION_SUPERSEDED'));
+  for (const method of ['quiesce', 'evidence', 'cleanup'])
+    await assert.rejects(control.handle({ ...candidateRequest(prepare, original, method), handoverId: 'old-handover' }), code('HOSTING_OPERATION_SUPERSEDED'));
+  assert.equal(f.enrollmentCount(), 0);
+  control.state.operations[oldKey].candidate.enrollmentSecretSha256 = 'invalid';
+  assert.throws(() => control.validateJournal());
+});
