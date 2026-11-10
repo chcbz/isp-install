@@ -1932,3 +1932,98 @@ test('position discovery completion and subsequent heartbeat never revive retire
  assert.deepEqual(state.reconciliation,['positions']);state.positionGate=null;
  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions','positions']);
 });
+
+test('handover quiesces only its subject, persists stopped fact and retains writer and public files', async t => {
+  const f = await fixture(t); const config = await f.config(); const mock = executors();
+  const host = new RuntimeHost({ config, createExecutor: mock.createExecutor }); f.cleanup(() => host.stop());
+  await host.start(); await Promise.all(config.agents.map(agent => host.activate(agent.subjectKey, {})));
+  const agent = config.agents[0]; const key = agent.subjectKey;
+  const request = { installationId: agent.manifest.installationId, operationId: 'handover-1' };
+  await writeFile(resolve(agent.profile.codexHome, 'public-fixture'), 'keep');
+  const result = await host.quiesceAgent(key, request);
+  assert.deepEqual(result, { subjectKey: key, ...request, phase: 'QUIESCED' });
+  assert.deepEqual(host.snapshot().agents.map(item => item.ready), [false, true, true]);
+  assert.equal(host.agentEvidence(key), null);
+  assert.equal(mock.states.get(key).closed, 1);
+  assert.equal(await readFile(resolve(agent.profile.codexHome, 'public-fixture'), 'utf8'), 'keep');
+  const before = await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8');
+  assert.equal(JSON.parse(before).phase, 'QUIESCED');
+  assert.deepEqual(await host.quiesceAgent(key, request), result);
+  assert.equal(await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8'), before);
+  assert.equal(mock.states.get(key).closed, 1);
+  await assert.rejects(acquireRuntimeOwnership(agent.stateRoot, { hostId: 'other', instanceId: 'other' }), code('RUNTIME_WRITER_BUSY'));
+  await assert.rejects(host.activate(key, {}), code('RUNTIME_AGENT_NOT_INITIALIZED'));
+  await assert.rejects(host.ensureAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await assert.rejects(host.quiesceAgent(key, { ...request, operationId: 'different' }), code('RUNTIME_HANDOVER_CONFLICT'));
+});
+
+test('handover rejects a different installation before pausing or writing any intent', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const mock = executors();
+  const host = new RuntimeHost({ config, createExecutor: mock.createExecutor }); f.cleanup(() => host.stop());
+  await host.start(); const agent = config.agents[0]; await host.activate(agent.subjectKey, {});
+  await assert.rejects(host.quiesceAgent(agent.subjectKey, { installationId: 'wrong', operationId: 'old' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  assert.equal(host.snapshot().agents[0].ready, true); assert.equal(mock.states.get(agent.subjectKey).paused, 0);
+  assert.deepEqual(await readdir(agent.stateRoot), ['.runtime-writer.lock']);
+});
+
+test('handover persists requested before close and retries without releasing ownership on failure', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  let allow = false; let closes = 0;
+  const host = new RuntimeHost({ config, createExecutor: async () => ({ initialize: async () => {}, activate: async () => {},
+    ready: () => false, pause: async () => {}, close: async () => {
+      closes++; assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8')).phase, 'REQUESTED');
+      if (!allow) throw new Error('owned executor still running');
+    } }) });
+  await host.start(); const request = { installationId: agent.manifest.installationId, operationId: 'finish' };
+  await assert.rejects(host.quiesceAgent(agent.subjectKey, request), /owned executor still running/);
+  assert.equal(host.snapshot().agents[0].phase, 'QUIESCING');
+  assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8')).phase, 'REQUESTED');
+  await assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await assert.rejects(acquireRuntimeOwnership(agent.stateRoot, { hostId: 'other', instanceId: 'other' }), code('RUNTIME_WRITER_BUSY'));
+  allow = true; await host.quiesceAgent(agent.subjectKey, request); assert.equal(closes, 2);
+  await host.stop();
+});
+
+for (const phase of ['REQUESTED', 'QUIESCED']) test(`handover ${phase} survives clean restart without creating an executor`, async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  const record = { formatVersion: 1, subjectKey: agent.subjectKey, installationId: agent.manifest.installationId,
+    manifestSha256: agent.manifest.manifestSha256, operationId: 'original', phase };
+  // Seed only a stopped test root; production crash recovery must still honor its existing writer lock.
+  await f.json(resolve(agent.stateRoot, 'handover.json'), record);
+  for (let boot = 0; boot < 2; boot++) {
+    const mock = executors(); const host = new RuntimeHost({ config, createExecutor: mock.createExecutor });
+    await host.start(); assert.equal(mock.states.size, 0);
+    assert.equal(host.snapshot().agents[0].phase, phase === 'QUIESCED' ? 'QUIESCED' : 'QUIESCING');
+    await assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+    await assert.rejects(host.activate(agent.subjectKey, {}), code('RUNTIME_AGENT_NOT_INITIALIZED'));
+    await host.stop(); assert.deepEqual(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8')), record);
+  }
+});
+
+test('handover corrupt or foreign local fact never starts execution or overwrites evidence', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  for (const record of [null, { formatVersion: 1, subjectKey: 'foreign', installationId: agent.manifest.installationId,
+    manifestSha256: agent.manifest.manifestSha256, operationId: 'old', phase: 'QUIESCED' }]) {
+    const path = resolve(agent.stateRoot, 'handover.json'); await f.json(path, record); const before = await readFile(path, 'utf8');
+    const mock = executors(); const host = new RuntimeHost({ config, createExecutor: mock.createExecutor });
+    await host.start(); assert.equal(mock.states.size, 0); assert.equal(host.snapshot().agents[0].phase, 'ISOLATED');
+    await assert.rejects(host.ensureAgent(agent), code('RUNTIME_AGENT_INITIALIZATION_FAILED'));
+    await assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_AGENT_INITIALIZATION_FAILED'));
+    assert.equal(await readFile(path, 'utf8'), before); await host.stop();
+  }
+});
+
+test('handover interrupts only its pending activation and cannot be bypassed by a queued restart', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  let entered; const activating = new Promise(resolve => { entered = resolve; }); let cancel;
+  const host = new RuntimeHost({ config, createExecutor: async () => ({ initialize: async () => {}, ready: () => false,
+    activate: async () => { entered(); await new Promise(resolve => { cancel = resolve; }); },
+    cancelActivation: () => cancel?.(), pause: async () => {}, close: async () => {} }) });
+  f.cleanup(() => host.stop()); await host.start();
+  const activation = host.activate(agent.subjectKey, {}); await activating;
+  const quiescing = host.quiesceAgent(agent.subjectKey, { installationId: agent.manifest.installationId, operationId: 'finish' });
+  const queuedRestart = assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await activation; assert.equal((await quiescing).phase, 'QUIESCED'); await queuedRestart;
+  assert.equal(host.snapshot().agents[0].ready, false);
+});

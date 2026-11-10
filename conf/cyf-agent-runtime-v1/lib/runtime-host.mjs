@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { constants, open, lstat, realpath, mkdir, unlink, rmdir } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { readRuntimeHostConfig, runtimeSubjectKey, validateManifest, stableJson } from './manifest.mjs';
+import { readPrivateJson, writePrivateJson } from './security.mjs';
 
 const error = code => Object.assign(new Error(code), { code });
 async function syncDirectory(path) {
@@ -66,7 +67,7 @@ export class RuntimeHost {
     return { hostId: this.config.hostId, instanceId: this.instanceId, agents: [...this.agents.entries()].map(([subjectKey, state]) => ({
       subjectKey, installationId: state.agent.manifest.installationId, phase: state.phase,
       // Local initialization is not authentication or execution-channel readiness.
-      ready: ['READY', 'INITIALIZED'].includes(state.phase) && state.executor?.ready?.() === true, reasonCode: state.reasonCode
+      ready: !state.quiesceRequested && ['READY', 'INITIALIZED'].includes(state.phase) && state.executor?.ready?.() === true, reasonCode: state.reasonCode
     })) };
   }
 
@@ -103,6 +104,14 @@ export class RuntimeHost {
         state.release ||= await acquireRuntimeOwnership(state.agent.stateRoot, {
           hostId: this.config.hostId, instanceId: this.instanceId, subjectKey: key
         });
+        const handover = await readPrivateJson(resolve(state.agent.stateRoot, 'handover.json'), undefined);
+        if (handover !== undefined) {
+          this.requireHandoverRecord(key, state, handover);
+          state.handover = handover; state.quiesceRequested = true;
+          state.phase = handover.phase === 'QUIESCED' ? 'QUIESCED' : 'QUIESCING';
+          return; // Ownership retained. Restart is not permission to resume old execution.
+        }
+        if (state.quiesceRequested) { state.phase = 'QUIESCING'; return; }
         state.executor = await this.createExecutor({ agent: state.agent, instanceId: this.instanceId, subjectKey: key });
         if (!state.executor || ['initialize', 'activate', 'ready', 'pause', 'close'].some(method => typeof state.executor[method] !== 'function')) throw error('RUNTIME_EXECUTOR_INVALID');
         await state.executor.initialize();
@@ -144,6 +153,7 @@ export class RuntimeHost {
       if (recreate) prior?.executor?.cancelActivation?.();
       return this.withAgent(key, async state => {
         if (this.stopping) throw error('RUNTIME_HOST_STOPPED');
+        if (state.quiesceRequested) throw error('RUNTIME_HANDOVER_PENDING');
         for (const path of roots(state.agent)) await requireOwnedPrivateRoot(path);
         if (recreate) {
           await state.executor?.pause?.(); await state.executor?.close?.();
@@ -161,7 +171,7 @@ export class RuntimeHost {
 
   agentEvidence(key) {
     const state = this.agents.get(key);
-    return !this.stopping && ['READY', 'INITIALIZED'].includes(state?.phase) && state.executor?.ready?.() === true
+    return !this.stopping && !state?.quiesceRequested && ['READY', 'INITIALIZED'].includes(state?.phase) && state.executor?.ready?.() === true
       ? state.executor.evidence?.() || null : null;
   }
 
@@ -169,7 +179,7 @@ export class RuntimeHost {
   // the frozen wire adapter, never inferred by this lifecycle host.
   activate(key, session) {
     return this.withAgent(key, async state => {
-      if (this.stopping || state.phase !== 'INITIALIZED') throw error('RUNTIME_AGENT_NOT_INITIALIZED');
+      if (this.stopping || state.quiesceRequested || state.phase !== 'INITIALIZED') throw error('RUNTIME_AGENT_NOT_INITIALIZED');
       try {
         await state.executor.activate(session);
         state.phase = state.executor.ready() === true ? 'READY' : 'INITIALIZED';
@@ -178,6 +188,57 @@ export class RuntimeHost {
         state.phase = 'ISOLATED'; state.reasonCode = 'RUNTIME_AGENT_AUTHORIZATION_FAILED';
         await state.executor.pause?.(); throw cause;
       }
+    });
+  }
+
+  requireHandoverRecord(key, state, record) {
+    const manifest = state.agent.manifest;
+    if (!record || typeof record !== 'object' || record.formatVersion !== 1 || record.subjectKey !== key
+        || record.installationId !== manifest.installationId || record.manifestSha256 !== manifest.manifestSha256
+        || typeof record.operationId !== 'string' || !record.operationId.trim()
+        || !['REQUESTED', 'QUIESCED'].includes(record.phase)) throw error('RUNTIME_HANDOVER_STATE_INVALID');
+  }
+
+  // Trusted local lifecycle boundary. The authenticated control adapter must bind
+  // operationId to the current business relationship; this host never decides rent.
+  quiesceAgent(key, { installationId, operationId } = {}) {
+    const state = this.agents.get(key);
+    if (!state) return Promise.reject(error('RUNTIME_AGENT_UNKNOWN'));
+    if (this.stopping || !this.releaseHost) return Promise.reject(error('RUNTIME_HOST_NOT_RUNNING'));
+    if (installationId !== state.agent.manifest.installationId || typeof operationId !== 'string' || !operationId.trim())
+      return Promise.reject(error('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+    if (state.handoverOperation && state.handoverOperation !== operationId
+        || state.handover && state.handover.operationId !== operationId) return Promise.reject(error('RUNTIME_HANDOVER_CONFLICT'));
+    state.handoverOperation = operationId; state.quiesceRequested = true;
+    // Registration may be waiting inside the lifecycle gate; cancel only this
+    // subject's activation before joining the gate (same as owned reprovision).
+    state.executor?.cancelActivation?.();
+    return this.withAgent(key, async current => {
+      if (this.stopping) throw error('RUNTIME_HOST_STOPPED');
+      if (!current.release) throw error('RUNTIME_HANDOVER_OWNERSHIP_REQUIRED');
+      const path = resolve(current.agent.stateRoot, 'handover.json');
+      // Read back on retry, including an ambiguous durable write. Never overwrite
+      // an unknown intent after a process restart or interrupted publication.
+      let record = await readPrivateJson(path, undefined);
+      if (record !== undefined) {
+        this.requireHandoverRecord(key, current, record);
+        if (record.operationId !== operationId) throw error('RUNTIME_HANDOVER_CONFLICT');
+      } else {
+        record = { formatVersion: 1, subjectKey: key, installationId,
+          manifestSha256: current.agent.manifest.manifestSha256, operationId, phase: 'REQUESTED' };
+        await writePrivateJson(path, record, { exclusive: true });
+      }
+      current.handover = record; current.phase = 'QUIESCING';
+      if (record.phase !== 'QUIESCED') {
+        await current.executor?.pause();
+        await current.executor?.close();
+        record = { ...record, phase: 'QUIESCED' };
+        await writePrivateJson(path, record);
+      }
+      current.executor = null; current.handover = record; current.phase = 'QUIESCED'; current.reasonCode = null;
+      // Keep the writer lock throughout future private cleanup. QUIESCED is not
+      // a cleanup receipt and does not authorize a fresh invitation/activation.
+      return { subjectKey: key, installationId, operationId, phase: 'QUIESCED' };
     });
   }
 
