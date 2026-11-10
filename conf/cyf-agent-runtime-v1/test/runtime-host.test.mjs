@@ -2151,3 +2151,58 @@ test('stopped evidence locates the real management journal and keeps unacknowled
   await assert.rejects(flushStoppedEvidence({ ...options, ownerJiacn: 'next-owner' }));
   assert.equal(sent.length, 4); assert.equal(invalidations, 4);
 });
+
+
+test('private cleanup gate requires original stopped evidence and persists success across restart without readmission', async t => {
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const engine = executors(); let evidence = false, cleanups = 0, outcome = 'pending';
+  const cleanup = async options => {
+    cleanups++; assert.equal(options.agent, agent); assert.equal(options.ownerJiacn, 'original'); assert.equal(options.operationId, 'finish');
+    if (outcome === 'failure') throw new Error('private removal interrupted');
+    return { confirmed: outcome === 'complete' };
+  };
+  const host = new RuntimeHost({ config, createExecutor: engine.createExecutor,
+    flushEvidence: async () => ({ confirmed: evidence }), cleanPrivateData: cleanup });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
+  await host.quiesceAgent(agent.subjectKey, request);
+  await host.flushAgentEvidence(agent.subjectKey, request);
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_HANDOVER_EVIDENCE_REQUIRED'));
+  assert.equal(cleanups, 0);
+  evidence = true; await host.flushAgentEvidence(agent.subjectKey, request);
+  for (const change of [{ ownerJiacn: 'next' }, { operationId: 'other' }, { installationId: 'other' }])
+    await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, { ...request, ...change }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  assert.equal(cleanups, 0);
+  assert.deepEqual(await host.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: false });
+  outcome = 'failure'; await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), /interrupted/);
+  assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'))).cleanupComplete, undefined);
+  outcome = 'complete';
+  assert.deepEqual(await Promise.all([host.cleanAgentPrivateData(agent.subjectKey, request), host.cleanAgentPrivateData(agent.subjectKey, request)]),
+    [{ confirmed: true }, { confirmed: true }]);
+  assert.equal(cleanups, 3);
+  assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'))).cleanupComplete, true);
+  assert.ok(host.agents.get(agent.subjectKey).release);
+  await assert.rejects(host.ensureAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await host.stop();
+  const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor });
+  f.cleanup(() => restarted.stop()); await restarted.start();
+  assert.equal(restarted.agents.get(agent.subjectKey).executor, null);
+  assert.deepEqual(await restarted.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true });
+  assert.equal(engine.states.get(agent.subjectKey).initialized, 1);
+  await assert.rejects(restarted.ensureAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+});
+
+test('private cleanup gate does not invent a receipt when storage adapter is absent or durable evidence is inconsistent', async t => {
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const host = new RuntimeHost({ config, createExecutor: executors().createExecutor, flushEvidence: async () => ({ confirmed: true }) });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_PRIVATE_CLEANUP_UNAVAILABLE'));
+  const path = resolve(agent.stateRoot, 'handover.json'), record = JSON.parse(await readFile(path));
+  assert.equal(record.cleanupComplete, undefined);
+  record.cleanupComplete = true; delete record.evidenceAccepted;
+  await f.json(path, record);
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
+});

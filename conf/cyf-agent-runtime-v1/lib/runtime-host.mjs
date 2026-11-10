@@ -53,10 +53,10 @@ export async function acquireRuntimeOwnership(root, { hostId, instanceId, subjec
 }
 
 export class RuntimeHost {
-  constructor({ config, instanceId = randomUUID(), createExecutor, flushEvidence, logger = () => {} }) {
+  constructor({ config, instanceId = randomUUID(), createExecutor, flushEvidence, cleanPrivateData, logger = () => {} }) {
     if (typeof createExecutor !== 'function' || !config?.agents?.length) throw error('RUNTIME_HOST_CONFIG_REQUIRED');
     if (typeof instanceId !== 'string' || !instanceId || instanceId === config.hostId) throw error('RUNTIME_INSTANCE_ID_INVALID');
-    this.config = config; this.instanceId = instanceId; this.createExecutor = createExecutor; this.flushEvidence = flushEvidence; this.logger = logger;
+    this.config = config; this.instanceId = instanceId; this.createExecutor = createExecutor; this.flushEvidence = flushEvidence; this.cleanPrivateData = cleanPrivateData; this.logger = logger;
     this.agents = new Map(config.agents.map(agent => [runtimeSubjectKey(agent.manifest), {
       agent, phase: 'STOPPED', executor: null, release: null, gate: Promise.resolve(), reasonCode: null
     }]));
@@ -199,6 +199,7 @@ export class RuntimeHost {
         || typeof record.operationId !== 'string' || !record.operationId.trim()
         || record.evidenceOwnerJiacn !== undefined && (typeof record.evidenceOwnerJiacn !== 'string' || !record.evidenceOwnerJiacn.trim() || record.evidenceOwnerJiacn !== record.evidenceOwnerJiacn.trim())
         || record.evidenceAccepted !== undefined && (record.evidenceAccepted !== true || !record.evidenceOwnerJiacn || record.phase !== 'QUIESCED')
+        || record.cleanupComplete !== undefined && (record.cleanupComplete !== true || record.evidenceAccepted !== true)
         || !['REQUESTED', 'QUIESCED'].includes(record.phase)) throw error('RUNTIME_HANDOVER_STATE_INVALID');
   }
 
@@ -226,6 +227,34 @@ export class RuntimeHost {
         const result = await this.flushEvidence({ agent: state.agent, ownerJiacn });
         if (result?.confirmed !== true) return { confirmed: false };
         record.evidenceAccepted = true;
+        await writePrivateJson(path, record);
+        state.handover = record;
+      }
+      return { confirmed: true };
+    });
+  }
+
+  // The trusted storage adapter owns public/private classification and must finish
+  // skill retirement and every private root before confirming. No default erasure
+  // of codexWorkdir: it may be the shared project repository. This receipt alone
+  // neither releases the business relationship nor permits another executor.
+  cleanAgentPrivateData(key, { installationId, operationId, ownerJiacn } = {}) {
+    return this.withAgent(key, async state => {
+      if (this.stopping || !this.releaseHost || !state.release) throw error('RUNTIME_HANDOVER_OWNERSHIP_REQUIRED');
+      const path = resolve(state.agent.stateRoot, 'handover.json');
+      const record = await readPrivateJson(path, undefined);
+      this.requireHandoverRecord(key, state, record);
+      if (installationId !== record.installationId || operationId !== record.operationId
+          || !ownerJiacn || ownerJiacn !== record.evidenceOwnerJiacn) throw error('RUNTIME_HANDOVER_IDENTITY_CONFLICT');
+      if (record.phase !== 'QUIESCED' || state.executor) throw error('RUNTIME_HANDOVER_STOP_REQUIRED');
+      if (record.evidenceAccepted !== true) throw error('RUNTIME_HANDOVER_EVIDENCE_REQUIRED');
+      if (record.cleanupComplete !== true) {
+        if (typeof this.cleanPrivateData !== 'function') throw error('RUNTIME_PRIVATE_CLEANUP_UNAVAILABLE');
+        const result = await this.cleanPrivateData({ agent: state.agent, ownerJiacn, operationId });
+        if (result?.confirmed !== true) return { confirmed: false };
+        // The adapter must preserve this control journal and lifetime writer lock.
+        // Persist only after successful deletion; failures retry the same operation.
+        record.cleanupComplete = true;
         await writePrivateJson(path, record);
         state.handover = record;
       }
