@@ -8,7 +8,7 @@ import { resolve } from 'node:path';
 import { hostingFixture, candidateRequest, tick, code } from './hosting-fixture.mjs';
 import { parseHostingJson, validateHostingRequest, validateHostingAssociation, hostingReply } from '../lib/hosting-wire.mjs';
 import { startHostingServer } from '../lib/hosting-server.mjs';
-import { digestManifest, stableJson } from '../lib/manifest.mjs';
+import { digestManifest, runtimeSubjectKey, stableJson } from '../lib/manifest.mjs';
 import { readPrivateJson, writePrivateJson } from '../lib/security.mjs';
 const fixtureBytes = await readFile(new URL('./fixtures/gss-hosting-control-v1.json', import.meta.url));
 const wire = JSON.parse(fixtureBytes);
@@ -635,7 +635,7 @@ test('public inventory is scoped, has no paths or provisioning side effects, and
   assert.equal(f.enrollmentCount(), 0); assert.equal(await readFile(control.path, 'utf8'), before);
   let observations = 0;
   control.observeInventory = async ({ profile }) => { observations++; assert.equal(profile.agentId, f.peers[0].manifest.canonicalAgentId);
-    return { inventoryVersion: '1', inventorySha256: 'a'.repeat(64), installedSkillCount: '1', skills: [{ skillKey: 'manual', source: 'NATIVE', revision: 'b'.repeat(64) }] }; };
+    return { inventoryVersion: '1', inventorySha256: 'a'.repeat(64), installedSkillCount: '1', skills: [{ skillKey: 'manual', source: 'NATIVE', revision: 'b'.repeat(64), enabled: true, installation: null }] }; };
   const existing = await control.handle({ ...request, canonicalAgentId: f.peers[0].manifest.canonicalAgentId });
   assert.equal(existing.installedSkillCount, '1'); assert.equal(observations, 1);
   await assert.rejects(control.handle({ ...request, ownerJiacn: 'other' }), code('HOSTING_SCOPE_REJECTED'));
@@ -655,4 +655,20 @@ test('shared inventory fixture preserves Unicode digest and public envelope with
   const request = messageOf(fixture.request), reply = hostingReply(request, fixture.response);
   assert.deepEqual(reply.data.skills.map(skill => skill.skillKey), ['installed', '菜谱']);
   assert.equal(reply.data.installedSkillCount, '2');
+});
+
+
+test('inventory never treats an orphan public root or missing workspace policy as an empty new Agent', async t => {
+  const f = await hostingFixture(t), control = f.control();
+  const request = { protocol: 'runtime-hosting-v1', method: 'inventory', tenantId: prepare.tenantId,
+    clientId: prepare.clientId, ownerJiacn: prepare.ownerJiacn, canonicalAgentId: prepare.canonicalAgentId };
+  const before = await readFile(control.path, 'utf8');
+  control.config.template.profile.workspacePolicyId = 'missing-policy';
+  await assert.rejects(control.handle(request), code('HOSTING_TEMPLATE_PROFILE_INVALID'));
+  delete control.config.template.profile.workspacePolicyId;
+  const orphan = resolve(control.config.managedRoot, runtimeSubjectKey(request));
+  await mkdir(orphan, { mode: 0o700 });
+  await assert.rejects(control.handle(request), code('HOSTING_SUBJECT_CONFLICT'));
+  assert.equal(await readFile(control.path, 'utf8'), before);
+  assert.equal(f.enrollmentCount(), 0);
 });

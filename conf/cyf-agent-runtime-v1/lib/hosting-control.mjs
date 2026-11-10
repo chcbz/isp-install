@@ -1,7 +1,7 @@
 // SAME RuntimeHost, private persistent candidate/admission journal. No DB/API key
 // broker, second engine/service, payment, caller-selected config or blind enroll.
 import { createHash, randomBytes } from 'node:crypto';
-import { constants, mkdir, open } from 'node:fs/promises';
+import { constants, lstat, mkdir, open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { digestManifest, runtimeSubjectKey, stableJson, validateManifest } from './manifest.mjs';
 import { acquireRuntimeOwnership, requireOwnedPrivateRoot } from './runtime-host.mjs';
@@ -185,8 +185,17 @@ export class HostingControl {
     if (request.method === 'inventory') {
       const subjectKey = runtimeSubjectKey(request);
       return this.withSubject(subjectKey, async () => {
+        if (this.config.template.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template.profile.workspacePolicyId))
+          throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
         const subject = this.state.subjects[subjectKey];
         const agent = subject ? this.subjectAgent(subject) : this.host.agents.get(subjectKey)?.agent;
+        if (!agent) {
+          // An orphan root is not proof of an empty public inventory; never adopt it for a zero quote.
+          try {
+            await lstat(resolve(this.config.managedRoot, subjectKey));
+            throw hostingError('HOSTING_SUBJECT_CONFLICT');
+          } catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
+        }
         // New managed subjects have fresh HOME/work roots and a validated model-only
         // template: no skill/plugin source is copied. Do not create an instance to quote.
         const inventory = agent ? await this.observeInventory({ profile: agent.profile,

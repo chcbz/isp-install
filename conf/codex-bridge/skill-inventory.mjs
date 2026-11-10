@@ -19,14 +19,19 @@ export function skillInventorySnapshot({ discovery, managed = [], cwd, codexHome
       || !Array.isArray(discovery.data[0].skills) || !Array.isArray(discovery.data[0].errors) || discovery.data[0].errors.length) fail()
   const rows = new Map(), managedViews = new Map(), nativePaths = new Map()
   for (const row of managed) {
-    if (row.active !== true || !text(row.skillKey) || !text(row.installationId)
+    if (row.active !== true || typeof row.enabled !== 'boolean' || !text(row.skillKey) || !text(row.installationId)
         || !text(row.packageTreeDigest) || rows.has(row.skillKey)) fail()
+    const installation = { skillInstallationId: row.installationId, productVersionId: row.productVersionId,
+      skillVersion: row.skillVersion, kind: row.kind, packageSha256: row.packageSha256, manifestSha256: row.manifestSha256 }
+    if (!text(installation.productVersionId) || !text(installation.skillVersion)
+        || !['INSTRUCTION', 'EXECUTABLE'].includes(installation.kind) || !/^[0-9a-f]{64}$/.test(installation.packageSha256)
+        || (installation.kind === 'INSTRUCTION' ? installation.manifestSha256 !== null : !/^[0-9a-f]{64}$/.test(installation.manifestSha256))) fail()
     rows.set(row.skillKey, { skillKey: row.skillKey, source: 'MANAGED', revision: sha(JSON.stringify([
-      row.installationId, row.packageTreeDigest, row.skillVersion, row.enabled])) })
+      row.installationId, row.packageTreeDigest, row.skillVersion, row.enabled])), enabled: row.enabled, installation })
     managedViews.set(resolve(codexHome, 'skills', row.skillKey, 'SKILL.md'), row)
   }
   for (const skill of discovery.data[0].skills) {
-    if (!text(skill.name) || !text(skill.path) || typeof skill.enabled !== 'boolean') fail()
+    if (!text(skill.name) || !text(skill.path) || typeof skill.enabled !== 'boolean' || !text(skill.scope)) fail()
     if (skill.scope === 'system') continue // Engine tools are not paid installations.
     const known = managedViews.get(skill.path)
     if (known) {
@@ -38,7 +43,7 @@ export function skillInventorySnapshot({ discovery, managed = [], cwd, codexHome
     // A collision is not evidence for silently dropping a billable skill kind.
     if (rows.has(skill.name)) fail()
     nativePaths.set(skill.name, path)
-    rows.set(skill.name, { skillKey: skill.name, source: 'NATIVE', revision: sha(readFileSync(path)) })
+    rows.set(skill.name, { skillKey: skill.name, source: 'NATIVE', revision: sha(readFileSync(path)), enabled: skill.enabled, installation: null })
   }
   const skills = ordered([...rows.values()])
   return Object.freeze({ inventoryVersion: '1', inventorySha256: sha(JSON.stringify(skills)),
