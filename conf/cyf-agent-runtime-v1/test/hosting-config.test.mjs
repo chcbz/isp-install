@@ -108,3 +108,13 @@ test('single source installer/validator explicitly collate control payload and t
   const tmpfiles = await readFile(resolve(sourceRoot, 'systemd/cyf-agent-runtime-v1-hosting.tmpfiles.conf.example'), 'utf8');
   assert.match(tmpfiles, /d \/run\/cyf-agent-runtime-v1\/unified 0750 root isp/); assert.match(tmpfiles, /d \/home\/isp\/state\/cyf-agent-runtime-v1-managed\/unified 0700 root root/);
 });
+
+test('managed native-only provider controls are trusted scalar settings, not private root inheritance', async t => {
+  const f = await configFixture(t)
+  Object.assign(f.config.template.profile, { nativeExecutionProviderId: 'operator', nativeExecutionProviderBaseUrl: 'https://provider.invalid/v1', nativeExecutionProviderWireApi: 'responses', nativeExecutionNetworkConnectTimeoutMs: 3000 })
+  assert.equal(validateHostingConfig(f.config), f.config)
+  for (const field of ['nativeExecutionRootDir', 'nativeExecutionStateRoot']) {
+    const value = structuredClone(f.config); value.template.profile[field] = '/private/other-subject'
+    assert.throws(() => validateHostingConfig(value), code('HOSTING_TEMPLATE_INVALID'))
+  }
+})

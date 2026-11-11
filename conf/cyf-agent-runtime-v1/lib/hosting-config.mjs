@@ -12,6 +12,7 @@ export const MANAGED_PROFILE_FIELDS = Object.freeze(['codexBin', 'codexModel', '
   'chatEngine', 'chatModel', 'chatReasoningEffort', 'chatSandbox', 'chatToolPolicy', 'fastChatEnabled', 'appServerEnabled',
   'appServerSchemaContractId', 'trueDeltaEnabled', 'typedDeliberationEnabled', 'workspacePolicyId', 'workspaceRole',
   'workspaceNoTaskPolicy', 'workspaceNonCodingCommandTypes', 'executionReportCommandTypes', 'nativeConversationHttpPollEnabled',
+  'nativeExecutionProviderId', 'nativeExecutionProviderBaseUrl', 'nativeExecutionProviderWireApi', 'nativeExecutionNetworkConnectTimeoutMs',
   'abilities', 'skills']);
 // Distinct operator-managed provider environment. Never inherit HOME/auth/session.
 export const managedProviderKey = key => /^CYF_MANAGED_PROVIDER_[A-Z][A-Z0-9_]*$/.test(key);

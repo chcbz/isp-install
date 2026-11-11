@@ -514,3 +514,7 @@ safe diagnostic metadata, never proof of task completion/revocation.
 `CHAT_CONTEXT_BOOTSTRAP_REQUIRED` 仅在 native turn/start 前成立。候选沿既有 inbox recovery 和 chat.dispatch.ack 保存/重传 `executionStarted:false` 证明；开始执行、未知接受或完成后异常不能使用该证明。重连/重复消息不重跑模型。API 的新 BOOTSTRAP `contextDelivery.replacesDispatchId` 只替换已明确拒绝的旧派发；Runtime 将同 request/turn 的旧未执行恢复项归档，保留去重证明并从最终结果确认候选中排除，防止误确认旧派发。无新轮询、新历史缓存或独立ACK。
 
 当前为API worktree 5b96cd8基线、Runtime worktree54c4701基线上的候选；Runtime候选1.3.56 / bridge1.1.45，不代表运行版本。API准入端已在候选激活，仍需整批Flow验证及受控迁移两项attempt唯一索引；不能单独部署此候选。详见CYF `docs/implementation/handoffs/JUYITING-POLLING-20261102.md` 2026-11-05接续记录。
+
+### 原生执行与资料读取独立（Runtime 1.3.68候选）
+
+原生技能环境不要求配置资料输入载体。Provider、主体私有根与兼容说明见 `conf/codex-bridge/README.md`“独立原生执行环境”。探测、注册声明、执行和清理由独立Owner持有，沿用已有隔离实现及API合同；不自动补凭据或搬迁生产状态。此说明为源码候选，不代表已安装或业务验收。

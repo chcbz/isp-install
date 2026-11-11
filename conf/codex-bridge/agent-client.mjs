@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
+import { NativeExecutionProfileRuntime, nativeExecutionProfile } from './native-execution-runtime.mjs'
 import { ChatUsageDelivery } from './chat-usage-delivery.mjs'
 import { contextDeliveryPlan, requireContextThread, completedContextReceipt, contextBootstrapRejection } from './chat-context-delivery.mjs'
 import { CHAT_FILE_TOOL_INSTRUCTIONS } from './native-execution-profile.mjs'
@@ -574,6 +575,12 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     codexTimeoutMs: parseCodexTimeoutMs(profile.codexTimeoutMs, fallback.codexTimeoutMs ?? 900000),
     codexModel: profile.codexModel || fallback.codexModel || '',
     nativeModelCatalogPath: String(profile.nativeModelCatalogPath ?? fallback.nativeModelCatalogPath ?? '').trim(),
+    nativeExecutionRootDir: String(profile.nativeExecutionRootDir ?? fallback.nativeExecutionRootDir ?? '').trim(),
+    nativeExecutionStateRoot: String(profile.nativeExecutionStateRoot ?? fallback.nativeExecutionStateRoot ?? '').trim(),
+    nativeExecutionProviderId: String(profile.nativeExecutionProviderId ?? fallback.nativeExecutionProviderId ?? '').trim(),
+    nativeExecutionProviderBaseUrl: String(profile.nativeExecutionProviderBaseUrl ?? fallback.nativeExecutionProviderBaseUrl ?? '').trim(),
+    nativeExecutionProviderWireApi: String(profile.nativeExecutionProviderWireApi ?? fallback.nativeExecutionProviderWireApi ?? '').trim(),
+    nativeExecutionNetworkConnectTimeoutMs: parseOptionalPositiveInteger(profile.nativeExecutionNetworkConnectTimeoutMs ?? fallback.nativeExecutionNetworkConnectTimeoutMs),
     chatEngine: profile.chatEngine || fallback.chatEngine || 'legacy-codex',
     chatModel: profile.chatModel || fallback.chatModel || '',
     chatReasoningEffort: profile.chatReasoningEffort || fallback.chatReasoningEffort || '',
@@ -4168,11 +4175,11 @@ export const runtimeReadyCommandTypes = state => {
 }
 
 export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null,
-  typedInspectionProfileRuntime = null, controlledImageV3Runtime = null, skillRegistry = null) => {
+  typedInspectionProfileRuntime = null, controlledImageV3Runtime = null, skillRegistry = null, nativeExecutionProfileRuntime = null) => {
   const typedDeliberation = buildTypedDeliberationDeclaration(profile, appServerAdapter)
   const typedInspection = typedInspectionProfileRuntime?.declaration?.() || null
   const nativeExecution = online && profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
-    ? typedInspectionProfileRuntime?.nativeExecutionDeclaration?.() : null
+    ? nativeExecutionProfileRuntime?.nativeExecutionDeclaration?.() : null
   // Reuse the existing measured config readback; no filesystem read or model call on publication.
   // chatModel is a deliberation override, not the default execution model.
   const executionModel = profile.codexModel || appServerAdapter?.readback?.config?.config?.model
@@ -4195,14 +4202,14 @@ const sendStatus = (profile, status, extra = {}) => {
 // Presence is status-only, so a measured readiness transition must refresh registration.
 export const publishMeasuredRuntimeCapabilities = (profile, state, { registerFn = registerAgent } = {}) => {
   const stage = state?.registration?.snapshot?.().stage
-  if (profile?.runtimeIdentity) return !state?.disposed && state?.runtimeTransport?.refreshCapabilities?.() === true
-  if (!state || state.disposed || state.ws?.readyState !== 1 ||
+  if (profile?.runtimeIdentity) return !state?.disposed && !state?.profileClosing && state?.runtimeTransport?.refreshCapabilities?.() === true
+  if (!state || state.disposed || state.profileClosing || state.ws?.readyState !== 1 ||
       !['pending_ack', 'ack_timeout', 'registered'].includes(stage)) return false
   return registerFn(profile) === true
 }
 
 export const publishTypedInspectionReadiness = (profile, state, { registerFn = registerAgent, sendStatusFn = sendStatus, busyFn = isProfileBusy } = {}) => {
-  if (!state?.typedInspectionProfileRuntime?.declaration?.() && !state?.typedInspectionProfileRuntime?.nativeExecutionDeclaration?.()) return false
+  if (!state?.typedInspectionProfileRuntime?.declaration?.() && !state?.nativeExecutionProfileRuntime?.nativeExecutionDeclaration?.()) return false
   if (!publishMeasuredRuntimeCapabilities(profile, state, { registerFn })) return false
   return sendStatusFn(profile, busyFn(profile) ? 'busy' : 'online') === true
 }
@@ -4243,7 +4250,7 @@ export const bindMeasuredSkillSession = (state, binding) => {
         rootDir: state.profile.workspaceFileRootDir, agentId: state.profile.agentId, runtimeInstanceId: state.profile.runtimeInstanceId,
         scope: binding.scope, registry: state.skillRegistry, runners: state.skillRunners,
         runNative: async request => {
-          const profileRuntime = state.typedInspectionProfileRuntime
+          const profileRuntime = state.nativeExecutionProfileRuntime
           if (!profileRuntime) throw new AgentProtocolError('NATIVE_EXECUTION_PROFILE_UNAVAILABLE', 'Isolated execution profile is unavailable')
           // Pin the baseline shell/file tools and the actual runtime Node, not all host programs.
           // The profile rechecks this manifest before mounting each execution.
@@ -4254,8 +4261,8 @@ export const bindMeasuredSkillSession = (state, binding) => {
             model: state.profile.chatModel || state.profile.codexModel, effort: state.profile.chatReasoningEffort })
         },
         getRuntimeHeaders: () => state.runtimeTransport?.headers(), fetchFn: (url, opts) => state.runtimeTransport.nativeFetch(url, opts),
-        onFailed: command => state.typedInspectionProfileRuntime?.releaseAdapter(`native:${command.executionId}:${command.snapshotDigest}`, { requestBinding: nativeExecutionRequestBinding(command) }),
-        onCommitted: command => state.typedInspectionProfileRuntime?.releaseAdapter(`native:${command.executionId}:${command.snapshotDigest}`, { requestBinding: nativeExecutionRequestBinding(command) }) })
+        onFailed: command => state.nativeExecutionProfileRuntime?.releaseAdapter(`native:${command.executionId}:${command.snapshotDigest}`, { requestBinding: nativeExecutionRequestBinding(command) }),
+        onCommitted: command => state.nativeExecutionProfileRuntime?.releaseAdapter(`native:${command.executionId}:${command.snapshotDigest}`, { requestBinding: nativeExecutionRequestBinding(command) }) })
     }
   }
   state.skillInstallManager.verifyCandidate = async row => (await state.skillRegistry.measureInstallation(row)).item
@@ -4271,7 +4278,7 @@ const registerAgent = profile => {
   const envelope = buildProtocolEnvelope(
     MESSAGE_TYPES.AGENT_REGISTER, buildAgentRegistrationPayload(
       profile, state.nativeBountyExecutionRuntime, state.ws?.readyState === WebSocketClient.OPEN,
-      state.appServerAdapter, state.typedInspectionProfileRuntime, state.controlledImageV3SourceRuntime, state.skillRegistry
+      state.appServerAdapter, state.typedInspectionProfileRuntime, state.controlledImageV3SourceRuntime, state.skillRegistry, state.nativeExecutionProfileRuntime
     ), profile
   )
   return sendRegistrationWithAckObservation({
@@ -5903,6 +5910,49 @@ export const inheritManagedRuntimeCapabilities = (profile, source = {}, managedI
 export const resolveManagedRuntimeProfile = (profile, source = {}, managedImageScopes = emptyManagedImageScopeAuthorizations(), managedChatScopes = emptyManagedChatScopes()) =>
   applyManagedChatScope(inheritManagedRuntimeCapabilities(profile, source, managedImageScopes?.resolve?.(profile) || null), source, managedChatScopes)
 
+/** Native capability is independent of materials carriers/evidence. Never inherit
+ * another subject's HOME, credentials or authorized inspection scope. */
+export const createNativeExecutionRuntime = (profile, { scopeDirectory, forbidden = [], Runtime = NativeExecutionProfileRuntime } = {}) => {
+  if (!profile.workspaceFileApiOrigin || !profile.workspaceFileRootDir) return null
+  const root = resolve(profile.workspaceFileRootDir, '.native-runtime', scopeDirectory)
+  return new Runtime({ profile,
+    materializerRoot: profile.nativeExecutionRootDir || profile.typedInspectionRootDir
+      ? resolve(profile.nativeExecutionRootDir || profile.typedInspectionRootDir, scopeDirectory) : resolve(root, 'probes'),
+    stateRoot: profile.nativeExecutionStateRoot || profile.typedInspectionStateRoot
+      ? resolve(profile.nativeExecutionStateRoot || profile.typedInspectionStateRoot, scopeDirectory) : resolve(root, 'state'),
+    bwrapBin: profile.typedInspectionBwrapBin, forbidden
+  })
+}
+
+/** One startup observation; registration and work consume the same owner. */
+export const ensureNativeExecutionProfile = (state, { initializeToolchain = initializeNativeToolchain,
+  publish = publishTypedInspectionReadiness } = {}) => {
+  if (!state || state.disposed || state.profileClosing || !state.nativeExecutionProfileRuntime) return Promise.resolve(null)
+  if (!state.nativeExecutionProfilePromise) {
+    const runtime = state.nativeExecutionProfileRuntime
+    state.nativeExecutionProfilePromise = Promise.resolve().then(async () => {
+      if (state.disposed || state.profileClosing) return null
+      const provider = nativeExecutionProfile(state.profile)
+      if (!provider.typedInspectionProviderId || !provider.typedInspectionProviderBaseUrl
+          || provider.typedInspectionProviderNetwork !== 'restricted-proxy')
+        throw Object.assign(new Error('NATIVE_EXECUTION_PROVIDER_CONFIG_REQUIRED'), { code: 'NATIVE_EXECUTION_PROVIDER_CONFIG_REQUIRED' })
+      await initializeToolchain(runtime)
+      if (state.disposed || state.profileClosing) return null
+      const ready = await runtime.measureNativeExecution()
+      if (!ready) {
+        const failure = runtime.nativeExecutionMeasurementFailure
+        console.warn(`native execution profile unavailable | profile=${state.profile.profileId} | stage=${failure?.stage || 'readiness'} | code=${failure?.code || 'NATIVE_EXECUTION_PROFILE_UNAVAILABLE'}`)
+      }
+      return ready
+    }).catch(error => {
+      state.nativeExecutionProfileFailure = { code: error.code || 'NATIVE_EXECUTION_PROFILE_UNAVAILABLE' }
+      console.warn(`native execution profile unavailable | profile=${state.profile.profileId} | code=${state.nativeExecutionProfileFailure.code}`)
+      return null
+    }).finally(() => { if (!state.disposed && !state.profileClosing) publish(state.profile, state) })
+  }
+  return state.nativeExecutionProfilePromise
+}
+
 const createProfileState = (profile, profileConfig = config, { deferNativeStartup = false } = {}) => {
   const runtimeInstanceId = profile.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
   const workspacePolicy = profile.workspacePolicyId
@@ -5951,7 +6001,9 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     rootDir: resolve(profileConfig.commandInboxDir, 'chat-workdirs'), profile,
     forbidden: [profile.codexHome, profile.codexWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
   })
-  const typedInspectionMaterializer = profile.workspaceFileApiOrigin && profile.typedInspectionRootDir
+  let typedInspectionMaterializer = null, typedInspectionProfileRuntime = null, typedInspectionProfileFailure = null
+  try {
+    typedInspectionMaterializer = profile.workspaceFileApiOrigin && profile.typedInspectionRootDir
     ? new TypedInspectionMaterializer({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
@@ -5962,13 +6014,25 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
     })
     : null
-  const typedInspectionProfileRuntime = profile.inputCarriers && typedInspectionMaterializer
+    typedInspectionProfileRuntime = profile.inputCarriers && typedInspectionMaterializer
     ? new TypedInspectionProfileRuntime({
       profile, materializerRoot: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
       stateRoot: resolve(profile.typedInspectionStateRoot, safeProfileDirectory(profile)), bwrapBin: profile.typedInspectionBwrapBin,
       forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
     })
     : null
+  } catch (error) {
+    typedInspectionProfileFailure = { code: error.code || 'TYPED_INSPECTION_PROFILE_UNAVAILABLE' }
+    console.warn(`materials profile unavailable | profile=${profile.profileId} | code=${typedInspectionProfileFailure.code}`)
+  }
+  let nativeExecutionProfileRuntime = null, nativeExecutionProfileFailure = null
+  try { nativeExecutionProfileRuntime = createNativeExecutionRuntime(profile, {
+    scopeDirectory: safeProfileDirectory(profile),
+    forbidden: [profile.codexHome, profile.codexWorkdir, chatWorkdir, workspacePolicy?.root, workspacePolicy?.repository]
+  }) } catch (error) {
+    nativeExecutionProfileFailure = { code: error.code || 'NATIVE_EXECUTION_PROFILE_UNAVAILABLE' }
+    console.warn(`native execution profile unavailable | profile=${profile.profileId} | code=${nativeExecutionProfileFailure.code}`)
+  }
   const typedInspectionNativeInputAdapters = {
     localImage: { supportedMimeTypes: ['image/png'], toNativeInput: ({ path }) => ({ type: 'localImage', path }) },
     localAudio: { supportedMimeTypes: ['audio/wav'], toNativeInput: ({ path }) => ({ type: 'localAudio', path }) }
@@ -6031,8 +6095,10 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     chatWorkdir,
     typedInspectionMaterializer,
     typedInspectionProfileRuntime,
+    nativeExecutionProfileRuntime,
+    nativeExecutionProfileFailure,
     typedInspectionProfilePromise: null,
-    typedInspectionProfileFailure: null,
+    typedInspectionProfileFailure,
     typedInspectionNativeInputAdapters,
     lanes,
     legacyExecutionGate,
@@ -6069,24 +6135,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
   state.ensureTypedInspectionProfile = async () => {
     if (!state.typedInspectionProfileRuntime || state.typedInspectionProfileFailure) return state.typedInspectionProfileRuntime
     if (!state.typedInspectionProfilePromise) state.typedInspectionProfilePromise = state.typedInspectionProfileRuntime.measure().then(() => {
-      if (!state.disposed && getProfileState(profile) === state) publishTypedInspectionReadiness(profile, state)
-      // Native measurement is single-flight at startup, never presence-side IO or a
-      // prerequisite for the independently measured read-only material lane.
-      if (!state.disposed && profile.workspaceFileApiOrigin && profile.workspaceFileRootDir && !state.nativeExecutionProfilePromise) {
-        state.nativeExecutionProfilePromise = Promise.resolve().then(async () => {
-          if (state.disposed) return
-          await initializeNativeToolchain(state.typedInspectionProfileRuntime)
-          const nativeReady = await state.typedInspectionProfileRuntime.measureNativeExecution()
-          if (!nativeReady) {
-            const failure = state.typedInspectionProfileRuntime.nativeExecutionMeasurementFailure
-            console.warn(`native execution profile unavailable | profile=${profile.profileId} | stage=${failure?.stage || 'readiness'} | code=${failure?.code || 'NATIVE_EXECUTION_PROFILE_UNAVAILABLE'}`)
-          }
-        }).catch(error => {
-          console.warn(`native execution profile unavailable | profile=${profile.profileId} | code=${error.code || 'NATIVE_EXECUTION_PROFILE_UNAVAILABLE'}`)
-        }).finally(() => {
-          if (!state.disposed && getProfileState(profile) === state) publishTypedInspectionReadiness(profile, state)
-        })
-      }
+      if (!state.disposed && !state.profileClosing && getProfileState(profile) === state) publishTypedInspectionReadiness(profile, state)
       return state.typedInspectionProfileRuntime
     }).catch(error => {
       state.typedInspectionProfileFailure = error
@@ -6098,7 +6147,12 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     await state.typedInspectionProfilePromise
     return state.typedInspectionProfileRuntime
   }
-  if (state.typedInspectionProfileRuntime && !deferNativeStartup) void state.ensureTypedInspectionProfile()
+  state.ensureNativeExecutionProfile = () => ensureNativeExecutionProfile(state)
+  if (!deferNativeStartup) {
+    // Serialize local probes, but a failed/absent materials capability cannot
+    // suppress native execution measurement or turn it into a materials grant.
+    void state.ensureTypedInspectionProfile().finally(() => state.ensureNativeExecutionProfile())
+  }
   if (profile.fastChatEnabled && profile.appServerEnabled) {
     const isCurrent = () => !state.disposed && (!profileStates.has(profileStateKey(profile)) || getProfileState(profile) === state)
     const scheduleRestart = () => {
@@ -6448,6 +6502,7 @@ export const disposeProfileState = (state, reason = 'profile removed') => {
 }
 const disposeProfileStateOnce = async (state, reason) => {
   const profile = state.profile
+  state.profileClosing = true
   state.e05CommandAbort?.abort()
   state.processor.pause()
   state.processor.stop()
@@ -6456,8 +6511,10 @@ const disposeProfileStateOnce = async (state, reason) => {
   // A failed inbox can isolate the executor while its no-model measurement is
   // still using the private CA/proxy. Let that owned work finish before disposal.
   await state.typedInspectionProfilePromise
+  await state.nativeExecutionProfilePromise
   await disposeAppServerState(state, { timeoutMs: 5000 })
   await state.typedInspectionProfileRuntime?.dispose()
+  await state.nativeExecutionProfileRuntime?.dispose()
   state.processor.pause()
   state.resultReplayCancel?.(); state.resultReplayCancel = null
   state.executionReportReplayCancel?.(); state.executionReportReplayCancel = null
@@ -6613,7 +6670,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           await observeRuntimePhase(logger, subjectKey, 'input-carriers-measure', () => entry.state.ensureTypedInspectionProfile?.())
           // Keep the entire native probe inside the existing boot gate. Otherwise
           // the next subject's synchronous measurement can starve its pending RPC.
-          await observeRuntimePhase(logger, subjectKey, 'native-execution-measure', () => entry.state.nativeExecutionProfilePromise)
+          await observeRuntimePhase(logger, subjectKey, 'native-execution-measure', () => entry.state.ensureNativeExecutionProfile())
           await observeRuntimePhase(logger, subjectKey, 'app-server-initialize', () => entry.state.ensureAppServer?.())
           return { initialized: true, authenticated: false }
         }),
@@ -6651,7 +6708,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           try { state.ackOutbox.pendingEnvelopes(); return state.skillInstallManager.isHealthy() } catch { return false }
         },
         registrationPayload: () => ({ ...buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
-          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry), nativeWorkNotifications: 1, workspaceFileWorkNotifications: 1 }),
+          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry, entry.state.nativeExecutionProfileRuntime), nativeWorkNotifications: 1, workspaceFileWorkNotifications: 1 }),
         readyCommandTypes: () => runtimeReadyCommandTypes(entry.state),
         skillManagementReady: () => Boolean(entry.state && !entry.closed && !entry.state.disposed && entry.state.skillInstallManager.isHealthy()),
         chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
