@@ -1,13 +1,14 @@
-// Private AF_UNIX stream, exactly one newline-terminated JSON exchange. This is
-// a control boundary INSIDE the existing process, not another Runtime/broker.
+// One host-level control boundary: private AF_UNIX and optional mutual TLS.
+// Both use exactly the same newline-framed message and lifecycle handler.
 import { randomUUID } from 'node:crypto';
 import { replyMessage, eventMessage } from './message-envelope.mjs';
 import { createServer } from 'node:net';
+import { createServer as createTlsServer } from 'node:tls';
 import { chmod, chown, lstat, realpath } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { HostingControl } from './hosting-control.mjs';
-import { canonicalHostingPath, hostingError } from './hosting-config.mjs';
+import { canonicalHostingPath, hostingError, readHostingTlsOptions } from './hosting-config.mjs';
 import { parseHostingJson, validateHostingRequest, hostingReply } from './hosting-wire.mjs';
 
 export async function requireHostingSocketParent(config) {
@@ -26,11 +27,13 @@ export async function startHostingServer({ control }) {
   try { await lstat(config.socketPath); throw hostingError('HOSTING_SOCKET_EXISTS'); }
   catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
   const connections = new Set(); let shuttingDown = false; let identity;
-  const server = createServer(socket => {
+  const accept = socket => {
     connections.add(socket); socket.on('close', () => connections.delete(socket));
     socket.on('error', () => {}); let bytes = Buffer.alloc(0); let received = false;
     socket.on('data', chunk => {
       if (received || shuttingDown) { socket.destroy(); return; }
+      // Same request-frame bound as the API producer; never accumulate an unbounded remote frame.
+      if (bytes.length + chunk.length > 16384) { socket.destroy(); return; }
       bytes = Buffer.concat([bytes, chunk]); const newline = bytes.indexOf(10);
       if (newline < 0) return;
       received = true;
@@ -53,7 +56,9 @@ export async function startHostingServer({ control }) {
       })();
     });
     socket.on('end', () => { if (!received) socket.destroy(); });
-  });
+  };
+  const server = createServer(accept);
+  let remoteServer = null;
   // Binding occurs synchronously inside listen; create under 0600 first so there
   // is never a world-accessible window before the explicitly configured group.
   const mask = process.umask(0o177);
@@ -67,13 +72,32 @@ export async function startHostingServer({ control }) {
     if (await realpath(config.socketPath) !== config.socketPath || !identity.isSocket() || identity.uid !== BigInt(process.getuid())
         || identity.gid !== BigInt(config.socketGid) || (identity.mode & 0o777n) !== 0o660n) throw hostingError('HOSTING_SOCKET_UNSAFE');
   } catch (cause) { await new Promise(resolve => server.close(resolve)); throw cause; }
+  if (config.remote) {
+    try {
+      remoteServer = createTlsServer(await readHostingTlsOptions(config.remote), accept);
+      // Include connections still in the TLS handshake so shutdown never leaves an owned socket behind.
+      remoteServer.on('connection', socket => { connections.add(socket); socket.on('close', () => connections.delete(socket)); });
+      remoteServer.on('tlsClientError', () => {}); // Never log certificates or handshake internals.
+      await new Promise((resolve, reject) => {
+        remoteServer.once('error', reject);
+        remoteServer.listen(config.remote.port, config.remote.listenHost, resolve);
+      });
+    } catch (cause) {
+      for (const socket of connections) socket.destroy();
+      if (remoteServer?.listening) await new Promise(resolve => remoteServer.close(resolve));
+      await new Promise(resolve => server.close(resolve));
+      throw cause;
+    }
+  }
   let closePromise;
   return {
     control,
+    remoteAddress: remoteServer?.address() ?? null,
     close: () => closePromise ||= (async () => {
       shuttingDown = true; for (const socket of connections) socket.destroy();
       const current = await lstat(config.socketPath, { bigint: true });
       if (current.dev !== identity.dev || current.ino !== identity.ino) throw hostingError('HOSTING_SOCKET_OWNERSHIP_LOST');
+      if (remoteServer) await new Promise((resolve, reject) => remoteServer.close(cause => cause ? reject(cause) : resolve()));
       await new Promise((resolve, reject) => server.close(cause => cause ? reject(cause) : resolve()));
       await control.close();
     })()

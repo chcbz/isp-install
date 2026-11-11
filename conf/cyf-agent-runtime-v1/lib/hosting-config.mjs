@@ -1,6 +1,7 @@
 // Operator-only local config. No control request can select these paths or keys.
 import { constants, lstat, open, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
+import { isIP } from 'node:net';
 import { readPrivateJson } from './security.mjs';
 
 export const hostingError = code => Object.assign(new Error(code), { code });
@@ -24,11 +25,20 @@ export async function canonicalHostingPath(path) {
   }
 }
 export function validateHostingConfig(value) {
-  if (!fields(value, ['configVersion', 'socketPath', 'socketGid', 'managedRoot', 'scopes', 'template', 'enrollmentTtlMs'])
+  const configFields = ['configVersion', 'socketPath', 'socketGid', 'managedRoot', 'scopes', 'template', 'enrollmentTtlMs'];
+  if (Object.hasOwn(value || {}, 'remote')) configFields.push('remote');
+  if (!fields(value, configFields)
       || value.configVersion !== 1 || !Number.isSafeInteger(value.socketGid) || value.socketGid < 0
       || !Number.isSafeInteger(value.enrollmentTtlMs) || value.enrollmentTtlMs < 1
       || !Array.isArray(value.scopes) || !value.scopes.length
       || value.template !== null && !fields(value.template, ['profile', 'codexConfig', 'providerEnvironment'])) throw hostingError('HOSTING_CONFIG_INVALID');
+  if (value.remote !== undefined) {
+    const remote = value.remote;
+    if (!fields(remote, ['listenHost', 'port', 'certificatePath', 'privateKeyPath', 'clientCaPath'])
+        || !isIP(remote.listenHost) || !Number.isInteger(remote.port) || remote.port < 0 || remote.port > 65535
+        || ['certificatePath', 'privateKeyPath', 'clientCaPath'].some(field => !exactHostingId(remote[field]) || !isAbsolute(remote[field])))
+      throw hostingError('HOSTING_REMOTE_CONFIG_INVALID');
+  }
   const seen = new Set();
   for (const scope of value.scopes) {
     if (!fields(scope, ['tenantId', 'clientId', 'ownerJiacn']) || !Object.values(scope).every(exactHostingId)) throw hostingError('HOSTING_CONFIG_SCOPE_INVALID');
@@ -87,6 +97,14 @@ export async function readHostingConfig(path, hostConfig) {
   const parent = await lstat(dirname(value.socketPath));
   if (!parent.isDirectory() || parent.uid !== process.getuid() || parent.gid !== value.socketGid
       || ![0o710, 0o750].includes(parent.mode & 0o777)) throw hostingError('HOSTING_SOCKET_PARENT_UNSAFE');
+  if (value.remote) {
+    for (const field of ['certificatePath', 'privateKeyPath', 'clientCaPath']) {
+      const path = value.remote[field];
+      await canonicalHostingPath(path);
+      if ([...roots, value.managedRoot].some(root => overlap(root, path))) throw hostingError('HOSTING_REMOTE_CREDENTIAL_ROOT_UNSAFE');
+    }
+    await readHostingTlsOptions(value.remote);
+  }
   if (value.template === null) return value;
   // Require an explicit, present binary; do not execute it here or create roots.
   await canonicalHostingPath(value.template.profile.codexBin);
@@ -102,4 +120,21 @@ export async function readHostingConfig(path, hostConfig) {
     if (profileConfigurationErrors(profile).length) throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
   } catch { throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID'); }
   return value;
+}
+
+// TLS material is operator-owned host state, outside every Agent's mutable roots.
+// No request supplies certificates, routes or transport settings.
+export async function readHostingTlsOptions(remote) {
+  const read = async (path, privateKey) => {
+    await canonicalHostingPath(path);
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || ![0, process.getuid()].includes(stat.uid)
+          || (stat.mode & (privateKey ? 0o077 : 0o022)) !== 0) throw hostingError('HOSTING_REMOTE_CREDENTIAL_UNSAFE');
+      return await file.readFile();
+    } finally { await file.close(); }
+  };
+  return { cert: await read(remote.certificatePath, false), key: await read(remote.privateKeyPath, true),
+    ca: await read(remote.clientCaPath, false), requestCert: true, rejectUnauthorized: true, minVersion: 'TLSv1.2' };
 }
