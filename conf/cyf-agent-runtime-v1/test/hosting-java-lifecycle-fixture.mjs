@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+// Disposable real HostingControl/RuntimeHost + API enrollment/session integration.
+// Executor registration/channel is synthetic; no provider or production filesystem access.
+import { hostingFixture } from './hosting-fixture.mjs';
+import { cleanStoppedPrivateData } from '../lib/private-data-cleanup.mjs';
+import { startHostingServer } from '../lib/hosting-server.mjs';
+const cleanups = [];
+if (!process.env.NODE_TEST_CONTEXT) {
+  const apiOrigin = process.argv[2];
+  if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(apiOrigin)) throw Error('LOOPBACK_API_REQUIRED');
+  const fixture = await hostingFixture({ after: fn => cleanups.push(fn) }, { apiOrigin, clock: Date.now,
+    scopes: ['owner', 'next-owner'].map(ownerJiacn => ({ tenantId: 'tenant', clientId: 'client', ownerJiacn })) });
+  fixture.controlConfig.template.profile.codexBin = process.env.CYF_GSS_INVENTORY_CODEX_BIN;
+  if (!fixture.controlConfig.template.profile.codexBin) throw Error('EXPLICIT_CODEX_REQUIRED');
+  fixture.host().flushEvidence = async () => ({ confirmed: true });
+  fixture.host().cleanPrivateData = options => cleanStoppedPrivateData({ ...options, apiOrigin,
+    instanceId: fixture.host().instanceId, publicFiles: options.agent.publicFiles,
+    flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
+  const server = await startHostingServer({ control: fixture.control() });
+  process.stdout.write(JSON.stringify({ socketPath: fixture.controlConfig.socketPath, uid: process.getuid(),
+    gid: process.getgid(), root: fixture.root, hostId: fixture.host().config.hostId }) + '\n');
+  let stopped;
+  const stop = () => stopped ||= (async () => { await server.close();
+    for (const cleanup of cleanups.reverse()) await cleanup(); process.stdin.pause(); })();
+  process.stdin.resume(); process.stdin.on('end', () => stop().catch(() => { process.exitCode = 1; }));
+  process.on('SIGTERM', () => stop().catch(() => { process.exitCode = 1; }));
+}

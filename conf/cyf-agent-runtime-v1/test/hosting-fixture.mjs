@@ -11,7 +11,8 @@ import { RuntimeV1Client } from '../lib/runtime-client.mjs';
 
 export const tick = () => new Promise(done => setImmediate(done));
 export const code = expected => cause => cause?.code === expected;
-export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false, rootParent = tmpdir(), observeInventory } = {}) {
+export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false, rootParent = tmpdir(), observeInventory, apiOrigin, clock, scopes,
+  scope = { tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner' } } = {}) {
   const root = await mkdtemp(resolve(rootParent, 'gss-hosting-owned-')); await mkdir(resolve(root, 'host'), { mode: 0o700 });
   await mkdir(resolve(root, 'managed'), { mode: 0o700 }); await mkdir(resolve(root, 'socket'), { mode: 0o750 });
   // Parent test runners may deliberately use umask 077. The real server requires
@@ -23,7 +24,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
     codexConfig: 'model_provider = "managed"\n[model_providers.managed]\nbase_url = "https://no-network.invalid/v1"\nenv_key = "CYF_MANAGED_PROVIDER_API_KEY"\nrequires_openai_auth = false\n',
     providerEnvironment: { CYF_MANAGED_PROVIDER_API_KEY: 'synthetic-provider-never-live' } };
   const controlConfig = { configVersion: 1, socketPath: resolve(root, 'socket/control.sock'), socketGid: process.getgid(),
-    managedRoot: resolve(root, 'managed'), scopes: [{ tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner' }],
+    managedRoot: resolve(root, 'managed'), scopes: scopes || [scope],
     template, enrollmentTtlMs: 3600000 };
   for (let index = 0; index < 3; index++) {
     const base = resolve(root, `peer-${index}`); await mkdir(base, { mode: 0o700 });
@@ -37,7 +38,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
   }
   let pending;
   const hostConfig = { configVersion: 1, hostId: 'fixture-host', stateRoot: resolve(root, 'host'), agents: peers };
-  const clientFactory = settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
+  const clientFactory = settings => apiOrigin ? new RuntimeV1Client({ ...settings, apiBaseUrl: apiOrigin }) : new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
     const envelope = JSON.parse(options.body); const body = envelope.data;
     if (url.endsWith('/enroll')) {
       enrollments++;
@@ -57,11 +58,19 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
       activate: async () => {
         if (agent.manifest.installationId.startsWith('rti_')) {
           await clientFactory({ manifest: agent.manifest, stateDir: agent.stateRoot, apiBaseUrl: 'https://no-network.invalid' }).loadAuthorization();
-          state.session = ++sessions;
+          if (apiOrigin) {
+            const client = clientFactory({ manifest: agent.manifest, stateDir: agent.stateRoot,
+              hostId: hostConfig.hostId, runtimeInstanceId: instanceId });
+            const session = await client.session();
+            state.session = Number(session.sessionGeneration); sessions++;
+            const registered = await fetch(`${apiOrigin}/fixture/register`, { method: 'POST', headers: client.sessionHeaders() });
+            if (!registered.ok) throw Error('FIXTURE_REGISTRATION_FAILED');
+            state.proof = await registered.json();
+          } else state.session = ++sessions;
           if (stalled || sessionStalled) await new Promise(done => { state.release = done; pending = state; });
           if (state.closed) return;
         } else state.session = 1;
-        state.ready = true; state.proof = { ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].map(key => [key, agent.manifest[key]])),
+        state.ready = true; state.proof ||= { ...Object.fromEntries(['installationId', 'tenantId', 'clientId', 'canonicalAgentId'].map(key => [key, agent.manifest[key]])),
           hostId: hostConfig.hostId, runtimeInstanceId: instanceId, sessionGeneration: String(state.session),
           registeredAt: now, serviceReadyAt: now, executorReady: true, durableReady: true };
       },
@@ -75,7 +84,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
   const start = async () => {
     host = new RuntimeHost({ config: hostConfig, instanceId: `fixture-instance-${++boot}`, createExecutor });
     await host.start(); for (const peer of peers) await host.activate(peer.subjectKey);
-    control = await new HostingControl({ host, config: controlConfig, apiOrigin: 'https://no-network.invalid', now: () => now, clientFactory, ...(observeInventory ? { observeInventory } : {}) }).initialize();
+    control = await new HostingControl({ host, config: controlConfig, apiOrigin: apiOrigin || 'https://no-network.invalid', now: () => clock ? clock() : now, clientFactory, ...(observeInventory ? { observeInventory } : {}) }).initialize();
     return { host, control };
   };
   const stop = async () => { await control?.close(); await host?.stop(); await control?.releaseOwnership(); };
