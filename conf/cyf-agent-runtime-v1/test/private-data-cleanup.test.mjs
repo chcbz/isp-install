@@ -13,16 +13,18 @@ async function fixture(t) {
   const stateRoot = resolve(root, 'state'), home = resolve(root, 'home'), work = resolve(root, 'work'), repository = resolve(root, 'repository');
   const profile = { profileId: 'test', agentId: 'agent', codexHome: home, codexWorkdir: repository, chatWorkdir: work, workspaceFallbackWorkdir: work,
     workspaceFileRootDir: resolve(root, 'native'), controlledImageHttpLedgerRoot: resolve(root, 'image'),
-    typedInspectionRootDir: resolve(root, 'typed-input'), typedInspectionStateRoot: resolve(root, 'typed-state') };
+    typedInspectionRootDir: resolve(root, 'typed-input'), typedInspectionStateRoot: resolve(root, 'typed-state'),
+    nativeExecutionRootDir: resolve(root, 'native-input'), nativeExecutionStateRoot: resolve(root, 'native-state') };
   const typed = Buffer.from(profile.agentId).toString('hex');
   const privateRoots = [work, profile.workspaceFileRootDir, profile.controlledImageHttpLedgerRoot,
-    resolve(profile.typedInspectionRootDir, typed), resolve(profile.typedInspectionStateRoot, typed)];
+    resolve(profile.typedInspectionRootDir, typed), resolve(profile.typedInspectionStateRoot, typed),
+    resolve(profile.nativeExecutionRootDir, typed), resolve(profile.nativeExecutionStateRoot, typed)];
   for (const dir of [stateRoot, home, repository, ...privateRoots]) await mkdir(dir, { recursive: true, mode: 0o700 });
   for (const dir of [stateRoot, home, ...privateRoots]) await writeFile(resolve(dir, 'private'), 'original user data');
   await mkdir(resolve(home, 'skills')); await writeFile(resolve(home, 'skills/public'), 'public skill');
   await mkdir(resolve(repository, '.git')); await writeFile(resolve(repository, '.git/history'), 'public commits');
   await writeFile(resolve(stateRoot, 'handover.json'), 'stopped control'); await mkdir(resolve(stateRoot, '.runtime-writer.lock'));
-  for (const parent of [profile.typedInspectionRootDir, profile.typedInspectionStateRoot]) {
+  for (const parent of [profile.typedInspectionRootDir, profile.typedInspectionStateRoot, profile.nativeExecutionRootDir, profile.nativeExecutionStateRoot]) {
     await mkdir(resolve(parent, 'another-agent')); await writeFile(resolve(parent, 'another-agent/private'), 'other owner');
   }
   await symlink(repository, resolve(work, 'link'));
@@ -46,7 +48,8 @@ test('aggregate cleanup attempts extraction before erasure and clears all owned 
   assert.deepEqual((await readdir(f.home)).sort(), ['config.toml', 'skills']);
   assert.deepEqual((await readdir(f.stateRoot)).sort(), ['.runtime-writer.lock', 'handover.json']);
   assert.equal(await readFile(resolve(f.repository, '.git/history'), 'utf8'), 'public commits');
-  for (const parent of [f.options.agent.profile.typedInspectionRootDir, f.options.agent.profile.typedInspectionStateRoot])
+  for (const parent of [f.options.agent.profile.typedInspectionRootDir, f.options.agent.profile.typedInspectionStateRoot,
+    f.options.agent.profile.nativeExecutionRootDir, f.options.agent.profile.nativeExecutionStateRoot])
     assert.equal(await readFile(resolve(parent, 'another-agent/private'), 'utf8'), 'other owner');
 });
 

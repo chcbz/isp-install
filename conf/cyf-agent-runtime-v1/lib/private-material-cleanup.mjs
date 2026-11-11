@@ -13,7 +13,7 @@ export async function stoppedMaterialRoots({ agent, publicRepositoryRoots = [] }
   const candidates = [
     ...['codexWorkdir', 'chatWorkdir', 'workspaceFallbackWorkdir'].map(field => [profile[field], true]),
     ...['workspaceFileRootDir', 'controlledImageHttpLedgerRoot'].map(field => [profile[field], false]),
-    ...['typedInspectionRootDir', 'typedInspectionStateRoot'].map(field => [profile[field]
+    ...['typedInspectionRootDir', 'typedInspectionStateRoot', 'nativeExecutionRootDir', 'nativeExecutionStateRoot'].map(field => [profile[field]
       ? resolve(profile[field], Buffer.from(String(profile.agentId), 'utf8').toString('hex')) : null, false])
   ];
   for (const [root, mayBePublic] of candidates) {
