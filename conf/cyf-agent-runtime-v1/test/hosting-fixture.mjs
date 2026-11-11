@@ -21,7 +21,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
   let now = 1791594000000; let enrollments = 0; let sessions = 0;
   const states = new Map(); const peers = [];
   const template = { profile: { codexBin: '/bin/true', appServerEnabled: false, fastChatEnabled: false },
-    codexConfig: 'model_provider = "managed"\n[model_providers.managed]\nbase_url = "https://no-network.invalid/v1"\nenv_key = "CYF_MANAGED_PROVIDER_API_KEY"\nrequires_openai_auth = false\n',
+    codexConfig: 'model_provider = "managed"\n[model_providers.managed]\nname = "Synthetic hosting provider"\nbase_url = "https://no-network.invalid/v1"\nenv_key = "CYF_MANAGED_PROVIDER_API_KEY"\nrequires_openai_auth = false\n',
     providerEnvironment: { CYF_MANAGED_PROVIDER_API_KEY: 'synthetic-provider-never-live' } };
   const controlConfig = { configVersion: 1, socketPath: resolve(root, 'socket/control.sock'), socketGid: process.getgid(),
     managedRoot: resolve(root, 'managed'), scopes: scopes || [scope],
