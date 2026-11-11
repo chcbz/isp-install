@@ -92,7 +92,7 @@ const liveProcessUsesSnapshot = directory => {
   }
   return false
 }
-const resourceManifest = root => {
+const resourceManifest = (root, { hashes = true } = {}) => {
   if (!existsSync(root)) return []
   const rootLexical = lstatSync(root, { bigint: true }); if (rootLexical.isSymbolicLink() || !rootLexical.isDirectory()) throw failTrust('CODEX_APP_SERVER_RESOURCE_ROOT_UNSAFE')
   const entries = []
@@ -103,7 +103,7 @@ const resourceManifest = root => {
       if (lexical.isDirectory()) { visit(path, relativePath); continue }
       if (!lexical.isFile()) throw failTrust('CODEX_APP_SERVER_RESOURCE_TYPE_UNSAFE')
       entries.push({
-        relativePath, path, size: String(lexical.size), mode: Number(lexical.mode & 0o777n), sha256: hashFile(path),
+        relativePath, path, size: String(lexical.size), mode: Number(lexical.mode & 0o777n), sha256: hashes ? hashFile(path) : null,
         sourceIdentity: { dev: String(lexical.dev), ino: String(lexical.ino), size: String(lexical.size), mtimeNs: String(lexical.mtimeNs), mode: String(lexical.mode), uid: String(lexical.uid), gid: String(lexical.gid) }
       })
     }
@@ -112,7 +112,7 @@ const resourceManifest = root => {
 }
 // Codex resolves companion executables next to its native binary. Preserve the
 // installed distribution's codex-* siblings, without requiring them on older CLIs.
-const companionManifest = executable => readdirSync(dirname(executable)).sort()
+const companionManifest = (executable, { hashes = true } = {}) => readdirSync(dirname(executable)).sort()
   .filter(name => /^codex-[A-Za-z0-9_.-]+$/.test(name) && !lstatSync(resolve(dirname(executable), name)).isDirectory())
   // The configured launcher may itself be a codex-* symlink to this binary.
   // It is already bound by configuredIdentity, not a companion executable.
@@ -120,7 +120,7 @@ const companionManifest = executable => readdirSync(dirname(executable)).sort()
   .map(name => {
     const path = resolve(dirname(executable), name); const stat = lstatSync(path)
     if (!stat.isFile() || stat.isSymbolicLink()) throw failTrust('CODEX_APP_SERVER_COMPANION_TYPE_UNSAFE')
-    return { relativePath: name, path, size: String(stat.size), sha256: hashFile(path) }
+    return { relativePath: name, path, size: String(stat.size), sha256: hashes ? hashFile(path) : null }
   })
 const manifestDigest = entries => createHash('sha256').update(JSON.stringify(entries.map(({ relativePath, size, sha256 }) => ({ relativePath, size, sha256 })))).digest('hex')
 const resourceTelemetry = entries => ({ fileCount: entries.length, totalBytes: entries.reduce((total, entry) => total + BigInt(entry.size), 0n).toString() })
@@ -190,7 +190,7 @@ export function cleanupCodexAppServerSnapshots() {
 const verifySystemExecutablePolicy = executable => {
   protectedAncestorPolicy(executable)
   const uid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null
-  for (const entry of [{ path: executable, executable: true }, ...companionManifest(executable).map(entry => ({ ...entry, executable: true })), ...resourceManifest(executableResources(executable))]) {
+  for (const entry of [{ path: executable, executable: true }, ...companionManifest(executable, { hashes: false }).map(entry => ({ ...entry, executable: true })), ...resourceManifest(executableResources(executable), { hashes: false })]) {
     const stat = lstatSync(entry.path, { bigint: true })
     if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o022n) !== 0n
         || (entry.executable && (stat.mode & 0o111n) === 0n)
@@ -232,11 +232,14 @@ export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
     if (!sameIdentity(executableIdentity, measurement.executableIdentity) || executableIdentity.sha256 !== measurement.executableIdentity.sha256) throw failTrust('CODEX_APP_SERVER_EXECUTABLE_IDENTITY_DRIFT')
     const executableResourceManifest = resourceManifest(executableResources(resolved.executable)); const executableResourceTelemetry = resourceTelemetry(executableResourceManifest)
     if (manifestDigest(executableResourceManifest) !== measurement.resourceDigest || executableResourceTelemetry.fileCount !== measurement.resourceFileCount || executableResourceTelemetry.totalBytes !== measurement.resourceBytes) throw failTrust('CODEX_APP_SERVER_RESOURCE_DRIFT')
-    if (manifestDigest(companionManifest(resolved.executable)) !== measurement.companionDigest || manifestDigest(companionManifest(measurement.snapshotPath)) !== measurement.companionDigest) throw failTrust('CODEX_APP_SERVER_COMPANION_DRIFT')
+    if (manifestDigest(companionManifest(resolved.executable)) !== measurement.companionDigest
+        || (measurement.snapshotPath !== resolved.executable && manifestDigest(companionManifest(measurement.snapshotPath)) !== measurement.companionDigest)) throw failTrust('CODEX_APP_SERVER_COMPANION_DRIFT')
     const lexicalSnapshot = lstatSync(measurement.snapshotPath)
     if (lexicalSnapshot.isSymbolicLink() || !lexicalSnapshot.isFile()) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_UNSAFE')
     const snapshotIdentity = statIdentity(measurement.snapshotPath)
-    snapshotIdentity.sha256 = hashFile(measurement.snapshotPath)
+    // Same canonical file: reuse this verification pass's digest; the enclosing
+    // before/after ctime+inode state check still rejects concurrent replacement.
+    snapshotIdentity.sha256 = measurement.snapshotPath === resolved.executable ? executableIdentity.sha256 : hashFile(measurement.snapshotPath)
     if (!sameIdentity(snapshotIdentity, measurement.snapshotIdentity) || snapshotIdentity.sha256 !== measurement.snapshotIdentity.sha256) throw failTrust('CODEX_APP_SERVER_SNAPSHOT_DRIFT')
     if (measurement.snapshotKind !== 'system' || measurement.snapshotPath !== resolved.executable
         || snapshotIdentity.dev !== executableIdentity.dev || snapshotIdentity.ino !== executableIdentity.ino
@@ -350,7 +353,7 @@ export function measureCodexAppServerBinary(profile, {
   // not to a copied file; no program bytes are written into Agent state.
   if (resolved.configured !== resolved.executable) verifySystemExecutablePolicy(resolved.configured)
   const snapshot = { path: resolved.executable, snapshotKind: 'system' }
-  const snapshotIdentity = statIdentity(snapshot.path); snapshotIdentity.sha256 = hashFile(snapshot.path); snapshotIdentity.ancestorPolicy = protectedAncestorPolicy(snapshot.path)
+  const snapshotIdentity = statIdentity(snapshot.path); snapshotIdentity.sha256 = executableIdentity.sha256; snapshotIdentity.ancestorPolicy = protectedAncestorPolicy(snapshot.path)
   try {
     // Version is diagnostic only. Neither its value nor schema generation is a
     // prerequisite to use the actual App Server RPCs. Integrity remains binding.

@@ -19,6 +19,11 @@ test('worker measurement yields; exact measured state can spawn; same-size/mtime
     const program = `#!/usr/bin/env node\nconst fs=require('fs'),p=require('path');if(process.argv[2]==='--version'){process.stdout.write('codex-cli worker-test\\n');process.exit(0)}const i=process.argv.indexOf('--out');fs.writeFileSync(p.join(process.argv[i+1],'codex_app_server_protocol.schemas.json'),${JSON.stringify(bundle)});\n`
     writeFileSync(bin, program, { mode: 0o700 }); const profile = { codexBin: bin, codexHome: root }
     const companion = resolve(root, 'bin', 'codex-code-mode-host'); writeFileSync(companion, '#!/bin/sh\necho companion-ok\n', { mode: 0o700 })
+    // Policy scans must still reject unsafe helpers even when they no longer hash bytes.
+    chmodSync(companion, 0o722)
+    await assert.rejects(measureCodexAppServerBinaryAsync(profile), error =>
+      error.code === 'APP_SERVER_BINARY_UNTRUSTED' && error.trustReason === 'CODEX_APP_SERVER_SYSTEM_FILE_UNSAFE')
+    chmodSync(companion, 0o700)
     let ticks = 0; const interval = setInterval(() => ticks++, 1)
     let measurement
     try { measurement = await measureCodexAppServerBinaryAsync(profile, { expected }) } finally { clearInterval(interval) }
