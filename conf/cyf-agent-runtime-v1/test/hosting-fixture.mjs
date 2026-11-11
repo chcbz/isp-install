@@ -1,6 +1,6 @@
 // Local-only synthetic scopes, private roots, native API and executor mocks.
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, chmod, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { digestManifest, runtimeSubjectKey } from '../lib/manifest.mjs';
@@ -11,7 +11,7 @@ import { RuntimeV1Client } from '../lib/runtime-client.mjs';
 
 export const tick = () => new Promise(done => setImmediate(done));
 export const code = expected => cause => cause?.code === expected;
-export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false, rootParent = tmpdir(), observeInventory, apiOrigin, clock, scopes,
+export async function hostingFixture(t, { loseEnrollment = false, stalled = false, sessionStalled = false, rootParent = tmpdir(), observeInventory, apiOrigin, clock, scopes, staticPeers = false,
   scope = { tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner' } } = {}) {
   const root = await mkdtemp(resolve(rootParent, 'gss-hosting-owned-')); await mkdir(resolve(root, 'host'), { mode: 0o700 });
   await mkdir(resolve(root, 'managed'), { mode: 0o700 }); await mkdir(resolve(root, 'socket'), { mode: 0o750 });
@@ -25,14 +25,16 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
     providerEnvironment: { CYF_MANAGED_PROVIDER_API_KEY: 'synthetic-provider-never-live' } };
   const controlConfig = { configVersion: 1, socketPath: resolve(root, 'socket/control.sock'), socketGid: process.getgid(),
     managedRoot: resolve(root, 'managed'), scopes: scopes || [scope],
-    template, enrollmentTtlMs: 3600000 };
+    template: staticPeers ? null : template, enrollmentTtlMs: 3600000 };
   for (let index = 0; index < 3; index++) {
     const base = resolve(root, `peer-${index}`); await mkdir(base, { mode: 0o700 });
     for (const name of ['state', 'home', 'work']) await mkdir(resolve(base, name), { mode: 0o700 });
-    const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: `peer-${index}`, tenantId: '0',
-      clientId: 'fixture-client', canonicalAgentId: `agt_peer_${index}` };
+    const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: staticPeers ? `rti_${String(index + 1).repeat(32)}` : `peer-${index}`, tenantId: '0',
+      clientId: 'fixture-client', canonicalAgentId: staticPeers ? `jyt-fixture-peer-${index}` : `agt_peer_${index}` };
     const manifest = { ...unsigned, manifestSha256: digestManifest(unsigned) };
-    peers.push({ manifest, subjectKey: runtimeSubjectKey(manifest), stateRoot: resolve(base, 'state'),
+    const manifestPath = resolve(base, 'manifest.json');
+    if (staticPeers) await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+    peers.push({ manifest, ...(staticPeers ? { manifestPath, publicFiles: { 'config.toml': 'model = "fixture-public"\n' } } : {}), subjectKey: runtimeSubjectKey(manifest), stateRoot: resolve(base, 'state'),
       profile: { profileId: `peer-${index}`, agentId: manifest.canonicalAgentId, codexBin: '/bin/true',
         codexHome: resolve(base, 'home'), codexWorkdir: resolve(base, 'work'), appServerEnabled: false, fastChatEnabled: false } });
   }
@@ -56,7 +58,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
     return {
       initialize: async () => { state.initialized++; },
       activate: async () => {
-        if (agent.manifest.installationId.startsWith('rti_')) {
+        if (agent.manifest.installationId.startsWith('rti_') && !(staticPeers && peers.some(peer => peer.manifest.installationId === agent.manifest.installationId))) {
           await clientFactory({ manifest: agent.manifest, stateDir: agent.stateRoot, apiBaseUrl: 'https://no-network.invalid' }).loadAuthorization();
           if (apiOrigin) {
             const client = clientFactory({ manifest: agent.manifest, stateDir: agent.stateRoot,
@@ -83,7 +85,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
   let host; let control; let boot = 0;
   const start = async () => {
     host = new RuntimeHost({ config: hostConfig, instanceId: `fixture-instance-${++boot}`, createExecutor });
-    await host.start(); for (const peer of peers) await host.activate(peer.subjectKey);
+    await host.start(); for (const peer of peers) if (host.agents.get(peer.subjectKey).phase === 'INITIALIZED') await host.activate(peer.subjectKey);
     control = await new HostingControl({ host, config: controlConfig, apiOrigin: apiOrigin || 'https://no-network.invalid', now: () => clock ? clock() : now, clientFactory, ...(observeInventory ? { observeInventory } : {}) }).initialize();
     return { host, control };
   };

@@ -28,13 +28,15 @@ export function validateHostingConfig(value) {
       || value.configVersion !== 1 || !Number.isSafeInteger(value.socketGid) || value.socketGid < 0
       || !Number.isSafeInteger(value.enrollmentTtlMs) || value.enrollmentTtlMs < 1
       || !Array.isArray(value.scopes) || !value.scopes.length
-      || !fields(value.template, ['profile', 'codexConfig', 'providerEnvironment'])) throw hostingError('HOSTING_CONFIG_INVALID');
+      || value.template !== null && !fields(value.template, ['profile', 'codexConfig', 'providerEnvironment'])) throw hostingError('HOSTING_CONFIG_INVALID');
   const seen = new Set();
   for (const scope of value.scopes) {
     if (!fields(scope, ['tenantId', 'clientId', 'ownerJiacn']) || !Object.values(scope).every(exactHostingId)) throw hostingError('HOSTING_CONFIG_SCOPE_INVALID');
     const key = JSON.stringify([scope.tenantId, scope.clientId, scope.ownerJiacn]);
     if (seen.has(key)) throw hostingError('HOSTING_CONFIG_SCOPE_DUPLICATE'); seen.add(key);
   }
+  // Static-only hosts need no provisioning template or duplicate provider credentials.
+  if (value.template === null) return value;
   const { profile, codexConfig, providerEnvironment } = value.template;
   if (!object(profile) || Object.keys(profile).some(key => !MANAGED_PROFILE_FIELDS.includes(key))
       || !exactHostingId(profile.codexBin) || !isAbsolute(profile.codexBin)
@@ -85,6 +87,7 @@ export async function readHostingConfig(path, hostConfig) {
   const parent = await lstat(dirname(value.socketPath));
   if (!parent.isDirectory() || parent.uid !== process.getuid() || parent.gid !== value.socketGid
       || ![0o710, 0o750].includes(parent.mode & 0o777)) throw hostingError('HOSTING_SOCKET_PARENT_UNSAFE');
+  if (value.template === null) return value;
   // Require an explicit, present binary; do not execute it here or create roots.
   await canonicalHostingPath(value.template.profile.codexBin);
   const binary = await open(value.template.profile.codexBin, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);

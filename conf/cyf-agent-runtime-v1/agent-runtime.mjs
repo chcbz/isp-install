@@ -47,7 +47,7 @@ export async function runUnifiedRuntime({ config, apiOrigin, instanceId = random
     await host.start();
     if (config.hostingControl) controlServer = await createControl({ host, config: config.hostingControl, apiOrigin, workspacePolicies, logger });
     const activate = config.agents.map(agent => {
-      if (host.agents.get(agent.subjectKey).phase !== 'INITIALIZED') return Promise.resolve();
+      if (controlServer?.control.managesActivation(agent.subjectKey) || host.agents.get(agent.subjectKey).phase !== 'INITIALIZED') return Promise.resolve();
       return host.activate(agent.subjectKey).catch(error => logger('runtime-agent-isolated', { subjectKey: agent.subjectKey, category: classifyRuntimeError(error).kind }));
     });
     // Activation may wait for a directed registration, but SIGTERM must still

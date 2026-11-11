@@ -4,7 +4,7 @@ import { validateMessage, replyMessage } from './message-envelope.mjs';
 import { randomUUID } from 'node:crypto';
 import { hostingError, exactHostingId } from './hosting-config.mjs';
 export const HOSTING_PROTOCOL = 'runtime-hosting-v1';
-export const HOSTING_METHODS = Object.freeze(['capabilities', 'inventory', 'prepare', 'ensure', 'observe', 'current', 'quiesce', 'evidence', 'cleanup']);
+export const HOSTING_METHODS = Object.freeze(['capabilities', 'inventory', 'adopt', 'prepare', 'ensure', 'observe', 'current', 'quiesce', 'evidence', 'cleanup']);
 export const HOSTING_ASSOCIATION_FIELDS = Object.freeze(['tenantId', 'clientId', 'ownerJiacn', 'canonicalAgentId', 'bindingId',
   'leaseId', 'initialIntentId', 'operationId', 'operationKind', 'reservedAt', 'requestedAt', 'validUntil']);
 export const HOSTING_CANDIDATE_FIELDS = Object.freeze(['installationId', 'manifestSha256', 'provisionGeneration']);
@@ -26,20 +26,21 @@ export function validateHostingAssociation(request) {
       || !HOSTING_METHODS.includes(request.method)) fail();
   const allowed = ['protocol', 'method', ...(['capabilities', 'inventory'].includes(request.method) ? ['tenantId', 'clientId', 'ownerJiacn', ...(request.method === 'inventory' ? ['canonicalAgentId'] : [])] : HOSTING_ASSOCIATION_FIELDS),
     ...(request.method === 'prepare' && Object.hasOwn(request, 'quotedInventory') ? ['quotedInventory'] : []),
-    ...(['ensure', 'observe', 'quiesce', 'evidence', 'cleanup'].includes(request.method) ? HOSTING_CANDIDATE_FIELDS : []), ...(['quiesce', 'evidence', 'cleanup'].includes(request.method) ? ['handoverId'] : [])];
+    ...(['adopt', 'ensure', 'observe', 'quiesce', 'evidence', 'cleanup'].includes(request.method) ? HOSTING_CANDIDATE_FIELDS : []), ...(['quiesce', 'evidence', 'cleanup'].includes(request.method) ? ['handoverId'] : [])];
   if (Object.keys(request).sort().join(',') !== allowed.sort().join(',')) throw hostingError('HOSTING_FIELD_FORBIDDEN');
   if (Object.hasOwn(request, 'quotedInventory') && (request.operationKind !== 'INITIAL' || !validQuotedInventory(request.quotedInventory))) fail();
   const ids = ['capabilities', 'inventory'].includes(request.method) ? ['tenantId', 'clientId', 'ownerJiacn', ...(request.method === 'inventory' ? ['canonicalAgentId'] : [])] : HOSTING_ASSOCIATION_FIELDS.slice(0, 8);
   if (ids.some(field => !exactHostingId(request[field]))) fail();
   if (['quiesce', 'evidence', 'cleanup'].includes(request.method) && !exactHostingId(request.handoverId)) fail();
-  if (request.method === 'current' && request.operationKind !== 'INITIAL') fail();
+  if (['current', 'adopt'].includes(request.method) && request.operationKind !== 'INITIAL') fail();
+  if (request.method === 'adopt' && request.provisionGeneration !== 1) fail();
   if (!['capabilities', 'inventory'].includes(request.method)) {
     if (!['INITIAL', 'REPROVISION'].includes(request.operationKind) || !positiveEpoch(request.reservedAt) || !positiveEpoch(request.requestedAt)
         || request.requestedAt < request.reservedAt
         || request.operationKind === 'INITIAL' && (request.operationId !== request.initialIntentId || request.validUntil !== null)
         || request.operationKind === 'REPROVISION' && (request.operationId === request.initialIntentId || !positiveEpoch(request.validUntil)
           || request.validUntil <= request.requestedAt)) fail();
-    if (['ensure', 'observe', 'quiesce', 'evidence', 'cleanup'].includes(request.method) && (!/^rti_[0-9a-f]{32}$/.test(request.installationId)
+    if (['adopt', 'ensure', 'observe', 'quiesce', 'evidence', 'cleanup'].includes(request.method) && (!/^rti_[0-9a-f]{32}$/.test(request.installationId)
         || !/^[0-9a-f]{64}$/.test(request.manifestSha256) || !Number.isSafeInteger(request.provisionGeneration) || request.provisionGeneration < 1)) fail();
   }
   return Object.freeze({ ...request });
