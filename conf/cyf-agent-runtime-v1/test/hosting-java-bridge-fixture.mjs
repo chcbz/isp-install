@@ -42,9 +42,21 @@ try {
     apiOrigin: 'https://example.test', instanceId: fixture.host().instanceId,
     publicFiles: options.agent.publicFiles, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
   if (process.env.CYF_GSS_TLS_CONFIG) fixture.controlConfig.remote = JSON.parse(await readFile(process.env.CYF_GSS_TLS_CONFIG, 'utf8'));
-  server = await startHostingServer({ control: fixture.control() });
+  const control = fixture.control(), handle = control.handle.bind(control);
+  control.handle = async request => {
+    const started = performance.now();
+    try {
+      const result = await handle(request);
+      process.stderr.write(JSON.stringify({ fixtureControl: request.method, outcome: result.outcome ?? null, elapsedMs: performance.now() - started }) + '\n');
+      return result;
+    } catch (cause) {
+      process.stderr.write(JSON.stringify({ fixtureControl: request.method, errorCode: cause.code ?? 'UNKNOWN', elapsedMs: performance.now() - started }) + '\n');
+      throw cause;
+    }
+  };
+  server = await startHostingServer({ control });
   process.stdout.write(JSON.stringify({ socketPath: fixture.controlConfig.socketPath, uid: process.getuid(), gid: fixture.controlConfig.socketGid,
-    remoteAddress: server.remoteAddress, hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId,
+    ...(server.remoteAddress ? { remoteAddress: server.remoteAddress } : {}), hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId,
     ...(staticPeers ? { adoptionSubject: fixture.peers[0].manifest } : {}) }) + '\n');
   let input = '';
   const close = () => { void stop().catch(() => { process.stderr.write('SYNTHETIC_FIXTURE_STOP_FAILED\n'); process.exitCode = 1; }); };
