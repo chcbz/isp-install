@@ -68,8 +68,13 @@ test('carrier readiness evidence rejects writable, relative, symlinked and incom
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('accepted exact 1f95 local-image evidence is consumable only under its pinned digest and model', () => {
-  const path = resolve(import.meta.dirname, '..', 'evidence', 'typed-inspection-local-image-gpt-5.6-terra-1f95df2.json')
+test('accepted exact 1f95 local-image evidence is consumable only under its pinned digest and model', t => {
+  // Git archives retain bytes, not private deployment ownership/mode. Stage the
+  // immutable fixture as operator-owned evidence without changing its digest.
+  const root = mkdtempSync(resolve(tmpdir(), 'pinned-carrier-')); chmodSync(root, 0o700)
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const path = resolve(root, 'evidence.json')
+  writeFileSync(path, readFileSync(resolve(import.meta.dirname, '..', 'evidence', 'typed-inspection-local-image-gpt-5.6-terra-1f95df2.json')), { mode: 0o600 })
   const binding = {
     profileId: 'mmd-image-understanding-1f95df2-v1', engineContractId: 'codex-app-server-codex-cli-0.159.2-typed-inspection-v1',
     enginePolicyDigest: 'sha256:d370907dd5a82c75dee79949a03ad8bb2dfd59f60856be7ac4eba247e003c5be',
