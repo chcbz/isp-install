@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { buildProviderTlsProbe, buildRestrictedNetworkProbe, isolatedSlirpCommand, RestrictedProviderEgress, restrictedProviderNetworkPolicy, verifyRestrictedNftReadback } from '../typed-inspection-network.mjs'
+import { buildProviderTlsProbe, buildRestrictedNetworkProbe, isolatedSlirpCommand, ownedNamespaceCommand, RestrictedProviderEgress, restrictedProviderNetworkPolicy, verifyRestrictedNftReadback } from '../typed-inspection-network.mjs'
 
 const hostNs = Object.freeze({ dev: '1', ino: '10', link: 'net:[10]' })
 const privateNs = Object.freeze({ dev: '1', ino: '20', link: 'net:[20]' })
@@ -129,13 +129,22 @@ test('root and holder startticks plus both executable identities are revalidated
 })
 
 
-test('slirp sandbox runs only after recursive private mount isolation and preserves restrictions/ready fd', () => {
-  assert.deepEqual(isolatedSlirpCommand('/usr/bin/slirp4netns', 201), {
-    executable: '/usr/bin/unshare',
-    args: ['--mount', '--propagation', 'private', '--', '/usr/bin/slirp4netns',
-      '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
-      '--enable-seccomp', '--ready-fd=3', '--netns-type=path', '/proc/201/ns/net', 'tap0']
-  })
+test('namespace commands use the netns owning user, not the sandbox descendant user', () => {
+  const command = ownedNamespaceCommand(201, ['/usr/sbin/nft', 'list', 'ruleset'])
+  assert.equal(command.executable, '/usr/bin/python3')
+  assert.deepEqual(command.args.slice(2), ['/usr/bin/nsenter', '201', 'network', '/usr/sbin/nft', 'list', 'ruleset'])
+  assert.match(command.args[1], /fcntl.ioctl\(net,0xb701\)/)
+  assert.match(command.args[1], /--preserve-credentials/)
+  assert.doesNotMatch(command.args[1], /ns\/user/)
+})
+
+test('slirp enters only the owning user before recursive private mount isolation', () => {
+  const command = isolatedSlirpCommand('/usr/bin/slirp4netns', 201)
+  assert.equal(command.executable, '/usr/bin/python3')
+  assert.deepEqual(command.args.slice(2), ['/usr/bin/nsenter', '201', 'user',
+    '/usr/bin/unshare', '--mount', '--propagation', 'private', '--', '/usr/bin/slirp4netns',
+    '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
+    '--enable-seccomp', '--ready-fd=3', '--netns-type=path', '/proc/201/ns/net', 'tap0'])
 })
 
 test('mount isolation failure fails closed without a direct-slirp retry', async () => {
@@ -175,7 +184,9 @@ test('mount isolation failure fails closed without a direct-slirp retry', async 
     assert.match(installedRules, /tcp dport \d+ accept; reject with icmpx type admin-prohibited;/)
     assert.equal((installedRules.match(/policy drop;/g) || []).length, 2)
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].bin, '/usr/bin/unshare')
+    assert.equal(calls[0].bin, '/usr/bin/python3')
+    assert.equal(calls[0].args[4], 'user')
+    assert.equal(calls[0].args[5], '/usr/bin/unshare')
     assert.deepEqual(calls[0].options, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env: { PATH: '' } })
     assert.equal(egress.attestation, null)
   } finally { await egress.dispose() }
@@ -303,4 +314,25 @@ test('dispose closes upgraded CONNECT tunnels even when upstream stays half-open
     await egress.dispose()
     await new Promise(resolve => upstream.close(resolve))
   }
+})
+
+for (const status of [0, 1]) test(`early stdin EPIPE keeps failed command diagnostics and cannot claim success (${status})`, async () => {
+  const { EventEmitter } = await import('node:events')
+  const egress = egressFor(inspector())
+  await egress.bindOwner(child(), wrapperExecutable)
+  egress.spawnFn = () => {
+    const process = new EventEmitter(); process.exitCode = null
+    process.stdout = new EventEmitter(); process.stderr = new EventEmitter(); process.stdin = new EventEmitter()
+    process.stdin.end = () => queueMicrotask(() => {
+      process.stdin.emit('error', Object.assign(new Error('pipe closed'), { code: 'EPIPE' }))
+      process.stderr.emit('data', Buffer.from('namespace admission failed'))
+      process.exitCode = status; process.emit('exit', status, null); process.emit('close', status, null)
+    })
+    return process
+  }
+  try {
+    const pending = egress._nsenter(201, ['/usr/sbin/nft', '-f', '-'], { input: 'rules' })
+    if (status === 0) await assert.rejects(pending, error => error.code === 'EPIPE')
+    else assert.deepEqual(await pending, { status, signal: null, stdout: '', stderr: 'namespace admission failed' })
+  } finally { await egress.dispose() }
 })

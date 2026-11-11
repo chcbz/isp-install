@@ -110,15 +110,19 @@ const closeServer = server => new Promise(resolve => {
   server.close(() => resolve())
 })
 const collectChild = (child, signal, input = null) => new Promise((resolve, reject) => {
-  let stdout = ''; let stderr = ''; let settled = false
+  let stdout = ''; let stderr = ''; let settled = false; let stdinError = null
   const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('close', close) }
   const finish = (callback, value) => { if (settled) return; settled = true; cleanup(); callback(value) }
   const abort = () => { try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}; const errorValue = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); errorValue.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; finish(reject, errorValue) }
   const error = value => finish(reject, value)
-  const close = (status, exitSignal) => finish(resolve, { status, signal: exitSignal, stdout, stderr })
+  const close = (status, exitSignal) => status === 0 && stdinError
+    ? finish(reject, stdinError) : finish(resolve, { status, signal: exitSignal, stdout, stderr })
   child.stdout?.on('data', chunk => { if (stdout.length < 65536) stdout += chunk.toString('utf8') })
   child.stderr?.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString('utf8') })
   child.once('error', error); child.once('close', close); signal?.addEventListener('abort', abort, { once: true })
+  // A rejected namespace command may close stdin before the rules are written.
+  // Keep its exit status/stderr rather than crashing the whole Runtime on EPIPE.
+  child.stdin?.on?.('error', value => { stdinError = value })
   if (input === null) child.stdin?.end(); else child.stdin?.end(input)
 })
 const waitForSlirpReady = (child, signal) => new Promise((resolve, reject) => {
@@ -162,17 +166,33 @@ export const verifyRestrictedNftReadback = (readback, proxyPort, canaryPort) => 
   return Object.freeze({ validated: true, digest: `sha256:${createHash('sha256').update(readback).digest('hex')}` })
 }
 
-// slirp's sandbox may unmount inherited paths. Detach the complete mount tree
-// BEFORE executing slirp; a private root alone leaves shared submounts unsafe.
-// Use the exact guarded netns path, not PID-mode implicit userns entry.
-// SUID bwrap can expose a descendant userns that does not own its netns.
-// No direct-slirp fallback: unshare errors must fail the readiness handshake.
-export const isolatedSlirpCommand = (slirpBin, pid) => ({
-  executable: '/usr/bin/unshare',
-  args: ['--mount', '--propagation', 'private', '--', slirpBin,
-    '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
-    '--enable-seccomp', '--ready-fd=3', '--netns-type=path', `/proc/${pid}/ns/net`, 'tap0']
+// The network namespace can belong to an ancestor of the sandbox process's
+// user namespace (e.g. bwrap's final uid-65534 view). Join its kernel-reported
+// owner, not /proc/<pid>/ns/user. No sudo, host capabilities or root service.
+const namespaceEntry = `import os,sys,fcntl
+net=os.open('/proc/'+sys.argv[2]+'/ns/net',os.O_RDONLY)
+user=fcntl.ioctl(net,0xb701) # NS_GET_USERNS from linux/nsfs.h
+os.set_inheritable(user,True)
+args=[sys.argv[1],'--preserve-credentials','--user=/proc/self/fd/'+str(user)]
+if sys.argv[3]=='network':
+ os.set_inheritable(net,True)
+ args.append('--net=/proc/self/fd/'+str(net))
+args+=['--']+sys.argv[4:]
+os.execv(sys.argv[1],args)
+`
+export const ownedNamespaceCommand = (pid, command, { network = true, pythonBin = '/usr/bin/python3', nsenterBin = '/usr/bin/nsenter' } = {}) => ({
+  executable: pythonBin,
+  args: ['-c', namespaceEntry, nsenterBin, String(pid), network ? 'network' : 'user', ...command]
 })
+
+// slirp stays on the host network side, but needs the netns-owning user namespace
+// to configure tap0 and create a recursively private mount tree. Preserve the
+// sandbox/seccomp/ready-fd restrictions; never retry without mount isolation.
+export const isolatedSlirpCommand = (slirpBin, pid, options = {}) => ownedNamespaceCommand(pid,
+  ['/usr/bin/unshare', '--mount', '--propagation', 'private', '--', slirpBin,
+    '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
+    '--enable-seccomp', '--ready-fd=3', '--netns-type=path', `/proc/${pid}/ns/net`, 'tap0'],
+  { ...options, network: false })
 
 export class RestrictedProviderEgress {
   constructor({ providerBaseUrl, networkConnectTimeoutMs, additionalOrigins = [], slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector() } = {}) {
@@ -277,7 +297,8 @@ export class RestrictedProviderEgress {
   get proxyUrl() { if (!this.port) fail('TYPED_INSPECTION_EGRESS_NOT_STARTED'); return `http://10.0.2.2:${this.port}` }
   async _nsenter(pid, args, { input = null, signal = this.lifecycle.signal } = {}) {
     cancelled(signal); await this._assertOwner(); cancelled(signal)
-    const child = this.spawnFn(this.nsenterBin, [`--net=/proc/${pid}/ns/net`, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: '' } })
+    const command = ownedNamespaceCommand(pid, args, { pythonBin: this.pythonBin, nsenterBin: this.nsenterBin })
+    const child = this.spawnFn(command.executable, command.args, { stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: '' } })
     const result = await collectChild(child, signal, input)
     await this._assertOwner(); cancelled(signal); return result
   }
@@ -294,7 +315,7 @@ export class RestrictedProviderEgress {
     if (listed.status !== 0) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_FAILED', listed.stderr || 'nft readback failed')
     const ruleReadback = verifyRestrictedNftReadback(listed.stdout, this.port, this.canaryPort)
     // _nsenter readback already checked ownership; no async gap here.
-    const slirpCommand = isolatedSlirpCommand(this.slirpBin, pid)
+    const slirpCommand = isolatedSlirpCommand(this.slirpBin, pid, { pythonBin: this.pythonBin, nsenterBin: this.nsenterBin })
     this.slirp = this.spawnFn(slirpCommand.executable, slirpCommand.args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env: { PATH: '' } })
     let stderr = ''; this.slirp.stderr?.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString('utf8') })
     try { await waitForSlirpReady(this.slirp, signal) } catch (error) { if (error.code === 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED' && stderr.trim()) error.message = stderr.trim(); throw error }
