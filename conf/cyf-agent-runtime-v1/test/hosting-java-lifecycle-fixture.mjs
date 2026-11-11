@@ -3,6 +3,7 @@
 // Executor registration/channel is synthetic; no provider or production filesystem access.
 import { hostingFixture } from './hosting-fixture.mjs';
 import { cleanStoppedPrivateData } from '../lib/private-data-cleanup.mjs';
+import { createExecutionAdapterFactory } from '../lib/execution-adapter.mjs';
 import { startHostingServer } from '../lib/hosting-server.mjs';
 const cleanups = [];
 if (!process.env.NODE_TEST_CONTEXT) {
@@ -12,6 +13,14 @@ if (!process.env.NODE_TEST_CONTEXT) {
     scopes: ['owner', 'next-owner'].map(ownerJiacn => ({ tenantId: 'tenant', clientId: 'client', ownerJiacn })) });
   fixture.controlConfig.template.profile.codexBin = process.env.CYF_GSS_INVENTORY_CODEX_BIN;
   if (!fixture.controlConfig.template.profile.codexBin) throw Error('EXPLICIT_CODEX_REQUIRED');
+  // Registration/execution remains synthetic, but relationship readmission must
+  // use the production manager + engine identity transition (never a success stub).
+  // This adapter has no attached executor, as on a process-recovery admission;
+  // hosting-readmission-integration covers closing an attached real executor.
+  const adapters = await createExecutionAdapterFactory({ config: fixture.hostConfig,
+    instanceId: fixture.host().instanceId, apiOrigin });
+  cleanups.push(() => adapters.close());
+  fixture.host().admitRelationship = adapters.admitRelationship;
   fixture.host().flushEvidence = async () => ({ confirmed: true });
   fixture.host().cleanPrivateData = options => cleanStoppedPrivateData({ ...options, apiOrigin,
     instanceId: fixture.host().instanceId, publicFiles: options.agent.publicFiles,
