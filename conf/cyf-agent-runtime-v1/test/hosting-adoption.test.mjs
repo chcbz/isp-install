@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { hostingFixture, fixtureInventory, code } from './hosting-fixture.mjs';
+import { hostingFixture, fixtureInventory, quotedPreparation, candidateRequest, code } from './hosting-fixture.mjs';
 import { eventMessage } from '../lib/message-envelope.mjs';
 import { validateHostingRequest, hostingReply } from '../lib/hosting-wire.mjs';
 import { cleanStoppedPrivateData } from '../lib/private-data-cleanup.mjs';
@@ -52,7 +52,7 @@ test('adoption preserves exact static installation, executor, private files and 
   assert.equal(f.host().snapshot().agents[0].ready, true);
 });
 
-test('adoption cannot change installation, scope, relationship or adopt a dynamic subject', async t => {
+test('adoption cannot change installation, scope, relationship or select an unconfigured subject', async t => {
   const f = await hostingFixture(t, { staticPeers: true }), request = association(f);
   for (const patch of [{ installationId: 'rti_' + 'a'.repeat(32) }, { manifestSha256: 'a'.repeat(64) },
     { canonicalAgentId: 'not-configured' }, { ownerJiacn: 'other' }, { clientId: 'other' }, { tenantId: 'other' }]) {
@@ -75,6 +75,9 @@ test('adopted static installation uses the same stopped evidence and private cle
   await f.control().handle(handover);
   assert.equal(f.states.get(peer.subjectKey)[0].closed, 1);
   assert.equal(f.host().snapshot().agents.filter(agent => agent.ready).length, 2);
+  await assert.rejects(f.control().handle({ ...handover, method: 'cleanup' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  f.host().flushEvidence = async () => ({ confirmed: false });
+  await f.control().handle({ ...handover, method: 'evidence' });
   await assert.rejects(f.control().handle({ ...handover, method: 'cleanup' }), code('RUNTIME_HANDOVER_EVIDENCE_REQUIRED'));
   f.host().flushEvidence = async () => ({ confirmed: true });
   assert.equal((await f.control().handle({ ...handover, method: 'evidence' })).outcome, 'EVIDENCE_ACCEPTED');
@@ -90,4 +93,25 @@ test('adopted static installation uses the same stopped evidence and private cle
   assert.equal(f.host().snapshot().agents[0].ready, false);
   assert.deepEqual(await f.control().handle({ ...handover, method: 'cleanup' }), result);
   assert.equal(f.enrollmentCount(), 0);
+  const originalHome = peer.profile.codexHome, originalManifest = peer.manifest;
+  let admissions = 0;
+  f.host().admitRelationship = async ({ previousAgent, agent }) => {
+    admissions++;
+    assert.equal(previousAgent.manifest.installationId, originalManifest.installationId);
+    assert.equal(agent.profile.codexHome, originalHome);
+  };
+  f.advance(1000);
+  const next = quotedPreparation({ ...initial(request), method: 'prepare', initialIntentId: 'next-intent',
+    operationId: 'next-intent', leaseId: 'next-lease', bindingId: 'next-binding', reservedAt: f.now(), requestedAt: f.now() });
+  const candidate = await f.control().handle(next);
+  assert.notEqual(candidate.installationId, originalManifest.installationId);
+  await f.control().handle(candidateRequest(next, candidate, 'ensure')); await f.settle();
+  assert.equal((await f.control().handle(candidateRequest(next, candidate, 'observe'))).outcome, 'SERVICE_READY');
+  assert.equal(admissions, 1); assert.equal(f.enrollmentCount(), 1);
+  assert.equal(f.host().agents.get(peer.subjectKey).agent.profile.codexHome, originalHome);
+  assert.equal(JSON.parse(await readFile(peer.manifestPath, 'utf8')).installationId, candidate.installationId);
+  await assert.rejects(f.control().handle({ ...handover, method: 'cleanup' }), code('HOSTING_OPERATION_SUPERSEDED'));
+  await f.stop(); await f.start(); f.control().resumeAdmitted(); await f.settle();
+  assert.equal(f.control().state.subjects[peer.subjectKey].manifest.installationId, candidate.installationId);
+  assert.equal(f.enrollmentCount(), 1);
 });

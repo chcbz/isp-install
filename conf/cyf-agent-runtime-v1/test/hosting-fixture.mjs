@@ -1,6 +1,6 @@
 // Local-only synthetic scopes, private roots, native API and executor mocks.
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, chmod, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, chmod, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { digestManifest, runtimeSubjectKey } from '../lib/manifest.mjs';
@@ -38,6 +38,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
       profile: { profileId: `peer-${index}`, agentId: manifest.canonicalAgentId, codexBin: '/bin/true',
         codexHome: resolve(base, 'home'), codexWorkdir: resolve(base, 'work'), appServerEnabled: false, fastChatEnabled: false } });
   }
+  const staticInstallations = new Set(staticPeers ? peers.map(peer => peer.manifest.installationId) : []);
   let pending;
   const hostConfig = { configVersion: 1, hostId: 'fixture-host', stateRoot: resolve(root, 'host'), agents: peers };
   const clientFactory = settings => apiOrigin ? new RuntimeV1Client({ ...settings, apiBaseUrl: apiOrigin }) : new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
@@ -58,7 +59,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
     return {
       initialize: async () => { state.initialized++; },
       activate: async () => {
-        if (agent.manifest.installationId.startsWith('rti_') && !(staticPeers && peers.some(peer => peer.manifest.installationId === agent.manifest.installationId))) {
+        if (agent.manifest.installationId.startsWith('rti_') && !staticInstallations.has(agent.manifest.installationId)) {
           await clientFactory({ manifest: agent.manifest, stateDir: agent.stateRoot, apiBaseUrl: 'https://no-network.invalid' }).loadAuthorization();
           if (apiOrigin) {
             const client = clientFactory({ manifest: agent.manifest, stateDir: agent.stateRoot,
@@ -84,6 +85,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
   };
   let host; let control; let boot = 0;
   const start = async () => {
+    if (staticPeers) for (const peer of peers) peer.manifest = JSON.parse(await readFile(peer.manifestPath, 'utf8'));
     host = new RuntimeHost({ config: hostConfig, instanceId: `fixture-instance-${++boot}`, createExecutor });
     await host.start(); for (const peer of peers) if (host.agents.get(peer.subjectKey).phase === 'INITIALIZED') await host.activate(peer.subjectKey);
     control = await new HostingControl({ host, config: controlConfig, apiOrigin: apiOrigin || 'https://no-network.invalid', now: () => clock ? clock() : now, clientFactory, ...(observeInventory ? { observeInventory } : {}) }).initialize();
