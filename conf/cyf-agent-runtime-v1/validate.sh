@@ -69,6 +69,8 @@ PY_RUNTIME_LAUNCHER_VALIDATE
   const { pathToFileURL } = await import("node:url");
   const engine = await import(pathToFileURL(resolve(process.argv[1], "codex-bridge/agent-client.mjs")));
   if (typeof engine.createRuntimeExecutionHost !== "function") throw new Error("Runtime execution host export is missing");
+  const runtime = await import(pathToFileURL(resolve(process.argv[1], "runtime/agent-runtime.mjs")));
+  if (typeof runtime.main !== "function") throw new Error("Runtime entry export is missing");
 ' "$PACKAGE_ROOT"
 if [ -n "$CONFIG" ]; then
     "$NODE_BIN" "$PACKAGE_ROOT/runtime/agent-runtime.mjs" validate --config "$CONFIG" >/dev/null

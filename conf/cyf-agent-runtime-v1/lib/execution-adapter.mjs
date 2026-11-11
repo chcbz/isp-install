@@ -388,6 +388,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "provider-usage-receipts.mjs",
   "chat-usage-delivery.mjs",
   "native-skill-config.mjs",
+  "skill-inventory.mjs",
   "native-execution-profile.mjs",
   "native-document-toolchain.mjs",
   "native-browser-toolchain.mjs",

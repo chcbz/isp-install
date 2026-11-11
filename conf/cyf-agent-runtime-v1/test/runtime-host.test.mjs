@@ -398,6 +398,9 @@ async function validatorImportFixture(t) {
   const root = await mkdtemp(resolve(tmpdir(), 'ur01-validator import-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const artifact = resolve(root, 'artifact'); await mkdir(artifact);
+  await mkdir(resolve(artifact, 'runtime'));
+  await cp(resolve(repo, 'conf/cyf-agent-runtime-v1/agent-runtime.mjs'), resolve(artifact, 'runtime/agent-runtime.mjs'));
+  await cp(resolve(repo, 'conf/cyf-agent-runtime-v1/lib'), resolve(artifact, 'runtime/lib'), { recursive: true });
   const engine = resolve(artifact, 'codex-bridge');
   await collateExecutionPayload(engineSource, engine);
   await cp(resolve(engineSource, 'node_modules'), resolve(engine, 'node_modules'), { recursive: true, dereference: true });
@@ -442,6 +445,15 @@ test('validator artifact import fails closed for a missing local module or execu
   await writeFile(dependency, source);
   await writeFile(resolve(f.engine, 'agent-client.mjs'), 'export const unrelated = true;\n');
   assert.throws(f.run, cause => cause.status !== 0 && /Runtime execution host export is missing/.test(cause.stderr));
+});
+
+test('validator imports the collated Runtime control graph without requiring host configuration', async t => {
+  const f = await validatorImportFixture(t);
+  assert.equal(f.run(), '');
+  assert.ok(EXECUTION_PAYLOAD_FILES.includes('skill-inventory.mjs'));
+  await rm(resolve(f.engine, 'skill-inventory.mjs'));
+  assert.throws(f.run, cause => cause.status !== 0 && /ERR_MODULE_NOT_FOUND/.test(cause.stderr)
+    && /skill-inventory/.test(cause.stderr));
 });
 
 test('single-artifact units pin local Node and shared host config; shell entry has no activation/reload', async () => {
