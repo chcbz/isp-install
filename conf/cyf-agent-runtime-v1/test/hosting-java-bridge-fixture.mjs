@@ -5,7 +5,7 @@
 import { hostingFixture } from './hosting-fixture.mjs';
 import { cleanStoppedPrivateData } from '../lib/private-data-cleanup.mjs';
 import { startHostingServer } from '../lib/hosting-server.mjs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 const cleanups = [];
 let server; let stopPromise;
@@ -41,9 +41,10 @@ try {
   fixture.host().cleanPrivateData = options => cleanStoppedPrivateData({ ...options,
     apiOrigin: 'https://example.test', instanceId: fixture.host().instanceId,
     publicFiles: options.agent.publicFiles, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
+  if (process.env.CYF_GSS_TLS_CONFIG) fixture.controlConfig.remote = JSON.parse(await readFile(process.env.CYF_GSS_TLS_CONFIG, 'utf8'));
   server = await startHostingServer({ control: fixture.control() });
   process.stdout.write(JSON.stringify({ socketPath: fixture.controlConfig.socketPath, uid: process.getuid(), gid: fixture.controlConfig.socketGid,
-    hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId,
+    remoteAddress: server.remoteAddress, hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId,
     ...(staticPeers ? { adoptionSubject: fixture.peers[0].manifest } : {}) }) + '\n');
   let input = '';
   const close = () => { void stop().catch(() => { process.stderr.write('SYNTHETIC_FIXTURE_STOP_FAILED\n'); process.exitCode = 1; }); };
