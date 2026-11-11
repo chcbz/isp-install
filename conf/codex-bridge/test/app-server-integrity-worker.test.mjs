@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, utimesSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { AppServerAdapter, measureCodexAppServerBinaryAsync } from '../app-server-adapter.mjs'
+import { AppServerAdapter, measureCodexAppServerBinary, measureCodexAppServerBinaryAsync } from '../app-server-adapter.mjs'
 
 test('worker measurement yields; exact measured state can spawn; same-size/mtime tampering fails closed', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'cyf-integrity-worker-')); chmodSync(root, 0o700)
@@ -51,4 +51,26 @@ test('worker measurement yields; exact measured state can spawn; same-size/mtime
     assert.equal(spawned, 1)
     await assert.rejects(measureCodexAppServerBinaryAsync({ codexBin: resolve(root, 'missing'), codexHome: root }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// Cold measurement now hashes each file once. Its enclosing stat snapshot must
+// still reject a mutation during the measurement, including restored size/mtime.
+test('cold measurement rejects executable and resource races before caching trust', () => {
+  for (const target of ['binary', 'resource']) {
+    const root = mkdtempSync(resolve(tmpdir(), 'cyf-integrity-race-')); chmodSync(root, 0o700)
+    try {
+      mkdirSync(resolve(root, 'bin'), { mode: 0o700 }); mkdirSync(resolve(root, 'codex-resources'), { mode: 0o700 })
+      const bin = resolve(root, 'bin/codex'), resource = resolve(root, 'codex-resources/helper')
+      writeFileSync(bin, '#!/bin/sh\necho trusted\n', { mode: 0o700 }); writeFileSync(resource, 'trusted', { mode: 0o400 })
+      const changed = target === 'binary' ? bin : resource, before = statSync(changed), cache = new Map()
+      assert.throws(() => measureCodexAppServerBinary({ codexBin: bin, codexHome: root }, { cache,
+        spawnSyncFn: () => {
+          writeFileSync(changed, target === 'binary' ? '#!/bin/sh\necho changed\n' : 'changed')
+          utimesSync(changed, before.atime, before.mtime)
+          return { status: 0, stdout: 'codex-cli fixture\n' }
+        } }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED'
+          && error.trustReason === 'CODEX_APP_SERVER_IDENTITY_CHANGED_DURING_MEASUREMENT')
+      assert.equal(cache.size, 0)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
 })

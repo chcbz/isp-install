@@ -327,7 +327,7 @@ export function measureCodexAppServerBinary(profile, {
 } = {}) {
   if (process.platform !== 'linux') throw failTrust('CODEX_APP_SERVER_EXECUTABLE_MEASUREMENT_UNSUPPORTED')
   reclaimProfileSnapshots(snapshotRoot)
-  let resolved; let configuredIdentity; let executableIdentity
+  let resolved; let configuredIdentity; let executableIdentity; let before
   try {
     resolved = resolveExecutable(profile.codexBin)
     // A previously verified system executable measurement needs no new full-file read
@@ -339,6 +339,10 @@ export function measureCodexAppServerBinary(profile, {
       if (!sameIdentity(configuredNow, candidate.configuredIdentity) || !sameIdentity(executableNow, candidate.executableIdentity) || !verifiedBinaryStates.has(candidate)) continue
       try { if (sameVerificationState(verifiedBinaryStates.get(candidate), binaryIntegrityState(profile, candidate))) return candidate } catch {}
     }
+    // Bind the entire cold measurement to unchanged file identities, including
+    // ctime and protected ancestors. Hash each file once in this pass; an immediate
+    // second full hash cannot add trust when these same identities did not change.
+    before = binaryIntegrityState(profile, { executableIdentity: { realpath: resolved.executable }, snapshotPath: resolved.executable })
     configuredIdentity = statIdentity(resolved.configured); configuredIdentity.sha256 = hashFile(resolved.configured)
     executableIdentity = statIdentity(resolved.executable); executableIdentity.sha256 = resolved.executable === resolved.configured ? configuredIdentity.sha256 : hashFile(resolved.executable)
     configuredIdentity.ancestorPolicy = protectedAncestorPolicy(resolved.configured)
@@ -372,7 +376,10 @@ export function measureCodexAppServerBinary(profile, {
       configuredIdentity: Object.freeze(configuredIdentity), executableIdentity: Object.freeze(executableIdentity), snapshotIdentity: Object.freeze(snapshotIdentity)
     }
     Object.defineProperty(measurement, 'snapshotPath', { value: snapshot.path, enumerable: false })
-    Object.freeze(measurement); verifyCodexAppServerBinaryIdentity(profile, measurement); cache.set(cacheKey, measurement); return measurement
+    Object.freeze(measurement)
+    if (!sameVerificationState(before, binaryIntegrityState(profile, measurement))) throw failTrust('CODEX_APP_SERVER_IDENTITY_CHANGED_DURING_MEASUREMENT')
+    verifiedBinaryStates.set(measurement, Object.freeze(before.map(row => Object.freeze(row))))
+    cache.set(cacheKey, measurement); return measurement
   } catch (error) {
     if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') throw error
     throw failTrust(`CODEX_APP_SERVER_BINARY_MEASUREMENT_FAILED:${error.code || error.message}`)
