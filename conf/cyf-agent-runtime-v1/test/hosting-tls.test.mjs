@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, writeFile, readFile, chmod, rm, lstat } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, chmod, rm, lstat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { connect as tlsConnect } from 'node:tls';
 import { connect as unixConnect } from 'node:net';
 import { hostingFixture, fixtureInventory } from './hosting-fixture.mjs';
 import { startHostingServer } from '../lib/hosting-server.mjs';
-import { validateHostingConfig, readHostingTlsOptions } from '../lib/hosting-config.mjs';
+import { validateHostingConfig, readHostingConfig, readHostingTlsOptions } from '../lib/hosting-config.mjs';
 import { eventMessage } from '../lib/message-envelope.mjs';
 
 const openssl = (root, args) => execFileSync('openssl', args, { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -99,4 +99,29 @@ test('unsafe operator key fails closed and closes the partially opened private l
   await assert.rejects(startHostingServer({ control: f.control() }), { code: 'HOSTING_REMOTE_CREDENTIAL_UNSAFE' });
   await assert.rejects(lstat(f.controlConfig.socketPath), { code: 'ENOENT' });
   assert.equal(f.host().snapshot().agents.filter(agent => agent.ready).length, 3);
+});
+
+
+test('operator remote config validates credentials outside Agent roots and refuses path aliases', async t => {
+  const c = await certificates(t), f = await hostingFixture(t, { staticPeers: true });
+  const config = { ...f.controlConfig, template: null, remote: c.remote };
+  const path = resolve(f.root, 'tls-control.json');
+  const read = async value => {
+    await writeFile(path, JSON.stringify(value), { mode: 0o600 });
+    return readHostingConfig(path, f.hostConfig);
+  };
+  assert.deepEqual(await read(config), config);
+  for (const change of [{ listenHost: 'operator.example' }, { port: -1 }, { port: 65536 },
+    { port: 1.5 }, { certificatePath: 'relative.crt' }, { rejectUnauthorized: false }]) {
+    assert.throws(() => validateHostingConfig({ ...config, remote: { ...c.remote, ...change } }),
+      { code: 'HOSTING_REMOTE_CONFIG_INVALID' });
+  }
+  await assert.rejects(read({ ...config, remote: { ...c.remote,
+    privateKeyPath: resolve(f.peers[0].profile.codexHome, 'control.key') } }),
+    { code: 'HOSTING_REMOTE_CREDENTIAL_ROOT_UNSAFE' });
+  const alias = resolve(c.root, 'aliased.key'); await symlink(c.remote.privateKeyPath, alias);
+  await assert.rejects(read({ ...config, remote: { ...c.remote, privateKeyPath: alias } }),
+    { code: 'HOSTING_CONFIG_PATH_UNSAFE' });
+  await chmod(c.remote.clientCaPath, 0o666);
+  await assert.rejects(read(config), { code: 'HOSTING_REMOTE_CREDENTIAL_UNSAFE' });
 });

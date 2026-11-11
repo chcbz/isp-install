@@ -11,6 +11,50 @@ Owner gss_runtime_sol_20261010. Development only; no installation, provider call
 
 Managed template and source installer support are specified below with exact fields. Retired broker remains retired. Final module-wide, isolated DB and production validation belong to Main/test runner, not this Owner.
 
+## Optional host-level mutual TLS control (1.3.98 source candidate)
+
+A remote self-hosted Runtime can expose the **same** hosting handler and journal
+through mutual TLS, independent of the Agent executor. Stopping an Agent does not
+stop this listener: evidence acknowledgement and private cleanup remain possible.
+The local private socket remains supported; no second billing or lifecycle engine
+is introduced. Runtime support alone does not enable API routing or production fees.
+
+Operator-owned hosting configuration may add exactly:
+
+```json
+"remote": {
+  "listenHost": "127.0.0.1",
+  "port": 9443,
+  "certificatePath": "/home/isp/conf/cyf-agent-runtime-v1/control-tls/server.crt",
+  "privateKeyPath": "/home/isp/conf/cyf-agent-runtime-v1/control-tls/server.key",
+  "clientCaPath": "/home/isp/conf/cyf-agent-runtime-v1/control-tls/client-ca.crt"
+}
+```
+
+Use an explicitly selected local interface and reachable production port; port zero
+is only useful for tests. Certificates and private keys must be ordinary canonical
+files outside host state, managed state and every Agent mutable root, owned by root
+or the Runtime service identity. Keys permit no group/other access; certificates and
+client CA must not be group/world writable. Never put control keys in CODEX_HOME.
+Use a dedicated control-client CA: **every client it authorizes is a control caller**,
+then the existing tenant/client/owner scope and exact relationship checks apply.
+The API must verify the server certificate hostname/IP and provide its client key.
+TLS 1.2 or later, client certificate validation and the 16384-byte request bound are
+mandatory. There is no unauthenticated listener or request-selected endpoint/key.
+
+Requests/replies keep the existing newline-framed protocolVersion 1 envelope.
+Socket and TLS calls share idempotency, association, journal and execution gates.
+Missing/untrusted client certificates are rejected before handler dispatch. TLS
+startup failure closes the partially opened private listener; shutdown closes owned
+connections including unfinished handshakes. Certificate changes require a controlled
+host restart; no extra polling or certificate-management framework is introduced.
+An omitted `remote` retains local-only behavior. Static-only hosts may use
+`template: null`; `hosting.adopt` associates their exact existing installation without
+enrollment, restart or charging, not a fabricated SERVICE_READY proof.
+
+Source tests: `test/hosting-tls.test.mjs`, alongside hosting-config/adoption/lifecycle.
+Local synthetic certificates prove transport behavior, not deployed remote readiness.
+
 ## Operator setup (source contract, NOT performed on this host)
 
 The artifact-staging installer includes `hosting-control.example.json`, this guide,
