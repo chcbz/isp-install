@@ -21,7 +21,8 @@ const stop = () => stopPromise ||= (async () => {
 // fixture as a test-runner child; explicit Java/CLI spawn remains the entry.
 if (!process.env.NODE_TEST_CONTEXT) {
 try {
-  const fixture = await hostingFixture({ after: cleanup => cleanups.push(cleanup) });
+  const staticPeers = process.env.CYF_GSS_STATIC_ADOPTION === '1';
+  const fixture = await hostingFixture({ after: cleanup => cleanups.push(cleanup) }, { staticPeers });
   if (process.env.CYF_GSS_INVENTORY_CODEX_BIN) {
     const peer = fixture.peers[0];
     peer.profile.codexBin = process.env.CYF_GSS_INVENTORY_CODEX_BIN;
@@ -42,7 +43,8 @@ try {
     publicFiles: options.agent.publicFiles, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
   server = await startHostingServer({ control: fixture.control() });
   process.stdout.write(JSON.stringify({ socketPath: fixture.controlConfig.socketPath, uid: process.getuid(), gid: fixture.controlConfig.socketGid,
-    hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId }) + '\n');
+    hostId: fixture.host().config.hostId, instanceId: fixture.host().instanceId,
+    ...(staticPeers ? { adoptionSubject: fixture.peers[0].manifest } : {}) }) + '\n');
   let input = '';
   const close = () => { void stop().catch(() => { process.stderr.write('SYNTHETIC_FIXTURE_STOP_FAILED\n'); process.exitCode = 1; }); };
   process.stdin.setEncoding('utf8');
