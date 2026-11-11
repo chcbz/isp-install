@@ -153,11 +153,10 @@ export const skillManagementResultHttpScope = (endpoint, options = {}) => {
     && (options.method || 'GET').toUpperCase() === 'POST';
 };
 
-export const knowledgeUsageHttpScope = (endpoint, options = {}) => {
+// Knowledge maintenance uses installation authorization, never a user's native session.
+export const knowledgeUsageHttpScope = endpoint => {
   let decoded; try { decoded = decodeURIComponent(endpoint.pathname); } catch { return false; }
-  if (!decoded.startsWith('/internal/agent/hosting-leases')) return true;
-  return /^\/internal\/agent\/hosting-leases\/[A-Za-z0-9][A-Za-z0-9._:-]{0,99}\/knowledge-usage$/.test(endpoint.pathname)
-    && !endpoint.href.includes('?') && (options.method || 'GET').toUpperCase() === 'POST';
+  return !decoded.startsWith('/internal/agent/hosting-leases');
 };
 
 export const materialsChatHttpScope = (endpoint, options = {}) => {
@@ -257,6 +256,12 @@ export class RuntimeV1Client {
     if (!this.currentSession) throw fail('RUNTIME_SESSION_REQUIRED');
     const url = new URL(this.currentSession.websocketPath, this.apiBaseUrl); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     return url.toString();
+  }
+  async recordKnowledgeUsage(leaseId, observation, options = {}) {
+    if (typeof leaseId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(leaseId))
+      throw fail('RUNTIME_KNOWLEDGE_LEASE_INVALID');
+    return this.request(`/internal/agent/hosting-leases/${encodeURIComponent(leaseId)}/knowledge-usage`, observation,
+      { Authorization: `Bearer ${await this.loadAuthorization()}` }, options);
   }
   async heartbeat(health = 'HEALTHY', options = {}) {
     return this.request('/agent/runtime/v1/heartbeat', { ...identityOf(this.manifest), health }, { Authorization: `Bearer ${await this.loadAuthorization()}` }, options);

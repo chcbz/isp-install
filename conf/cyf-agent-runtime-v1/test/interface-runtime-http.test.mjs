@@ -67,10 +67,32 @@ test('engine and Runtime share identical codec source bytes', async () => {
   assert.deepEqual(await readFile(new URL('../lib/api-envelope.mjs', import.meta.url)), await readFile(new URL('../../codex-bridge/api-envelope.mjs', import.meta.url)))
 })
 
-test('knowledge usage native namespace accepts only exact POST accounting route', async () => {
+test('knowledge usage namespace is unavailable to ordinary native sessions', async () => {
   const { knowledgeUsageHttpScope } = await import('../lib/runtime-client.mjs');
   const base = 'https://api.test/internal/agent/hosting-leases/lease/knowledge-usage';
-  assert.equal(knowledgeUsageHttpScope(new URL(base), { method: 'POST' }), true);
+  assert.equal(knowledgeUsageHttpScope(new URL(base), { method: 'POST' }), false);
   for (const path of [base, `${base}?owner=x`, `${base}/other`, base.replace('/lease/', '/%6cease/'), base.replace('knowledge-usage', 'cleanup')])
     assert.equal(knowledgeUsageHttpScope(new URL(path), { method: path === base ? 'GET' : 'POST' }), false);
 });
+
+test('knowledge maintenance confines the installation bearer to its fixed accounting endpoint', async () => {
+  let calls = 0, loads = 0
+  const api = client(async (url, config) => {
+    calls++
+    assert.equal(url, 'https://api.test/internal/agent/hosting-leases/lease-1/knowledge-usage')
+    assert.equal(config.headers.Authorization, 'Bearer original-installation')
+    assert.equal(config.redirect, 'error')
+    assert.equal('X-Agent-Runtime-Id' in config.headers, false)
+    assert.equal(JSON.parse(config.body).data.handoverId, 'lease-1')
+    return response(config, { accepted: true })
+  })
+  api.loadAuthorization = async () => { loads++; return 'original-installation' }
+  api.session = async () => { throw new Error('Must not create ordinary session') }
+  for (const lease of ['', '../session', 'lease?owner=x', 'lease/other', '%6cease', null])
+    await assert.rejects(api.recordKnowledgeUsage(lease, {}), { code: 'RUNTIME_KNOWLEDGE_LEASE_INVALID' })
+  assert.equal(loads, 0); assert.equal(calls, 0)
+  assert.deepEqual(await api.recordKnowledgeUsage('lease-1', { handoverId: 'lease-1' }), { accepted: true })
+  assert.equal(loads, 1); assert.equal(calls, 1)
+  await assert.rejects(api.nativeFetch('https://api.test/internal/agent/hosting-leases/lease-1/knowledge-usage', { method: 'POST' }),
+    { code: 'RUNTIME_NATIVE_SCOPE_INVALID' })
+})

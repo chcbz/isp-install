@@ -83,7 +83,7 @@ test('artifact install and validation inventories include the complete runtime e
   assert.ok(seen.has('lib/knowledge-maintenance.mjs')); assert.ok(seen.has('lib/evidence-handover.mjs'));
 });
 
-test('native HTTP roundtrip acknowledges STARTED before spend and reuses the original session for actual usage', async t => {
+test('installation HTTP roundtrip acknowledges STARTED before spend without issuing a user session', async t => {
   const { createServer } = await import('node:http'), { once } = await import('node:events');
   const { knowledgeReceipt } = await import('./knowledge-usage-fixture.mjs');
   const { configPath, hostConfig, agent } = await fixture(t);
@@ -106,8 +106,8 @@ test('native HTTP roundtrip acknowledges STARTED before spend and reuses the ori
         data = { ...q.data, scheme: 'AgentRuntime', sessionToken: `rts1_${'c'.repeat(64)}`, sessionGeneration: '1', status: 'CHANNEL_PENDING', websocketPath: '/ws/agent/channel' };
       } else {
         assert.equal(request.url, '/internal/agent/hosting-leases/lease/knowledge-usage');
-        assert.equal(request.headers.authorization, `AgentRuntime rts1_${'c'.repeat(64)}`);
-        assert.equal(request.headers['x-agent-runtime-id'], 'same-runtime-boot');
+        assert.equal(request.headers.authorization, `Bearer rta1_${'b'.repeat(64)}`);
+        assert.equal(request.headers['x-agent-runtime-id'], undefined);
         assert.equal(q.data.observation.requestedTier, 'standard');
         assert.equal('ownerJiacn' in q.data, false); assert.equal('taskId' in q.data, false);
         seen.push(q.data); data = knowledgeReceipt(agent.manifest, 'lease', q.data);
@@ -127,23 +127,23 @@ test('native HTTP roundtrip acknowledges STARTED before spend and reuses the ori
     } });
   const context = { agent, operationId: 'handover', leaseId: 'lease' };
   await extract(context); await extract.flushPlatformCosts(context);
-  assert.ifError(server.fixtureError); assert.equal(sessions, 1); assert.equal(seen.length, 2);
+  assert.ifError(server.fixtureError); assert.equal(sessions, 0); assert.equal(seen.length, 2);
   assert.equal(seen[1].observation.evidence.usage.total_tokens, 5);
 });
 
-test('failed STARTED acknowledgement never calls provider; empty history creates no session or model spend', async t => {
+test('failed STARTED acknowledgement never calls provider; empty history creates no client or model spend', async t => {
   const { configPath, hostConfig, agent } = await fixture(t);
-  let spent = 0, sessions = 0;
+  let spent = 0, clients = 0;
   const extract = createKnowledgeMaintenance({ hostConfig, knowledgeConfig: await readKnowledgeMaintenanceConfig(configPath, hostConfig),
     apiOrigin: 'https://fixture.invalid', instanceId: 'boot', fetchImpl: async () => { spent++; },
-    clientFactory: knowledgeClientFactory({ onSession: () => sessions++, beforeReply: async () => { throw new Error('start unacknowledged'); } }) });
+    clientFactory: knowledgeClientFactory({ onClient: () => clients++, beforeReply: async () => { throw new Error('start unacknowledged'); } }) });
   const context = { agent, operationId: 'handover', leaseId: 'lease' };
   await extract(context); await extract.flushPlatformCosts(context);
-  assert.equal(sessions, 0); assert.equal(spent, 0);
+  assert.equal(clients, 0); assert.equal(spent, 0);
   await mkdir(resolve(agent.profile.codexHome, 'sessions'));
   await writeFile(resolve(agent.profile.codexHome, 'sessions/one.jsonl'), JSON.stringify({ type: 'response_item', payload: {
     type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Synthetic.' }]
   } }) + '\n');
   await assert.rejects(extract(context), /start unacknowledged/);
-  assert.equal(spent, 0); assert.equal(sessions, 1);
+  assert.equal(spent, 0); assert.equal(clients, 1);
 });

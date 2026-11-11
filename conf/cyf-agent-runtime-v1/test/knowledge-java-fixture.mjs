@@ -9,7 +9,7 @@ if (!process.env.NODE_TEST_CONTEXT) {
   const [apiOrigin, scratch, agentId, installationId] = process.argv.slice(2);
   const agent = { subjectKey: `0/client/${agentId}`, stateRoot: resolve(scratch, 'agent-state'),
     manifest: { installationId, tenantId: '0', clientId: 'client', canonicalAgentId: agentId,
-      manifestVersion: '1', manifestSha256: `sha256:${'b'.repeat(64)}` },
+      manifestVersion: '1', manifestSha256: `sha256:${'a'.repeat(64)}` },
     profile: { codexHome: resolve(scratch, 'home'), codexWorkdir: resolve(scratch, 'work') } };
   for (const dir of [agent.stateRoot, agent.profile.codexHome, agent.profile.codexWorkdir]) await mkdir(dir, { mode: 0o700 });
   await writeFile(resolve(agent.stateRoot, 'runtime-authorization.json'), JSON.stringify({ installationId, runtimeAuthorization: `rta1_${'d'.repeat(64)}` }), { mode: 0o600 });
@@ -35,22 +35,24 @@ if (!process.env.NODE_TEST_CONTEXT) {
   const resumed = createKnowledgeMaintenance(config('gpt-6-luna'));
   await resumed.flushPlatformCosts(context); await resumed.flushPlatformCosts(context);
   assert.equal(spent, 1);
-  const noPrice = createKnowledgeMaintenance(config('unpriced-model'));
-  await noPrice({ ...context, operationId: 'no-price' });
-  await noPrice.flushPlatformCosts({ ...context, operationId: 'no-price' });
-  const noUsage = createKnowledgeMaintenance(config('gpt-6-luna', false));
-  await noUsage({ ...context, operationId: 'no-usage' });
-  await noUsage.flushPlatformCosts({ ...context, operationId: 'no-usage' });
-  assert.equal(spent, 3);
-  // The real auth filter, not caller fields, owns actor scope. Exercise token forgery.
   const client = new RuntimeV1Client({ manifest: agent.manifest, apiBaseUrl: apiOrigin, stateDir: agent.stateRoot,
     hostId: 'host', runtimeInstanceId: 'knowledge-boot' });
-  try {
-    await client.session(); client.currentSession = { ...client.currentSession, sessionToken: `rts1_${'e'.repeat(64)}` };
-    const denied = await client.nativeFetch(`${apiOrigin}/internal/agent/hosting-leases/lease/knowledge-usage`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ handoverId: 'forged', observation: {
-        batchId: '0', stage: 'extract', phase: 'STARTED', channel: 'platform', requestedModel: 'gpt-6-luna', requestedTier: 'standard', evidence: null } }) });
-    assert.equal(denied.status, 401);
-  } finally { client.invalidateSession(); }
-  process.stdout.write(JSON.stringify({ passed: true, providerCalls: spent, realNativeHttp: true, privateSourceRetained: true }) + '\n');
+  // Ordinary user session is denied for the unavailable original account. Maintenance remains narrow.
+  await assert.rejects(client.session(), error => error.status === 400);
+  // Independent synthetic observations exercise pending-price and pending-usage under the SAME original handover.
+  for (const [batchId, model, usage] of [['unpriced', 'unpriced-model', true], ['missing-usage', 'gpt-6-luna', false]]) {
+    const observation = { batchId, stage: 'extract', channel: 'platform', requestedModel: model, requestedTier: 'standard' };
+    await client.recordKnowledgeUsage('lease', { handoverId: 'handover', observation: { ...observation, phase: 'STARTED', evidence: null } });
+    await client.recordKnowledgeUsage('lease', { handoverId: 'handover', observation: { ...observation, phase: 'RESPONDED', evidence: {
+      providerReceiptId: batchId, actualModel: model, serviceTier: 'default',
+      ...(usage ? { usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 20 }, output_tokens: 10, total_tokens: 110 } } : {})
+    } } });
+  }
+  // Installation forgery never reaches the platform ledger; no native-session fallback.
+  await writeFile(resolve(agent.stateRoot, 'runtime-authorization.json'), JSON.stringify({ installationId,
+    runtimeAuthorization: `rta1_${'e'.repeat(64)}` }), { mode: 0o600 });
+  await assert.rejects(client.recordKnowledgeUsage('lease', { handoverId: 'handover', observation: {
+    batchId: 'forged', stage: 'extract', phase: 'STARTED', channel: 'platform', requestedModel: 'gpt-6-luna', requestedTier: 'standard', evidence: null
+  } }), error => error.status === 403);
+  process.stdout.write(JSON.stringify({ passed: true, providerCalls: spent, realInstallationHttp: true, syntheticAdditionalObservations: 2, privateSourceRetained: true }) + '\n');
 }

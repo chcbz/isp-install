@@ -6,16 +6,16 @@ export function knowledgeReceipt(manifest, leaseId, body) {
   return { handoverId, attemptId: createHash('sha256').update(JSON.stringify(['PUBLIC_KNOWLEDGE_EXTRACTION', source])).digest('hex'),
     revision: observation.phase === 'STARTED' ? '1' : '2', status: 'PENDING_USAGE', costYuan: null };
 }
-export function knowledgeClientFactory({ sent = [], beforeReply = async () => {}, onSession = () => {}, onClose = () => {} } = {}) {
-  return settings => ({
-    async session() { onSession(settings); },
-    async nativeFetch(url, options) {
-      const body = JSON.parse(options.body); const leaseId = new URL(url).pathname.split('/')[4];
-      const receipt = knowledgeReceipt(settings.manifest, leaseId, body);
-      sent.push(body); await beforeReply(body, receipt);
-      return new Response(JSON.stringify({ protocolVersion: 1, requestId: 'fixture', code: 'E0', msg: 'OK', data: receipt }),
-        { status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'fixture' } });
-    },
-    invalidateSession() { onClose(); }
-  });
+export function knowledgeClientFactory({ sent = [], beforeReply = async () => {}, onClient = () => {} } = {}) {
+  return settings => {
+    onClient(settings);
+    return {
+      async session() { throw new Error('Knowledge maintenance must not issue a user session'); },
+      async recordKnowledgeUsage(leaseId, body) {
+        const receipt = knowledgeReceipt(settings.manifest, leaseId, body);
+        sent.push(body); await beforeReply(body, receipt);
+        return receipt;
+      }
+    };
+  };
 }
