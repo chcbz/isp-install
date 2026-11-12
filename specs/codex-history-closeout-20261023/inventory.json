@@ -1,0 +1,17 @@
+[
+  {
+    "ordinal": 32,
+    "thread_id": "01a0ce86-a401-70f3-8edb-7cddc582a6d7",
+    "cwd": "/home/isp/wsps/chcbz/isp-install",
+    "archived_at_inventory": true,
+    "updated_at_at_inventory": 1790171924,
+    "last_turn_status": "completed",
+    "user_messages": 2,
+    "final_answers": 2,
+    "message_snapshot_sha256": "d7680e5c724ae1026ee9d298e4f9b209e59a22cbc641d832d62eb87ae016631f",
+    "summary": "isp-install同步：历史master与远端bfa917b3986b一致，修一次过期workspace队列socket重连；不表示今日安装版本。",
+    "document_references": [],
+    "summary_file": "/home/isp/wsps/chcbz/isp-install/specs/codex-history-closeout-20261023/threads.md",
+    "deletion_state": "deleted_verified"
+  }
+]
