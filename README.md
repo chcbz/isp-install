@@ -95,6 +95,18 @@ sudo systemctl enable mysql nginx
 sudo systemctl start mysql nginx
 ```
 
+## New API 的 Docker 依赖环境
+
+```bash
+sudo ./install.sh --profile new-api-deps
+```
+
+新增 `docker` 与 `new-api-deps` 组件：安装 Docker Engine/Compose，并以 Docker 准备
+PostgreSQL 15、Redis 7.4；不启动 New API 应用，不开放数据库公网端口。
+使用持久化目录、随机密码、镜像 digest 锁定和健康检查。
+Ubuntu 26.04 的实际安装结果及安全/运维说明见 [Docker 依赖指南](docs/new-api-docker-deps.md)。
+不改变其他 profile 或已有原生数据库安装方式。
+
 ## 支持的软件
 
 | 类别 | 软件 | 说明 |

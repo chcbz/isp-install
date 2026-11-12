@@ -47,7 +47,8 @@ show_help() {
     echo "  dev-env             开发环境 (JDK + Maven + Git + Node)"
     echo "  db-server           数据库服务器 (MySQL + Redis)"
     echo "  agent               统一多Agent Runtime 制品 (需显式实例/工具链)"
-    echo "  full                完整安装 (所有组件)"
+    echo "  new-api-deps        Docker + PostgreSQL + Redis (不启动业务应用)"
+    echo "  full                完整安装 (所有传统组件)"
     echo ""
     echo "示例:"
     echo "  $0 --profile web-server      # 安装 Web 服务器配置"
@@ -82,11 +83,14 @@ list_profiles() {
     echo "  包含: cyf-agent-runtime-v1; 需显式 CYF_RUNTIME_V1_INSTANCE 和可执行 Node（发布记录实际版本）"
     echo ""
 
+    echo -e "${BLUE}new-api-deps${NC} - Docker + PostgreSQL + Redis (仅依赖，不开放公网端口)"
+    echo ""
     echo -e "${BLUE}full${NC} - 完整安装"
     echo "  包含: 所有组件"
     echo ""
     
     echo -e "${BLUE}单独组件:${NC}"
+    echo "  docker, new-api-deps"
     echo "  jdk, maven, node, python, git"
     echo "  mysql, redis, nginx, php"
     echo "  rabbitmq, openldap, elasticsearch"
@@ -99,6 +103,8 @@ list_profiles() {
 # 组件映射
 #===============================================================
 declare -A COMPONENT_SCRIPTS=(
+    ["docker"]="docker_install.sh"
+    ["new-api-deps"]="new_api_deps_install.sh"
     ["jdk"]="jdk_install.sh"
     ["java"]="jdk_install.sh"
     ["maven"]="maven_install.sh"
@@ -131,6 +137,7 @@ declare -A COMPONENT_SCRIPTS=(
 # 预设配置
 #===============================================================
 declare -A PROFILES=(
+    ["new-api-deps"]="docker new-api-deps"
     ["web-server"]="nginx php mysql redis"
     ["dev-env"]="jdk maven git node python"
     ["db-server"]="mysql redis rabbitmq"
