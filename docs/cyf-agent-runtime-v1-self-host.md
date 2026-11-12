@@ -518,3 +518,14 @@ safe diagnostic metadata, never proof of task completion/revocation.
 ### 原生执行与资料读取独立（Runtime 1.3.68候选）
 
 原生技能环境不要求配置资料输入载体。Provider、主体私有根与兼容说明见 `conf/codex-bridge/README.md`“独立原生执行环境”。探测、注册声明、执行和清理由独立Owner持有，沿用已有隔离实现及API合同；不自动补凭据或搬迁生产状态。此说明为源码候选，不代表已安装或业务验收。
+
+## CYF Python 存储精简（2026-11-09；源码入口，未发布）
+
+CYF任务先读`/home/isp/wsps/cyf/AGENTS.md`；本节不修改其他项目发布规则。核对生产基线1.3.68/source92df9eb8，仅改Python准备/归档适配，不删浏览器、Python标准库、文档/图片处理能力或业务状态。
+
+- `lib/freeze-python.py`在私有stage完成独立Python冻结和权限收口后，按内容、mode、uid/gid、xattr合并Python执行文件/libpython重复别名。必须早于`prepare-toolchain-image.mjs`和制品manifest生成；有外部硬链接、外部别名、可写/不安全目录或tmpfs时拒绝。不在已安装app、旧备份或历史prepared树执行。
+- 通过既有`build-python-toolchain.sh`/`install.sh`调用时，可显式设置`CYF_PYTHON_DEBUG_OUTPUT=/ABS/DISK/TASK/python-debug-symbols`。该路径必须全新、位于整个Runtime stage之外；保留debug文件、原始/输出SHA及符号映射，再仅移除ELF调试信息。没有变量时只去重。正式发布的符号应包外保留；隔离探测完成可按任务归属回收。重新复用旧工具链的发布路径不会自动触发freeze，Owner须在形成新sandbox前显式使用同一函数，不能把脚本修改冒充所有发布入口接线。
+- `python-artifact.py`保持schema1与普通历史包读取兼容，新增tar内部硬链接安全提取。链接目标必须是同包直接普通成员且摘要/模式一致；拒绝逃逸、链式/悬空/软链接目标，先普通文件后硬链接，最后独立清单核验。新包必须使用配套的新提取器；不改历史包或伪造旧manifest。
+- 必要状态备份策略及主机维护入口统一维护于CYF `ops/maintenance/RUNTIME_BACKUP_RETENTION.md`，不在本仓复制清理规则。程序内的请求/会话目录不是诊断垃圾；不得随瘦身删除身份、授权、ACK、任务绑定或会话事实。
+
+定向入口：磁盘TMPDIR下`python3 -B tests/test_runtime_python_freeze.py -v`、`tests/test_runtime_python_artifact.py -v`。真实冻结探测可显式提供`CYF_TEST_FREEZE_PYTHON`；本次全部12项冻结用例及11项归档用例通过，并完成生产工具链**隔离复制**的文档/图片探测、sandbox重建及打包→新目录提取验证。不代表应用已发布。证据与已安装维护工具版本见CYF `docs/implementation/handoffs/RUNTIME-FOOTPRINT-20261109.md`。

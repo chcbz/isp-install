@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -34,6 +35,29 @@ class PythonArtifactTest(unittest.TestCase):
         self.assertEqual(len(list(self.target.rglob('python.txt'))), 1)
         with self.assertRaisesRegex(ValueError, 'NEW_TARGET'):
             module.extract(self.archive, self.manifest, self.target)
+
+    def test_hardlink_alias_roundtrip_retains_shared_storage(self):
+        os.link(str(self.source / 'lib/python.txt'), str(self.source / 'lib/python-alias.txt'))
+        module.pack(self.source, self.archive, self.manifest)
+        module.extract(self.archive, self.manifest, self.target)
+        self.assertEqual((self.target/'lib/python.txt').stat().st_ino, (self.target/'lib/python-alias.txt').stat().st_ino)
+        self.assertEqual(module.inventory(self.source),module.inventory(self.target))
+
+    def test_malicious_hardlinks_are_rejected_before_target_creation(self):
+        digest=hashlib.sha256(b'x').hexdigest()
+        for link in ('/etc/passwd','../outside','alias','missing','source'):
+            with tarfile.open(str(self.archive),'w:gz') as stream:
+                regular=tarfile.TarInfo('source'); regular.mode=0o644; regular.size=1
+                stream.addfile(regular,io.BytesIO(b'x'))
+                alias=tarfile.TarInfo('alias'); alias.mode=0o644; alias.type=tarfile.LNKTYPE; alias.linkname=link
+                stream.addfile(alias)
+            # Even internal links must match declared content; source case differs.
+            rows=[{'path':'source','type':'file','mode':0o644,'sha256':digest},
+                  {'path':'alias','type':'file','mode':0o644,'sha256':hashlib.sha256(b'y').hexdigest()}]
+            self.manifest.write_text(json.dumps({'schemaVersion':1,'sha256':module.sha(self.archive),'entries':rows}))
+            with self.assertRaisesRegex(ValueError,'UNSAFE_HARDLINK'):
+                module.extract(self.archive,self.manifest,self.target)
+            self.assertFalse(self.target.exists())
 
     def test_browser_layout_roundtrip_uses_same_archive_contract(self):
         browser = self.source / 'chromium'
